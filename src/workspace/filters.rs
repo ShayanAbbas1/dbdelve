@@ -8,8 +8,23 @@ use super::*;
 impl Workspace {
     /// Run a relation's statement again. The rows are a snapshot, and this is
     /// the only way to ask for a newer one.
+    ///
+    /// The structure is a snapshot too, and was loaded once when the tab
+    /// opened: a column added or a key declared since then stayed invisible
+    /// until the tab was closed and reopened. It is what decides which cells
+    /// can be edited and which can be followed, so rows read fresh against a
+    /// stale one are not a fresh answer.
     pub(crate) fn refresh_relation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.clear_notice();
+        if let Some((schema, relation)) = self
+            .profile()
+            .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == id))
+            // A routine has no structure to ask for.
+            .filter(|tab| matches!(tab.body, ObjectBody::Relation { .. }))
+            .map(|tab| (tab.schema.clone(), tab.name.clone()))
+        {
+            self.load_structure(id, schema, relation, cx);
+        }
         self.requery_relation(id, |_, _, _, _| true, cx);
     }
 
