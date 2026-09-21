@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use security_framework::passwords::{self, PasswordOptions};
+use keyring::v1::Entry as KeyringEntry;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Cell, RelationKind};
@@ -28,11 +28,7 @@ pub const HISTORY_DEPTH: usize = 200;
 /// [`HISTORY_DEPTH`] runs, and bounds the file either way -- which is what
 /// makes reading the whole of it cheap.
 const HISTORY_SLACK: usize = HISTORY_DEPTH * 4;
-/// `errSecItemNotFound`. Apple's `OSStatus` values are frozen ABI, and the
-/// named constant lives in `security-framework-sys`, which is not a dependency
-/// here -- adding it with the exact pin this project uses everywhere would
-/// fight `security-framework`'s own transitive bump of it.
-const ITEM_NOT_FOUND: i32 = -25300;
+
 /// A grid past this many rows still runs and displays in full -- this is only
 /// how much of it a snapshot keeps on disk, so reopening a tab is instant
 /// without the cache growing as large as the result it is caching.
@@ -378,36 +374,36 @@ pub fn profile_id(name: &str, existing: &[String]) -> String {
     candidate
 }
 
-/// `Ok(None)` only for a keychain that holds no item for this profile. A denied
-/// prompt, a locked keychain and a secret that is not text are failures: a
-/// blank password is valid, so none of them can be inferred from the connect
-/// attempt that would follow.
+/// `Ok(None)` only for a credential store that holds no entry for this
+/// profile. A denied prompt, a locked store and a secret that is not text
+/// are failures: a blank password is valid, so none of them can be inferred
+/// from the connect attempt that would follow.
 pub fn password(profile_id: &str) -> Result<Option<String>, String> {
-    let bytes = match passwords::generic_password(PasswordOptions::new_generic_password(
-        &variant_name()?,
-        profile_id,
-    )) {
-        Ok(bytes) => bytes,
-        Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "Could not read the password from the keychain: {error}"
-            ));
-        }
-    };
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|error| format!("The keychain password is not valid text: {error}"))
+    let entry = KeyringEntry::new(&variant_name()?, profile_id)
+        .map_err(|error| format!("Could not open the credential store: {error}"))?;
+    match entry.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::v1::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!(
+            "Could not read the password from the credential store: {error}"
+        )),
+    }
 }
 
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
-    passwords::set_generic_password(&variant_name()?, profile_id, password.as_bytes())
-        .map_err(|error| format!("Could not save the password to the keychain: {error}"))
+    let entry = KeyringEntry::new(&variant_name()?, profile_id)
+        .map_err(|error| format!("Could not open the credential store: {error}"))?;
+    entry
+        .set_password(password)
+        .map_err(|error| format!("Could not save the password to the credential store: {error}"))
 }
 
 pub fn delete_password(profile_id: &str) {
     let Ok(service) = variant_name() else { return };
-    let _ = passwords::delete_generic_password(&service, profile_id);
+    let Ok(entry) = KeyringEntry::new(&service, profile_id) else {
+        return;
+    };
+    let _ = entry.delete_credential();
 }
 
 pub fn saved_queries(profile_id: &str) -> Vec<String> {
@@ -760,12 +756,27 @@ fn variant_name() -> Result<String, String> {
 }
 
 fn dbdelve_directory() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .ok_or_else(|| "HOME is not set.".to_string())?;
-    Ok(PathBuf::from(home)
-        .join("Library/Application Support")
-        .join(variant_name()?))
+    let variant = variant_name()?;
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .ok_or_else(|| "HOME is not set.".to_string())?;
+        return Ok(PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(variant));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // XDG Base Directory Specification
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(xdg).join(&variant));
+        }
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .ok_or_else(|| "HOME is not set.".to_string())?;
+        Ok(PathBuf::from(home).join(".config").join(&variant))
+    }
 }
 
 fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
@@ -858,15 +869,26 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).expect("the test home must be creatable");
 
-        let previous = std::env::var_os("HOME");
+        let previous_home = std::env::var_os("HOME");
+        #[cfg(not(target_os = "macos"))]
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
         // SAFETY: the lock above is what makes this the only thread reading or
         // writing the environment for as long as `body` runs.
         unsafe { std::env::set_var("HOME", &home) };
+        #[cfg(not(target_os = "macos"))]
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
         let outcome = body();
         unsafe {
-            match previous {
+            match previous_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        unsafe {
+            match previous_xdg {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
         }
         let _ = fs::remove_dir_all(&home);
@@ -1442,13 +1464,19 @@ open_objects = []
                 variant(unset);
                 assert_eq!(variant_name().unwrap(), "dbdelve");
                 let directory = dbdelve_directory().unwrap();
+                #[cfg(target_os = "macos")]
                 assert!(directory.ends_with("Library/Application Support/dbdelve"));
+                #[cfg(not(target_os = "macos"))]
+                assert!(directory.ends_with(".config/dbdelve"));
             }
 
             variant(Some("dev"));
             assert_eq!(variant_name().unwrap(), "dbdelve-dev");
             let directory = dbdelve_directory().unwrap();
+            #[cfg(target_os = "macos")]
             assert!(directory.ends_with("Library/Application Support/dbdelve-dev"));
+            #[cfg(not(target_os = "macos"))]
+            assert!(directory.ends_with(".config/dbdelve-dev"));
 
             // No NUL case: `set_var` panics on one before the code under test
             // ever sees it.

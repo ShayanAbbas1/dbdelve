@@ -26,7 +26,7 @@ use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, EntityInputHandler,
     FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem,
     ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window,
-    WindowOptions, deferred, div, point, prelude::FluentBuilder, px,
+    WindowOptions, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     Disableable, IndexPath, Root,
@@ -80,6 +80,7 @@ use ui::{
 use workspace::{Settings, Workspace};
 
 /// The platform's window buttons, which dbdelve positions but does not draw.
+#[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_DIAMETER: f32 = 14.0;
 
 fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, String> {
@@ -158,7 +159,16 @@ fn install_panic_log() {
     let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
         return;
     };
+    #[cfg(target_os = "macos")]
     let directory = PathBuf::from(home).join("Library/Logs/dbdelve");
+    #[cfg(not(target_os = "macos"))]
+    let directory = {
+        let xdg = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&home).join(".cache"));
+        xdg.join("dbdelve")
+    };
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Nothing in here may panic: a panic inside the hook aborts with less
@@ -280,16 +290,23 @@ fn main() {
             // The platform titlebar is kept only for its window buttons: a system
             // bar in its own grey above dbdelve's chrome is the seam every native app
             // avoids. dbdelve paints that strip itself, and the buttons sit over it.
+            #[cfg(target_os = "macos")]
+            let titlebar = Some(TitlebarOptions {
+                title: Some("dbdelve".into()),
+                appears_transparent: true,                    traffic_light_position: Some(gpui::point(
+                    px(layout::SPACE_MD),
+                    px((layout::TITLEBAR_HEIGHT - TRAFFIC_LIGHT_DIAMETER) / 2.),
+                )),
+            });
+            #[cfg(not(target_os = "macos"))]
+            let titlebar = Some(TitlebarOptions {
+                title: Some("dbdelve".into()),
+                appears_transparent: true,
+                ..Default::default()
+            });
             let options = WindowOptions {
                 window_background: theme.window_background(),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("dbdelve".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(
-                        px(layout::SPACE_MD),
-                        px((layout::TITLEBAR_HEIGHT - TRAFFIC_LIGHT_DIAMETER) / 2.),
-                    )),
-                }),
+                titlebar,
                 ..Default::default()
             };
 

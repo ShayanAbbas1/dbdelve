@@ -15,6 +15,20 @@ use std::collections::HashMap;
 
 use gpui::{KeyBinding, Keystroke};
 
+/// The modifier key for application shortcuts. On macOS the Command key is
+/// the standard; on Linux, Super/Win is the window manager's key and Ctrl
+/// is the conventional choice for app shortcuts.
+#[cfg(target_os = "macos")]
+const PLATFORM_KEY: &str = "cmd";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_KEY: &str = "ctrl";
+
+/// Swap `cmd-` for the platform modifier key in a chord string.
+/// May be a better way to handle this in the future
+fn platform_chord(chord: &str) -> String {
+    chord.replacen("cmd-", &format!("{PLATFORM_KEY}-"), 1)
+}
+
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
@@ -86,7 +100,8 @@ macro_rules! registry {
                     }
                     _ => {
                         for default in [$($default),*] {
-                            bindings.push(KeyBinding::new(default, $($action)+, $context));
+                            let chord = platform_chord(default);
+                            bindings.push(KeyBinding::new(&chord, $($action)+, $context));
                         }
                     }
                 }

@@ -3,7 +3,7 @@ name = "dbdelve"
 version = "0.1.1"
 edition = "2024"
 license = "MIT"
-description = "A native macOS SQL client"
+description = "A native SQL client"
 publish = false
 
 # Exact pins: gpui is pre-1.0 and breaks on minor bumps. See AGENTS.md before
@@ -143,8 +143,10 @@ sqlparser = { version = "=0.63.0", default-features = false, features = ["std"] 
 # already in the graph is `unicode_categories`; `winnow` is already here.
 sqlformat = { version = "=0.5.0", default-features = false }
 
-# Profile passwords live in the macOS Keychain, never in profiles.toml.
-security-framework = "3"
+# Profile passwords live in the platform credential store, never in profiles.toml.
+# macOS: Keychain via this crate's own dependency. Linux: Secret Service
+# (GNOME Keyring, KDE Wallet).
+keyring = { version = "4", features = ["v1"] }
 guic-gpui-assets = "=0.2.0"
 icondata_lu = "=0.1.0"
 icondata_core = "=0.1.0"
@@ -153,6 +155,8 @@ icondata_core = "=0.1.0"
 # -- silently, through a `log::warn!` nothing here is listening to.
 gpui_platform = { version = "=0.3.5", package = "gpui-pre-platform", features = [
     "font-kit",
+    "wayland",
+    "x11",
 ] }
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so

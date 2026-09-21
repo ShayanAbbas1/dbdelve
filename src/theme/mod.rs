@@ -79,7 +79,12 @@ pub mod layout {
     pub const TITLEBAR_HEIGHT: f32 = 38.0;
     /// Where the titlebar's own content can start without colliding with the
     /// platform's window buttons, which are drawn over it.
+    #[cfg(target_os = "macos")]
     pub const TITLEBAR_LEADING_INSET: f32 = 78.0;
+    /// On Linux the space isn't needed for the traffic light buttons, just for
+    /// spacing of the sidebar toggle
+    #[cfg(not(target_os = "macos"))]
+    pub const TITLEBAR_LEADING_INSET: f32 = 8.0;
     /// Tall enough to hold a compact control with air around it: the apply pair
     /// lives in this strip, and a button wedged edge to edge in its own bar
     /// reads as something that overflowed rather than something placed.

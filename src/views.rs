@@ -929,14 +929,20 @@ fn render_results(
     let has_rows = results.read(cx).delegate().rows_count(cx) > 0;
 
     let message = match query {
-        QueryState::Idle if is_query => Some(centered(
-            key_hint(
-                t,
-                "cmd-enter",
-                "runs the selection or statement under the cursor",
-            )
-            .into_any_element(),
-        )),
+        QueryState::Idle if is_query => {
+            #[cfg(target_os = "macos")]
+            const RUN_KEY: &str = "cmd-enter";
+            #[cfg(not(target_os = "macos"))]
+            const RUN_KEY: &str = "ctrl-enter";
+            Some(centered(
+                key_hint(
+                    t,
+                    RUN_KEY,
+                    "runs the selection or statement under the cursor",
+                )
+                .into_any_element(),
+            ))
+        }
         // A preview runs the moment its tab is shown, so an idle one is a
         // tab that is about to run rather than one waiting to be asked. It has
         // nothing to cancel yet, though, which is the whole difference here.
