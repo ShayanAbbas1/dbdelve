@@ -836,6 +836,12 @@ fn collect_statements(tree: &Tree, sql: &str) -> Vec<Range<usize>> {
 /// a `;` inside a string, a quoted name, a comment or a dollar-quoted body
 /// separates nothing: cutting a function body at its first `;` would send the
 /// server half a `CREATE FUNCTION`.
+///
+/// ponytail: standard SQL only. MySQL's `#` line comments and backslash
+/// escapes are not read, so a `;` inside one of those splits a statement the
+/// server then rejects. Reading them would break Postgres, where `#` is an
+/// operator and `\` is not an escape -- the fix is a dialect here, not a
+/// bigger scanner, and it can wait for someone who hits it.
 fn unread_pieces(sql: &str, range: Range<usize>) -> (Vec<Range<usize>>, bool) {
     let text = sql.get(range.clone()).unwrap_or_default();
     let bytes = text.as_bytes();
@@ -878,7 +884,10 @@ fn unread_pieces(sql: &str, range: Range<usize>) -> (Vec<Range<usize>>, bool) {
                     None => 1,
                 }
             }
-            _ => 1,
+            // Byte-wise scan, char-wise slicing: advancing one byte past a
+            // multi-byte character would leave `index` mid-character and the
+            // next `&text[index..]` panics.
+            _ => rest.chars().next().map_or(1, char::len_utf8),
         };
     }
 
@@ -1641,6 +1650,22 @@ mod tests {
         // an unqualified DELETE.
         let sql = "DELETE FROM t -- note; still the same statement\n WHERE !!! garbage";
         assert_eq!(texts(sql), vec![sql]);
+    }
+
+    #[test]
+    fn a_non_ascii_character_in_unread_text_is_not_a_byte() {
+        // The scanner walks bytes and slices characters. A bare `\u{e9}` used to
+        // leave the cursor mid-character and panic the app rather than run
+        // anything -- quoted it was always safe, since the quote is jumped whole.
+        assert_eq!(texts("USE caf\u{e9}_db"), vec!["USE caf\u{e9}_db"]);
+        assert_eq!(
+            texts("CALL refresh_totals('caf\u{e9}')"),
+            vec!["CALL refresh_totals('caf\u{e9}')"]
+        );
+        assert_eq!(
+            texts("SELECT 1;\nUSE caf\u{e9}_db"),
+            vec!["SELECT 1", "USE caf\u{e9}_db"]
+        );
     }
 
     #[test]
