@@ -98,20 +98,25 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
         )
 }
 
+/// macOS draws its window buttons over a transparent titlebar. Linux has no
+/// compositor that will draw them into one, and Windows hides its caption
+/// buttons when that bar is transparent, so both keep the system bar.
+pub(crate) const OVERLAY_TITLEBAR: bool = cfg!(target_os = "macos");
+
 /// dbdelve's own titlebar, drawn where the platform's would be.
 ///
-/// The system titlebar is transparent (see `main`), so this row is what runs to
-/// the top of the window and the window buttons are drawn over its leading
-/// inset. It is also the drag handle the platform no longer provides — which
-/// is why the drag region is a child covering what is left of the row rather
-/// than the row itself: a drag region swallows the clicks a button needs, so
-/// anything interactive goes in `leading`, outside it.
+/// On macOS the system titlebar is transparent (see `main`), so this row is
+/// what runs to the top of the window and the window buttons are drawn over
+/// its leading inset. It is also the drag handle the platform no longer
+/// provides — which is why the drag region is a child covering what is left
+/// of the row rather than the row itself: a drag region swallows the clicks
+/// a button needs, so anything interactive goes in `leading`, outside it.
 ///
-/// On Linux the window wears a real system titlebar instead, so this row keeps
-/// only the job the system one cannot do — saying, through the connection
-/// switcher in `leading`, which database is in front of you. Nothing is inset
-/// for buttons that are drawn above rather than over it, and moving the window
-/// belongs to the bar the compositor drew.
+/// On Linux and Windows the window wears a real system titlebar instead, so
+/// this row keeps only the job the system one cannot do — saying, through the
+/// connection switcher in `leading`, which database is in front of you.
+/// Nothing is inset for buttons that are drawn above rather than over it, and
+/// moving the window belongs to the bar the system drew.
 pub(crate) fn titlebar(mode: Option<AnyElement>, leading: Vec<AnyElement>) -> impl IntoElement {
     div()
         .h(px(layout::TITLEBAR_HEIGHT))
@@ -120,16 +125,17 @@ pub(crate) fn titlebar(mode: Option<AnyElement>, leading: Vec<AnyElement>) -> im
         .flex_shrink_0()
         .items_center()
         .gap(px(layout::SPACE_MD))
-        .pl(px(match cfg!(target_os = "linux") {
-            true => layout::SPACE_MD,
-            false => layout::TITLEBAR_LEADING_INSET,
+        .pl(px(if OVERLAY_TITLEBAR {
+            layout::TITLEBAR_LEADING_INSET
+        } else {
+            layout::SPACE_MD
         }))
         .pr(px(layout::SPACE_MD))
         .children(leading)
         .child(
             div()
                 .id("titlebar")
-                .when(!cfg!(target_os = "linux"), |strip| {
+                .when(OVERLAY_TITLEBAR, |strip| {
                     strip
                         .window_control_area(gpui::WindowControlArea::Drag)
                         .on_double_click(|_, window, _| window.titlebar_double_click())
