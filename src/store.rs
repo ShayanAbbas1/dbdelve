@@ -884,9 +884,8 @@ fn secure(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-            format!("Could not set permissions on {}: {error}", path.display())
-        })
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not set permissions on {}: {error}", path.display()))
     }
     #[cfg(windows)]
     {

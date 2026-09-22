@@ -158,9 +158,11 @@ rebind them in Settings.
 
 ### Windows
 
-Build from source. There is no installer yet. The build needs the MSVC
-toolchain and the Windows SDK, which is what compiles the bundled SQLite and
-GPUI's shaders:
+A zip, x86_64, from [the latest release][releases]. Unzip it and run
+`dbdelve.exe`. Nothing is installed. There is no installer.
+
+To build it yourself instead, the build needs the MSVC toolchain and the
+Windows SDK, which is what compiles the bundled SQLite and GPUI's shaders:
 
 ```sh
 cargo build --release

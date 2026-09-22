@@ -34,7 +34,8 @@ pub fn write_ico(out: &mut impl Write, images: &[(u32, &[u8])]) -> io::Result<()
         directory.push(0);
         directory.extend(1u16.to_le_bytes());
         directory.extend(32u16.to_le_bytes());
-        let len = u32::try_from(png.len()).map_err(|_| invalid("png does not fit an icon entry"))?;
+        let len =
+            u32::try_from(png.len()).map_err(|_| invalid("png does not fit an icon entry"))?;
         directory.extend(len.to_le_bytes());
         directory.extend(offset.to_le_bytes());
         offset = offset
@@ -61,12 +62,11 @@ mod tests {
     fn each_png_is_stored_whole_and_256_is_a_zero_dimension() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/linux/icons");
         let sizes = [16u32, 32, 64, 128, 256];
-        let loaded = sizes
-            .map(|size| {
-                let bytes = std::fs::read(root.join(format!("dbdelve-{size}.png")))
-                    .unwrap_or_else(|error| panic!("dbdelve-{size}.png: {error}"));
-                (size, bytes)
-            });
+        let loaded = sizes.map(|size| {
+            let bytes = std::fs::read(root.join(format!("dbdelve-{size}.png")))
+                .unwrap_or_else(|error| panic!("dbdelve-{size}.png: {error}"));
+            (size, bytes)
+        });
         let images = loaded
             .iter()
             .map(|(size, bytes)| (*size, bytes.as_slice()))
