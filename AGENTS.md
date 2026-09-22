@@ -1,6 +1,6 @@
 # AGENTS.md
 
-DBDelve is a native database client in Rust on GPUI for macOS and Linux,
+DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
 speaking Postgres, MySQL and SQLite. A data browser and a SQL editor as equals:
 open a table and browse it — page, sort, filter, edit — or write the statement
 yourself.
