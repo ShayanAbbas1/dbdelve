@@ -91,6 +91,10 @@ Install from the AUR:
 yay -S dbdelve-bin
 ```
 
+It's maintained by
+[@0PandaDEV](https://github.com/0PandaDEV), not by this project. Thanks for
+packaging it!
+
 A tarball or an AppImage, x86_64 or aarch64, built on Ubuntu 22.04 — that is
 the oldest glibc either will run against, so anything at least that new is
 fine. X11 and Wayland both work, and you need a Vulkan or OpenGL driver, a
