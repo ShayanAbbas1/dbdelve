@@ -5,7 +5,7 @@
 # Dev by default: its own bundle id, its own name, its own profiles and its own
 # Keychain items, run from the build tree and never installed, so a build can
 # neither replace the released app nor touch what it has saved.
-# DBDELVE_CHANNEL=release builds the app dev/release.sh ships.
+# DBDELVE_CHANNEL=release builds the app the release workflow ships.
 #
 # Usage: dev/bundle.sh
 set -euo pipefail
