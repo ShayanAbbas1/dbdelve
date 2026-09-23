@@ -23,19 +23,20 @@ impl Workspace {
         let Some(session) = self.profile().map(|profile| &profile.session) else {
             return;
         };
-        // The chip row draws every query tab before every object tab, so
-        // cycling walks them in that order.
+        // The chip row draws unsaved buffers, then saved queries, then object
+        // tabs, so cycling walks them in that order.
         let tabs: Vec<Tab> = session
             .queries
             .iter()
             .filter(|query| query.open_query.is_none())
             .map(|tab| Tab::Query(tab.id))
-            .chain(session
-                .saved_queries
-                .iter()
-                .map(|name| session.tab_holding(name))
-                .flatten()
-                .map(|id| Tab::Query(id)))
+            .chain(
+                session
+                    .saved_queries
+                    .iter()
+                    .filter_map(|name| session.tab_holding(name))
+                    .map(Tab::Query),
+            )
             .chain(session.objects.iter().map(|tab| Tab::Object(tab.id)))
             .collect();
         if tabs.len() < 2 {
