@@ -28,7 +28,14 @@ impl Workspace {
         let tabs: Vec<Tab> = session
             .queries
             .iter()
+            .filter(|query| query.open_query.is_none())
             .map(|tab| Tab::Query(tab.id))
+            .chain(session
+                .saved_queries
+                .iter()
+                .map(|name| session.tab_holding(name))
+                .flatten()
+                .map(|id| Tab::Query(id)))
             .chain(session.objects.iter().map(|tab| Tab::Object(tab.id)))
             .collect();
         if tabs.len() < 2 {
