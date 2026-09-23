@@ -107,6 +107,27 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
     "ring",
 ] }
 
+# Snowflake. It publishes no Rust driver, and the community ones are tokio plus
+# reqwest, so this speaks its documented SQL REST API over a blocking client --
+# the same "blocking, owns no runtime GPUI has to host" rule as the three
+# drivers above.
+#
+# Default features off for the usual reason, though here they happen to be the
+# right ones: `rustls` is ureq's spelling of rustls *on ring* with webpki-roots,
+# both already in the graph through `mysql`. Stated rather than inherited so a
+# ureq that changes its defaults cannot bring aws-lc-rs in behind us. `gzip` is
+# not optional: every result partition after the first arrives compressed.
+ureq = { version = "=3.4.2", default-features = false, features = [
+    "rustls",
+    "gzip",
+    "json",
+] }
+# Key-pair authentication: an RS256 signature and a SHA-256 fingerprint per
+# request. Both crates were already linked, `ring` as the TLS provider. Pinned
+# to the locked versions so naming them adds nothing to the build.
+ring = "=0.17.14"
+base64 = "=0.22.1"
+
 # The palette's scorer. gpui-component ships the list, the virtualized scroll
 # and the search field, but no fuzzy matching at all -- and ranking that reads
 # as obvious (whole words, word starts, runs of adjacent characters) is not a
