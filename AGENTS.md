@@ -150,8 +150,8 @@ Every direct dependency, because a list that omits some is a list nobody
 trusts. `Cargo.toml` carries the full reasoning; this is the shape of it.
 
 ```toml
-gpui = "=0.2.2"
-gpui-component = { version = "=0.5.1", features = ["tree-sitter-languages"] }
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
 
 tree-sitter = "=0.25.10"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below
