@@ -21,7 +21,9 @@ use serde::Deserialize;
 use sqlparser::ast::{
     AlterTableOperation, CopySource, CopyTarget, Query, SetExpr, Statement, UtilityOption,
 };
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+};
 use sqlparser::parser::Parser as SqlParser;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -787,7 +789,7 @@ fn collect_statements(tree: &Tree, sql: &str) -> Vec<Range<usize>> {
                     continue;
                 }
                 // Otherwise it is a statement of its own. The grammar is one
-                // dialect's worth of SQL and the servers speak three: `PRAGMA`,
+                // dialect's worth of SQL and the servers speak four: `PRAGMA`,
                 // `CALL`, `LISTEN` and `USE` are all statements it has never
                 // heard of, and a buffer holding only one of them used to hold
                 // "no statement to run". Whether it is valid is the server's to
@@ -1156,6 +1158,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
         Engine::MySql => Box::new(MySqlDialect {}),
         Engine::Sqlite => Box::new(SQLiteDialect {}),
+        Engine::Snowflake => Box::new(SnowflakeDialect {}),
     };
 
     // All or nothing: one statement it cannot read makes the whole submission

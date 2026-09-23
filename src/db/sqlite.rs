@@ -310,9 +310,14 @@ impl Connection {
         }
 
         let relations = self.internal_query(&relations_sql(&schemas))?;
-        // SQLite has no stored functions or procedures at all, so an empty list
-        // is the true answer rather than a gap in what dbdelve can see.
         assemble_catalog(relations, QueryResult::default())
+    }
+
+    /// SQLite has no stored functions or procedures at all, so an empty list is
+    /// the true answer rather than a gap in what dbdelve can see -- and there is
+    /// nothing to ask the file for.
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        Ok(Catalog::default())
     }
 
     /// `main`, `temp`, and anything `ATTACH`ed — under SQLite's own names for

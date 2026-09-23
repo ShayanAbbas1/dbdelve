@@ -204,10 +204,28 @@ impl Workspace {
                     // present and inert. A disabled field still reads as
                     // something the connection has.
                     .children(
-                        (!form.engine.is_server())
+                        (form.engine.fields() == Fields::File)
                             .then(|| self.form_field("Database file", &form.path, cx)),
                     )
-                    .children(form.engine.is_server().then(|| {
+                    // No encryption row: the transport is HTTPS and always
+                    // verified, so there is no choice to show. No password
+                    // either; the key file is the credential.
+                    .children((form.engine.fields() == Fields::Account).then(|| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(layout::SPACE_MD))
+                            .child(self.form_field("Account", &form.account, cx))
+                            .child(self.form_field("Username", &form.user, cx))
+                            .child(self.form_field("Private key file", &form.private_key, cx))
+                            .child(self.form_field("Database", &form.database, cx))
+                            .child(self.form_field("Warehouse", &form.warehouse, cx))
+                            .child(self.form_field("Role", &form.role, cx))
+                            // Last, because it is nearly always blank: the
+                            // account names its own host.
+                            .child(self.form_field("Host (optional)", &form.host, cx))
+                    }))
+                    .children((form.engine.fields() == Fields::Server).then(|| {
                         div()
                             .flex()
                             .flex_col()

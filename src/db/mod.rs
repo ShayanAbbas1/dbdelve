@@ -21,7 +21,10 @@ pub use crate::tls::SslMode;
 
 mod mysql;
 mod postgres;
+mod snowflake;
 mod sqlite;
+
+pub use snowflake::{SnowflakeConfig, account_identifier};
 
 /// Which engine a profile talks to.
 ///
@@ -34,6 +37,19 @@ pub enum Engine {
     Postgres,
     MySql,
     Sqlite,
+    Snowflake,
+}
+
+/// The shape of a connection's details. The form draws one of these and never
+/// asks which engine it is drawing for (hard rule 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fields {
+    /// Host, port, database, user, password and an `sslmode`.
+    Server,
+    /// A path and nothing else.
+    File,
+    /// An account reached over HTTPS with a private key.
+    Account,
 }
 
 /// How much the server should be asked to do to answer "how would you run
@@ -76,13 +92,14 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 3] = [Self::Postgres, Self::MySql, Self::Sqlite];
+    pub const ALL: [Self; 4] = [Self::Postgres, Self::MySql, Self::Sqlite, Self::Snowflake];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Postgres => "Postgres",
             Self::MySql => "MySQL",
             Self::Sqlite => "SQLite",
+            Self::Snowflake => "Snowflake",
         }
     }
 
@@ -93,6 +110,7 @@ impl Engine {
             Self::Postgres => "postgres",
             Self::MySql => "mysql",
             Self::Sqlite => "sqlite",
+            Self::Snowflake => "snowflake",
         }
     }
 
@@ -103,15 +121,21 @@ impl Engine {
             "postgres" | "postgresql" => Ok(Self::Postgres),
             "mysql" | "mariadb" => Ok(Self::MySql),
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
+            "snowflake" => Ok(Self::Snowflake),
             other => Err(format!("{other} is not a database engine dbdelve speaks.")),
         }
     }
 
-    /// Whether the engine reaches a server rather than opening a file.
-    /// Everything a server needs — a host, credentials, TLS — is absent for the
-    /// one that does not, and this is what the form asks before drawing them.
-    pub fn is_server(self) -> bool {
-        !matches!(self, Self::Sqlite)
+    /// Which set of fields makes a connection to this engine, which is what
+    /// the form asks before drawing any. A server's host, credentials and TLS
+    /// are absent for a file, and an account has a key where a server has a
+    /// password and no transport to choose.
+    pub fn fields(self) -> Fields {
+        match self {
+            Self::Postgres | Self::MySql => Fields::Server,
+            Self::Sqlite => Fields::File,
+            Self::Snowflake => Fields::Account,
+        }
     }
 
     /// What `mode` is spelled as here, or `None` where the engine has no such
@@ -133,6 +157,8 @@ impl Engine {
             (Self::Postgres | Self::MySql, ExplainMode::Analyze) => Some("EXPLAIN ANALYZE "),
             (Self::Sqlite, ExplainMode::Plan) => Some("EXPLAIN QUERY PLAN "),
             (Self::Sqlite, ExplainMode::Analyze) => None,
+            // Its plan is a fourth shape `explain.rs` does not read yet.
+            (Self::Snowflake, _) => None,
         }
     }
 
@@ -153,6 +179,8 @@ impl Engine {
             Self::Postgres => None,
             Self::MySql => Some("BEGIN"),
             Self::Sqlite => Some("BEGIN"),
+            // Every statement autocommits unless the submission brackets it.
+            Self::Snowflake => Some("BEGIN"),
         }
     }
 
@@ -165,7 +193,7 @@ impl Engine {
     /// of those inside `src/db/` — the caller asks, and never matches.
     pub fn assigns_default(self) -> bool {
         match self {
-            Self::Postgres | Self::MySql => true,
+            Self::Postgres | Self::MySql | Self::Snowflake => true,
             Self::Sqlite => false,
         }
     }
@@ -176,7 +204,10 @@ impl Engine {
     /// standard way produces a statement that runs and means something else.
     fn identifier_quote(self) -> char {
         match self {
-            Self::Postgres | Self::Sqlite => '"',
+            // Snowflake folds an unquoted name to upper case and reads a quoted
+            // one exactly, and the catalog reports names as stored -- so quoting
+            // what the catalog said is always the name it meant.
+            Self::Postgres | Self::Sqlite | Self::Snowflake => '"',
             Self::MySql => '`',
         }
     }
@@ -206,7 +237,7 @@ impl Engine {
         }
     }
 
-    /// Doubling the quote is enough for two of the three: neither Postgres nor
+    /// Doubling the quote is enough for two of them: neither Postgres nor
     /// SQLite reads a backslash as an escape, the first because
     /// `standard_conforming_strings` is on by default and the second because it
     /// has no such notion at all. MySQL does, unless `NO_BACKSLASH_ESCAPES` is
@@ -215,7 +246,10 @@ impl Engine {
     pub fn quote_literal(self, value: &str) -> String {
         match self {
             Self::Postgres | Self::Sqlite => format!("'{}'", value.replace('\'', "''")),
-            Self::MySql => format!("'{}'", value.replace('\\', r"\\").replace('\'', "''")),
+            // Snowflake reads a backslash as an escape too, and unconditionally.
+            Self::MySql | Self::Snowflake => {
+                format!("'{}'", value.replace('\\', r"\\").replace('\'', "''"))
+            }
         }
     }
 
@@ -315,6 +349,7 @@ pub enum ConnectionConfig {
         path: String,
         statement_timeout: u32,
     },
+    Snowflake(SnowflakeConfig),
 }
 
 impl ConnectionConfig {
@@ -323,6 +358,7 @@ impl ConnectionConfig {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(_) => Engine::MySql,
             Self::Sqlite { .. } => Engine::Sqlite,
+            Self::Snowflake(_) => Engine::Snowflake,
         }
     }
 
@@ -331,7 +367,7 @@ impl ConnectionConfig {
     pub fn server(&self) -> Option<&ServerConfig> {
         match self {
             Self::Postgres(server) | Self::MySql(server) => Some(server),
-            Self::Sqlite { .. } => None,
+            Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
 
@@ -340,7 +376,7 @@ impl ConnectionConfig {
     pub fn server_mut(&mut self) -> Option<&mut ServerConfig> {
         match self {
             Self::Postgres(server) | Self::MySql(server) => Some(server),
-            Self::Sqlite { .. } => None,
+            Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
 
@@ -368,6 +404,10 @@ impl ConnectionConfig {
                 // A URL has nowhere to say it; the form is where it is set.
                 statement_timeout: 0,
             }),
+            // Nobody pastes a Snowflake URL, because there is no such form.
+            Engine::Snowflake => {
+                Err("Snowflake has no connection URL. Fill the fields in instead.".to_string())
+            }
         }
     }
 
@@ -380,6 +420,7 @@ impl ConnectionConfig {
             Self::Sqlite {
                 statement_timeout, ..
             } => *statement_timeout,
+            Self::Snowflake(account) => account.statement_timeout,
         }
     }
 
@@ -407,6 +448,7 @@ impl ConnectionConfig {
         match self {
             Self::Postgres(server) | Self::MySql(server) => server.endpoint(),
             Self::Sqlite { path, .. } => path.clone(),
+            Self::Snowflake(account) => account.host(),
         }
     }
 }
@@ -418,6 +460,7 @@ pub enum Connection {
     Postgres(postgres::Connection),
     MySql(mysql::Connection),
     Sqlite(sqlite::Connection),
+    Snowflake(snowflake::Connection),
 }
 
 impl Connection {
@@ -431,6 +474,9 @@ impl Connection {
                 path,
                 statement_timeout,
             } => sqlite::Connection::open(&path, statement_timeout).map(Self::Sqlite),
+            ConnectionConfig::Snowflake(account) => {
+                snowflake::Connection::open(&account).map(Self::Snowflake)
+            }
         }
     }
 
@@ -444,14 +490,35 @@ impl Connection {
             Self::Postgres(connection) => connection.query(sql),
             Self::MySql(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
+            Self::Snowflake(connection) => connection.query(sql),
         }
     }
 
+    /// The relations of every schema, and no routines.
+    ///
+    /// Split from [`Connection::routines`] because the two are separate
+    /// queries on every engine and one of them is reliably the slower: on
+    /// Snowflake `INFORMATION_SCHEMA.PROCEDURES` took eight seconds to report
+    /// that there were none, with the tables already in hand after two. The
+    /// explorer is worth more open and incomplete than closed and correct, so
+    /// what arrives first is shown first.
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         match self {
             Self::Postgres(connection) => connection.catalog(),
             Self::MySql(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
+            Self::Snowflake(connection) => connection.catalog(),
+        }
+    }
+
+    /// The stored functions and procedures, as a catalog holding nothing else,
+    /// for [`Catalog::merge`] to fold into the one already on screen.
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.routines(),
+            Self::MySql(connection) => connection.routines(),
+            Self::Sqlite(connection) => connection.routines(),
+            Self::Snowflake(connection) => connection.routines(),
         }
     }
 
@@ -460,6 +527,7 @@ impl Connection {
             Self::Postgres(connection) => connection.structure(schema, relation),
             Self::MySql(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
+            Self::Snowflake(connection) => connection.structure(schema, relation),
         }
     }
 
@@ -487,6 +555,7 @@ impl Connection {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
+            Self::Snowflake(connection) => connection.cancel(),
         }
     }
 
@@ -503,6 +572,7 @@ impl Connection {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(_) => Engine::MySql,
             Self::Sqlite(_) => Engine::Sqlite,
+            Self::Snowflake(_) => Engine::Snowflake,
         };
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
@@ -649,6 +719,28 @@ pub struct Schema {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalog {
     pub schemas: Vec<Schema>,
+}
+
+impl Catalog {
+    /// Fold a later half into this one: the routines of a schema already here
+    /// join it, and a schema that holds only routines is added in its place.
+    ///
+    /// Assembled by name rather than by position, because the two halves are
+    /// separate queries and a schema can appear in either alone -- one holding
+    /// only functions is in the second and not the first.
+    pub fn merge(&mut self, other: Self) {
+        for schema in other.schemas {
+            match self
+                .schemas
+                .iter_mut()
+                .find(|existing| existing.name == schema.name)
+            {
+                Some(existing) => existing.routines = schema.routines,
+                None => self.schemas.push(schema),
+            }
+        }
+        self.schemas.sort_by(|a, b| a.name.cmp(&b.name));
+    }
 }
 
 /// One relation's definition. Loaded when the relation is opened rather than at
@@ -948,6 +1040,8 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         (Engine::MySql, true) => Some("SET SESSION TRANSACTION READ ONLY"),
         (Engine::MySql, false) => Some("SET SESSION TRANSACTION READ WRITE"),
         (Engine::Sqlite, _) => None,
+        // There is no session to set anything on.
+        (Engine::Snowflake, _) => None,
     }
 }
 
@@ -1171,6 +1265,143 @@ mod tests {
         assert_eq!(
             Engine::MySql.qualified("dbdelve_dev", "table"),
             "`dbdelve_dev`.`table`"
+        );
+    }
+
+    #[test]
+    fn snowflake_quotes_the_standard_way_and_doubles_a_backslash() {
+        // A quoted name is read exactly where a bare one is folded to upper
+        // case, so the double quote is what makes the catalog's spelling the
+        // one the server looks up.
+        assert_eq!(
+            Engine::Snowflake.quote_identifier("odd\"name"),
+            "\"odd\"\"name\""
+        );
+        // A backslash is an escape in a Snowflake string, as in MySQL. Left
+        // single, a trailing one swallows the closing quote.
+        assert_eq!(
+            Engine::Snowflake.quote_literal(r"back\slash"),
+            r"'back\\slash'"
+        );
+        assert_eq!(
+            Engine::Snowflake.qualified("PUBLIC", "ORDERS"),
+            "\"PUBLIC\".\"ORDERS\""
+        );
+    }
+
+    #[test]
+    fn snowflake_is_stored_under_its_own_name_and_has_no_url() {
+        assert_eq!(Engine::parse("snowflake"), Ok(Engine::Snowflake));
+        assert_eq!(Engine::Snowflake.as_str(), "snowflake");
+        assert!(ConnectionConfig::from_url("snowflake://account/db").is_err());
+    }
+
+    #[test]
+    fn snowflake_offers_no_explain_and_sets_nothing_for_read_only() {
+        for mode in ExplainMode::ALL {
+            assert_eq!(Engine::Snowflake.explain_prefix(mode), None);
+        }
+        // There is no session for a setting to live on.
+        assert_eq!(read_only_statement(Engine::Snowflake, true), None);
+        assert_eq!(read_only_statement(Engine::Snowflake, false), None);
+    }
+
+    fn schema(name: &str, relations: &[&str], routines: &[&str]) -> Schema {
+        Schema {
+            name: name.to_string(),
+            relations: relations
+                .iter()
+                .map(|name| Relation {
+                    name: (*name).to_string(),
+                    kind: RelationKind::Table,
+                    partition_of: None,
+                })
+                .collect(),
+            routines: routines
+                .iter()
+                .map(|name| Routine {
+                    name: (*name).to_string(),
+                    kind: RoutineKind::Function,
+                    identity_arguments: String::new(),
+                    result_type: String::new(),
+                    language: String::new(),
+                    definition: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_second_half_of_a_catalog_joins_the_first_by_name() {
+        let mut catalog = Catalog {
+            schemas: vec![
+                schema("public", &["accounts"], &[]),
+                schema("ops", &["jobs"], &[]),
+            ],
+        };
+        catalog.merge(Catalog {
+            schemas: vec![
+                schema("public", &[], &["digest"]),
+                // A schema holding only functions is in the second half alone,
+                // and is a schema the explorer has to show.
+                schema("audit", &[], &["trail"]),
+            ],
+        });
+
+        let named = |name: &str| {
+            catalog
+                .schemas
+                .iter()
+                .find(|schema| schema.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))
+        };
+        // The relations it already had are untouched, and its routines arrive.
+        assert_eq!(named("public").relations.len(), 1);
+        assert_eq!(named("public").routines[0].name, "digest");
+        assert_eq!(named("audit").relations, []);
+        assert_eq!(named("ops").routines, []);
+        // Still in one order, wherever each schema came from.
+        assert_eq!(
+            catalog
+                .schemas
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["audit", "ops", "public"]
+        );
+    }
+
+    #[test]
+    fn each_engine_names_the_fields_its_connection_is_made_of() {
+        // Two engines sharing a set is what lets the form keep focus where it
+        // was when the chip moves between them.
+        assert_eq!(Engine::Postgres.fields(), Fields::Server);
+        assert_eq!(Engine::MySql.fields(), Fields::Server);
+        assert_eq!(Engine::Sqlite.fields(), Fields::File);
+        assert_eq!(Engine::Snowflake.fields(), Fields::Account);
+    }
+
+    #[test]
+    fn a_snowflake_config_has_no_server_half() {
+        // No password, so nothing for the credential fields or the Keychain
+        // to be asked about.
+        let mut account = SnowflakeConfig {
+            account: "myorg-myaccount".into(),
+            database: "ANALYTICS".into(),
+            statement_timeout: 30,
+            ..Default::default()
+        };
+        let config = ConnectionConfig::Snowflake(account.clone());
+        assert_eq!(config.engine(), Engine::Snowflake);
+        assert!(config.server().is_none());
+        assert_eq!(config.statement_timeout(), 30);
+        assert_eq!(config.endpoint(), "myorg-myaccount.snowflakecomputing.com");
+
+        // A host that was given wins over the one the account implies.
+        account.host = Some("myorg.privatelink.example".into());
+        assert_eq!(
+            ConnectionConfig::Snowflake(account).endpoint(),
+            "myorg.privatelink.example"
         );
     }
 

@@ -92,6 +92,17 @@ impl Workspace {
                     _ => ConnectionConfig::Postgres(server),
                 }
             }
+            Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
+                account: stored.account.unwrap_or_default(),
+                // Blank on disk is the derived host, the same as absent.
+                host: Some(stored.host).filter(|host| !host.is_empty()),
+                user: stored.user,
+                private_key: stored.private_key.unwrap_or_default(),
+                database: stored.database,
+                warehouse: stored.warehouse,
+                role: stored.role,
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            }),
         };
         // A profile written before a buffer was a tab carries one buffer, whose
         // name is in the legacy scalar and whose text `read_scratch` migrates.
@@ -252,6 +263,8 @@ impl Workspace {
                     server.root_certificate.clone().unwrap_or_default(),
                 ),
             ],
+            // `from_url` refuses the scheme, so no URL arrives as one.
+            ConnectionConfig::Snowflake(_) => Vec::new(),
         };
         for (input, value) in filled {
             let input = input.clone();
@@ -301,10 +314,11 @@ impl Workspace {
                     // Only when the field set actually changes: Postgres and
                     // MySQL show the same fields, so switching between them
                     // takes nothing away and must not take focus either.
-                    if form.engine.is_server() != engine.is_server() {
-                        form.needs_focus = Some(match engine.is_server() {
-                            true => form.host.clone(),
-                            false => form.path.clone(),
+                    if form.engine.fields() != engine.fields() {
+                        form.needs_focus = Some(match engine.fields() {
+                            Fields::Server => form.host.clone(),
+                            Fields::File => form.path.clone(),
+                            Fields::Account => form.account.clone(),
                         });
                     }
                     form.engine = engine;
@@ -643,6 +657,55 @@ impl Workspace {
                                 *kind = actual;
                             }
                         }
+                    }
+                    workspace.install_completions(&id, cx);
+                    workspace.refresh_explorer(&id, cx);
+                    cx.notify();
+                    workspace.load_routines(&id, generation, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Fill the routines in behind the relations already on screen.
+    ///
+    /// A second request rather than a slower first one: the two are separate
+    /// queries on every engine, and where the routines are the slow half the
+    /// explorer would otherwise sit empty until they arrived.
+    ///
+    /// A failure here leaves the relations alone and is said once in the status
+    /// bar. Replacing a working explorer with an error because the functions
+    /// could not be listed would cost more than it reports.
+    fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let routines_task = cx
+            .background_executor()
+            .spawn(async move { connection.routines() });
+
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let result = routines_task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(profile) = workspace.issued_to(&id, generation) else {
+                        return;
+                    };
+                    match result {
+                        // Only onto a catalog that loaded. One that failed, or
+                        // that a reconnect has already replaced, is not this
+                        // half's to complete.
+                        Ok(routines) => {
+                            if let CatalogState::Loaded(catalog) = &mut profile.catalog {
+                                catalog.merge(routines);
+                            }
+                        }
+                        Err(error) => workspace.note(error.message, cx),
                     }
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);

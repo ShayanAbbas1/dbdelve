@@ -89,15 +89,26 @@ impl Profile {
         // path, rather than either writing a blank the loader would have to
         // decide the meaning of.
         let server = self.config.server();
+        let snowflake = match &self.config {
+            ConnectionConfig::Snowflake(account) => Some(account),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
-            host: server.map(|server| server.host.clone()).unwrap_or_default(),
+            host: server
+                .map(|server| server.host.clone())
+                .or_else(|| snowflake.and_then(|account| account.host.clone()))
+                .unwrap_or_default(),
             port: server.and_then(|server| server.port),
             database: server
                 .map(|server| server.database.clone())
+                .or_else(|| snowflake.map(|account| account.database.clone()))
                 .unwrap_or_default(),
-            user: server.map(|server| server.user.clone()).unwrap_or_default(),
+            user: server
+                .map(|server| server.user.clone())
+                .or_else(|| snowflake.map(|account| account.user.clone()))
+                .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
             engine: Some(self.config.engine().as_str().to_string()),
@@ -105,6 +116,10 @@ impl Profile {
                 ConnectionConfig::Sqlite { path, .. } => Some(path.clone()),
                 _ => None,
             },
+            account: snowflake.map(|account| account.account.clone()),
+            private_key: snowflake.map(|account| account.private_key.clone()),
+            warehouse: snowflake.and_then(|account| account.warehouse.clone()),
+            role: snowflake.and_then(|account| account.role.clone()),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.

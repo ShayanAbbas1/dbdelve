@@ -12,7 +12,7 @@ use gpui_component::input::InputState;
 
 use crate::{
     Workspace,
-    db::{ConnectionConfig, Engine, ServerConfig, SslMode},
+    db::{ConnectionConfig, Engine, ServerConfig, SnowflakeConfig, SslMode},
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -42,6 +42,14 @@ pub(crate) struct ConnectionForm {
     /// Only reachable while the mode consults one, so the field cannot sit
     /// there filled in and doing nothing.
     pub(crate) root_certificate: Entity<InputState>,
+    /// What an account has that a server does not. `host`, `database` and
+    /// `user` are shared with the server fields: they mean the same thing, and
+    /// sharing them is what keeps a value typed under one chip there under the
+    /// next.
+    pub(crate) account: Entity<InputState>,
+    pub(crate) private_key: Entity<InputState>,
+    pub(crate) warehouse: Entity<InputState>,
+    pub(crate) role: Entity<InputState>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever chip is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -66,6 +74,10 @@ impl ConnectionForm {
     ) -> Self {
         let value = |value: Option<&str>| value.unwrap_or_default().to_string();
         let server = config.and_then(ConnectionConfig::server);
+        let account = match config {
+            Some(ConnectionConfig::Snowflake(account)) => Some(account),
+            _ => None,
+        };
         let file = match config {
             Some(ConnectionConfig::Sqlite { path, .. }) => Some(path.as_str()),
             _ => None,
@@ -79,6 +91,7 @@ impl ConnectionForm {
                 .default_value(value(
                     server
                         .map(|server| server.database.as_str())
+                        .or_else(|| account.map(|account| account.database.as_str()))
                         .or_else(|| file.map(file_stem)),
                 ))
         });
@@ -90,7 +103,11 @@ impl ConnectionForm {
         let host = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Host")
-                .default_value(value(server.map(|server| server.host.as_str())))
+                .default_value(value(
+                    server
+                        .map(|server| server.host.as_str())
+                        .or_else(|| account.and_then(|account| account.host.as_deref())),
+                ))
         });
         let port = cx.new(|cx| {
             InputState::new(window, cx)
@@ -105,12 +122,20 @@ impl ConnectionForm {
         let database = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Database")
-                .default_value(value(server.map(|server| server.database.as_str())))
+                .default_value(value(
+                    server
+                        .map(|server| server.database.as_str())
+                        .or_else(|| account.map(|account| account.database.as_str())),
+                ))
         });
         let user = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Username")
-                .default_value(value(server.map(|server| server.user.as_str())))
+                .default_value(value(
+                    server
+                        .map(|server| server.user.as_str())
+                        .or_else(|| account.map(|account| account.user.as_str())),
+                ))
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
@@ -125,6 +150,28 @@ impl ConnectionForm {
                 .default_value(value(
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
+        });
+        let account_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Account identifier")
+                .default_value(value(account.map(|account| account.account.as_str())))
+        });
+        let private_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Absolute path to the private key file")
+                .default_value(value(account.map(|account| account.private_key.as_str())))
+        });
+        let warehouse = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Warehouse (optional)")
+                .default_value(value(
+                    account.and_then(|account| account.warehouse.as_deref()),
+                ))
+        });
+        let role = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Role (optional)")
+                .default_value(value(account.and_then(|account| account.role.as_deref())))
         });
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
@@ -157,6 +204,10 @@ impl ConnectionForm {
             password,
             sslmode: server.map(|server| server.sslmode).unwrap_or_default(),
             root_certificate,
+            account: account_name,
+            private_key,
+            warehouse,
+            role,
             statement_timeout,
             error: None,
             editing: None,
@@ -209,6 +260,7 @@ impl ConnectionForm {
             }
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
+            Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
         };
 
         Ok((name, config))
@@ -224,6 +276,46 @@ impl ConnectionForm {
         value
             .parse()
             .map_err(|_| "Statement timeout must be a whole number of seconds.".to_string())
+    }
+
+    pub(crate) fn account(&self, cx: &App) -> Result<SnowflakeConfig, String> {
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        let optional =
+            |input: &Entity<InputState>| Some(read(input)).filter(|value| !value.is_empty());
+        let account = crate::db::account_identifier(&read(&self.account));
+        let user = read(&self.user);
+        let private_key = read(&self.private_key);
+        let database = read(&self.database);
+
+        for (label, value) in [
+            ("Account", &account),
+            ("Username", &user),
+            ("Private key", &private_key),
+            ("Database", &database),
+        ] {
+            if value.is_empty() {
+                return Err(format!("{label} is required."));
+            }
+        }
+        // Absolute, because a relative one resolves against wherever the app
+        // was launched from -- `/` for one opened from Finder -- and `~` is the
+        // shell's to expand, not the file system's.
+        if !private_key.starts_with('/') {
+            return Err("Private key must be an absolute path to the key file.".into());
+        }
+
+        Ok(SnowflakeConfig {
+            account,
+            // Blank is the host the account implies, which is nearly always
+            // the right one.
+            host: optional(&self.host),
+            user,
+            private_key,
+            database,
+            warehouse: optional(&self.warehouse),
+            role: optional(&self.role),
+            statement_timeout: self.statement_timeout(cx)?,
+        })
     }
 
     pub(crate) fn server(&self, cx: &App) -> Result<ServerConfig, String> {
@@ -281,6 +373,7 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
             server.database.clone()
         }
         ConnectionConfig::Sqlite { path, .. } => file_stem(path).to_string(),
+        ConnectionConfig::Snowflake(account) => account.database.clone(),
     }
 }
 
@@ -354,5 +447,14 @@ mod tests {
             ),
             None
         );
+        // An account signs in with a key file the profile only points at, so
+        // there is no secret for the Keychain to hold.
+        let account = ConnectionConfig::Snowflake(crate::db::SnowflakeConfig {
+            database: "ANALYTICS".to_string(),
+            private_key: "/Users/dev/.ssh/snowflake.p8".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(password_to_persist(&account, Origin::Form), None);
+        assert_eq!(default_profile_name(&account), "ANALYTICS");
     }
 }

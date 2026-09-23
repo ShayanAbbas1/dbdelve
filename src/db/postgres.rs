@@ -483,9 +483,11 @@ impl Connection {
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(RELATIONS_SQL)?;
-        let routines = self.internal_query(ROUTINES_SQL)?;
-        assemble_catalog(relations, routines)
+        assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
+    }
+
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        assemble_catalog(QueryResult::default(), self.internal_query(ROUTINES_SQL)?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
