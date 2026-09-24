@@ -57,6 +57,17 @@ pub struct StoredProfile {
     /// The database file, for SQLite. Absent for a server engine.
     #[serde(default)]
     pub path: Option<String>,
+    /// What Snowflake needs beyond the fields it shares with a server engine.
+    /// All four absent for every other engine. `private_key` is a path: the
+    /// key itself never leaves its file.
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
     /// The editor's zoom, back when it was a per-profile setting. Read only:
     /// the live value is [`StoredSettings::editor_font_size`] now, and this is
     /// what the migration seeds it from for anyone upgrading -- dropping the
@@ -1052,6 +1063,10 @@ user = "shayan"
                 root_certificate: None,
                 engine: Some("postgres".into()),
                 path: None,
+                account: None,
+                private_key: None,
+                warehouse: None,
+                role: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
                 next_query_id: Some(1),
@@ -1091,6 +1106,10 @@ user = "shayan"
             root_certificate: Some("/etc/ssl/rds.pem".into()),
             engine: Some("postgres".into()),
             path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1184,6 +1203,10 @@ open_objects = []
             root_certificate: None,
             engine: Some("postgres".into()),
             path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1245,6 +1268,10 @@ open_objects = []
             root_certificate: None,
             engine: Some("sqlite".into()),
             path: Some("/Users/dev/dbdelve_dev.db".into()),
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
             next_query_id: Some(7),
@@ -1263,6 +1290,48 @@ open_objects = []
                 active: true,
                 bars: Vec::new(),
             }],
+        };
+        let file = ProfileFile {
+            active: None,
+            fonts: None,
+            settings: None,
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
+    fn a_snowflake_profile_survives_the_round_trip_through_toml() {
+        // The key is a path, so it is a profile field like any other and the
+        // round trip is the whole of what persists for this engine.
+        let profile = StoredProfile {
+            id: "warehouse".into(),
+            name: "Warehouse".into(),
+            host: String::new(),
+            port: None,
+            database: "ANALYTICS".into(),
+            user: "TIM".into(),
+            sslmode: None,
+            root_certificate: None,
+            engine: Some("snowflake".into()),
+            path: None,
+            account: Some("myorg-myaccount".into()),
+            private_key: Some("/Users/dev/.ssh/snowflake.p8".into()),
+            warehouse: Some("COMPUTE_WH".into()),
+            role: None,
+            editor_font_size: None,
+            statement_timeout: Some(60),
+            next_query_id: Some(1),
+            color: None,
+            mode: None,
+            confirmed: Vec::new(),
+            open_query: None,
+            open_queries: Vec::new(),
+            open_objects: Vec::new(),
         };
         let file = ProfileFile {
             active: None,
@@ -1351,6 +1420,10 @@ open_objects = []
             root_certificate: None,
             engine: Some("sqlite".into()),
             path: Some("/tmp/dev.sqlite".into()),
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: None,
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1438,6 +1511,10 @@ open_objects = []
                     root_certificate: None,
                     engine: Some("postgres".into()),
                     path: None,
+                    account: None,
+                    private_key: None,
+                    warehouse: None,
+                    role: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
                     next_query_id: Some(2),
@@ -1459,6 +1536,10 @@ open_objects = []
                     root_certificate: None,
                     engine: Some("sqlite".into()),
                     path: Some("/tmp/dev.sqlite".into()),
+                    account: None,
+                    private_key: None,
+                    warehouse: None,
+                    role: None,
                     editor_font_size: None,
                     statement_timeout: None,
                     next_query_id: None,
@@ -1760,6 +1841,10 @@ open_objects = []
             root_certificate: None,
             engine: Some("postgres".into()),
             path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -2042,6 +2127,10 @@ name = \"accounts\"
             root_certificate: None,
             engine: Some("postgres".into()),
             path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -2133,6 +2222,10 @@ name = \"accounts\"
             root_certificate: None,
             engine: Some("postgres".into()),
             path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),

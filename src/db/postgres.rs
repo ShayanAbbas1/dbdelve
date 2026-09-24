@@ -484,9 +484,11 @@ impl Connection {
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(RELATIONS_SQL)?;
-        let routines = self.internal_query(ROUTINES_SQL)?;
-        assemble_catalog(relations, routines)
+        assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
+    }
+
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        assemble_catalog(QueryResult::default(), self.internal_query(ROUTINES_SQL)?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1735,10 +1737,9 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through PG*"]
     fn live_catalog_round_trip() {
-        let catalog = Connection::open(&live_config())
-            .expect("connection should open")
-            .catalog()
-            .expect("catalog should load");
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let mut catalog = connection.catalog().expect("catalog should load");
+        catalog.merge(connection.routines().expect("routines should load"));
         let public = catalog
             .schemas
             .iter()

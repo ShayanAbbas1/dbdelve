@@ -22,8 +22,8 @@ use gpui_component::{
 use crate::{
     Workspace, completion,
     db::{
-        Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, RelationKind, Routine,
-        Structure,
+        CancelToken, Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode,
+        RelationKind, Routine, Structure,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -93,15 +93,26 @@ impl Profile {
         // path, rather than either writing a blank the loader would have to
         // decide the meaning of.
         let server = self.config.server();
+        let snowflake = match &self.config {
+            ConnectionConfig::Snowflake(account) => Some(account),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
-            host: server.map(|server| server.host.clone()).unwrap_or_default(),
+            host: server
+                .map(|server| server.host.clone())
+                .or_else(|| snowflake.and_then(|account| account.host.clone()))
+                .unwrap_or_default(),
             port: server.and_then(|server| server.port),
             database: server
                 .map(|server| server.database.clone())
+                .or_else(|| snowflake.map(|account| account.database.clone()))
                 .unwrap_or_default(),
-            user: server.map(|server| server.user.clone()).unwrap_or_default(),
+            user: server
+                .map(|server| server.user.clone())
+                .or_else(|| snowflake.map(|account| account.user.clone()))
+                .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
             engine: Some(self.config.engine().as_str().to_string()),
@@ -109,6 +120,10 @@ impl Profile {
                 ConnectionConfig::Sqlite { path, .. } => Some(path.clone()),
                 _ => None,
             },
+            account: snowflake.map(|account| account.account.clone()),
+            private_key: snowflake.map(|account| account.private_key.clone()),
+            warehouse: snowflake.and_then(|account| account.warehouse.clone()),
+            role: snowflake.and_then(|account| account.role.clone()),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.
@@ -585,8 +600,19 @@ pub(crate) enum Focus {
 
 pub(crate) enum CatalogState {
     Loading,
-    Loaded(Catalog),
+    /// The relations, and how far the routines behind them have got.
+    Loaded(Catalog, Routines),
     Failed(String),
+}
+
+/// The second half of a loaded catalog. A catalog whose routines are not
+/// `Loaded` holds none, and a routine missing from it says nothing about the
+/// database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Routines {
+    Loading,
+    Loaded,
+    Failed,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds
@@ -1047,9 +1073,11 @@ pub(crate) enum QueryState {
     /// `cancelling` says a cancel has been *sent* for this slot, and nothing
     /// more: the statement is still in flight, so this is still `Running` to
     /// everything that asks. It leaves the flag behind when it leaves the
-    /// variant, which is why nothing resets it.
+    /// variant, which is why nothing resets it. `cancel` is what the run went
+    /// out under, and all a cancel for this slot may stop.
     Running {
         cancelling: bool,
+        cancel: CancelToken,
     },
     Complete {
         rows: usize,
@@ -1310,7 +1338,8 @@ mod tests {
     fn result_pane_expands_as_soon_as_a_query_starts() {
         assert!(!result_pane_is_expanded(&QueryState::Idle));
         assert!(result_pane_is_expanded(&QueryState::Running {
-            cancelling: false
+            cancelling: false,
+            cancel: CancelToken::default(),
         }));
     }
 
@@ -1318,7 +1347,10 @@ mod tests {
     /// question asked of a running query has to keep its old answer.
     #[test]
     fn a_query_being_cancelled_is_still_running() {
-        let cancelling = QueryState::Running { cancelling: true };
+        let cancelling = QueryState::Running {
+            cancelling: true,
+            cancel: CancelToken::default(),
+        };
         assert!(result_pane_is_expanded(&cancelling));
         assert!(matches!(cancelling, QueryState::Running { .. }));
     }

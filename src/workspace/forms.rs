@@ -6,7 +6,7 @@
 use gpui_component::checkbox::Checkbox;
 
 use super::*;
-use crate::sql::Stop;
+use crate::sql::{Destructive, Stop};
 
 impl Workspace {
     pub(crate) fn render_connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -70,15 +70,23 @@ impl Workspace {
                                                 "Connect to a database"
                                             }),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::TEXT_SM))
-                                            .text_color(t.text_muted)
-                                            .child(if editing {
-                                                "Change where this connection points."
-                                            } else {
-                                                "Paste a URL, or fill in the fields."
-                                            }),
+                                    // Snowflake has no connection URL to paste,
+                                    // so a fresh form for it says nothing about
+                                    // one; editing keeps the generic subtitle,
+                                    // which never mentioned a URL either.
+                                    .children(
+                                        (editing || form.engine.fields() != Fields::Account).then(
+                                            || {
+                                                div()
+                                                    .text_size(px(layout::TEXT_SM))
+                                                    .text_color(t.text_muted)
+                                                    .child(if editing {
+                                                        "Change where this connection points."
+                                                    } else {
+                                                        "Paste a URL, or fill in the fields."
+                                                    })
+                                            },
+                                        ),
                                     ),
                             ),
                     )
@@ -125,55 +133,60 @@ impl Workspace {
                                 ),
                         )
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_XS))
+                    // Snowflake has no connection URL: `Engine::fields()` is
+                    // where that is decided, not a match on the engine here.
+                    .when(form.engine.fields() != Fields::Account, |form_div| {
+                        form_div
                             .child(
                                 div()
-                                    .text_size(px(layout::TEXT_SM))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(t.text_muted)
-                                    .child("Connection URL"),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(layout::SPACE_XS))
+                                    .child(
+                                        div()
+                                            .text_size(px(layout::TEXT_SM))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(t.text_muted)
+                                            .child("Connection URL"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(layout::SPACE_SM))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(Input::new(&form.url).w_full()),
+                                            )
+                                            .child(
+                                                icon_button(
+                                                    "apply-connection-url",
+                                                    icon::FILL_DOWN,
+                                                    Tone::Primary,
+                                                    Control::Standard,
+                                                    t,
+                                                )
+                                                .tooltip("Fill the fields from this URL")
+                                                .on_click(cx.listener(Self::apply_connection_url)),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap(px(layout::SPACE_SM))
+                                    .child(hairline())
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(Input::new(&form.url).w_full()),
+                                            .text_size(px(layout::TEXT_XS))
+                                            .text_color(t.text_faint)
+                                            .child("OR"),
                                     )
-                                    .child(
-                                        icon_button(
-                                            "apply-connection-url",
-                                            icon::FILL_DOWN,
-                                            Tone::Primary,
-                                            Control::Standard,
-                                            t,
-                                        )
-                                        .tooltip("Fill the fields from this URL")
-                                        .on_click(cx.listener(Self::apply_connection_url)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(layout::SPACE_SM))
-                            .child(hairline())
-                            .child(
-                                div()
-                                    .text_size(px(layout::TEXT_XS))
-                                    .text_color(t.text_faint)
-                                    .child("OR"),
+                                    .child(hairline()),
                             )
-                            .child(hairline()),
-                    )
+                    })
                     .child(self.form_field("Display name", &form.name, cx))
                     .child(
                         div()
@@ -204,10 +217,28 @@ impl Workspace {
                     // present and inert. A disabled field still reads as
                     // something the connection has.
                     .children(
-                        (!form.engine.is_server())
+                        (form.engine.fields() == Fields::File)
                             .then(|| self.form_field("Database file", &form.path, cx)),
                     )
-                    .children(form.engine.is_server().then(|| {
+                    // No encryption row: the transport is HTTPS and always
+                    // verified, so there is no choice to show. No password
+                    // either; the key file is the credential.
+                    .children((form.engine.fields() == Fields::Account).then(|| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(layout::SPACE_MD))
+                            .child(self.form_field("Account", &form.account, cx))
+                            .child(self.form_field("Username", &form.user, cx))
+                            .child(self.form_field("Private key file", &form.private_key, cx))
+                            .child(self.form_field("Database", &form.database, cx))
+                            .child(self.form_field("Warehouse", &form.warehouse, cx))
+                            .child(self.form_field("Role", &form.role, cx))
+                            // Last, because it is nearly always blank: the
+                            // account names its own host.
+                            .child(self.form_field("Host", &form.host, cx))
+                    }))
+                    .children((form.engine.fields() == Fields::Server).then(|| {
                         div()
                             .flex()
                             .flex_col()
@@ -538,10 +569,28 @@ impl Workspace {
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
                 "Mode",
-                format!(
-                    "{name} is in {current_mode} mode. This needs {}.",
-                    needed.label()
-                ),
+                // `Destructive::Unreadable` only reaches `Upgrade` on an engine
+                // with no server-side read-only setting to fall back on
+                // (`Engine::holds_read_only`): there is nothing stopping a
+                // write it cannot parse, so the reason is worth spelling out
+                // rather than reading like an ordinary mode shortfall.
+                if pending
+                    .verdict
+                    .destructive
+                    .contains(&Destructive::Unreadable)
+                {
+                    format!(
+                        "{name} is in {current_mode} mode. dbdelve can't parse this, and \
+                         this database has no server-side read-only setting to stop it if \
+                         it writes, so it needs {}.",
+                        needed.label()
+                    )
+                } else {
+                    format!(
+                        "{name} is in {current_mode} mode. This needs {}.",
+                        needed.label()
+                    )
+                },
                 if sql.is_some() {
                     format!("Switch to {} and run", needed.label())
                 } else {
@@ -1156,12 +1205,12 @@ impl Workspace {
                 .text_color(t.danger)
                 .child(message.clone())
                 .into_any_element(),
-            CatalogState::Loaded(catalog) if catalog.schemas.is_empty() => div()
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => div()
                 .p(px(layout::SPACE_MD))
                 .text_color(t.text_muted)
                 .child("No database objects found.")
                 .into_any_element(),
-            CatalogState::Loaded(_) => {
+            CatalogState::Loaded(..) => {
                 render_tree(
                     &profile.session.explorer_tree,
                     move |index, entry, _, _, cx| {

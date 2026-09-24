@@ -1,0 +1,127 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 0,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 0,
+      "uncompressedSize" : 0
+    } ],
+    "rowType" : [ {
+      "name" : "created_on",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : 3,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_ltz"
+    }, {
+      "name" : "database_name",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "schema_name",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "table_name",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "column_name",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "key_sequence",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : 0,
+      "precision" : 9,
+      "length" : null,
+      "type" : "fixed"
+    }, {
+      "name" : "constraint_name",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "rely",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "comment",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 16777216,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    } ]
+  },
+  "data" : [  ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000034?requestId=00000000-0000-0000-0000-000000000035",
+  "requestId" : "00000000-0000-0000-0000-000000000035",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000034",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284738254
+}

@@ -516,8 +516,12 @@ impl Connection {
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         let relations = self.internal_query(&RELATIONS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        assemble_catalog(relations, QueryResult::default())
+    }
+
+    pub fn routines(&self) -> Result<Catalog, DbError> {
         let routines = self.internal_query(&ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
-        assemble_catalog(relations, routines)
+        assemble_catalog(QueryResult::default(), routines)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1294,7 +1298,9 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
     fn live_catalog_round_trip() {
-        let catalog = live().catalog().expect("catalog should load");
+        let connection = live();
+        let mut catalog = connection.catalog().expect("catalog should load");
+        catalog.merge(connection.routines().expect("routines should load"));
         let schema = catalog
             .schemas
             .iter()

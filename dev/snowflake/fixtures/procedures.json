@@ -1,0 +1,103 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 204
+    } ],
+    "rowType" : [ {
+      "name" : "schema_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "PROCEDURES",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "routine_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "PROCEDURES",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "routine_kind",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 36,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 9,
+      "type" : "text"
+    }, {
+      "name" : "identity_arguments",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "result_type",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "language",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "definition",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["SALES","REFUND","procedure","(ORDER_ID NUMBER)","VARCHAR(134217728)","SQL","\nBEGIN\n  UPDATE DBDELVE_TEST.SALES.ORDERS SET status = 'refunded' WHERE id = :order_id;\n  RETURN 'ok';\nEND;\n"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000023?requestId=00000000-0000-0000-0000-000000000024",
+  "requestId" : "00000000-0000-0000-0000-000000000024",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000023",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284731608
+}

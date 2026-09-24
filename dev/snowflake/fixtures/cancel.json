@@ -1,0 +1,7 @@
+{
+  "code" : "000604",
+  "sqlState" : "57014",
+  "message" : "SQL execution canceled",
+  "statementHandle" : "00000000-0000-0000-0000-000000000015",
+  "statementStatusUrl" : "/api/statements/00000000-0000-0000-0000-000000000015"
+}

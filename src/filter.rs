@@ -420,6 +420,10 @@ pub(crate) fn filter_predicate(
             Engine::Postgres => comparison("~"),
             Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
             Engine::Sqlite => None,
+            // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
+            // value, where the other two match anywhere in it. Counting matches
+            // asks the question the dropdown's entry has always meant.
+            Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
         },
     }
 }
@@ -455,6 +459,20 @@ pub(crate) fn substring(engine: Engine, name: &str, operator: Operator, value: &
             ),
             _ => format!("instr({name}, {literal}) > 0"),
         };
+    }
+    // No default escape here either, but there are exact functions for the
+    // job, so there is no arithmetic to do. Case-sensitive, like SQLite's arm.
+    if engine == Engine::Snowflake {
+        let function = match operator {
+            Operator::StartsWith => "STARTSWITH",
+            Operator::EndsWith => "ENDSWITH",
+            _ => "CONTAINS",
+        };
+        let negation = match operator {
+            Operator::NotContains => "NOT ",
+            _ => "",
+        };
+        return format!("{negation}{function}({name}, {literal})");
     }
     let escaped = like_pattern(value);
     let pattern = match operator {
@@ -863,6 +881,39 @@ mod tests {
     }
 
     #[test]
+    fn snowflake_asks_with_exact_functions_rather_than_a_pattern() {
+        // No default `LIKE` escape, as on SQLite, but functions that ask the
+        // question directly -- so a `%` in the value is a percent sign.
+        assert_eq!(
+            predicate(Engine::Snowflake, Operator::Contains, "50%").as_deref(),
+            Some(r#"CONTAINS("state", '50%')"#)
+        );
+        assert_eq!(
+            predicate(Engine::Snowflake, Operator::NotContains, "ok").as_deref(),
+            Some(r#"NOT CONTAINS("state", 'ok')"#)
+        );
+        assert_eq!(
+            predicate(Engine::Snowflake, Operator::StartsWith, "ok").as_deref(),
+            Some(r#"STARTSWITH("state", 'ok')"#)
+        );
+        assert_eq!(
+            predicate(Engine::Snowflake, Operator::EndsWith, "ok").as_deref(),
+            Some(r#"ENDSWITH("state", 'ok')"#)
+        );
+    }
+
+    #[test]
+    fn a_snowflake_regex_matches_anywhere_like_the_others() {
+        // `REGEXP_LIKE` there anchors to the whole value, which would make the
+        // same dropdown entry mean something narrower on one engine.
+        assert!(Operator::Regex.on(Engine::Snowflake));
+        assert_eq!(
+            predicate(Engine::Snowflake, Operator::Regex, r"^a\d").as_deref(),
+            Some(r#"REGEXP_COUNT("state", '^a\\d') > 0"#)
+        );
+    }
+
+    #[test]
     fn a_raw_bar_is_the_users_own_sql_verbatim() {
         let raw = |value: &str| {
             bar_predicate(
@@ -921,7 +972,7 @@ mod tests {
         // The other half of the operator list: a predicate that does not parse
         // is refused before it runs, which would make an operator unusable
         // rather than unsafe. Checked per engine, because the quoting differs.
-        for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
+        for engine in Engine::ALL {
             for operator in Operator::ALL.into_iter().filter(|o| o.on(engine)) {
                 let value = match operator {
                     Operator::Between => "1..9",

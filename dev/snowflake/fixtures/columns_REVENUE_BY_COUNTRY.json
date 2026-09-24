@@ -1,0 +1,69 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 3,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 3,
+      "uncompressedSize" : 114
+    } ],
+    "rowType" : [ {
+      "name" : "column_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "COLUMNS",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "data_type",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "nullable",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 12,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 3,
+      "type" : "text"
+    }, {
+      "name" : "column_default",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["COUNTRY","varchar","yes",""],
+["ORDERS","number(18,0)","yes",""],
+["REVENUE","number(22,2)","yes",""] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000027?requestId=00000000-0000-0000-0000-000000000028",
+  "requestId" : "00000000-0000-0000-0000-000000000028",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000027",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284735905
+}

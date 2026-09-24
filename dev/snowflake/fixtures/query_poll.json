@@ -1,0 +1,67 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 32
+    } ],
+    "rowType" : [ {
+      "name" : "ONE",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : false,
+      "scale" : 0,
+      "precision" : 1,
+      "length" : null,
+      "type" : "fixed"
+    }, {
+      "name" : "NOTHING",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 0,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 0,
+      "type" : "text"
+    }, {
+      "name" : "BLANK",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 4,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 1,
+      "type" : "text"
+    }, {
+      "name" : "LEAP",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : null,
+      "type" : "date"
+    } ]
+  },
+  "data" : [ ["1",null,"","19782"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000003?requestId=00000000-0000-0000-0000-000000000004",
+  "requestId" : "00000000-0000-0000-0000-000000000004",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000003",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284270973
+}

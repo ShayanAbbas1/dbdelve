@@ -64,7 +64,12 @@ jobs:
             libwayland-dev libdbus-1-dev sqlite3
       - run: sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
       - run: docker compose up -d --wait
-      - run: cargo test -- --include-ignored
+      # CI has no Snowflake account, and the live Snowflake tests panic
+      # without one; the mock tests cover the same ground offline. The one
+      # live test that needs no account stays: it is what proves the TLS
+      # provider is linked at run time.
+      - run: cargo test -- --include-ignored --skip snowflake::tests::live_
+      - run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
 
   macos-lint:
     runs-on: macos-latest

@@ -291,10 +291,10 @@ fn jump_items(profile: &Profile) -> Vec<Item> {
         command: Command::OpenQuery(name.clone()),
     }));
 
-    let CatalogState::Loaded(catalog) = &profile.catalog else {
+    let CatalogState::Loaded(catalog, _) = &profile.catalog else {
         return items;
     };
-    for (schema_index, schema) in catalog.schemas.iter().enumerate() {
+    for (schema_index, schema) in catalog.by_name() {
         items.extend(
             schema
                 .relations

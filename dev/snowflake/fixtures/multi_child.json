@@ -1,0 +1,31 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 5
+    } ],
+    "rowType" : [ {
+      "name" : "TWO",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : 0,
+      "byteLength" : null,
+      "precision" : 1,
+      "length" : null,
+      "type" : "fixed"
+    } ]
+  },
+  "data" : [ ["2"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000011?requestId=00000000-0000-0000-0000-000000000013",
+  "requestId" : "00000000-0000-0000-0000-000000000013",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000011",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284319350
+}

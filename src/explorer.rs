@@ -63,9 +63,8 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     let mut leaves = HashMap::new();
 
     let items = catalog
-        .schemas
-        .iter()
-        .enumerate()
+        .by_name()
+        .into_iter()
         .filter_map(|(schema_index, schema)| {
             let schema_matches = matches_filter(&schema.name, &filter);
             let mut groups = Vec::new();

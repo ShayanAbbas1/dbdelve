@@ -1,0 +1,6 @@
+{
+  "code" : "000604",
+  "message" : "SQL execution canceled",
+  "sqlState" : "57014",
+  "statementHandle" : "00000000-0000-0000-0000-000000000015"
+}

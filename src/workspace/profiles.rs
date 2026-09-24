@@ -93,6 +93,17 @@ impl Workspace {
                     _ => ConnectionConfig::Postgres(server),
                 }
             }
+            Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
+                account: stored.account.unwrap_or_default(),
+                // Blank on disk is the derived host, the same as absent.
+                host: Some(stored.host).filter(|host| !host.is_empty()),
+                user: stored.user,
+                private_key: stored.private_key.unwrap_or_default(),
+                database: stored.database,
+                warehouse: stored.warehouse,
+                role: stored.role,
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            }),
         };
         // A profile written before a buffer was a tab carries one buffer, whose
         // name is in the legacy scalar and whose text `read_scratch` migrates.
@@ -255,6 +266,8 @@ impl Workspace {
                     server.root_certificate.clone().unwrap_or_default(),
                 ),
             ],
+            // `from_url` refuses the scheme, so no URL arrives as one.
+            ConnectionConfig::Snowflake(_) => Vec::new(),
         };
         for (input, value) in filled {
             let input = input.clone();
@@ -304,10 +317,11 @@ impl Workspace {
                     // Only when the field set actually changes: Postgres and
                     // MySQL show the same fields, so switching between them
                     // takes nothing away and must not take focus either.
-                    if form.engine.is_server() != engine.is_server() {
-                        form.needs_focus = Some(match engine.is_server() {
-                            true => form.host.clone(),
-                            false => form.path.clone(),
+                    if form.engine.fields() != engine.fields() {
+                        form.needs_focus = Some(match engine.fields() {
+                            Fields::Server => form.host.clone(),
+                            Fields::File => form.path.clone(),
+                            Fields::Account => form.account.clone(),
                         });
                     }
                     form.engine = engine;
@@ -661,20 +675,85 @@ impl Workspace {
                         return;
                     };
                     profile.catalog = match result {
-                        Ok(catalog) => CatalogState::Loaded(catalog),
+                        Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
                         Err(error) => CatalogState::Failed(error.message),
                     };
                     // Relations restore before the catalog arrives, wearing
                     // whatever kind was on disk -- a default, for a profile an
                     // older build wrote. This is the first moment there is
                     // anything to correct it from.
-                    if let CatalogState::Loaded(catalog) = &profile.catalog {
+                    if let CatalogState::Loaded(catalog, _) = &profile.catalog {
                         for tab in &mut profile.session.objects {
                             if let ObjectKind::Relation(kind) = &mut tab.kind
                                 && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
                             {
                                 *kind = actual;
                             }
+                        }
+                    }
+                    // The relations are new, so what was known about any
+                    // one's columns describes a schema that may no longer
+                    // exist. Here and not in `install_completions`, which the
+                    // routines and every new buffer also reach without the
+                    // relations having changed.
+                    profile.session.completion_columns.borrow_mut().clear();
+                    workspace.install_completions(&id, cx);
+                    workspace.refresh_explorer(&id, cx);
+                    cx.notify();
+                    workspace.load_routines(&id, generation, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Fill the routines in behind the relations already on screen.
+    ///
+    /// A second request rather than a slower first one: the two are separate
+    /// queries on every engine, and where the routines are the slow half the
+    /// explorer would otherwise sit empty until they arrived.
+    ///
+    /// A failure here leaves the relations alone and is said once in the status
+    /// bar. Replacing a working explorer with an error because the functions
+    /// could not be listed would cost more than it reports.
+    fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
+            if let CatalogState::Loaded(_, routines) = &mut profile.catalog {
+                *routines = Routines::Failed;
+            }
+            return;
+        };
+        let routines_task = cx
+            .background_executor()
+            .spawn(async move { connection.routines() });
+
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let result = routines_task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(profile) = workspace.issued_to(&id, generation) else {
+                        return;
+                    };
+                    // Only onto a catalog that loaded. One that failed, or
+                    // that a reconnect has already replaced, is not this half's
+                    // to complete.
+                    let CatalogState::Loaded(catalog, routines) = &mut profile.catalog else {
+                        return;
+                    };
+                    match result {
+                        Ok(loaded) => {
+                            catalog.merge(loaded);
+                            *routines = Routines::Loaded;
+                        }
+                        // On this profile, not through `note`: that writes to
+                        // whichever one is active, and the user may have moved on.
+                        Err(error) => {
+                            *routines = Routines::Failed;
+                            profile.session.notice = Some(error.message);
                         }
                     }
                     workspace.install_completions(&id, cx);
@@ -763,12 +842,8 @@ impl Workspace {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
-        // The catalog is new, so what was known about any relation's columns
-        // describes a schema that may no longer exist.
-        profile.session.completion_columns.borrow_mut().clear();
-
         let provider = match &profile.catalog {
-            CatalogState::Loaded(catalog) => Some(Rc::new(SchemaCompletions::new(
+            CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 cx.weak_entity(),
@@ -791,7 +866,7 @@ impl Workspace {
         };
         let filter = profile.session.explorer_filter.read(cx).value();
         let explorer = match &profile.catalog {
-            CatalogState::Loaded(catalog) => build_explorer_tree(catalog, &filter),
+            CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
             _ => explorer::ExplorerTree {
                 items: Vec::new(),
                 leaves: HashMap::new(),

@@ -21,7 +21,9 @@ use serde::Deserialize;
 use sqlparser::ast::{
     AlterTableOperation, CopySource, CopyTarget, Query, SetExpr, Statement, UtilityOption,
 };
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+};
 use sqlparser::parser::Parser as SqlParser;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -787,7 +789,7 @@ fn collect_statements(tree: &Tree, sql: &str) -> Vec<Range<usize>> {
                     continue;
                 }
                 // Otherwise it is a statement of its own. The grammar is one
-                // dialect's worth of SQL and the servers speak three: `PRAGMA`,
+                // dialect's worth of SQL and the servers speak four: `PRAGMA`,
                 // `CALL`, `LISTEN` and `USE` are all statements it has never
                 // heard of, and a buffer holding only one of them used to hold
                 // "no statement to run". Whether it is valid is the server's to
@@ -1133,6 +1135,7 @@ impl Verdict {
     /// The more restrictive of two verdicts: the higher mode, and the union of
     /// what they destroy. A kind only ever arrives with `Mode::Full`, so taking
     /// the union never smuggles a destructive kind under a lower mode.
+    /// `Unreadable` is the exception, and `classify` returns it alone.
     fn max(mut self, other: Self) -> Self {
         self.mode = self.mode.max(other.mode);
         for kind in other.destructive {
@@ -1156,12 +1159,23 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
         Engine::MySql => Box::new(MySqlDialect {}),
         Engine::Sqlite => Box::new(SQLiteDialect {}),
+        Engine::Snowflake => Box::new(SnowflakeDialect {}),
     };
 
     // All or nothing: one statement it cannot read makes the whole submission
     // one it cannot vouch for.
+    // An unreadable verdict's mode is the lowest one it may be run once in.
+    // Any, where the server holds Read-only to reads; otherwise nothing stops
+    // what it turns out to write, so Read-only may not run it at all.
     let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
-        return Verdict::destroys(Destructive::Unreadable);
+        return Verdict {
+            mode: if engine.holds_read_only() {
+                Mode::ReadOnly
+            } else {
+                Mode::ReadWrite
+            },
+            destructive: vec![Destructive::Unreadable],
+        };
     };
 
     // An empty or comment-only string parses to no statements at all. There is
@@ -1177,7 +1191,8 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
 /// `INSERT … RETURNING` traces to its table like any select -- would write
 /// again. A statement `classify` cannot read is not vouched for either.
 pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
-    classify(engine, sql).mode == Mode::ReadOnly
+    let verdict = classify(engine, sql);
+    verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
 }
 
 /// The lowest mode that may run one statement: what its variant earns, raised
@@ -1245,6 +1260,24 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         }
         Statement::ExplainTable { .. } => Verdict::READ,
 
+        // A Snowflake Scripting block, `BEGIN DELETE FROM t; END`, parses as the
+        // same variant as a bare `BEGIN` with its body inside. Any exception
+        // handler holds statements of its own, so one is not read into.
+        Statement::StartTransaction {
+            statements,
+            exception,
+            ..
+        } if !statements.is_empty() || exception.is_some() => {
+            if exception.is_some() {
+                Verdict::FULL
+            } else {
+                statements
+                    .iter()
+                    .map(statement_verdict)
+                    .fold(Verdict::READ, Verdict::max)
+            }
+        }
+
         Statement::ShowTables { .. }
         | Statement::ShowCatalogs { .. }
         | Statement::ShowCharset { .. }
@@ -1281,6 +1314,27 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             _ if *to => Verdict::READ,
             _ => Verdict::WRITE,
         },
+
+        // Replacing an object that holds data drops that data first: `CREATE OR
+        // REPLACE SCHEMA s` empties every table in `s`, and `INSERT OVERWRITE`
+        // truncates before it inserts. A replaced view, function or procedure
+        // holds no rows, so those stay with the object they create.
+        Statement::CreateTable(create) if create.or_replace => {
+            Verdict::destroys(Destructive::Drop)
+        }
+        Statement::CreateSchema {
+            or_replace: true, ..
+        }
+        | Statement::CreateDatabase {
+            or_replace: true, ..
+        }
+        // An internal stage holds the files put into it.
+        | Statement::CreateStage {
+            or_replace: true, ..
+        } => Verdict::destroys(Destructive::Drop),
+        Statement::Insert(insert) if insert.overwrite => {
+            Verdict::destroys(Destructive::Truncate)
+        }
 
         Statement::Insert { .. }
         | Statement::Update { .. }
@@ -1401,7 +1455,13 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
     // remedy is not a mode change: every typo lands here, and asking someone to
     // raise a connection to Full to get a syntax error back would teach them to
     // live in Full.
+    //
+    // The one mode it can ask for is Read-write, where no server-side hold
+    // stands behind Read-only (see `classify`).
     if verdict.destructive.contains(&Destructive::Unreadable) {
+        if verdict.mode > mode {
+            return Some(Stop::Upgrade(verdict.mode));
+        }
         return Some(Stop::RunOnce);
     }
     if verdict.mode > mode {
@@ -2676,10 +2736,12 @@ mod tests {
                 Mode::Full,
                 Some(Destructive::Drop),
             ),
-            ("SELCT 1", Mode::Full, Some(Destructive::Unreadable)),
+            // Read-only: Postgres holds the session to reads, so what the gate
+            // cannot read the server still can.
+            ("SELCT 1", Mode::ReadOnly, Some(Destructive::Unreadable)),
             (
                 "DO $$ BEGIN NULL; END $$",
-                Mode::Full,
+                Mode::ReadOnly,
                 Some(Destructive::Unreadable),
             ),
             // A normal thing to type at a SQLite database, and the crate does not
@@ -2687,7 +2749,7 @@ mod tests {
             // exists at all.
             (
                 "PRAGMA table_info(t)",
-                Mode::Full,
+                Mode::ReadOnly,
                 Some(Destructive::Unreadable),
             ),
         ];
@@ -2837,6 +2899,75 @@ mod tests {
         );
     }
 
+    /// Every one of these parses as the variant a plain write does, one flag
+    /// apart, and destroys what the object held before.
+    #[test]
+    fn classify_calls_replacing_a_data_holding_object_destructive() {
+        let cases: &[(Engine, &str, Destructive)] = &[
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE TABLE t (a int)",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE TABLE t AS SELECT 1 AS a",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE SCHEMA s",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE DATABASE d",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE STAGE st",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "INSERT OVERWRITE INTO t SELECT * FROM u",
+                Destructive::Truncate,
+            ),
+        ];
+        for (engine, sql, kind) in cases {
+            assert_eq!(
+                classify(*engine, sql),
+                Verdict {
+                    mode: Mode::Full,
+                    destructive: vec![*kind],
+                },
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "CREATE OR REPLACE VIEW v AS SELECT 1 AS a",
+            "CREATE TABLE t (a int)",
+            "CREATE SCHEMA s",
+            "INSERT INTO t SELECT * FROM u",
+        ] {
+            assert_eq!(classify(Engine::Snowflake, sql), Verdict::WRITE, "{sql}");
+        }
+        for engine in [Engine::Postgres, Engine::MySql] {
+            assert_eq!(
+                classify(engine, "CREATE OR REPLACE VIEW v AS SELECT 1"),
+                Verdict::WRITE,
+                "{engine:?}"
+            );
+            assert_eq!(
+                classify(engine, "CREATE TABLE t (a int)"),
+                Verdict::WRITE,
+                "{engine:?}"
+            );
+        }
+    }
+
     /// One AST, three dialects. Two statements genuinely differ and are asserted as
     /// differing rather than skipped.
     #[test]
@@ -2980,25 +3111,76 @@ mod tests {
 
     #[test]
     fn an_unreadable_statement_never_offers_a_mode_and_never_goes_quiet() {
-        let unreadable = Verdict {
-            mode: Mode::Full,
-            destructive: vec![Destructive::Unreadable],
-        };
-
         // Not Upgrade, in any mode: a typo must never ask to raise a connection to
         // Full in order to receive a syntax error.
-        for mode in Mode::ALL {
-            assert_eq!(
-                gate(&unreadable, mode, &[]),
-                Some(Stop::RunOnce),
-                "{mode:?}"
-            );
+        for engine in [Engine::Postgres, Engine::MySql] {
+            let unreadable = classify(engine, "UNDROP TABLE t");
+            for mode in Mode::ALL {
+                assert_eq!(
+                    gate(&unreadable, mode, &[]),
+                    Some(Stop::RunOnce),
+                    "{engine:?} {mode:?}"
+                );
+            }
         }
+        let unreadable = classify(Engine::Postgres, "SELCT 1");
 
         // Not suppressible even if something contrived writes it into the list.
         assert_eq!(
             gate(&unreadable, Mode::Full, &[Destructive::Unreadable]),
             Some(Stop::RunOnce)
+        );
+    }
+
+    /// With no server-side hold behind Read-only, a statement the gate cannot
+    /// read could write with nothing to stop it -- and each of these can.
+    #[test]
+    fn read_only_refuses_what_it_cannot_read_where_the_server_would_not() {
+        let cases: &[(Engine, &str)] = &[
+            (Engine::Snowflake, "UNDROP TABLE t"),
+            (Engine::Snowflake, "PUT file:///tmp/a.csv @st"),
+            (Engine::Sqlite, "PRAGMA table_info(t)"),
+        ];
+        for (engine, sql) in cases {
+            let verdict = classify(*engine, sql);
+            assert_eq!(verdict.destructive, vec![Destructive::Unreadable], "{sql}");
+            assert_eq!(
+                gate(&verdict, Mode::ReadOnly, &[]),
+                Some(Stop::Upgrade(Mode::ReadWrite)),
+                "{sql}"
+            );
+            for mode in [Mode::ReadWrite, Mode::Full] {
+                assert_eq!(gate(&verdict, mode, &[]), Some(Stop::RunOnce), "{sql}");
+            }
+            assert!(!rerunnable(*engine, sql), "{sql}");
+        }
+        assert!(!rerunnable(Engine::Postgres, "SELCT 1"));
+
+        // A scripting block parses, and is as dangerous as what it holds.
+        assert_eq!(
+            classify(Engine::Snowflake, "BEGIN DELETE FROM t; END").destructive,
+            vec![Destructive::UnfilteredDelete]
+        );
+        assert_eq!(
+            classify(Engine::Snowflake, "BEGIN SELECT 1; END"),
+            Verdict::READ
+        );
+        assert_eq!(classify(Engine::Snowflake, "BEGIN"), Verdict::READ);
+        assert_eq!(
+            classify(
+                Engine::Snowflake,
+                "BEGIN SELECT 1; EXCEPTION WHEN OTHER THEN DELETE FROM t; END"
+            ),
+            Verdict::FULL
+        );
+
+        // This one parses, and its opaque body makes it Full like `CALL`.
+        assert_eq!(
+            classify(
+                Engine::Snowflake,
+                "EXECUTE IMMEDIATE $$ BEGIN DELETE FROM t; END $$"
+            ),
+            Verdict::FULL
         );
     }
 

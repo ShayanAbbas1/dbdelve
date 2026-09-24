@@ -942,7 +942,13 @@ fn render_results(
             .into_any_element()
     };
 
-    let cancelling = matches!(query, QueryState::Running { cancelling: true });
+    let cancelling = matches!(
+        query,
+        QueryState::Running {
+            cancelling: true,
+            ..
+        }
+    );
     let cancel = move |cx: &mut Context<Workspace>| {
         // A word rather than an icon: a square or a cross beside a status line
         // reads as "close this", and the quiet tone is what keeps it from

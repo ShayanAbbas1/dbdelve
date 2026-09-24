@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL and SQLite.
+speaking Postgres, MySQL, SQLite and Snowflake.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -91,18 +91,19 @@ require it, stop and raise it instead.
 
 4. **Driver types do not reach the UI layer.** The grid receives rendered
    strings and type tags, never a `postgres::Row`, a `mysql::Value`, a
-   `rusqlite::ValueRef`, an OID or a storage class. Engine dispatch is a closed
-   enum inside `src/db/` and stops there: no trait, no plugin surface. A UI that
-   knows which engine it is talking to grows an engine-shaped special case in
-   every view, and those are the special cases nobody ever removes. An enum
-   rather than a trait for the same reason in miniature: three arms the
-   compiler makes every match enumerate, instead of an open extension point.
+   `rusqlite::ValueRef`, an OID, a storage class or an epoch count off
+   Snowflake's wire. Engine dispatch is a closed enum inside `src/db/` and stops
+   there: no trait, no plugin surface. A UI that knows which engine it is
+   talking to grows an engine-shaped special case in every view, and those are
+   the special cases nobody ever removes. An enum rather than a trait for the
+   same reason in miniature: four arms the compiler makes every match
+   enumerate, instead of an open extension point.
 
    The one thing that crosses out is `db::Engine`, because DBDelve writes SQL
    and has to spell it the way the server will read it. It holds no connection.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`,
    `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
-   `is_server`, and `filter::Operator::on` for the filter dropdown) and never
+   `fields`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
@@ -145,14 +146,17 @@ an upgrade, or ask for confirmation.
 - **Anything it cannot read is `Destructive::Unreadable`** and runs once on
   confirmation, before any mode comparison: every typo lands there, and asking
   for Full to get a syntax error back would teach people to live in Full.
+  The exception is Read-only on an engine where `Engine::holds_read_only` is
+  false (SQLite, Snowflake): nothing on the server would stop it writing, so
+  the verdict carries Read-write and the gate asks for that instead.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
   mode into every open grid, which caches it.
 - `Connection::set_read_only` holds a Read-only session to reads on the server
-  (Postgres and MySQL; SQLite has no such setting). It is a backstop, not the
-  boundary: `sql::gate` is. A write-less role is the only real privilege
-  boundary.
+  (Postgres and MySQL; SQLite has no such setting, and Snowflake no session
+  to hold it in). It is a backstop, not the boundary: `sql::gate` is. A
+  write-less role is the only real privilege boundary.
 
 ---
 
@@ -177,9 +181,13 @@ rusqlite = "0.40"          # bundled + column_metadata + column_decltype. dff = 
 
 rustls = "0.23"            # TLS; the driver ships none. default-features = false
 rustls-native-certs = "0.8"     # the platform trust store, for Postgres
-rustls-pemfile = "2"            # a named root certificate
+rustls-pemfile = "2"            # a named root certificate, and Snowflake's key file
 tokio-postgres-rustls = "0.14"
 keyring = "4"              # passwords: Keychain, Secret Service, Credential Manager
+
+ureq = "=3.4.2"            # Snowflake's SQL REST API; blocking. dff = false, rustls on ring
+ring = "=0.17.14"          # its key-pair tokens. Already linked as the TLS provider
+base64 = "=0.22.1"
 
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
@@ -236,6 +244,14 @@ builds dependencies optimized, because GPUI lays out and shapes text on the CPU
 every frame; deleting it makes the grid crawl. `[profile.release]` sets
 `lto = "thin"` and `codegen-units = 1`.
 
+**`default-features = false` on `ureq` states what its defaults happen to be.**
+`rustls` there is rustls *on ring* with `webpki-roots`, both already in the
+graph through `mysql`. Named rather than inherited so a release that changes
+its defaults cannot bring `aws-lc-rs` in. `gzip` is not optional: every result
+partition after the first arrives compressed. Snowflake publishes no Rust
+driver and the community ones are tokio futures, which is why this is an HTTP
+client and not a driver.
+
 **Do not add tokio.** GPUI's executor is `async-task` with no reactor (Grand
 Central Dispatch on macOS). A tokio future on `cx.background_executor().spawn(...)`
 _panics_ the moment it touches a socket or timer. Database work uses blocking
@@ -271,6 +287,19 @@ Pick the engine on the form's chip row first; it decides which fields exist.
 Then paste a URL and choose **Use URL**, or fill the fields in. Connecting is
 the connection test; there is deliberately no separate test button.
 
+Snowflake has no container. Its unit tests need nothing, and neither do its
+mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses
+recorded from a real account (`dev/snowflake/fixtures`), with scripted
+sequences, error statuses and truncated or stalled bodies for the failure
+paths. A test build alone accepts an `http://` host, which is how a
+connection reaches it; everywhere else the API is HTTPS. Its live tests are
+`#[ignore]`d and read `DBDELVE_SNOWFLAKE_ACCOUNT`, `_USER`, `_PRIVATE_KEY` (an
+absolute path) and `_DATABASE`, plus `_WAREHOUSE`, `_ROLE` and `_HOST` when set,
+run with `cargo test snowflake -- --ignored`. The catalog test creates and
+drops a `DBDELVE_TEST` schema. A recording that no longer matches what the
+server says is re-recorded from a live account, with handles and request ids
+replaced by placeholders.
+
 SQLite has no server to connect to. Build the file once, then give the form its
 absolute path:
 
@@ -294,13 +323,14 @@ locally:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                      # unit tests; no database needed
-cargo test -- --include-ignored # plus the live_ tests, against the dev databases
+cargo test -- --include-ignored --skip snowflake::tests::live_ # plus the live_ tests
 ```
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL` and `dbdelve_SQLITE_PATH` (the
 lowercase prefix is what they read); the `tests` job in `ci.yml` has the values
-for the dev databases. CI lints on Linux, macOS and Windows, runs the live tests
+for the dev databases. It has no Snowflake account, so it skips the Snowflake
+live tests but for the one that needs none; the mock tests stand in for them. CI lints on Linux, macOS and Windows, runs the live tests
 on Linux, and runs the unit tests on Windows too, since the storage tests are
 what exercise the `APPDATA` paths.
 
@@ -468,8 +498,78 @@ Decided, and not to be re-litigated:
   not detected: an older server refuses the statement and says so.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
-- **Read-only has no server-side backstop on SQLite.** Postgres gets
-  `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION READ ONLY`.
+- **Read-only has no server-side backstop on SQLite or Snowflake.** Postgres
+  gets `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION READ
+  ONLY`. So on SQLite and Snowflake, Read-only refuses a statement `sql::classify` cannot
+  read rather than offering to run it once (`Engine::holds_read_only`).
+- **Snowflake has no session, because it is spoken to over its SQL REST API.**
+  It publishes no Rust driver. Each submission is one HTTPS request, so nothing
+  set in one run reaches the next, an open transaction included. The API does
+  not even pretend: a `USE` comes back as "Command not supported by SQL API:
+  USE", which `live_a_use_is_refused_rather_than_quietly_forgotten` pins. The database, warehouse, role, timeout and `MULTI_STATEMENT_COUNT`
+  are fields of the request and never SQL — hard rule 1.
+- **Snowflake has no connection mutex**, alone among the four: there is no
+  socket to serialise, so a catalog load does not queue behind a slow query,
+  and `snowflake::Connection::at_once` runs a structure load's four statements
+  on four threads rather than one after another (1.3s against 3.6s, measured).
+  The consequence is that more than one statement can be in flight -- every
+  tab's, and the catalog's -- so a run goes out under a `db::CancelToken` the
+  tab keeps in `QueryState::Running`, and `cancel` stops only the handles
+  registered under that token. A cancel that lands before the submit has
+  returned a handle is kept on the token and carried out when the handle
+  arrives. The other engines take the token and ignore it:
+  they stop whatever their one connection is running.
+  Statements are always submitted `async=true`, because a synchronous submit
+  withholds its handle for up to 45 seconds and the handle is what Cancel needs.
+- **Snowflake signs in with a key pair and nothing else.** An RS256 token per
+  request, signed with `ring` from the key file the profile points at by
+  absolute path; nothing goes to the Keychain, so `ConnectionConfig::server`
+  answers `None` for it and nothing prompts on its behalf. An encrypted key is refused by name (`ring` does not
+  decrypt PKCS#8). Password, OAuth, browser SSO and access tokens are not
+  implemented. There is no `sslmode` to honour or weaken: the API is HTTPS and
+  always verified against `webpki-roots`.
+- **An engine's own statements are submitted synchronously; the user's are
+  not.** The asynchronous submit exists so Cancel has a handle from the first
+  moment, and it costs a round trip -- 885ms against 315ms for three
+  `SELECT 1`s. Nothing offers to cancel a catalog load, so
+  `snowflake::Connection::internal_query` pays for neither.
+- **The relations and the routines are two loads, everywhere.**
+  `Connection::catalog` answers with relations alone and
+  `Connection::routines` follows behind it, merged in by `Catalog::merge` when
+  it lands. It is engine-agnostic by design, and Snowflake is why it exists:
+  `INFORMATION_SCHEMA.FUNCTIONS` and `PROCEDURES` took four and eight seconds
+  to report that a database had neither, with the tables in hand after two. A
+  routines load that fails leaves the relations on screen and says so once.
+  `Catalog::merge` appends a routines-only schema rather than re-sorting, so a
+  `schema_index` taken before the merge still names the same schema;
+  `Catalog::by_name` is the display order. Until `Routines::Loaded`, a stored
+  routine tab stays pending rather than being resolved against a catalog that
+  cannot have it yet.
+- **Snowflake's catalog needs a running warehouse.** It is read through
+  `INFORMATION_SCHEMA`, so connecting resumes a suspended warehouse and so does
+  opening a Structure tab. That view has nothing naming the columns of a key,
+  so keys come from `SHOW PRIMARY KEYS`, `SHOW UNIQUE KEYS` and `SHOW IMPORTED
+  KEYS`, asked `IN SCHEMA` and narrowed to the relation because `IN TABLE` is
+  an error for a view. The schema there is written from the database down: a
+  `SHOW` does not resolve against the request's `database` field the way a
+  query does, and refuses a bare schema with "Must specify the full search
+  path". `SnowflakeConfig::stored_database` folds a bare name to upper case
+  for it, as the server does. A profile is bound to one database, as on Postgres, and
+  a foreign key into another database is listed and not followable.
+- **A Snowflake result is never editable.** Its primary keys are declared and
+  not enforced, so a `WHERE` over one may name several rows, and the API says
+  nothing about which table a result column came from. `QueryResult::edit` is
+  always `None`. Inserting a row from an object tab needs no key and works as
+  it does elsewhere.
+- **Snowflake's temporal values arrive as counts from the epoch** whatever
+  output format is asked for, and `snowflake::render` turns them into text
+  before they leave `src/db/`. `TIMESTAMP_LTZ` is shown in UTC with a `Z`,
+  because the API carries no session time zone to show it in.
+- **Snowflake filters use `CONTAINS`, `STARTSWITH` and `ENDSWITH`**, for
+  SQLite's reason: no default `LIKE` escape. Its regex is `REGEXP_COUNT(col,
+  pattern) > 0` and not `REGEXP_LIKE`, which there anchors the pattern to the
+  whole value where Postgres `~` and MySQL's `REGEXP_LIKE` match anywhere.
+  Explain is not offered: its plan is a fourth shape `explain.rs` does not read.
 - **`CHECK` constraints are absent** from the Structure tab on MySQL and SQLite.
   SQLite keeps them only in the `CREATE TABLE` text; MySQL's
   `information_schema.CHECK_CONSTRAINTS` only exists from 8.0.16.

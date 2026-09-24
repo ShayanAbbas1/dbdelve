@@ -1,0 +1,6 @@
+{
+  "code" : "391911",
+  "message" : "Command not supported by SQL API: USE",
+  "sqlState" : "0A000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000017"
+}

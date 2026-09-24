@@ -59,7 +59,7 @@ impl Workspace {
         })
     }
 
-    /// Ask the server to stop whatever the active profile is running.
+    /// Ask the server to stop what the active tab is running.
     ///
     /// Nothing is marked cancelled here. The statement is still in flight until
     /// the driver returns, and what it returns — rows, or the server's own word
@@ -82,23 +82,27 @@ impl Workspace {
         let Some(connection) = self.profile().and_then(Profile::connection) else {
             return;
         };
-        if let Some(profile) = self.profile_mut() {
-            let tab = profile.session.active;
-            // ponytail: per-slot UI truth about a request having been sent, not
-            // a claim that anything stopped. It bounds the repeat clicks to one
-            // cancel per run; a cancel that the server ignores has no answer
-            // here, and would need the driver to report one.
-            if let Some((QueryState::Running { cancelling }, _)) = profile.session.slot(tab) {
-                if *cancelling {
-                    return;
-                }
-                *cancelling = true;
-                cx.notify();
-            }
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let tab = profile.session.active;
+        // ponytail: per-slot UI truth about a request having been sent, not
+        // a claim that anything stopped. It bounds the repeat clicks to one
+        // cancel per run; a cancel that the server ignores has no answer
+        // here, and would need the driver to report one.
+        let Some((QueryState::Running { cancelling, cancel }, _)) = profile.session.slot(tab)
+        else {
+            return;
+        };
+        if *cancelling {
+            return;
         }
+        *cancelling = true;
+        let cancel = cancel.clone();
+        cx.notify();
         let cancel_task = cx
             .background_executor()
-            .spawn(async move { connection.cancel() });
+            .spawn(async move { connection.cancel(&cancel) });
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -739,7 +743,11 @@ impl Workspace {
             cx.notify();
             return;
         };
-        *state = QueryState::Running { cancelling: false };
+        let cancel = CancelToken::default();
+        *state = QueryState::Running {
+            cancelling: false,
+            cancel: cancel.clone(),
+        };
         // Whatever plan is on screen describes the last statement, not this one.
         // Turning the pane back to the rows is what puts the spinner and Cancel
         // in front of a run that is in flight -- and what stops a plain Run from
@@ -798,7 +806,7 @@ impl Workspace {
         }
         let query_task = cx
             .background_executor()
-            .spawn(async move { connection.query(&sql) });
+            .spawn(async move { connection.query(&sql, &cancel) });
 
         cx.spawn(async move |workspace, cx| {
             let result = query_task.await;

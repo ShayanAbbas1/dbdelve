@@ -52,8 +52,8 @@ use actions::{
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
 use db::{
-    Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, RelationKind,
-    ServerConfig, SslMode,
+    CancelToken, Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, Fields,
+    RelationKind, ServerConfig, SnowflakeConfig, SslMode,
 };
 use explorer::{ExplorerTarget, ObjectKind, PREVIEW_ROW_LIMIT, tree as build_explorer_tree};
 use export::Format;
@@ -67,9 +67,9 @@ use palette::{Command, Mode as PaletteMode, Palette};
 use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,
-    ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Session,
-    StructureState, Tab, close_target, insert_value, matching_tab, relation_kind, restored_state,
-    show_snapshot,
+    ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines,
+    Session, StructureState, Tab, close_target, insert_value, matching_tab, relation_kind,
+    restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
