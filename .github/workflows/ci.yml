@@ -1,7 +1,17 @@
 name: ci
 
+# The push to main is what gives a new PR a cache to start from: a PR can only
+# restore caches saved by itself or by the default branch, so without it every
+# PR's first run compiled every dependency from scratch.
 on:
   pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
     paths:
       - "src/**"
       - "Cargo.toml"
