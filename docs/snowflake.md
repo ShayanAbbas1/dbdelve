@@ -83,6 +83,9 @@ chmod 600 ~/.ssh/snowflake.p8
   dbt only does under an enforced contract.
 - **A filter on a `BINARY` column fails**, including following a foreign key
   whose columns are binary.
+- **Read-only refuses what DBDelve can't parse** (`UNDROP`, `PUT`, and the
+  like). Snowflake has no read-only setting to stop it if it writes, so it runs
+  only once the profile is switched to Read-write.
 - **Explain is not offered.**
 - **Several statements in one run** show the last statement's result.
 - **`TIMESTAMP_LTZ` is shown in UTC**, marked `Z`.

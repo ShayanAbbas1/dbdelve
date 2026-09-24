@@ -146,6 +146,9 @@ an upgrade, or ask for confirmation.
 - **Anything it cannot read is `Destructive::Unreadable`** and runs once on
   confirmation, before any mode comparison: every typo lands there, and asking
   for Full to get a syntax error back would teach people to live in Full.
+  The exception is Read-only on an engine where `Engine::holds_read_only` is
+  false (SQLite, Snowflake): nothing on the server would stop it writing, so
+  the verdict carries Read-write and the gate asks for that instead.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
@@ -488,7 +491,8 @@ Decided, and not to be re-litigated:
   where `DEFAULT` is not an expression.
 - **Read-only has no server-side backstop on SQLite or Snowflake.** Postgres
   gets `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION READ
-  ONLY`.
+  ONLY`. So on SQLite and Snowflake, Read-only refuses a statement `sql::classify` cannot
+  read rather than offering to run it once (`Engine::holds_read_only`).
 - **Snowflake has no session, because it is spoken to over its SQL REST API.**
   It publishes no Rust driver. Each submission is one HTTPS request, so nothing
   set in one run reaches the next, an open transaction included. The API does

@@ -198,6 +198,14 @@ impl Engine {
         }
     }
 
+    /// Whether the server holds a Read-only session to reads -- the backstop
+    /// `read_only_statement` sets. Without one, a statement `sql::classify`
+    /// cannot read has nothing behind it that would stop a write, so the gate
+    /// refuses it in Read-only instead of offering to run it once.
+    pub fn holds_read_only(self) -> bool {
+        read_only_statement(self, true).is_some()
+    }
+
     /// Postgres and SQLite take the standard's double quote. MySQL takes a
     /// backtick, which it accepts whether or not `ANSI_QUOTES` is set — a double
     /// quote there is a *string literal*, so quoting a MySQL identifier the
@@ -1682,6 +1690,14 @@ mod tests {
             error.message,
             "Catalog query returned unknown relation kind unknown."
         );
+    }
+
+    #[test]
+    fn only_postgres_and_mysql_hold_read_only() {
+        assert!(Engine::Postgres.holds_read_only());
+        assert!(Engine::MySql.holds_read_only());
+        assert!(!Engine::Sqlite.holds_read_only());
+        assert!(!Engine::Snowflake.holds_read_only());
     }
 
     #[test]
