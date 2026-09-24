@@ -540,6 +540,11 @@ Decided, and not to be re-litigated:
   `INFORMATION_SCHEMA.FUNCTIONS` and `PROCEDURES` took four and eight seconds
   to report that a database had neither, with the tables in hand after two. A
   routines load that fails leaves the relations on screen and says so once.
+  `Catalog::merge` appends a routines-only schema rather than re-sorting, so a
+  `schema_index` taken before the merge still names the same schema;
+  `Catalog::by_name` is the display order. Until `Routines::Loaded`, a stored
+  routine tab stays pending rather than being resolved against a catalog that
+  cannot have it yet.
 - **Snowflake's catalog needs a running warehouse.** It is read through
   `INFORMATION_SCHEMA`, so connecting resumes a suspended warehouse and so does
   opening a Structure tab. That view has nothing naming the columns of a key,
