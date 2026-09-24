@@ -453,6 +453,17 @@ const RETRY_PAUSE: Duration = if cfg!(test) {
 };
 const RETRIES: u32 = 4;
 
+/// The most one response body may take to arrive, once its headers have. A
+/// body that stops arriving would otherwise hang the query past the reach of
+/// Cancel. ponytail: a total rather than an idle bound, which ureq does not
+/// offer; ten minutes is a compressed partition over a slow link many times
+/// over.
+const RECV_BODY: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(600)
+};
+
 /// The statement whose rows a finished response stands for.
 ///
 /// A submission of several statements answers with a handle per statement and
@@ -551,6 +562,7 @@ impl Connection {
             // Bounds a server that accepts and then says nothing. Not a bound
             // on the statement: that is polled, a short request at a time.
             .timeout_recv_response(Some(Duration::from_secs(120)))
+            .timeout_recv_body(Some(RECV_BODY))
             .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -2431,6 +2443,27 @@ mod tests {
         mock.on("GET", &poll, [Response::fixture(422, "cancelled.json")]);
         let error = query.join().expect("no panic").expect_err("stopped");
         assert_eq!(error.message, "SQL execution canceled");
+    }
+
+    #[test]
+    fn a_body_that_stops_arriving_is_an_error_rather_than_a_wait() {
+        let mock = Mock::start();
+        let sql = "CALL SYSTEM$WAIT(60)";
+        let pause = Duration::from_secs(5);
+        mock.on_statement(
+            "?async=true",
+            sql,
+            [Response::fixture(202, "wait_submit.json").stalled(10, pause)],
+        );
+        let connection = connected(&mock);
+
+        let started = Instant::now();
+        let error = connection.query(sql).expect_err("stalled");
+        assert!(
+            started.elapsed() < pause - Duration::from_secs(1),
+            "{error}"
+        );
+        assert!(error.message.contains("was not read whole"), "{error}");
     }
 
     #[test]
