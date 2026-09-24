@@ -592,12 +592,26 @@ impl Connection {
         let status = response.status().as_u16();
         // No size limit: a partition is as large as the server made it, and
         // the default cap is smaller than one.
-        let body = response
+        let bytes = response
             .body_mut()
             .with_config()
             .limit(u64::MAX)
-            .read_json()
-            .unwrap_or(Value::Null);
+            .read_to_vec()
+            .map_err(|error| {
+                plain_error(format!(
+                    "The answer from {host} was not read whole: {error}."
+                ))
+            })?;
+        let body = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            // A proxy's error page is not JSON, and its status is the message.
+            Err(_) if !matches!(status, 200 | 202) => Value::Null,
+            Err(error) => {
+                return Err(plain_error(format!(
+                    "The answer from {host} was not understood: {error}."
+                )));
+            }
+        };
         Ok((status, body))
     }
 
@@ -2047,6 +2061,26 @@ mod tests {
         assert_eq!(result.rows[0], vec![Some("0".to_string())]);
         assert_eq!(result.rows[19_999], vec![Some("19999".to_string())]);
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 1);
+    }
+
+    #[test]
+    fn a_partition_cut_short_is_an_error_and_not_fewer_rows() {
+        let mock = Mock::start();
+        let sql = "SELECT SEQ4() AS N FROM TABLE(GENERATOR(ROWCOUNT => 20000))";
+        let handle = mock.accept(sql, "large");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(200, "large_poll.json.gz")],
+        );
+        mock.on(
+            "GET",
+            &format!("/{handle}?partition=1"),
+            [Response::fixture(200, "large_partition_1.json.gz").truncated(100)],
+        );
+
+        let error = connected(&mock).query(sql).expect_err("half a result");
+        assert!(error.message.contains("was not read whole"), "{error}");
     }
 
     #[test]
