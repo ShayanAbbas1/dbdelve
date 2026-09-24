@@ -839,9 +839,7 @@ impl Workspace {
         let generation = profile.generation;
         let rows = result.rows.len();
         let suggested = format!("{stem}.{}", format.extension());
-        let directory = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
         let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
 
         cx.spawn(async move |workspace, cx| {

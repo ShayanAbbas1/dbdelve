@@ -166,15 +166,15 @@ gpui_platform = { version = "=0.3.5", package = "gpui-pre-platform", features = 
     "wayland",
 ] }
 
-# GPUI does layout, text shaping and scene building on the CPU every frame, so
-# an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are
-# compiled optimized even in dev; DBDelve's own crate stays at opt-level 0, so
-# incremental builds and debugging are unaffected once deps are built.
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "=0.1.31"
 
+# GPUI does layout, text shaping and scene building on the CPU every frame, so
+# an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are
+# compiled optimized even in dev; DBDelve's own crate stays at opt-level 0, so
+# incremental builds and debugging are unaffected once deps are built.
 [profile.dev.package."*"]
 opt-level = 3
 

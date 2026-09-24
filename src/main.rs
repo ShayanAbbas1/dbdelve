@@ -1,13 +1,7 @@
 mod actions;
-
-// The icon resource is assembled in `build.rs`. The writer lives beside that
-// script so this test can reach it; the binary itself does not contain it.
 mod completion;
 mod connection_form;
 mod db;
-#[cfg(test)]
-#[path = "../build/ico.rs"]
-mod exe_icon;
 mod explain;
 mod explorer;
 mod export;

@@ -798,7 +798,7 @@ fn data_root() -> Result<PathBuf, String> {
     }
 }
 
-fn home() -> Result<PathBuf, String> {
+pub(crate) fn home() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     let (key, value) = ("USERPROFILE", std::env::var_os("USERPROFILE"));
     #[cfg(not(target_os = "windows"))]
