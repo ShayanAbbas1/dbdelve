@@ -512,8 +512,11 @@ Decided, and not to be re-litigated:
   socket to serialise, so a catalog load does not queue behind a slow query,
   and `snowflake::Connection::at_once` runs a structure load's four statements
   on four threads rather than one after another (1.3s against 3.6s, measured).
-  The consequence is that more than one statement can be in flight, so its
-  `cancel` stops every handle the connection has running rather than one.
+  The consequence is that more than one statement can be in flight -- every
+  tab's, and the catalog's -- so a run goes out under a `db::CancelToken` the
+  tab keeps in `QueryState::Running`, and `cancel` stops only the handles
+  registered under that token. The other engines take the token and ignore it:
+  they stop whatever their one connection is running.
   Statements are always submitted `async=true`, because a synchronous submit
   withholds its handle for up to 45 seconds and the handle is what Cancel needs.
 - **Snowflake signs in with a key pair and nothing else.** An RS256 token per

@@ -22,8 +22,8 @@ use gpui_component::{
 use crate::{
     Workspace, completion,
     db::{
-        Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, RelationKind, Routine,
-        Structure,
+        CancelToken, Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode,
+        RelationKind, Routine, Structure,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -1073,9 +1073,11 @@ pub(crate) enum QueryState {
     /// `cancelling` says a cancel has been *sent* for this slot, and nothing
     /// more: the statement is still in flight, so this is still `Running` to
     /// everything that asks. It leaves the flag behind when it leaves the
-    /// variant, which is why nothing resets it.
+    /// variant, which is why nothing resets it. `cancel` is what the run went
+    /// out under, and all a cancel for this slot may stop.
     Running {
         cancelling: bool,
+        cancel: CancelToken,
     },
     Complete {
         rows: usize,
@@ -1336,7 +1338,8 @@ mod tests {
     fn result_pane_expands_as_soon_as_a_query_starts() {
         assert!(!result_pane_is_expanded(&QueryState::Idle));
         assert!(result_pane_is_expanded(&QueryState::Running {
-            cancelling: false
+            cancelling: false,
+            cancel: CancelToken::default(),
         }));
     }
 
@@ -1344,7 +1347,10 @@ mod tests {
     /// question asked of a running query has to keep its old answer.
     #[test]
     fn a_query_being_cancelled_is_still_running() {
-        let cancelling = QueryState::Running { cancelling: true };
+        let cancelling = QueryState::Running {
+            cancelling: true,
+            cancel: CancelToken::default(),
+        };
         assert!(result_pane_is_expanded(&cancelling));
         assert!(matches!(cancelling, QueryState::Running { .. }));
     }

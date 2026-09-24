@@ -13,6 +13,7 @@
 //! engine's catalog SQL aliases its columns to names chosen here rather than to
 //! its own.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,16 @@ mod snowflake;
 mod sqlite;
 
 pub use snowflake::{SnowflakeConfig, account_identifier};
+
+/// One run's claim on Cancel: [`Connection::query`] runs under it, and
+/// [`Connection::cancel`] stops only what ran under it.
+///
+/// Snowflake is why it exists. Every tab and every catalog load there is a
+/// statement of its own in flight on the one connection at once, so a cancel
+/// has to know whose to stop. Postgres, MySQL and SQLite run one statement at
+/// a time behind their mutex and stop that one, whoever's it is.
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<Mutex<Vec<String>>>);
 
 /// Which engine a profile talks to.
 ///
@@ -493,12 +504,12 @@ impl Connection {
     /// The SQL is never rewritten — no limit injected, no reformatting. Row
     /// limits belong to the caller that *generated* a query, never to one the
     /// user typed.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
+    pub fn query(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
         match self {
             Self::Postgres(connection) => connection.query(sql),
             Self::MySql(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
-            Self::Snowflake(connection) => connection.query(sql),
+            Self::Snowflake(connection) => connection.query_with(sql, cancel),
         }
     }
 
@@ -539,7 +550,8 @@ impl Connection {
         }
     }
 
-    /// Ask the server to stop whatever this connection is running.
+    /// Ask the server to stop the statement running under `cancel` -- on
+    /// Postgres, MySQL and SQLite, whatever this connection is running.
     ///
     /// Takes `&self` and touches the connection mutex nowhere, deliberately:
     /// the runaway statement is holding that mutex, so a cancel that waited for
@@ -558,12 +570,12 @@ impl Connection {
     /// fat one: Postgres buffers a whole result set before dbdelve sees a row, so
     /// a query already returning gigabytes is past the point where stopping the
     /// server helps.
-    pub fn cancel(&self) -> Result<(), DbError> {
+    pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
         match self {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
-            Self::Snowflake(connection) => connection.cancel(),
+            Self::Snowflake(connection) => connection.cancel(cancel),
         }
     }
 
@@ -585,7 +597,7 @@ impl Connection {
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement).map(|_| ())
+        self.query(statement, &CancelToken::default()).map(|_| ())
     }
 }
 
