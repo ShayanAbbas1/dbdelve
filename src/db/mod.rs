@@ -35,7 +35,15 @@ pub use snowflake::{SnowflakeConfig, account_identifier};
 /// has to know whose to stop. Postgres, MySQL and SQLite run one statement at
 /// a time behind their mutex and stop that one, whoever's it is.
 #[derive(Clone, Default)]
-pub struct CancelToken(Arc<Mutex<Vec<String>>>);
+pub struct CancelToken(Arc<Mutex<Cancelling>>);
+
+/// Whether a cancel has been asked for, which has to outlast a statement whose
+/// handle is still on its way, and the handles there are to stop.
+#[derive(Default)]
+struct Cancelling {
+    asked: bool,
+    handles: Vec<String>,
+}
 
 /// Which engine a profile talks to.
 ///

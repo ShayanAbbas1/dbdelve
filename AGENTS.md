@@ -515,7 +515,9 @@ Decided, and not to be re-litigated:
   The consequence is that more than one statement can be in flight -- every
   tab's, and the catalog's -- so a run goes out under a `db::CancelToken` the
   tab keeps in `QueryState::Running`, and `cancel` stops only the handles
-  registered under that token. The other engines take the token and ignore it:
+  registered under that token. A cancel that lands before the submit has
+  returned a handle is kept on the token and carried out when the handle
+  arrives. The other engines take the token and ignore it:
   they stop whatever their one connection is running.
   Statements are always submitted `async=true`, because a synchronous submit
   withholds its handle for up to 45 seconds and the handle is what Cancel needs.

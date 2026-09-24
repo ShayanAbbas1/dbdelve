@@ -22,8 +22,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::{
-    CancelToken, Catalog, Cell, Column, DbError, Engine, ForeignKey, NamedDefinition, QueryResult,
-    Structure, assemble_catalog, assemble_structure, plain_error,
+    CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, ForeignKey, NamedDefinition,
+    QueryResult, Structure, assemble_catalog, assemble_structure, plain_error,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -529,14 +529,14 @@ pub struct Connection {
 /// locked for a push, a removal or a clone and never across a request, so a
 /// cancel waits on nothing a query holds.
 struct RunningGuard<'a> {
-    running: &'a Mutex<Vec<String>>,
+    running: &'a Mutex<Cancelling>,
     handle: String,
 }
 
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut running) = self.running.lock() {
-            running.retain(|handle| *handle != self.handle);
+            running.handles.retain(|handle| *handle != self.handle);
         }
     }
 }
@@ -715,18 +715,6 @@ impl Connection {
         let handle = accepted["statementHandle"].as_str().unwrap_or_default();
         // Nothing to cancel once the statement is over, and a synchronous
         // submit that finished is over.
-        let _running = match cancellable {
-            Cancellable::Yes(CancelToken(running)) if answer == Reply::Running => {
-                if let Ok(mut running) = running.lock() {
-                    running.push(handle.to_string());
-                }
-                Some(RunningGuard {
-                    running,
-                    handle: handle.to_string(),
-                })
-            }
-            _ => None,
-        };
         let handle = match handle.is_empty() {
             true if answer == Reply::Running => {
                 return Err(plain_error(format!(
@@ -734,6 +722,30 @@ impl Connection {
                 )));
             }
             _ => handle.to_string(),
+        };
+        let _running = match cancellable {
+            Cancellable::Yes(CancelToken(running)) if answer == Reply::Running => {
+                let asked = running.lock().is_ok_and(|mut running| {
+                    running.handles.push(handle.clone());
+                    running.asked
+                });
+                let guard = RunningGuard {
+                    running,
+                    handle: handle.clone(),
+                };
+                // Cancel was pressed while the submit was on its way, found no
+                // handle and answered that nothing was running; the button is
+                // spent, so it is carried out here.
+                if asked && let Err(error) = self.stop(&handle) {
+                    return Err(plain_error(format!(
+                        "Cancel came before {host} named the statement, and stopping it \
+                         once named failed ({}). It may still be running.",
+                        error.message
+                    )));
+                }
+                Some(guard)
+            }
+            _ => None,
         };
 
         let mut finished = accepted;
@@ -799,12 +811,16 @@ impl Connection {
     /// connection is shared by every tab and by the catalog loads.
     ///
     /// The running statement ends as an ordinary error out of `query`, in the
-    /// server's words. Nothing in flight is not an error.
+    /// server's words. Nothing in flight is not an error, and a statement still
+    /// waiting for its handle is stopped when the handle arrives.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
         let handles = cancel
             .0
             .lock()
-            .map(|running| running.clone())
+            .map(|mut running| {
+                running.asked = true;
+                running.handles.clone()
+            })
             .unwrap_or_default();
         // Every one is asked, and the first refusal reported after: one that
         // failed is no reason to leave the others running.
@@ -1419,9 +1435,16 @@ mod tests {
 
     #[test]
     fn a_handle_leaves_the_running_list_however_the_query_ends() {
-        let running = Mutex::new(vec!["other".to_string()]);
+        let running = Mutex::new(Cancelling {
+            asked: false,
+            handles: vec!["other".to_string()],
+        });
         let attempt = || -> Result<(), DbError> {
-            running.lock().expect("unpoisoned").push("mine".into());
+            running
+                .lock()
+                .expect("unpoisoned")
+                .handles
+                .push("mine".into());
             let _guard = RunningGuard {
                 running: &running,
                 handle: "mine".into(),
@@ -1429,7 +1452,7 @@ mod tests {
             Err(plain_error("the poll failed".into()))
         };
         assert!(attempt().is_err());
-        assert_eq!(*running.lock().expect("unpoisoned"), ["other"]);
+        assert_eq!(running.lock().expect("unpoisoned").handles, ["other"]);
     }
 
     #[test]
@@ -2366,6 +2389,48 @@ mod tests {
         for query in queries {
             assert!(query.join().expect("no panic").is_err());
         }
+    }
+
+    #[test]
+    fn a_cancel_sent_before_the_handle_arrives_stops_the_statement_when_it_does() {
+        let mock = Mock::start();
+        let sql = "CALL SYSTEM$WAIT(60)";
+        let handle = mock.accept(sql, "wait");
+        mock.on_statement(
+            "?async=true",
+            sql,
+            [Response::fixture(202, "wait_submit.json").delayed(Duration::from_millis(200))],
+        );
+        let poll = format!("/{handle}");
+        mock.on("GET", &poll, [Response::fixture(202, "wait_running.json")]);
+        let stop = format!("/{handle}/cancel");
+        mock.on("POST", &stop, [Response::fixture(200, "cancel.json")]);
+        let connection = connected(&mock);
+
+        let run = CancelToken::default();
+        let query = {
+            let (connection, token) = (connection.clone(), run.clone());
+            std::thread::spawn(move || connection.query_with(sql, &token))
+        };
+        let started = Instant::now();
+        // The version check's submit, then this one's, still unanswered.
+        while mock.hits("POST", "?async=true") < 2 {
+            assert!(started.elapsed() < Duration::from_secs(10), "never sent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        connection.cancel(&run).expect("nothing to cancel yet");
+        assert_eq!(mock.hits("POST", &stop), 0);
+
+        while mock.hits("POST", &stop) == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "never cancelled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        mock.on("GET", &poll, [Response::fixture(422, "cancelled.json")]);
+        let error = query.join().expect("no panic").expect_err("stopped");
+        assert_eq!(error.message, "SQL execution canceled");
     }
 
     #[test]

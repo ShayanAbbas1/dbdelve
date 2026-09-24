@@ -36,6 +36,8 @@ fn fixture_json(name: &str) -> Value {
 #[derive(Clone, Debug)]
 enum Delivery {
     Whole,
+    /// All of it, after a pause: a server slow to answer.
+    Delayed(Duration),
     Truncated(usize),
     Stalled(usize, Duration),
 }
@@ -81,6 +83,14 @@ impl Response {
     pub fn truncated(self, sent: usize) -> Self {
         Self {
             delivery: Delivery::Truncated(sent),
+            ..self
+        }
+    }
+
+    /// Nothing for `pause`, then the whole response.
+    pub fn delayed(self, pause: Duration) -> Self {
+        Self {
+            delivery: Delivery::Delayed(pause),
             ..self
         }
     }
@@ -308,6 +318,9 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
 }
 
 fn write_response(mut stream: TcpStream, response: &Response) -> std::io::Result<()> {
+    if let Delivery::Delayed(pause) = response.delivery {
+        std::thread::sleep(pause);
+    }
     let mut head = format!(
         "HTTP/1.1 {} Mock\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.status,
@@ -321,7 +334,7 @@ fn write_response(mut stream: TcpStream, response: &Response) -> std::io::Result
     stream.write_all(head.as_bytes())?;
 
     let sent = match response.delivery {
-        Delivery::Whole => response.body.len(),
+        Delivery::Whole | Delivery::Delayed(_) => response.body.len(),
         Delivery::Truncated(sent) | Delivery::Stalled(sent, _) => sent.min(response.body.len()),
     };
     stream.write_all(&response.body[..sent])?;
