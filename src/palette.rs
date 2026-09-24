@@ -103,6 +103,7 @@ pub enum Command {
     NextProfile,
     PreviousProfile,
     NewConnection,
+    RefreshConnection,
     CycleTheme,
     /// Put the palette back up over the font list for this slot, the way
     /// [`Command::QueryHistory`] does for the history.
@@ -650,6 +651,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         chord_hint("new_connection", overrides),
         icon::PLUS,
         Command::NewConnection,
+    ));
+    items.push(Item::command(
+        "Refresh connection",
+        chord_hint("refresh_connection", overrides),
+        icon::DATABASE,
+        Command::RefreshConnection,
     ));
     items.push(Item::command(
         "Cycle theme",

@@ -44,10 +44,10 @@ use actions::{
     CopyCell, CycleTheme, DeleteRow, DiscardEdits, EditCell, ExplainQuery, FollowForeignKey,
     FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow, NextPage, NextProfile, NextTab,
     OpenSettings, PaletteNext, PalettePrevious, PreviousPage, PreviousProfile, PreviousTab, Quit,
-    RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery,
-    SaveQuery, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode,
-    SetNull, SetRowLimit, ShowEditor, SortColumn, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
-    ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
+    ResetEditorZoom, RunQuery, SaveQuery, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator,
+    SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor, SortColumn, ToggleFilterJoin,
+    ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

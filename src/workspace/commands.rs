@@ -231,6 +231,7 @@ impl Workspace {
             Command::NextProfile => self.cycle_profile(1, cx),
             Command::PreviousProfile => self.cycle_profile(-1, cx),
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
+            Command::RefreshConnection => self.reconnect(self.active, cx),
             Command::CycleTheme => self.cycle_theme(&CycleTheme, window, cx),
             Command::PickFont(slot) => self.open_palette(PaletteMode::Font(slot), window, cx),
             Command::SetFont(slot, family) => self.set_font(slot, family, cx),

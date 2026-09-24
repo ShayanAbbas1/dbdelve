@@ -497,18 +497,39 @@ impl Workspace {
         self.remember_profiles(cx);
 
         if reconnect {
-            // The rows on an object tab are the old database's. Their statement
-            // is dbdelve's own, so it re-runs the moment the tab is looked at
-            // again -- a query tab holds SQL the user wrote and is theirs to
-            // re-run.
-            for tab in &mut self.profiles[index].session.objects {
-                if let ObjectBody::Relation { stale, .. } = &mut tab.body {
-                    *stale = true;
-                }
-            }
-            self.begin_connect(index, cx);
+            self.reconnect(index, cx);
         }
         cx.notify();
+    }
+
+    /// Throw the profile's connection away and open a new one, whatever state
+    /// the old one is in: a server that restarted leaves a `Connected` socket
+    /// nothing answers on, and one that was down at connect leaves `Failed`
+    /// with nothing that tries again.
+    pub(crate) fn reconnect(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return;
+        };
+        // The rows on an object tab were read over the old connection. Their
+        // statement is dbdelve's own, so it re-runs the moment the tab is
+        // looked at again -- a query tab holds SQL the user wrote and is
+        // theirs to re-run.
+        for tab in &mut profile.session.objects {
+            if let ObjectBody::Relation { stale, .. } = &mut tab.body {
+                *stale = true;
+            }
+        }
+        self.begin_connect(index, cx);
+    }
+
+    pub(crate) fn refresh_connection(
+        &mut self,
+        _: &RefreshConnection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        self.reconnect(self.active, cx);
     }
 
     pub(crate) fn open_connection_form(
@@ -594,6 +615,15 @@ impl Workspace {
                         Err(message) => ProfileState::Failed(message),
                     };
                     workspace.load_catalog(&id, generation, cx);
+                    // The tab in front is already being looked at, so a
+                    // reconnect has no later visit to re-run it on.
+                    let active = workspace
+                        .profile()
+                        .filter(|profile| profile.id == id && profile.connection().is_some());
+                    if let Some(Tab::Object(object)) = active.map(|profile| profile.session.active)
+                    {
+                        workspace.load_relation(object, cx);
+                    }
                     cx.notify();
                 })
                 .ok();
