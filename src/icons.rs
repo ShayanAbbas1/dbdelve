@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 39] = [
+const ICONS: [(&str, &IconData); 40] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -43,6 +43,7 @@ const ICONS: [(&str, &IconData); 39] = [
     ("icons/ellipsis.svg", icondata_lu::LuEllipsis),
     ("icons/loader-circle.svg", icondata_lu::LuLoaderCircle),
     ("icons/minus.svg", icondata_lu::LuMinus),
+    ("icons/square.svg", icondata_lu::LuSquare),
     ("icons/plus.svg", icondata_lu::LuPlus),
     ("icons/search.svg", icondata_lu::LuSearch),
     ("icons/arrow-up.svg", icondata_lu::LuArrowUp),
@@ -71,6 +72,10 @@ const ICONS: [(&str, &IconData); 39] = [
 /// rather than a file.
 pub mod icon {
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
+    /// Windows' caption buttons, which dbdelve draws itself there.
+    pub const MINIMIZE: &str = "icons/minus.svg";
+    pub const MAXIMIZE: &str = "icons/square.svg";
+    pub const CLOSE_WINDOW: &str = "icons/close.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";
     pub const SWITCHER: &str = "icons/chevrons-up-down.svg";

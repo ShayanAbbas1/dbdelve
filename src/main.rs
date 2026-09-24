@@ -313,19 +313,21 @@ fn main() {
             // The platform titlebar is kept only for its window buttons on macOS:
             // a system bar in its own grey above dbdelve's chrome is the seam
             // every native app avoids. dbdelve paints that strip itself, and the
-            // buttons sit over it.
+            // buttons sit over it. Windows draws no buttons into it, so
+            // `ui::titlebar` draws them there. GPUI's Windows backend has no
+            // usable system caption to fall back on either.
             //
-            // ponytail: Linux has no compositor that draws window buttons into a
-            // transparent titlebar, and Windows hides its caption buttons when
-            // that bar is transparent. Both ask for the real one and wear the
-            // seam. The upgrade is drawing close, minimise and maximise into
-            // `ui::titlebar` and switching back to a client-owned bar.
+            // ponytail: there is nothing to sit over on Linux -- no compositor
+            // draws window buttons into a transparent titlebar -- so the window
+            // asks for the real one and wears the seam. The upgrade is drawing
+            // close, minimise and maximise into `ui::titlebar` there too and
+            // switching back to `WindowDecorations::Client`.
             let options = WindowOptions {
                 window_background: theme.window_background(),
                 titlebar: Some(TitlebarOptions {
                     title: Some("dbdelve".into()),
-                    appears_transparent: ui::OVERLAY_TITLEBAR,
-                    traffic_light_position: ui::OVERLAY_TITLEBAR.then(|| {
+                    appears_transparent: ui::CLIENT_TITLEBAR,
+                    traffic_light_position: cfg!(target_os = "macos").then(|| {
                         point(
                             px(layout::SPACE_MD),
                             px((layout::TITLEBAR_HEIGHT - TRAFFIC_LIGHT_DIAMETER) / 2.),

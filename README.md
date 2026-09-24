@@ -169,8 +169,9 @@ cargo build --release
 ```
 
 The binary is `target\release\dbdelve.exe`. Connections and query history go
-to `%APPDATA%\dbdelve`. Passwords go in Credential Manager. The window uses
-the system title bar. Chords are the same as macOS with Ctrl in place of Cmd.
+to `%APPDATA%\dbdelve`. Passwords go in Credential Manager. The window draws
+its own title bar, buttons included. Chords are the same as macOS with Ctrl in
+place of Cmd.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 

@@ -532,7 +532,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(None, Vec::new()))
+                .child(titlebar(t, None, Vec::new()))
                 .child(
                     div()
                         .flex_1()
@@ -693,6 +693,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .child(titlebar(
+                t,
                 Some({
                     let mode = profile.mode;
                     let silenced = profile
