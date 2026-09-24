@@ -900,14 +900,23 @@ impl Connection {
                 relation,
                 "constraint_name",
                 "PRIMARY KEY",
+                &database,
             ),
-            key_definitions(&unique, "table_name", relation, "constraint_name", "UNIQUE"),
+            key_definitions(
+                &unique,
+                "table_name",
+                relation,
+                "constraint_name",
+                "UNIQUE",
+                &database,
+            ),
             key_definitions(
                 &imported,
                 "fk_table_name",
                 relation,
                 "fk_name",
                 "FOREIGN KEY",
+                &database,
             ),
         ]
         .concat();
@@ -1079,6 +1088,7 @@ fn key_definitions(
     relation: &str,
     name_column: &str,
     keyword: &str,
+    database: &str,
 ) -> Vec<NamedDefinition> {
     let quote = |name: &str| Engine::Snowflake.quote_identifier(name);
     let foreign = keyword == "FOREIGN KEY";
@@ -1106,14 +1116,20 @@ fn key_definitions(
             };
             let mut definition = format!("{keyword} ({})", list(column));
             if foreign && let Some(first) = rows.first() {
-                definition.push_str(&format!(
-                    " REFERENCES {} ({})",
-                    Engine::Snowflake.qualified(
-                        shown(result, first, "pk_schema_name").unwrap_or_default(),
-                        shown(result, first, "pk_table_name").unwrap_or_default(),
-                    ),
-                    list("pk_column_name")
-                ));
+                let pk_database = shown(result, first, "pk_database_name").unwrap_or_default();
+                let table = Engine::Snowflake.qualified(
+                    shown(result, first, "pk_schema_name").unwrap_or_default(),
+                    shown(result, first, "pk_table_name").unwrap_or_default(),
+                );
+                // A key into another database reads as local unless that
+                // database is spelled out; one bound to this profile's own
+                // (the common case) stays as short as the other engines write it.
+                let table = if pk_database.is_empty() || pk_database == database {
+                    table
+                } else {
+                    format!("{}.{table}", quote(pk_database))
+                };
+                definition.push_str(&format!(" REFERENCES {table} ({})", list("pk_column_name")));
             }
             NamedDefinition {
                 name: name.to_string(),
@@ -1673,7 +1689,8 @@ mod tests {
                 "table_name",
                 "ORDER_LINES",
                 "constraint_name",
-                "PRIMARY KEY"
+                "PRIMARY KEY",
+                "ANALYTICS",
             ),
             vec![NamedDefinition {
                 name: "PK_LINES".into(),
@@ -1727,12 +1744,33 @@ mod tests {
             "ORDER_LINES",
             "fk_name",
             "FOREIGN KEY",
+            "ANALYTICS",
         );
         assert_eq!(
             definitions[0].definition,
             r#"FOREIGN KEY ("ORDER_ID") REFERENCES "PUBLIC"."ORDERS" ("ID")"#
         );
         assert_eq!(definitions.len(), 2);
+    }
+
+    #[test]
+    fn a_foreign_key_into_another_database_names_it() {
+        let definitions = key_definitions(
+            &imported_keys(),
+            "fk_table_name",
+            "ORDER_LINES",
+            "fk_name",
+            "FOREIGN KEY",
+            "ANALYTICS",
+        );
+        let into_reference = definitions
+            .iter()
+            .find(|definition| definition.name == "FK_PRODUCT")
+            .expect("the second key is in the fixture");
+        assert_eq!(
+            into_reference.definition,
+            r#"FOREIGN KEY ("SKU") REFERENCES "REFERENCE"."PUBLIC"."PRODUCTS" ("SKU")"#
+        );
     }
 
     #[test]
