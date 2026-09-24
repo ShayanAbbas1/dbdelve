@@ -191,6 +191,9 @@ impl Workspace {
         if self.close_settings(window, cx) {
             return;
         }
+        if self.cancel_stale_edit(cx) {
+            return;
+        }
         if self.cancel_discard_close(cx) {
             return;
         }

@@ -32,7 +32,7 @@ use crate::{
         stored_filter,
     },
     result_grid,
-    result_grid::ResultGrid,
+    result_grid::{NewValue, ResultGrid},
     sql::{Destructive, Mode, SortKey, Verdict},
     store,
     theme::ConnectionColor,
@@ -51,6 +51,10 @@ pub(crate) struct Profile {
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
     pub(crate) confirmed: Vec<Destructive>,
+    /// Whether this connection has silenced the prompt before editing rows
+    /// restored from an earlier session. Stored as [`STALE_ROWS`] among
+    /// `confirmed`'s slugs, which a build without it drops as unknown.
+    pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
     pub(crate) catalog: CatalogState,
@@ -116,7 +120,9 @@ impl Profile {
             confirmed: self
                 .confirmed
                 .iter()
-                .map(|kind| kind.slug().to_string())
+                .map(|kind| kind.slug())
+                .chain(self.confirmed_stale.then_some(STALE_ROWS))
+                .map(str::to_string)
                 .collect(),
             // Nothing writes the legacy scalar any more; a buffer's name is a
             // property of its tab now. Kept on the stored shape only so a
@@ -210,6 +216,9 @@ pub(crate) struct Session {
     pub(crate) insert_form: Option<InsertForm>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
+    /// The edit held until the user accepts that a restored grid's rows may
+    /// be stale.
+    pub(crate) stale_edit: Option<StaleEdit>,
     /// The structure request each relation tab is waiting on, by tab id.
     ///
     /// A refresh asks for the definition again, and nothing stops a second
@@ -289,6 +298,23 @@ pub(crate) struct PendingRun {
     pub(crate) verdict: Verdict,
     /// The "don't ask again" tick, which only the Confirm shape shows.
     pub(crate) dont_ask: bool,
+}
+
+/// The `confirmed` slug that silences [`StaleEdit`]'s prompt.
+pub(crate) const STALE_ROWS: &str = "stale-rows";
+
+/// An edit on a restored grid, stopped until the user answers whether to edit
+/// rows fetched in an earlier session.
+pub(crate) struct StaleEdit {
+    pub(crate) resume: StaleResume,
+    pub(crate) dont_ask: bool,
+}
+
+#[derive(Clone)]
+pub(crate) enum StaleResume {
+    Open,
+    Stage(NewValue),
+    Delete,
 }
 
 impl Session {
@@ -399,6 +425,7 @@ impl Session {
             apply_review: None,
             insert_form: None,
             pending_run: None,
+            stale_edit: None,
             structure_requests: HashMap::new(),
         }
     }
@@ -537,6 +564,7 @@ impl Session {
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
+        self.stale_edit = None;
     }
 }
 
@@ -975,10 +1003,11 @@ pub(crate) enum StructureState {
 pub(crate) fn show_snapshot(
     results: &Entity<TableState<ResultGrid>>,
     grid: &store::StoredGrid,
+    mode: Mode,
     cx: &mut Context<Workspace>,
 ) {
     results.update(cx, |table, cx| {
-        *table.delegate_mut() = ResultGrid::restored(grid);
+        *table.delegate_mut() = ResultGrid::restored(grid, mode);
         table.refresh(cx);
     });
 }

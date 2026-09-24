@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Cell, RelationKind};
+use crate::db::{Cell, EditTarget, RelationKind};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -224,6 +224,13 @@ pub struct StoredGrid {
     pub showing_structure: bool,
     #[serde(default)]
     pub captured: u64,
+    /// Where the rows can be written back to, and each column's type -- the
+    /// type is what keeps a binary column read-only. Absent from a snapshot
+    /// written before these were kept, which reads back as not editable.
+    #[serde(default)]
+    pub edit: Option<EditTarget>,
+    #[serde(default)]
+    pub data_types: Vec<Option<String>>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -621,6 +628,8 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             filter: grid.filter.clone(),
             showing_structure: grid.showing_structure,
             captured: grid.captured,
+            edit: grid.edit.clone(),
+            data_types: grid.data_types.clone(),
         };
         &capped
     } else {
@@ -1759,6 +1768,8 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 0,
+                edit: None,
+                data_types: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -1803,6 +1814,13 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 1_700_000_000,
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "accounts".into(),
+                    columns: vec![Some("id".into()), None],
+                    keys: vec![0],
+                }),
+                data_types: vec![Some("int4".into()), None],
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -1829,6 +1847,8 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 0,
+                edit: None,
+                data_types: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -1873,6 +1893,8 @@ open_objects = []
                 filter: r#""state" = 'ok'"#.into(),
                 showing_structure: false,
                 captured: 1_700_000_000,
+                edit: None,
+                data_types: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -1898,6 +1920,19 @@ open_objects = []
 
         assert_eq!(grid.filter, "");
         assert_eq!(grid.limit, None);
+    }
+
+    #[test]
+    fn a_snapshot_written_by_0_1_6_reads_back_with_no_edit_target() {
+        // Byte for byte what `ResultGrid::stored` wrote before snapshots kept
+        // an edit target. Without one the restored grid is read-only, which is
+        // what it was in the build that wrote it.
+        let older = r#"{"columns":["id","name"],"rows":[["1",null]],"total_rows":1,"sort":[[0,true]],"order_by":[["created_at",false]],"widths":[80.0,160.0],"active":[0,1],"last_query":"select * from accounts","limit":null,"filter":"","showing_structure":false,"captured":1700000000}"#;
+        let grid: StoredGrid = serde_json::from_str(older).expect("a 0.1.6 grid must decode");
+
+        assert_eq!(grid.edit, None);
+        assert!(grid.data_types.is_empty());
+        assert_eq!(grid.rows, vec![vec![Some("1".to_string()), None]]);
     }
 
     #[test]

@@ -103,6 +103,7 @@ impl Workspace {
     ) {
         if let Some(profile) = self.profile_mut() {
             profile.confirmed.clear();
+            profile.confirmed_stale = false;
         }
         self.remember_profiles(cx);
         cx.notify();

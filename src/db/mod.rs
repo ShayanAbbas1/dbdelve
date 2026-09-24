@@ -726,7 +726,7 @@ pub struct QueryResult {
 /// The identity work — which oid, which attribute number — happens inside this
 /// module and stops here (hard rule 4). A caller gets an answer it can build
 /// SQL from, not a puzzle it has to ask the catalog about.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditTarget {
     pub schema: String,
     pub table: String,

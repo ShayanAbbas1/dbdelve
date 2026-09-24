@@ -604,6 +604,8 @@ impl Workspace {
                         .children(match stop {
                             Stop::Confirm(kind) if kind.suppressible() => Some(
                                 Checkbox::new("dont-ask-again")
+                                    .text_size(px(layout::TEXT_SM))
+                                    .font_weight(FontWeight::BOLD)
                                     .label(format!(
                                         "Don't ask again for {} on {name}",
                                         kind.label()
@@ -650,6 +652,120 @@ impl Workspace {
                                         move |_, _, cx| {
                                             _ = approve.update(cx, |workspace, cx| {
                                                 workspace.approve_pending_run(cx);
+                                            });
+                                        },
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Asked before the first edit on rows restored from an earlier session,
+    /// which may no longer be what the database holds.
+    pub(crate) fn render_stale_edit(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let profile = self.profile()?;
+        let dont_ask = profile.session.stale_edit.as_ref()?.dont_ask;
+        let age = profile
+            .session
+            .active_results()
+            .and_then(|results| results.read(cx).delegate().captured())
+            .map(|captured| relative_age(store::captured_at().saturating_sub(captured)))
+            .unwrap_or_else(|| "moments".into());
+
+        let cancel = cx.entity().downgrade();
+        let refresh = cancel.clone();
+        let approve = cancel.clone();
+        let tick = cancel.clone();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(
+                            t,
+                            "Edit rows restored from your last session?",
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child(format!(
+                                    "These rows were fetched {age} ago, before dbdelve was \
+                                     last closed, and were restored from that session rather \
+                                     than read again. Anything changed in the database since \
+                                     isn't shown here, and an edit overwrites whatever the \
+                                     cell holds now."
+                                )),
+                        )
+                        .child(
+                            Checkbox::new("dont-ask-stale")
+                                .text_size(px(layout::TEXT_SM))
+                                .font_weight(FontWeight::BOLD)
+                                .label("Don't ask again for this connection")
+                                .checked(dont_ask)
+                                .on_click(move |_, _, cx| {
+                                    _ = tick.update(cx, |workspace, cx| {
+                                        workspace.toggle_stale_dont_ask(cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    button(
+                                        "cancel-stale-edit",
+                                        "Cancel",
+                                        Tone::Quiet,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = cancel.update(cx, |workspace, cx| {
+                                                workspace.cancel_stale_edit(cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    button(
+                                        "refresh-stale-edit",
+                                        "Refresh",
+                                        Tone::Quiet,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = refresh.update(cx, |workspace, cx| {
+                                                workspace.refresh_stale(window, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    button(
+                                        "approve-stale-edit",
+                                        "Edit anyway",
+                                        Tone::Primary,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = approve.update(cx, |workspace, cx| {
+                                                workspace.edit_stale_anyway(window, cx);
                                             });
                                         },
                                     ),

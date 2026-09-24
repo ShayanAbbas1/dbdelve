@@ -105,6 +105,10 @@ pub struct ResultGrid {
     /// was written. Held beside `captured` and for the same reason: a run
     /// replaces the whole delegate, so a live result cannot keep a stale count.
     restored_total: Option<usize>,
+    /// Whether a restored grid's edits wait on the user accepting that its rows
+    /// may be stale. Session-only, and dropped with the delegate like
+    /// `captured` is, so a run's own rows never ask.
+    unconfirmed: bool,
     /// Which result columns carry a foreign key, as indices into `columns`.
     /// Empty until a relation's structure says otherwise, and empty forever on
     /// a query result: a statement can join as many relations as it likes, so
@@ -224,6 +228,7 @@ impl ResultGrid {
             editing: None,
             captured: None,
             restored_total: None,
+            unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
             has_default: Vec::new(),
@@ -244,28 +249,27 @@ impl ResultGrid {
 
     /// A grid read back from a snapshot.
     ///
-    /// There is no `QueryResult` behind it: the snapshot keeps column names and
-    /// values, not the type information or the edit target those come with. So
-    /// a restored grid shows rows, and the inspector and in-grid editing come
-    /// back with the run that replaces it.
-    pub fn restored(stored: &StoredGrid) -> Self {
-        // No `edit` target comes back with a snapshot (see the doc comment
-        // above), so `editable` refuses regardless of mode -- there is nothing
-        // for this value to gate until the run that replaces it lands.
+    /// The edit target and column types come back with it, so it can be
+    /// edited -- but only once the user has said the rows are fresh enough to
+    /// edit against (see [`ResultGrid::confirm_stale`]). A snapshot written
+    /// before those were kept has neither, and stays read-only until a run.
+    pub fn restored(stored: &StoredGrid, mode: Mode) -> Self {
         let mut grid = Self::new(
             QueryResult {
                 columns: stored
                     .columns
                     .iter()
-                    .map(|name| db::Column {
+                    .enumerate()
+                    .map(|(index, name)| db::Column {
                         name: name.clone(),
-                        data_type: None,
+                        data_type: stored.data_types.get(index).cloned().flatten(),
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                edit: stored.edit.clone(),
                 ..QueryResult::default()
             },
-            Mode::default(),
+            mode,
         );
 
         // Over the widths `new` just fitted, which measured the capped rows
@@ -285,6 +289,7 @@ impl ResultGrid {
             .filter(|(row, col)| *row < rows && *col < columns);
         grid.captured = Some(stored.captured);
         grid.restored_total = Some(stored.total_rows);
+        grid.unconfirmed = stored.edit.is_some();
         grid
     }
 
@@ -292,6 +297,15 @@ impl ResultGrid {
     /// put here.
     pub fn captured(&self) -> Option<u64> {
         self.captured
+    }
+
+    /// Whether an edit here has to be confirmed against stale rows first.
+    pub fn unconfirmed(&self) -> bool {
+        self.unconfirmed
+    }
+
+    pub fn confirm_stale(&mut self) {
+        self.unconfirmed = false;
     }
 
     /// How many rows the result behind this grid had. More than the grid holds
@@ -344,6 +358,13 @@ impl ResultGrid {
             // is still the rows it was, and restamping it would make every
             // restart claim the cache was just taken.
             captured: self.captured.unwrap_or_else(captured_at),
+            edit: self.result.edit.clone(),
+            data_types: self
+                .result
+                .columns
+                .iter()
+                .map(|column| column.data_type.clone())
+                .collect(),
         }
     }
 
@@ -613,7 +634,7 @@ impl ResultGrid {
     /// Open an input on a cell. `false` when the cell is not editable, and
     /// nothing at all happens then: the notice belongs to `main.rs`.
     pub fn begin_edit(&mut self, row: usize, col: usize) -> bool {
-        if !self.editable(row, col) {
+        if self.unconfirmed || !self.editable(row, col) {
             return false;
         }
         self.editing = Some(Editing {
@@ -632,7 +653,7 @@ impl ResultGrid {
     /// Record a new value for a cell. `false` when the cell is not editable, in
     /// which case nothing is recorded.
     pub fn set_pending(&mut self, row: usize, col: usize, value: NewValue) -> bool {
-        if !self.editable(row, col) {
+        if self.unconfirmed || !self.editable(row, col) {
             return false;
         }
 
@@ -1572,7 +1593,7 @@ mod tests {
         // An edit nobody applied stays with the session that typed it.
         assert!(grid.set_pending(0, 1, value("changed")));
 
-        let restored = ResultGrid::restored(&grid.stored());
+        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
 
         assert_eq!(
             restored
@@ -1603,29 +1624,39 @@ mod tests {
         // Restore, then quit without re-running: the snapshot is written back
         // from a grid holding `GRID_ROW_CAP` rows, and recomputing the count
         // from those would collapse the real size to the cap for good.
-        let restored = ResultGrid::restored(&StoredGrid {
-            columns: vec!["n".into()],
-            rows: (0..GRID_ROW_CAP)
-                .map(|n| vec![Some(n.to_string())])
-                .collect(),
-            total_rows: 20_000,
-            sort: Vec::new(),
-            order_by: Vec::new(),
-            widths: Vec::new(),
-            active: None,
-            last_query: None,
-            limit: None,
-            filter: String::new(),
-            showing_structure: false,
-            captured: 1_700_000_000,
-        });
+        let restored = ResultGrid::restored(
+            &StoredGrid {
+                columns: vec!["n".into()],
+                rows: (0..GRID_ROW_CAP)
+                    .map(|n| vec![Some(n.to_string())])
+                    .collect(),
+                total_rows: 20_000,
+                sort: Vec::new(),
+                order_by: Vec::new(),
+                widths: Vec::new(),
+                active: None,
+                last_query: None,
+                limit: None,
+                filter: String::new(),
+                showing_structure: false,
+                captured: 1_700_000_000,
+                edit: None,
+                data_types: Vec::new(),
+            },
+            Mode::ReadWrite,
+        );
 
         assert_eq!(restored.total_rows(), 20_000);
         let written = restored.stored();
         assert_eq!(written.total_rows, 20_000);
         assert_eq!(written.rows.len(), GRID_ROW_CAP);
         // And again, however many times the profile is reopened.
-        assert_eq!(ResultGrid::restored(&written).stored().total_rows, 20_000);
+        assert_eq!(
+            ResultGrid::restored(&written, Mode::ReadWrite)
+                .stored()
+                .total_rows,
+            20_000
+        );
     }
 
     #[test]
@@ -1653,12 +1684,74 @@ mod tests {
         // `write_grid` caps the rows, so the cell that was active can be past
         // the end of what comes back -- and a ring around nothing is worse
         // than none.
-        let grid = ResultGrid::restored(&StoredGrid {
-            active: Some((9_000, 0)),
-            ..editable_grid().stored()
-        });
+        let grid = ResultGrid::restored(
+            &StoredGrid {
+                active: Some((9_000, 0)),
+                ..editable_grid().stored()
+            },
+            Mode::ReadWrite,
+        );
 
         assert_eq!(grid.active, None);
+    }
+
+    #[test]
+    fn a_restored_grid_edits_nothing_until_its_stale_rows_are_confirmed() {
+        let mut grid = ResultGrid::restored(&editable_grid().stored(), Mode::ReadWrite);
+        assert!(
+            grid.editable(0, 1),
+            "the edit target came back with the rows"
+        );
+        assert!(grid.unconfirmed());
+        assert!(!grid.begin_edit(0, 1));
+        assert!(!grid.stage(0, 1, NewValue::Null));
+        assert!(!grid.has_pending());
+
+        grid.confirm_stale();
+        assert!(grid.begin_edit(0, 1));
+        assert!(grid.stage(0, 1, NewValue::Null));
+        assert_eq!(
+            grid.pending_updates()[0].keys,
+            vec![("id".to_string(), "7".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_restored_binary_column_stays_read_only() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), typed("payload", "bytea")],
+                rows: vec![vec![Some("7".into()), Some("\\xab".into())]],
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "measurements".into(),
+                    columns: vec![Some("id".into()), Some("payload".into())],
+                    keys: vec![0],
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        let mut restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+        restored.confirm_stale();
+
+        assert!(!restored.editable(0, 1));
+        assert!(!restored.begin_edit(0, 1));
+    }
+
+    #[test]
+    fn a_snapshot_from_before_edit_targets_restores_read_only() {
+        let older = r#"{"columns":["id"],"rows":[["1"]],"total_rows":1,"captured":1700000000}"#;
+        let mut grid = ResultGrid::restored(
+            &serde_json::from_str(older).expect("an older grid must decode"),
+            Mode::ReadWrite,
+        );
+
+        // Nothing to confirm, and nothing to edit either way.
+        assert!(!grid.unconfirmed());
+        assert!(!grid.editable(0, 0));
+        assert!(!grid.begin_edit(0, 0));
+        assert_eq!(grid.row_key(0), None);
     }
 
     #[test]

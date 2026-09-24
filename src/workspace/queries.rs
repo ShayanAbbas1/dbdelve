@@ -839,7 +839,17 @@ impl Workspace {
                                 let plan = explain::parse(&columns, &result.rows);
                                 (true, false, Some(plan))
                             }
-                            Ok(result) => {
+                            Ok(mut result) => {
+                                // An `INSERT … RETURNING` grid traces to its
+                                // table like any select, but applying an edit
+                                // re-runs the statement behind the grid to
+                                // reload it -- which would repeat the write.
+                                if statement
+                                    .as_deref()
+                                    .is_some_and(|statement| !sql::rerunnable(engine, statement))
+                                {
+                                    result.edit = None;
+                                }
                                 *state = QueryState::Complete {
                                     rows: result.rows.len(),
                                     bytes: result.bytes,

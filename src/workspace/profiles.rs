@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
 
 impl Workspace {
@@ -159,6 +160,7 @@ impl Workspace {
                 .iter()
                 .filter_map(|slug| Destructive::from_slug(slug))
                 .collect(),
+            confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
             catalog: CatalogState::Loading,
@@ -194,6 +196,7 @@ impl Workspace {
             color,
             mode,
             confirmed: Vec::new(),
+            confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
             catalog: CatalogState::Loading,

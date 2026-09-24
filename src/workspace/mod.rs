@@ -695,7 +695,12 @@ impl Render for Workspace {
             .child(titlebar(
                 Some({
                     let mode = profile.mode;
-                    let silenced = profile.confirmed.clone();
+                    let silenced = profile
+                        .confirmed
+                        .iter()
+                        .map(|kind| kind.label())
+                        .chain(profile.confirmed_stale.then_some("stale rows"))
+                        .collect::<Vec<_>>();
                     ui::mode_pill(t, mode)
                         .dropdown_menu(move |menu, _, _| {
                             let menu = Mode::ALL.into_iter().fold(menu, |menu, option| {
@@ -716,11 +721,7 @@ impl Render for Workspace {
                                 menu.separator().menu(
                                     format!(
                                         "Reset silenced confirmations ({})",
-                                        silenced
-                                            .iter()
-                                            .map(|kind| kind.label())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
+                                        silenced.join(", ")
                                     ),
                                     Box::new(ResetConfirmations),
                                 )
@@ -840,6 +841,7 @@ impl Render for Workspace {
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))
+            .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
             .children(self.render_palette(cx))
     }
