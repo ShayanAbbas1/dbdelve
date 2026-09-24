@@ -399,7 +399,7 @@ impl Workspace {
         // The catalog is the only authority on what the referenced relation is;
         // a default is what a tab opened before it loaded would have worn too.
         let kind = match &profile.catalog {
-            CatalogState::Loaded(catalog) => {
+            CatalogState::Loaded(catalog, _) => {
                 relation_kind(catalog, &key.referenced_schema, &key.referenced_table)
                     .unwrap_or_default()
             }
@@ -592,7 +592,7 @@ impl Workspace {
     /// Turn the object tabs read back from disk into live ones. A relation is
     /// opened as soon as there is a connection to query, because everything its
     /// tab needs is on disk; only a routine, whose body the tab renders, waits
-    /// for the catalog. Anything the database no longer has simply does not
+    /// for the catalog's routines. Anything the database no longer has simply does not
     /// come back -- a relation it has dropped comes back as a tab whose query
     /// fails, which says so where silence did not.
     pub(crate) fn restore_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -603,47 +603,12 @@ impl Workspace {
         if pending == 0 {
             return;
         }
-        let connected = profile.connection().is_some();
-        let engine = profile.config.engine();
-        let catalog = match &profile.catalog {
-            CatalogState::Loaded(catalog) => Some(catalog),
-            _ => None,
-        };
-
-        let mut opened = Vec::new();
-        let mut still_pending = Vec::new();
-        for stored in &profile.session.pending_objects {
-            if stored.routine {
-                match catalog {
-                    Some(catalog) => opened.extend(
-                        OpenedObject::resolve(engine, catalog, stored)
-                            .map(|object| (object, stored.active)),
-                    ),
-                    None => still_pending.push(stored.clone()),
-                }
-            } else if connected {
-                let (filter, filters) = restored_filter(engine, stored);
-                opened.push((
-                    OpenedObject::Relation {
-                        schema: stored.schema.clone(),
-                        name: stored.name.clone(),
-                        // The catalog when it is here, because `stored.kind` can
-                        // be the default a build that did not keep one wrote --
-                        // which draws every view with a table's icon.
-                        kind: catalog
-                            .and_then(|catalog| {
-                                relation_kind(catalog, &stored.schema, &stored.name)
-                            })
-                            .unwrap_or(stored.kind),
-                        filter,
-                        filters,
-                    },
-                    stored.active,
-                ));
-            } else {
-                still_pending.push(stored.clone());
-            }
-        }
+        let (opened, still_pending) = restorable(
+            profile.config.engine(),
+            profile.connection().is_some(),
+            &profile.catalog,
+            &profile.session.pending_objects,
+        );
         // Called on every frame, so a pass that could do nothing has to change
         // nothing: rewriting the profile here would write to disk per frame.
         if opened.is_empty() && still_pending.len() == pending {
@@ -670,10 +635,62 @@ impl Workspace {
 
     pub(crate) fn catalog(&self) -> Option<&Catalog> {
         match self.profile().map(|profile| &profile.catalog) {
-            Some(CatalogState::Loaded(catalog)) => Some(catalog),
+            Some(CatalogState::Loaded(catalog, _)) => Some(catalog),
             _ => None,
         }
     }
+}
+
+/// Split the stored tabs into those that can open now and those still waiting.
+///
+/// A routine waits for the routines, not just the catalog: resolved against
+/// relations alone it would find nothing and be dropped for good. One whose
+/// routines failed to load keeps waiting, because a failed listing says nothing
+/// about whether the routine still exists.
+fn restorable(
+    engine: Engine,
+    connected: bool,
+    catalog: &CatalogState,
+    pending: &[store::StoredObject],
+) -> (Vec<(OpenedObject, bool)>, Vec<store::StoredObject>) {
+    let (catalog, routines) = match catalog {
+        CatalogState::Loaded(catalog, routines) => (Some(catalog), *routines),
+        _ => (None, Routines::Loading),
+    };
+
+    let mut opened = Vec::new();
+    let mut still_pending = Vec::new();
+    for stored in pending {
+        if stored.routine {
+            match catalog {
+                Some(catalog) if routines == Routines::Loaded => opened.extend(
+                    OpenedObject::resolve(engine, catalog, stored)
+                        .map(|object| (object, stored.active)),
+                ),
+                _ => still_pending.push(stored.clone()),
+            }
+        } else if connected {
+            let (filter, filters) = restored_filter(engine, stored);
+            opened.push((
+                OpenedObject::Relation {
+                    schema: stored.schema.clone(),
+                    name: stored.name.clone(),
+                    // The catalog when it is here, because `stored.kind` can
+                    // be the default a build that did not keep one wrote --
+                    // which draws every view with a table's icon.
+                    kind: catalog
+                        .and_then(|catalog| relation_kind(catalog, &stored.schema, &stored.name))
+                        .unwrap_or(stored.kind),
+                    filter,
+                    filters,
+                },
+                stored.active,
+            ));
+        } else {
+            still_pending.push(stored.clone());
+        }
+    }
+    (opened, still_pending)
 }
 
 /// The columns a `NULL` cannot be written into.
@@ -709,6 +726,69 @@ fn columns_with_defaults(engine: Engine, columns: &[ColumnDefinition]) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::db::{Routine, RoutineKind, Schema};
+
+    fn stored(name: &str, routine: bool) -> store::StoredObject {
+        store::StoredObject {
+            schema: "public".into(),
+            name: name.into(),
+            routine,
+            kind: RelationKind::Table,
+            filter: String::new(),
+            filters: Vec::new(),
+            active: false,
+            bars: Vec::new(),
+        }
+    }
+
+    fn catalog_with(routines: Routines) -> CatalogState {
+        let digest = Routine {
+            name: "digest".into(),
+            kind: RoutineKind::Function,
+            identity_arguments: String::new(),
+            result_type: String::new(),
+            language: String::new(),
+            definition: String::new(),
+        };
+        CatalogState::Loaded(
+            Catalog {
+                schemas: vec![Schema {
+                    name: "public".into(),
+                    relations: Vec::new(),
+                    routines: match routines {
+                        Routines::Loaded => vec![digest],
+                        _ => Vec::new(),
+                    },
+                }],
+            },
+            routines,
+        )
+    }
+
+    #[test]
+    fn a_stored_routine_waits_for_the_routines_and_survives_their_failure() {
+        let pending = [stored("accounts", false), stored("digest()", true)];
+
+        // Relations are in, routines are not: the relation opens, and the
+        // routine is neither resolved against a catalog without it nor dropped.
+        for routines in [Routines::Loading, Routines::Failed] {
+            let (opened, waiting) =
+                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
+            assert_eq!(opened.len(), 1);
+            assert_eq!(opened[0].0.name(), "accounts");
+            assert_eq!(waiting, [stored("digest()", true)]);
+        }
+
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            &catalog_with(Routines::Loaded),
+            &pending,
+        );
+        assert_eq!(opened.len(), 2);
+        assert!(waiting.is_empty());
+    }
 
     fn definition(name: &str, nullable: bool, default: Option<&str>) -> ColumnDefinition {
         ColumnDefinition {

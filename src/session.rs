@@ -600,8 +600,19 @@ pub(crate) enum Focus {
 
 pub(crate) enum CatalogState {
     Loading,
-    Loaded(Catalog),
+    /// The relations, and how far the routines behind them have got.
+    Loaded(Catalog, Routines),
     Failed(String),
+}
+
+/// The second half of a loaded catalog. A catalog whose routines are not
+/// `Loaded` holds none, and a routine missing from it says nothing about the
+/// database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Routines {
+    Loading,
+    Loaded,
+    Failed,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds

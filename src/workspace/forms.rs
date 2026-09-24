@@ -1174,12 +1174,12 @@ impl Workspace {
                 .text_color(t.danger)
                 .child(message.clone())
                 .into_any_element(),
-            CatalogState::Loaded(catalog) if catalog.schemas.is_empty() => div()
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => div()
                 .p(px(layout::SPACE_MD))
                 .text_color(t.text_muted)
                 .child("No database objects found.")
                 .into_any_element(),
-            CatalogState::Loaded(_) => {
+            CatalogState::Loaded(..) => {
                 render_tree(
                     &profile.session.explorer_tree,
                     move |index, entry, _, _, cx| {

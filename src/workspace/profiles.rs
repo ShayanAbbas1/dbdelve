@@ -675,14 +675,14 @@ impl Workspace {
                         return;
                     };
                     profile.catalog = match result {
-                        Ok(catalog) => CatalogState::Loaded(catalog),
+                        Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
                         Err(error) => CatalogState::Failed(error.message),
                     };
                     // Relations restore before the catalog arrives, wearing
                     // whatever kind was on disk -- a default, for a profile an
                     // older build wrote. This is the first moment there is
                     // anything to correct it from.
-                    if let CatalogState::Loaded(catalog) = &profile.catalog {
+                    if let CatalogState::Loaded(catalog, _) = &profile.catalog {
                         for tab in &mut profile.session.objects {
                             if let ObjectKind::Relation(kind) = &mut tab.kind
                                 && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
@@ -715,6 +715,9 @@ impl Workspace {
             return;
         };
         let Some(connection) = profile.connection() else {
+            if let CatalogState::Loaded(_, routines) = &mut profile.catalog {
+                *routines = Routines::Failed;
+            }
             return;
         };
         let routines_task = cx
@@ -729,16 +732,21 @@ impl Workspace {
                     let Some(profile) = workspace.issued_to(&id, generation) else {
                         return;
                     };
+                    // Only onto a catalog that loaded. One that failed, or
+                    // that a reconnect has already replaced, is not this half's
+                    // to complete.
+                    let CatalogState::Loaded(catalog, routines) = &mut profile.catalog else {
+                        return;
+                    };
                     match result {
-                        // Only onto a catalog that loaded. One that failed, or
-                        // that a reconnect has already replaced, is not this
-                        // half's to complete.
-                        Ok(routines) => {
-                            if let CatalogState::Loaded(catalog) = &mut profile.catalog {
-                                catalog.merge(routines);
-                            }
+                        Ok(loaded) => {
+                            catalog.merge(loaded);
+                            *routines = Routines::Loaded;
                         }
-                        Err(error) => workspace.note(error.message, cx),
+                        Err(error) => {
+                            *routines = Routines::Failed;
+                            workspace.note(error.message, cx);
+                        }
                     }
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
@@ -831,7 +839,7 @@ impl Workspace {
         profile.session.completion_columns.borrow_mut().clear();
 
         let provider = match &profile.catalog {
-            CatalogState::Loaded(catalog) => Some(Rc::new(SchemaCompletions::new(
+            CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 cx.weak_entity(),
@@ -854,7 +862,7 @@ impl Workspace {
         };
         let filter = profile.session.explorer_filter.read(cx).value();
         let explorer = match &profile.catalog {
-            CatalogState::Loaded(catalog) => build_explorer_tree(catalog, &filter),
+            CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
             _ => explorer::ExplorerTree {
                 items: Vec::new(),
                 leaves: HashMap::new(),
