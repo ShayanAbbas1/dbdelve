@@ -1172,6 +1172,14 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .fold(Verdict::READ, Verdict::max)
 }
 
+/// Whether `sql` can run again just to reload the rows it produced. A grid is
+/// reloaded by re-running the statement behind it, and one that writes --
+/// `INSERT … RETURNING` traces to its table like any select -- would write
+/// again. A statement `classify` cannot read is not vouched for either.
+pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
+    classify(engine, sql).mode == Mode::ReadOnly
+}
+
 /// The lowest mode that may run one statement: what its variant earns, raised
 /// by whatever the `Query` it owns turns out to contain.
 ///
@@ -2699,6 +2707,19 @@ mod tests {
     /// The single most likely bug in the feature: this parses as `Statement::Query`,
     /// so a match on the top-level variant calls a table-emptying statement a read.
     /// Spec §3.5.
+    #[test]
+    fn only_a_read_is_rerun_to_reload_its_rows() {
+        assert!(rerunnable(Engine::Postgres, "SELECT * FROM t"));
+        for sql in [
+            "INSERT INTO t VALUES (1) RETURNING *",
+            "UPDATE t SET v = 1 RETURNING *",
+            "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            "SELEC * FROM t",
+        ] {
+            assert!(!rerunnable(Engine::Postgres, sql), "{sql}");
+        }
+    }
+
     #[test]
     fn classify_sees_through_data_modifying_ctes() {
         let delete = "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x";

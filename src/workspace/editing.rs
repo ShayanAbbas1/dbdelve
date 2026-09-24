@@ -429,17 +429,33 @@ impl Workspace {
                 grid.captured().is_some(),
             )
         };
+        // Checked before the snapshot: running a write again is not the way
+        // back to editable rows.
+        let engine = self.engine();
+        let wrote = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .is_some_and(|tab| {
+                tab.last_query
+                    .as_deref()
+                    .is_some_and(|statement| !sql::rerunnable(engine, statement))
+            });
         self.note(
-            match (traced, snapshot) {
-                (true, _) => "This column cannot be edited.".into(),
-                (false, true) => match tab {
+            match (traced, wrote, snapshot) {
+                (true, _, _) => "This column cannot be edited.".into(),
+                (false, true, _) => {
+                    "These rows came from a statement that writes. Fetch them with a SELECT to edit them.".into()
+                }
+                (false, false, true) => match tab {
                     Tab::Query(_) => {
                         "These rows are from an earlier session. Run the query again to edit them."
                             .into()
                     }
                     _ => "These rows are from an earlier session. Refresh them to edit.".into(),
                 },
-                (false, false) => "dbdelve cannot tell which table these rows come from.".into(),
+                (false, false, false) => {
+                    "dbdelve cannot tell which table these rows come from.".into()
+                }
             },
             cx,
         );
