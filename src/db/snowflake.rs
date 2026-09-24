@@ -858,7 +858,10 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         let [functions, procedures] =
             self.at_once([FUNCTIONS_SQL.into(), PROCEDURES_SQL.into()])?;
-        assemble_catalog(QueryResult::default(), appended(functions, procedures)?)
+        assemble_catalog(
+            QueryResult::default(),
+            strip_signature_parens(appended(functions, procedures)?),
+        )
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -986,6 +989,27 @@ SELECT PROCEDURE_SCHEMA AS "schema_name",
        COALESCE(PROCEDURE_DEFINITION, '') AS "definition"
 FROM INFORMATION_SCHEMA.PROCEDURES
 ORDER BY 1, 2"#;
+
+/// Snowflake's `ARGUMENT_SIGNATURE` already reads `(ARG TYPE, ...)`, but the
+/// rest of the app wraps `identity_arguments` itself (`name({args})`), so a
+/// left-alone value would show as `NAME((ARG TYPE))`.
+fn strip_signature_parens(mut result: QueryResult) -> QueryResult {
+    let Some(index) = result
+        .columns
+        .iter()
+        .position(|column| column.name == "identity_arguments")
+    else {
+        return result;
+    };
+    for row in &mut result.rows {
+        if let Some(value) = row.get_mut(index).and_then(|cell| cell.as_mut())
+            && let Some(stripped) = value.strip_prefix('(').and_then(|v| v.strip_suffix(')'))
+        {
+            *value = stripped.to_string();
+        }
+    }
+    result
+}
 
 /// Two results of the same shape as one, for an assembler that takes one.
 ///
@@ -1746,6 +1770,23 @@ mod tests {
         );
         let other = result(&["schema_name"], &[&[Some("app")]]);
         assert!(appended(functions, other).is_err());
+    }
+
+    #[test]
+    fn a_signature_loses_the_parens_the_app_adds_back_itself() {
+        let functions = result(
+            &["identity_arguments"],
+            &[&[Some("(AMOUNT NUMBER)")], &[Some("()")], &[None]],
+        );
+        let stripped = strip_signature_parens(functions);
+        assert_eq!(
+            stripped.rows,
+            vec![
+                vec![Some("AMOUNT NUMBER".to_string())],
+                vec![Some("".to_string())],
+                vec![None],
+            ]
+        );
     }
 
     #[test]
