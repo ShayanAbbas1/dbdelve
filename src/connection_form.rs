@@ -308,7 +308,7 @@ impl ConnectionForm {
             account,
             // Blank is the host the account implies, which is nearly always
             // the right one.
-            host: optional(&self.host),
+            host: optional(&self.host).map(|host| crate::db::normalize_host(&host)),
             user,
             private_key,
             database,

@@ -61,18 +61,43 @@ pub struct SnowflakeConfig {
 const ACCOUNT_DOMAIN: &str = ".snowflakecomputing.com";
 
 /// The account identifier out of whatever was pasted for it. People have the
-/// URL they sign in at far more often than the identifier inside it, and the
-/// one is the other with a scheme in front and the domain behind.
+/// URL they sign in at far more often than the identifier inside it: either
+/// the connection host, the account with a scheme in front and the domain
+/// behind, or Snowsight's `app.snowflake.com/<org>/<account>/...`, which
+/// names the same account in two path segments instead.
 pub fn account_identifier(input: &str) -> String {
     let input = input.trim();
-    let host = input
-        .split_once("://")
-        .map_or(input, |(_, rest)| rest)
-        .split(['/', ':', '?'])
+    let rest = input.split_once("://").map_or(input, |(_, rest)| rest);
+    let mut segments = rest.split('/');
+    let host = segments
+        .next()
+        .unwrap_or_default()
+        .split([':', '?'])
         .next()
         .unwrap_or_default();
+
+    if host == "app.snowflake.com"
+        && let (Some(org), Some(account)) = (segments.next(), segments.next())
+        && !org.is_empty()
+        && !account.is_empty()
+    {
+        return format!("{org}-{account}");
+    }
+
     host.strip_suffix(ACCOUNT_DOMAIN)
         .unwrap_or(host)
+        .to_string()
+}
+
+/// The host as pasted, with the scheme and path a URL carries trimmed off:
+/// `SnowflakeConfig::host` is spliced straight after `https://` to build every
+/// request, so a value that still has one in front would double it up.
+pub fn normalize_host(input: &str) -> String {
+    let input = input.trim();
+    let rest = input.split_once("://").map_or(input, |(_, rest)| rest);
+    rest.split(['/', '?'])
+        .next()
+        .unwrap_or_default()
         .to_string()
 }
 
@@ -1952,6 +1977,41 @@ mod tests {
             account_identifier("https://xy12345.eu-central-1.snowflakecomputing.com"),
             "xy12345.eu-central-1"
         );
+    }
+
+    #[test]
+    fn an_account_is_found_inside_a_snowsight_url_too() {
+        for input in [
+            "https://app.snowflake.com/myorg/myaccount/worksheets",
+            "https://app.snowflake.com/myorg/myaccount",
+            "  https://app.snowflake.com/myorg/myaccount/ ",
+        ] {
+            assert_eq!(account_identifier(input), "myorg-myaccount", "{input}");
+        }
+    }
+
+    #[test]
+    fn a_host_pasted_as_a_url_loses_its_scheme_and_path() {
+        for (input, expected) in [
+            (
+                "xy12345.snowflakecomputing.com",
+                "xy12345.snowflakecomputing.com",
+            ),
+            (
+                "https://xy12345.snowflakecomputing.com",
+                "xy12345.snowflakecomputing.com",
+            ),
+            (
+                "https://xy12345.snowflakecomputing.com/",
+                "xy12345.snowflakecomputing.com",
+            ),
+            (
+                "  https://xy12345.snowflakecomputing.com/console?x=1 ",
+                "xy12345.snowflakecomputing.com",
+            ),
+        ] {
+            assert_eq!(normalize_host(input), expected, "{input}");
+        }
     }
 
     #[test]

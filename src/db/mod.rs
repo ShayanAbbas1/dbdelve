@@ -25,7 +25,7 @@ mod postgres;
 mod snowflake;
 mod sqlite;
 
-pub use snowflake::{SnowflakeConfig, account_identifier};
+pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
