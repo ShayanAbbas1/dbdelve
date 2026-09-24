@@ -691,6 +691,12 @@ impl Workspace {
                             }
                         }
                     }
+                    // The relations are new, so what was known about any
+                    // one's columns describes a schema that may no longer
+                    // exist. Here and not in `install_completions`, which the
+                    // routines and every new buffer also reach without the
+                    // relations having changed.
+                    profile.session.completion_columns.borrow_mut().clear();
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
                     cx.notify();
@@ -836,10 +842,6 @@ impl Workspace {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
-        // The catalog is new, so what was known about any relation's columns
-        // describes a schema that may no longer exist.
-        profile.session.completion_columns.borrow_mut().clear();
-
         let provider = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
                 Arc::new(catalog.clone()),
