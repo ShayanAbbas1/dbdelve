@@ -1737,10 +1737,9 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through PG*"]
     fn live_catalog_round_trip() {
-        let catalog = Connection::open(&live_config())
-            .expect("connection should open")
-            .catalog()
-            .expect("catalog should load");
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let mut catalog = connection.catalog().expect("catalog should load");
+        catalog.merge(connection.routines().expect("routines should load"));
         let public = catalog
             .schemas
             .iter()

@@ -1298,7 +1298,9 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
     fn live_catalog_round_trip() {
-        let catalog = live().catalog().expect("catalog should load");
+        let connection = live();
+        let mut catalog = connection.catalog().expect("catalog should load");
+        catalog.merge(connection.routines().expect("routines should load"));
         let schema = catalog
             .schemas
             .iter()
