@@ -2781,8 +2781,8 @@ mod tests {
         assert_eq!(
             routines,
             [
-                ("WITH_VAT", RoutineKind::Function, "(AMOUNT NUMBER)"),
-                ("REFUND", RoutineKind::Procedure, "(ORDER_ID NUMBER)"),
+                ("WITH_VAT", RoutineKind::Function, "AMOUNT NUMBER"),
+                ("REFUND", RoutineKind::Procedure, "ORDER_ID NUMBER"),
             ]
         );
 
