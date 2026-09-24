@@ -146,7 +146,11 @@ pub(crate) fn titlebar(mode: Option<AnyElement>, leading: Vec<AnyElement>) -> im
 /// The card every modal is drawn on. Shared so two panels asking the same kind
 /// of question cannot end up looking like two different applications.
 pub(crate) fn dialog(t: Theme) -> gpui::Div {
+    // `occlude`, or a click on one of its buttons also lands on whatever is
+    // drawn beneath -- a grid header that re-sorts and re-runs, a cell that
+    // moves the selection.
     div()
+        .occlude()
         .w(px(layout::DIALOG_WIDTH))
         .p(px(layout::SPACE_LG))
         .flex()

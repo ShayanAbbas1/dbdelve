@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::session::{StaleEdit, StaleResume};
 
 impl Workspace {
     /// Open the "New row" form over the preview in front, one field per column
@@ -397,6 +398,12 @@ impl Workspace {
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
+        let tab = profile.session.active;
+        if results.read(cx).delegate().editable(row, col)
+            && !self.confirm_stale(StaleResume::Open, cx)
+        {
+            return;
+        }
         if results.update(cx, |table, cx| {
             let opened = table.delegate_mut().begin_edit(row, col);
             cx.notify();
@@ -413,14 +420,26 @@ impl Workspace {
         // an edit target the grid deliberately does not expose: a result dbdelve
         // cannot trace to one table has no editable cell anywhere in the row,
         // and one it can has this column alone refused.
-        let traced = {
-            let table = results.read(cx);
-            (0..table.delegate().columns().len()).any(|col| table.delegate().editable(row, col))
+        // A snapshot written before edit targets were kept has none, so it
+        // would read as untraceable too.
+        let (traced, snapshot) = {
+            let grid = results.read(cx).delegate();
+            (
+                (0..grid.columns().len()).any(|col| grid.editable(row, col)),
+                grid.captured().is_some(),
+            )
         };
         self.note(
-            match traced {
-                true => "This column cannot be edited.".into(),
-                false => "dbdelve cannot tell which table these rows come from.".into(),
+            match (traced, snapshot) {
+                (true, _) => "This column cannot be edited.".into(),
+                (false, true) => match tab {
+                    Tab::Query(_) => {
+                        "These rows are from an earlier session. Run the query again to edit them."
+                            .into()
+                    }
+                    _ => "These rows are from an earlier session. Refresh them to edit.".into(),
+                },
+                (false, false) => "dbdelve cannot tell which table these rows come from.".into(),
             },
             cx,
         );
@@ -470,6 +489,11 @@ impl Workspace {
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
+        if results.read(cx).delegate().editable(row, col)
+            && !self.confirm_stale(StaleResume::Stage(value.clone()), cx)
+        {
+            return;
+        }
         if results.update(cx, |table, cx| {
             let staged = table.delegate_mut().stage(row, col, value);
             cx.notify();
@@ -487,6 +511,89 @@ impl Workspace {
             return;
         }
         self.note("This column cannot be edited.".into(), cx);
+    }
+
+    /// Whether an edit may go ahead on the grid in front, raising the stale-rows
+    /// prompt when it may not. Callers ask only once the grid would otherwise
+    /// take the edit, so the prompt never stands in front of a refusal.
+    fn confirm_stale(&mut self, resume: StaleResume, cx: &mut Context<Self>) -> bool {
+        let Some(profile) = self.profile_mut() else {
+            return false;
+        };
+        let Some(results) = profile.session.active_results().cloned() else {
+            return false;
+        };
+        if !results.read(cx).delegate().unconfirmed() {
+            return true;
+        }
+        if profile.confirmed_stale {
+            results.update(cx, |table, _| table.delegate_mut().confirm_stale());
+            return true;
+        }
+        profile.session.stale_edit = Some(StaleEdit {
+            resume,
+            dont_ask: false,
+        });
+        cx.notify();
+        false
+    }
+
+    pub(crate) fn cancel_stale_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self
+            .profile_mut()
+            .is_some_and(|profile| profile.session.stale_edit.take().is_some());
+        if open {
+            cx.notify();
+        }
+        open
+    }
+
+    pub(crate) fn toggle_stale_dont_ask(&mut self, cx: &mut Context<Self>) {
+        if let Some(profile) = self.profile_mut()
+            && let Some(stale) = &mut profile.session.stale_edit
+        {
+            stale.dont_ask = !stale.dont_ask;
+        }
+        cx.notify();
+    }
+
+    /// Fetch the rows again instead. The edit is dropped: it was aimed at the
+    /// rows being replaced.
+    pub(crate) fn refresh_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_stale_edit(cx);
+        // The statement that produced these rows, not the one under the cursor,
+        // which may be a different statement in the same buffer.
+        let rerun = self.profile().and_then(|profile| {
+            let tab = profile.session.active_query_tab()?;
+            Some((tab.id, tab.last_query.clone()?))
+        });
+        match rerun {
+            Some((id, select)) => self.execute_sql(select, Tab::Query(id), cx),
+            None => self.run_query(&RunQuery, window, cx),
+        }
+    }
+
+    /// Accept the rows as they are and carry on with the edit that asked.
+    pub(crate) fn edit_stale_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(StaleEdit { resume, dont_ask }) = profile.session.stale_edit.take() else {
+            return;
+        };
+        if let Some(results) = profile.session.active_results().cloned() {
+            results.update(cx, |table, _| table.delegate_mut().confirm_stale());
+        }
+        if dont_ask {
+            profile.confirmed_stale = true;
+            self.remember_profiles(cx);
+        }
+        match resume {
+            StaleResume::Open => self.edit_cell(&EditCell, window, cx),
+            StaleResume::Stage(value) => self.stage_value(value, window, cx),
+            StaleResume::Delete => self.delete_row(&DeleteRow, window, cx),
+        }
+        cx.notify();
     }
 
     /// The grid's own commit was refused by the mode. It has nowhere to say so
@@ -549,6 +656,9 @@ impl Workspace {
             );
             return;
         };
+        if !self.confirm_stale(StaleResume::Delete, cx) {
+            return;
+        }
 
         let borrowed: Vec<(&str, &str)> = keys
             .iter()
