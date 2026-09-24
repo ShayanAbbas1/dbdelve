@@ -102,7 +102,7 @@ impl ConnectionForm {
         });
         let host = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Host")
+                .placeholder("Host (optional)")
                 .default_value(value(
                     server
                         .map(|server| server.host.as_str())

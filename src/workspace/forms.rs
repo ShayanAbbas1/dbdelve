@@ -70,15 +70,23 @@ impl Workspace {
                                                 "Connect to a database"
                                             }),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::TEXT_SM))
-                                            .text_color(t.text_muted)
-                                            .child(if editing {
-                                                "Change where this connection points."
-                                            } else {
-                                                "Paste a URL, or fill in the fields."
-                                            }),
+                                    // Snowflake has no connection URL to paste,
+                                    // so a fresh form for it says nothing about
+                                    // one; editing keeps the generic subtitle,
+                                    // which never mentioned a URL either.
+                                    .children(
+                                        (editing || form.engine.fields() != Fields::Account).then(
+                                            || {
+                                                div()
+                                                    .text_size(px(layout::TEXT_SM))
+                                                    .text_color(t.text_muted)
+                                                    .child(if editing {
+                                                        "Change where this connection points."
+                                                    } else {
+                                                        "Paste a URL, or fill in the fields."
+                                                    })
+                                            },
+                                        ),
                                     ),
                             ),
                     )
@@ -125,55 +133,60 @@ impl Workspace {
                                 ),
                         )
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_XS))
+                    // Snowflake has no connection URL: `Engine::fields()` is
+                    // where that is decided, not a match on the engine here.
+                    .when(form.engine.fields() != Fields::Account, |form_div| {
+                        form_div
                             .child(
                                 div()
-                                    .text_size(px(layout::TEXT_SM))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(t.text_muted)
-                                    .child("Connection URL"),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(layout::SPACE_XS))
+                                    .child(
+                                        div()
+                                            .text_size(px(layout::TEXT_SM))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(t.text_muted)
+                                            .child("Connection URL"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(layout::SPACE_SM))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(Input::new(&form.url).w_full()),
+                                            )
+                                            .child(
+                                                icon_button(
+                                                    "apply-connection-url",
+                                                    icon::FILL_DOWN,
+                                                    Tone::Primary,
+                                                    Control::Standard,
+                                                    t,
+                                                )
+                                                .tooltip("Fill the fields from this URL")
+                                                .on_click(cx.listener(Self::apply_connection_url)),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap(px(layout::SPACE_SM))
+                                    .child(hairline())
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(Input::new(&form.url).w_full()),
+                                            .text_size(px(layout::TEXT_XS))
+                                            .text_color(t.text_faint)
+                                            .child("OR"),
                                     )
-                                    .child(
-                                        icon_button(
-                                            "apply-connection-url",
-                                            icon::FILL_DOWN,
-                                            Tone::Primary,
-                                            Control::Standard,
-                                            t,
-                                        )
-                                        .tooltip("Fill the fields from this URL")
-                                        .on_click(cx.listener(Self::apply_connection_url)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(layout::SPACE_SM))
-                            .child(hairline())
-                            .child(
-                                div()
-                                    .text_size(px(layout::TEXT_XS))
-                                    .text_color(t.text_faint)
-                                    .child("OR"),
+                                    .child(hairline()),
                             )
-                            .child(hairline()),
-                    )
+                    })
                     .child(self.form_field("Display name", &form.name, cx))
                     .child(
                         div()
@@ -223,7 +236,7 @@ impl Workspace {
                             .child(self.form_field("Role", &form.role, cx))
                             // Last, because it is nearly always blank: the
                             // account names its own host.
-                            .child(self.form_field("Host (optional)", &form.host, cx))
+                            .child(self.form_field("Host", &form.host, cx))
                     }))
                     .children((form.engine.fields() == Fields::Server).then(|| {
                         div()
