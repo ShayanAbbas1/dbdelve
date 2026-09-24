@@ -1285,6 +1285,27 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             _ => Verdict::WRITE,
         },
 
+        // Replacing an object that holds data drops that data first: `CREATE OR
+        // REPLACE SCHEMA s` empties every table in `s`, and `INSERT OVERWRITE`
+        // truncates before it inserts. A replaced view, function or procedure
+        // holds no rows, so those stay with the object they create.
+        Statement::CreateTable(create) if create.or_replace => {
+            Verdict::destroys(Destructive::Drop)
+        }
+        Statement::CreateSchema {
+            or_replace: true, ..
+        }
+        | Statement::CreateDatabase {
+            or_replace: true, ..
+        }
+        // An internal stage holds the files put into it.
+        | Statement::CreateStage {
+            or_replace: true, ..
+        } => Verdict::destroys(Destructive::Drop),
+        Statement::Insert(insert) if insert.overwrite => {
+            Verdict::destroys(Destructive::Truncate)
+        }
+
         Statement::Insert { .. }
         | Statement::Update { .. }
         | Statement::CreateTable { .. }
@@ -2838,6 +2859,75 @@ mod tests {
             classify(Engine::Postgres, "SELECT * FROM t").mode,
             Mode::ReadOnly
         );
+    }
+
+    /// Every one of these parses as the variant a plain write does, one flag
+    /// apart, and destroys what the object held before.
+    #[test]
+    fn classify_calls_replacing_a_data_holding_object_destructive() {
+        let cases: &[(Engine, &str, Destructive)] = &[
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE TABLE t (a int)",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE TABLE t AS SELECT 1 AS a",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE SCHEMA s",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE DATABASE d",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "CREATE OR REPLACE STAGE st",
+                Destructive::Drop,
+            ),
+            (
+                Engine::Snowflake,
+                "INSERT OVERWRITE INTO t SELECT * FROM u",
+                Destructive::Truncate,
+            ),
+        ];
+        for (engine, sql, kind) in cases {
+            assert_eq!(
+                classify(*engine, sql),
+                Verdict {
+                    mode: Mode::Full,
+                    destructive: vec![*kind],
+                },
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "CREATE OR REPLACE VIEW v AS SELECT 1 AS a",
+            "CREATE TABLE t (a int)",
+            "CREATE SCHEMA s",
+            "INSERT INTO t SELECT * FROM u",
+        ] {
+            assert_eq!(classify(Engine::Snowflake, sql), Verdict::WRITE, "{sql}");
+        }
+        for engine in [Engine::Postgres, Engine::MySql] {
+            assert_eq!(
+                classify(engine, "CREATE OR REPLACE VIEW v AS SELECT 1"),
+                Verdict::WRITE,
+                "{engine:?}"
+            );
+            assert_eq!(
+                classify(engine, "CREATE TABLE t (a int)"),
+                Verdict::WRITE,
+                "{engine:?}"
+            );
+        }
     }
 
     /// One AST, three dialects. Two statements genuinely differ and are asserted as
