@@ -532,7 +532,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(None, Vec::new()))
+                .child(titlebar(t, None, Vec::new()))
                 .child(
                     div()
                         .flex_1()
@@ -650,6 +650,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::sort_column))
             .on_action(cx.listener(Self::set_row_limit))
             .on_action(cx.listener(Self::refresh_active_relation))
+            .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::previous_page))
             .on_action(cx.listener(Self::clear_filter))
@@ -692,9 +693,15 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .child(titlebar(
+                t,
                 Some({
                     let mode = profile.mode;
-                    let silenced = profile.confirmed.clone();
+                    let silenced = profile
+                        .confirmed
+                        .iter()
+                        .map(|kind| kind.label())
+                        .chain(profile.confirmed_stale.then_some("stale rows"))
+                        .collect::<Vec<_>>();
                     ui::mode_pill(t, mode)
                         .dropdown_menu(move |menu, _, _| {
                             let menu = Mode::ALL.into_iter().fold(menu, |menu, option| {
@@ -715,11 +722,7 @@ impl Render for Workspace {
                                 menu.separator().menu(
                                     format!(
                                         "Reset silenced confirmations ({})",
-                                        silenced
-                                            .iter()
-                                            .map(|kind| kind.label())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
+                                        silenced.join(", ")
                                     ),
                                     Box::new(ResetConfirmations),
                                 )
@@ -839,6 +842,7 @@ impl Render for Workspace {
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))
+            .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
             .children(self.render_palette(cx))
     }

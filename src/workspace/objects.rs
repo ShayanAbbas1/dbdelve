@@ -488,14 +488,13 @@ impl Workspace {
         let Some(snapshot) = store::read_grid(&profile_id, &key) else {
             return;
         };
-        let Some(results) = self
+        let Some((results, mode)) = self
             .profile()
-            .and_then(|profile| profile.session.results(tab))
-            .cloned()
+            .and_then(|profile| Some((profile.session.results(tab)?.clone(), profile.mode)))
         else {
             return;
         };
-        show_snapshot(&results, &snapshot, cx);
+        show_snapshot(&results, &snapshot, mode, cx);
         let preview_rows = self.settings.preview_rows;
         let Some(profile) = self.profile_mut() else {
             return;

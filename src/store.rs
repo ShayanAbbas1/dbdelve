@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Cell, RelationKind};
+use crate::db::{Cell, EditTarget, RelationKind};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -235,6 +234,13 @@ pub struct StoredGrid {
     pub showing_structure: bool,
     #[serde(default)]
     pub captured: u64,
+    /// Where the rows can be written back to, and each column's type -- the
+    /// type is what keeps a binary column read-only. Absent from a snapshot
+    /// written before these were kept, which reads back as not editable.
+    #[serde(default)]
+    pub edit: Option<EditTarget>,
+    #[serde(default)]
+    pub data_types: Vec<Option<String>>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -305,8 +311,8 @@ struct ProfileFile {
 
 /// The profile list and the id of the one that was last in front. A missing
 /// file is the first run, and reads as an empty list. Every other failure is
-/// reported, a missing `HOME` included -- `save_profiles` refuses on that too,
-/// and an empty list here is what the next save writes back.
+/// reported, an unreachable data directory included -- `save_profiles` refuses
+/// on that too, and an empty list here is what the next save writes back.
 pub fn load_profiles() -> Result<Restored, String> {
     let path = dbdelve_directory()?.join(PROFILES_FILE);
     // A file we could not read is not renamed: nothing is recovered by moving
@@ -414,9 +420,9 @@ pub fn delete_password(profile_id: &str) {
     }
 }
 
-/// Keychain Services on macOS, Secret Service on Linux. The service is the
-/// variant name and the account the profile id, which is what keeps a dev
-/// build's passwords apart from a release build's.
+/// Keychain Services on macOS, Secret Service on Linux, Credential Manager on
+/// Windows. The service is the variant name and the account the profile id,
+/// which is what keeps a dev build's passwords apart from a release build's.
 fn keychain_entry(profile_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(&variant_name()?, profile_id)
         .map_err(|error| format!("Could not reach the keychain: {error}"))
@@ -632,6 +638,8 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             filter: grid.filter.clone(),
             showing_structure: grid.showing_structure,
             captured: grid.captured,
+            edit: grid.edit.clone(),
+            data_types: grid.data_types.clone(),
         };
         &capped
     } else {
@@ -772,24 +780,44 @@ fn variant_name() -> Result<String, String> {
 }
 
 /// macOS keeps Application Support, where every install before this already
-/// has its data. Everywhere else follows the XDG base directory spec.
+/// has its data. Linux follows the XDG base directory spec. Windows uses the
+/// roaming profile, which follows the user the way Application Support does.
 fn dbdelve_directory() -> Result<PathBuf, String> {
-    let variant = variant_name()?;
-    #[cfg(target_os = "macos")]
-    let root = home()?.join("Library/Application Support");
-    #[cfg(not(target_os = "macos"))]
-    let root = match std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        Some(data_home) => PathBuf::from(data_home),
-        None => home()?.join(".local/share"),
-    };
-    Ok(root.join(variant))
+    Ok(data_root()?.join(variant_name()?))
 }
 
-fn home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
+fn data_root() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?.join("Library/Application Support"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(appdata));
+        }
+        Ok(home()?.join("AppData").join("Roaming"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Ok(
+            match std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+                Some(data_home) => PathBuf::from(data_home),
+                None => home()?.join(".local/share"),
+            },
+        )
+    }
+}
+
+pub(crate) fn home() -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    let (key, value) = ("USERPROFILE", std::env::var_os("USERPROFILE"));
+    #[cfg(not(target_os = "windows"))]
+    let (key, value) = ("HOME", std::env::var_os("HOME"));
+    value
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| "HOME is not set.".to_string())
+        .ok_or_else(|| format!("{key} is not set."))
 }
 
 fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
@@ -860,9 +888,21 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
 /// so `0600` holds regardless of whether `path` is being created or replaced.
 /// `OpenOptions::mode` only sets this at creation, which is not enough for a
 /// file that already existed with looser permissions from before this rule.
+///
+/// Windows has no mode bits. The file is created under the user's roaming
+/// profile, and that directory's ACL is what keeps other users out.
 fn secure(path: &Path) -> Result<(), String> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("Could not set permissions on {}: {error}", path.display()))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not set permissions on {}: {error}", path.display()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -872,7 +912,8 @@ mod tests {
 
     /// `HOME` is process-wide and the tests run in threads, so the ones that
     /// touch the disk take turns and each gets its own directory to be the
-    /// whole of dbdelve's storage for the length of the test.
+    /// whole of dbdelve's storage for the length of the test. Windows reads
+    /// `APPDATA` instead, so that is pointed at the same temporary root.
     fn with_home<T>(body: impl FnOnce() -> T) -> T {
         static LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
 
@@ -886,11 +927,20 @@ mod tests {
         // `XDG_DATA_HOME` goes with it: left set, it would point the storage
         // outside the test home on every platform that honours it.
         let previous_data_home = std::env::var_os("XDG_DATA_HOME");
+        #[cfg(target_os = "windows")]
+        let previous_appdata = std::env::var_os("APPDATA");
+        #[cfg(target_os = "windows")]
+        let previous_profile = std::env::var_os("USERPROFILE");
         // SAFETY: the lock above is what makes this the only thread reading or
         // writing the environment for as long as `body` runs.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::remove_var("XDG_DATA_HOME");
+            #[cfg(target_os = "windows")]
+            {
+                std::env::set_var("USERPROFILE", &home);
+                std::env::set_var("APPDATA", home.join("AppData").join("Roaming"));
+            }
         }
         let outcome = body();
         unsafe {
@@ -901,6 +951,17 @@ mod tests {
             if let Some(value) = previous_data_home {
                 std::env::set_var("XDG_DATA_HOME", value);
             }
+            #[cfg(target_os = "windows")]
+            {
+                match previous_appdata {
+                    Some(value) => std::env::set_var("APPDATA", value),
+                    None => std::env::remove_var("APPDATA"),
+                }
+                match previous_profile {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+            }
         }
         let _ = fs::remove_dir_all(&home);
         outcome
@@ -909,11 +970,13 @@ mod tests {
     /// What `dbdelve_directory` appends to the home the test set, which is
     /// the platform's data directory and not one fixed path.
     fn data_path(variant: &str) -> PathBuf {
-        if cfg!(target_os = "macos") {
-            PathBuf::from("Library/Application Support").join(variant)
-        } else {
-            PathBuf::from(".local/share").join(variant)
-        }
+        #[cfg(target_os = "macos")]
+        let relative = PathBuf::from("Library/Application Support");
+        #[cfg(target_os = "windows")]
+        let relative = PathBuf::from("AppData").join("Roaming");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let relative = PathBuf::from(".local/share");
+        relative.join(variant)
     }
 
     fn ids(names: &[&str]) -> Vec<String> {
@@ -1625,14 +1688,21 @@ open_objects = []
             );
 
             // The rewrite goes through `write_file`, so the mode the appends
-            // set has to survive it.
-            let mode = fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
+            // set has to survive it. Windows has no mode bits to check.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_written_config_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
         // Profiles, saved queries and the scratch buffer all hold connection
         // settings and go through this one function, so this is the one place
         // that has to prove the permission rather than every caller.
@@ -1844,6 +1914,8 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 0,
+                edit: None,
+                data_types: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -1888,6 +1960,13 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 1_700_000_000,
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "accounts".into(),
+                    columns: vec![Some("id".into()), None],
+                    keys: vec![0],
+                }),
+                data_types: vec![Some("int4".into()), None],
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -1914,6 +1993,8 @@ open_objects = []
                 filter: String::new(),
                 showing_structure: false,
                 captured: 0,
+                edit: None,
+                data_types: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -1958,6 +2039,8 @@ open_objects = []
                 filter: r#""state" = 'ok'"#.into(),
                 showing_structure: false,
                 captured: 1_700_000_000,
+                edit: None,
+                data_types: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -1983,6 +2066,19 @@ open_objects = []
 
         assert_eq!(grid.filter, "");
         assert_eq!(grid.limit, None);
+    }
+
+    #[test]
+    fn a_snapshot_written_by_0_1_6_reads_back_with_no_edit_target() {
+        // Byte for byte what `ResultGrid::stored` wrote before snapshots kept
+        // an edit target. Without one the restored grid is read-only, which is
+        // what it was in the build that wrote it.
+        let older = r#"{"columns":["id","name"],"rows":[["1",null]],"total_rows":1,"sort":[[0,true]],"order_by":[["created_at",false]],"widths":[80.0,160.0],"active":[0,1],"last_query":"select * from accounts","limit":null,"filter":"","showing_structure":false,"captured":1700000000}"#;
+        let grid: StoredGrid = serde_json::from_str(older).expect("a 0.1.6 grid must decode");
+
+        assert_eq!(grid.edit, None);
+        assert!(grid.data_types.is_empty());
+        assert_eq!(grid.rows, vec![vec![Some("1".to_string()), None]]);
     }
 
     #[test]

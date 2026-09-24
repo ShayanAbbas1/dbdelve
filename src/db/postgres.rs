@@ -249,7 +249,8 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let host = match parsed.get_hosts() {
         [Host::Tcp(host)] => host.clone(),
         [] => return Err("Connection URL does not contain a host.".into()),
-        [_] => return Err("Connection URL contains a Unix socket host.".into()),
+        #[cfg(unix)]
+        [Host::Unix(_)] => return Err("Connection URL contains a Unix socket host.".into()),
         _ => return Err("Connection URL contains more than one host.".into()),
     };
     let database = parsed

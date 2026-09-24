@@ -1,8 +1,8 @@
 # DBDelve
 
-A modern and performant database client for Postgres, MySQL and SQLite. macOS
-and Linux. Written in Rust with GPUI. Buttery smooth, small memory footprint,
-fast navigation and stays performant on large datasets.
+A modern, performant, cross-platform database client for Postgres, MySQL and
+SQLite, on macOS, Linux and Windows. Written in Rust with GPUI. Buttery smooth,
+small memory footprint, fast navigation and stays performant on large datasets.
 
 > Early days. Everything listed below works today.
 
@@ -86,6 +86,15 @@ Applications; the quarantine step doesn't apply here.
 
 ### Linux
 
+Install from the AUR:
+```sh
+yay -S dbdelve-bin
+```
+
+It's maintained by
+[@0PandaDEV](https://github.com/0PandaDEV), not by this project. Thanks for
+packaging it!
+
 A tarball or an AppImage, x86_64 or aarch64, built on Ubuntu 22.04 — that is
 the oldest glibc either will run against, so anything at least that new is
 fine. X11 and Wayland both work, and you need a Vulkan or OpenGL driver, a
@@ -146,6 +155,23 @@ to `$XDG_DATA_HOME/dbdelve`, or `~/.local/share/dbdelve`.
 Chords are the same as macOS with Ctrl in place of Cmd. A `profiles.toml`
 carried over from a Mac keeps its `cmd-` overrides, which mean Super on Linux —
 rebind them in Settings.
+
+### Windows
+
+A zip, x86_64, from [the latest release][releases]. Unzip it and run
+`dbdelve.exe`. Nothing is installed. There is no installer.
+
+To build it yourself instead, the build needs the MSVC toolchain and the
+Windows SDK, which is what compiles the bundled SQLite and GPUI's shaders:
+
+```sh
+cargo build --release
+```
+
+The binary is `target\release\dbdelve.exe`. Connections and query history go
+to `%APPDATA%\dbdelve`. Passwords go in Credential Manager. The window draws
+its own title bar, buttons included. Chords are the same as macOS with Ctrl in
+place of Cmd.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 

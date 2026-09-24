@@ -1,0 +1,229 @@
+name: release
+
+# Run from the Actions tab. Unticked, it builds every asset and publishes
+# nothing -- the point is finding out whether they build. Ticked, it tags the
+# commit as v<Cargo.toml version>, publishes the release once every asset
+# exists, and repoints the Homebrew cask. A version with a hyphen
+# (0.2.0-rc.1) is published as a pre-release, may come from any branch, and
+# leaves the cask alone.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the release (unticked builds only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      # Before any build, so a release that cannot go out fails in seconds
+      # instead of after every asset has been built.
+      - id: version
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          PRERELEASE=false
+          [[ "$VERSION" == *-* ]] && PRERELEASE=true
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          [[ "$PUBLISH" == true ]] || exit 0
+          # An existing tag means Cargo.toml was not bumped since the last
+          # release, and publishing would reuse a tag on a different commit.
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/v$VERSION")" ]]; then
+            echo "v$VERSION is already tagged -- bump the version in Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$PRERELEASE" == false && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "$VERSION is a stable version -- publish it from main" >&2
+            exit 1
+          fi
+        env:
+          PUBLISH: ${{ inputs.publish }}
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        # 22.04, never ubuntu-latest: glibc is forward-compatible only, so a
+        # binary linked against a newer runner's glibc will not start on Ubuntu
+        # 22.04 or on Debian stable. The oldest runner we build on is the
+        # oldest system the release runs on.
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same list the README tells a Linux user to install before building
+      # from source. If CI needs something more, the README is wrong too.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libdbus-1-dev
+
+      - run: dev/package-linux.sh
+
+      # Second, not instead: the tarball installs a desktop entry and icons,
+      # the AppImage is one file that runs without installing anything, and
+      # the release carries both. Both come off the same `cargo build
+      # --release`, so this one is the packaging step alone.
+      - run: dev/package-appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.runner }}
+          path: |
+            target/linux/dbdelve-*.tar.gz
+            target/linux/dbdelve-*.AppImage
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    # arm64, which is all the cask installs on.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ad-hoc, deliberately: a Developer ID is the only identity Gatekeeper
+      # would trust, and a signature from an issuer the user does not trust
+      # reads worse than an anonymous one. The price is that the hash moves
+      # every release, so the Keychain asks once more after each update.
+      - run: dev/bundle.sh
+        env:
+          DBDELVE_CHANNEL: release
+          DBDELVE_SIGN_ID: "-"
+
+      # A symlink beside the app is the whole of the drag-to-install convention.
+      - run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          mkdir -p target/dmg
+          cp -R target/DBDelve.app target/dmg/
+          ln -s /Applications target/dmg/Applications
+          hdiutil create -volname "DBDelve $VERSION" -srcfolder target/dmg \
+            -ov -format UDZO "target/DBDelve-$VERSION.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/DBDelve-*.dmg
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
+      # and rc.exe (the icon resource). If CI needs something more, the
+      # README is wrong too.
+      - run: powershell -File dev/package-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/windows/dbdelve-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [version, linux, macos, windows]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Every file the release is supposed to carry is named here, so a build
+      # that quietly lost one fails before anything goes public rather than
+      # publishing a release that is missing it.
+      - run: |
+          for ASSET in "DBDelve-$VERSION.dmg" \
+            "dbdelve-$VERSION-linux-x86_64.tar.gz" "dbdelve-$VERSION-x86_64.AppImage" \
+            "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
+            "dbdelve-$VERSION-windows-x86_64.zip"; do
+            if [[ ! -f "dist/$ASSET" ]]; then
+              echo "no $ASSET among the built assets" >&2
+              ls dist >&2
+              exit 1
+            fi
+          done
+          PRERELEASE_FLAG=()
+          [[ "$PRERELEASE" == true ]] && PRERELEASE_FLAG=(--prerelease)
+          # --target creates the tag on the commit that was built. A tag made
+          # with github.token starts no other workflow run.
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" \
+            --title "DBDelve $VERSION" --generate-notes "${PRERELEASE_FLAG[@]}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+
+  cask:
+    needs: [version, release]
+    # A pre-release is for testing the pipeline, and Homebrew users would get it
+    # as an ordinary update.
+    if: needs.version.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+
+      # TAP_TOKEN is a fine-grained PAT with contents: write on the tap alone.
+      # github.token cannot push to another repository.
+      - uses: actions/checkout@v4
+        with:
+          repository: ShayanAbbas1/homebrew-dbdelve
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - run: |
+          SHA="$(sha256sum "DBDelve-$VERSION.dmg" | cut -d' ' -f1)"
+          mkdir -p tap/Casks
+          # Rewritten whole rather than patched in place: two substitutions that
+          # have to agree are two chances for the version and the checksum to
+          # drift apart.
+          cat > tap/Casks/dbdelve.rb <<CASK
+          cask "dbdelve" do
+            version "$VERSION"
+            sha256 "$SHA"
+
+            url "https://github.com/ShayanAbbas1/dbdelve/releases/download/v#{version}/DBDelve-#{version}.dmg"
+            name "DBDelve"
+            desc "Native SQL client"
+            homepage "https://github.com/ShayanAbbas1/dbdelve"
+
+            depends_on arch: :arm64
+            depends_on macos: :monterey
+
+            app "DBDelve.app"
+
+            # Lowercase: the app writes "dbdelve", and a zap spelled any other way
+            # silently removes nothing. Saved passwords live in the Keychain, which zap
+            # cannot reach at all.
+            zap trash: "~/Library/Application Support/dbdelve"
+          end
+          CASK
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/dbdelve.rb
+          git commit -m "DBDelve $VERSION"
+          git push
+        env:
+          VERSION: ${{ needs.version.outputs.version }}

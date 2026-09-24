@@ -1,6 +1,6 @@
 [package]
 name = "dbdelve"
-version = "0.1.5"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 description = "A native SQL client"
@@ -165,7 +165,8 @@ sqlparser = { version = "=0.63.0", default-features = false, features = ["std"] 
 sqlformat = { version = "=0.5.0", default-features = false }
 
 # Profile passwords live in the platform keychain, never in profiles.toml:
-# Keychain Services on macOS, Secret Service (gnome-keyring, KWallet) on Linux.
+# Keychain Services on macOS, Secret Service (gnome-keyring, KWallet) on Linux,
+# Credential Manager on Windows.
 # The `v1` default feature is the whole API this needs, and its Apple store
 # writes the same generic-password items security-framework did, so passwords
 # saved by an earlier build still read back.
@@ -178,12 +179,18 @@ icondata_core = "=0.1.0"
 # -- silently, through a `log::warn!` nothing here is listening to.
 # x11 and wayland: gpui-pre-platform enables neither by default, and the Linux
 # backend panics on the first frame unless at least one is on. Both are inert
-# in a macOS build -- they forward to gpui_linux, which is not in that graph.
+# on macOS and Windows -- they forward to gpui_linux, which is not in that
+# graph. font-kit is the macOS text system; Windows uses DirectWrite either way.
 gpui_platform = { version = "=0.3.5", package = "gpui-pre-platform", features = [
     "font-kit",
     "x11",
     "wayland",
 ] }
+
+# Explorer shows the icon compiled into the .exe. The resource compiler is
+# the Windows SDK's; macOS and Linux never run this build script's embed.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "=0.1.31"
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
 # an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are

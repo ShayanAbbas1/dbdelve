@@ -44,7 +44,15 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
         .map(|(_, rest)| rest)
         .ok_or_else(|| "Connection URL does not name a database file.".to_string())?;
     let path = rest.strip_prefix("//").unwrap_or(rest);
-    let decoded = percent_decoded(path)?;
+    let mut decoded = percent_decoded(path)?;
+    // `sqlite:///C:/a.db` is the standard spelling of a Windows path, and the
+    // slash before the drive is the URL's, not the path's. Stripped on every
+    // platform: a Unix path starting `/C:/` is not one anyone means.
+    if let [b'/', drive, b':', ..] = decoded.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
+        decoded.remove(0);
+    }
 
     if decoded.is_empty() {
         return Err("Connection URL does not name a database file.".into());
@@ -928,6 +936,9 @@ SELECT count(*) FROM forever
             ("sqlite:./dev/dbdelve_dev.db", "./dev/dbdelve_dev.db"),
             ("file:///tmp/dbdelve.db", "/tmp/dbdelve.db"),
             ("sqlite:///tmp/my%20dbdelve.db", "/tmp/my dbdelve.db"),
+            ("sqlite:///C:/Users/me/dbdelve.db", "C:/Users/me/dbdelve.db"),
+            ("sqlite://C:/Users/me/dbdelve.db", "C:/Users/me/dbdelve.db"),
+            ("file:///c:/dbdelve.db", "c:/dbdelve.db"),
         ] {
             assert_eq!(path_from_url(url).unwrap(), expected, "{url}");
         }

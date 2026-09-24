@@ -1,0 +1,98 @@
+name: ci
+
+# The push to main is what gives a new PR a cache to start from: a PR can only
+# restore caches saved by itself or by the default branch, so without it every
+# PR's first run compiled every dependency from scratch.
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "assets/windows/**"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "assets/windows/**"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libdbus-1-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  tests:
+    # Not 22.04: its sqlite3 (3.37) predates unhex(), which the dev seed uses.
+    runs-on: ubuntu-24.04
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "55432"
+      PGDATABASE: dbdelve_dev
+      PGUSER: dbdelve
+      PGPASSWORD: dbdelve
+      # Lowercase prefix on purpose: it is what the live_ tests read.
+      dbdelve_MYSQL_URL: mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
+      dbdelve_SQLITE_PATH: ${{ github.workspace }}/dev/dbdelve_dev.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Started before the apt step so the databases boot while it runs.
+      - run: docker compose up -d
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libdbus-1-dev sqlite3
+      - run: sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
+      - run: docker compose up -d --wait
+      - run: cargo test -- --include-ignored
+
+  macos-lint:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  windows-lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # Tests too, not only the build: the storage tests are what exercise the
+  # APPDATA paths, and no other job runs them on Windows.
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo test

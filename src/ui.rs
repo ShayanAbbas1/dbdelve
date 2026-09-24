@@ -98,14 +98,20 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
         )
 }
 
+/// macOS draws its window buttons over a transparent titlebar, and Windows
+/// draws none at all into one, so both leave the strip to dbdelve. Linux has no
+/// compositor that will draw buttons into it, so it keeps the system bar.
+pub(crate) const CLIENT_TITLEBAR: bool = !cfg!(target_os = "linux");
+
 /// dbdelve's own titlebar, drawn where the platform's would be.
 ///
-/// The system titlebar is transparent (see `main`), so this row is what runs to
-/// the top of the window and the window buttons are drawn over its leading
-/// inset. It is also the drag handle the platform no longer provides — which
-/// is why the drag region is a child covering what is left of the row rather
-/// than the row itself: a drag region swallows the clicks a button needs, so
-/// anything interactive goes in `leading`, outside it.
+/// On macOS and Windows the system titlebar is transparent (see `main`), so
+/// this row is what runs to the top of the window. It is also the drag handle
+/// the platform no longer provides — which is why the drag region is a child
+/// covering what is left of the row rather than the row itself: a drag region
+/// swallows the clicks a button needs, so anything interactive goes in
+/// `leading`, outside it. macOS draws its window buttons over the row's
+/// leading inset; Windows gets `caption_buttons` at the trailing end.
 ///
 /// On Linux the window wears a real system titlebar instead, so this row keeps
 /// only the job the system one cannot do — saying, through the connection
@@ -113,6 +119,7 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
 /// for buttons that are drawn above rather than over it, and moving the window
 /// belongs to the bar the compositor drew.
 pub(crate) fn titlebar(
+    t: Theme,
     mode: Option<AnyElement>,
     leading: Vec<AnyElement>,
 ) -> impl IntoElement {
@@ -123,16 +130,19 @@ pub(crate) fn titlebar(
         .flex_shrink_0()
         .items_center()
         .gap(px(layout::SPACE_MD))
-        .pl(px(match cfg!(target_os = "linux") {
-            true => layout::SPACE_MD,
-            false => layout::TITLEBAR_LEADING_INSET,
+        .pl(px(if cfg!(target_os = "macos") {
+            layout::TITLEBAR_LEADING_INSET
+        } else {
+            layout::SPACE_MD
         }))
-        .pr(px(layout::SPACE_MD))
+        .when(!cfg!(target_os = "windows"), |row| {
+            row.pr(px(layout::SPACE_MD))
+        })
         .children(leading)
         .child(
             div()
                 .id("titlebar")
-                .when(!cfg!(target_os = "linux"), |strip| {
+                .when(CLIENT_TITLEBAR, |strip| {
                     strip
                         .window_control_area(gpui::WindowControlArea::Drag)
                         .on_double_click(|_, window, _| window.titlebar_double_click())
@@ -144,12 +154,64 @@ pub(crate) fn titlebar(
                 .gap(px(layout::SPACE_SM))
                 .children(mode),
         )
+        .when(cfg!(target_os = "windows"), |row| {
+            row.child(caption_buttons(t))
+        })
+}
+
+/// Minimise, maximise and close, for Windows, which draws none into a
+/// transparent titlebar. Each is only marked with its control area: Windows
+/// hit-tests it as its own caption button, so the click, the snap-layout flyout
+/// on maximise and closing the window stay the system's.
+///
+/// ponytail: one square for maximise whether or not the window already is;
+/// Windows' restore glyph is two, and `window.is_maximized()` picks it if that
+/// ever reads wrong.
+fn caption_buttons(t: Theme) -> impl IntoElement {
+    let button = |id: &'static str, path: &'static str, area, hover: gpui::Hsla| {
+        div()
+            .id(id)
+            .w(px(layout::TITLEBAR_HEIGHT * 1.25))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .window_control_area(area)
+            .hover(move |style| style.bg(hover))
+            .child(icon(path).size(px(layout::ICON_SIZE)).text_color(t.text))
+    };
+    div()
+        .h_full()
+        .flex()
+        .flex_shrink_0()
+        .child(button(
+            "minimize",
+            icon::MINIMIZE,
+            gpui::WindowControlArea::Min,
+            t.element_hover.into(),
+        ))
+        .child(button(
+            "maximize",
+            icon::MAXIMIZE,
+            gpui::WindowControlArea::Max,
+            t.element_hover.into(),
+        ))
+        .child(button(
+            "close",
+            icon::CLOSE_WINDOW,
+            gpui::WindowControlArea::Close,
+            t.danger.into(),
+        ))
 }
 
 /// The card every modal is drawn on. Shared so two panels asking the same kind
 /// of question cannot end up looking like two different applications.
 pub(crate) fn dialog(t: Theme) -> gpui::Div {
+    // `occlude`, or a click on one of its buttons also lands on whatever is
+    // drawn beneath -- a grid header that re-sorts and re-runs, a cell that
+    // moves the selection.
     div()
+        .occlude()
         .w(px(layout::DIALOG_WIDTH))
         .p(px(layout::SPACE_LG))
         .flex()
