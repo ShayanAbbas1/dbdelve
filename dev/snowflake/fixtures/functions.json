@@ -1,0 +1,103 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 97
+    } ],
+    "rowType" : [ {
+      "name" : "schema_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "FUNCTIONS",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "routine_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "FUNCTIONS",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "routine_kind",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 32,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 8,
+      "type" : "text"
+    }, {
+      "name" : "identity_arguments",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "result_type",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "language",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "definition",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["SALES","WITH_VAT","function","(AMOUNT NUMBER)","NUMBER(10,2)","SQL","amount * 1.21"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000021?requestId=00000000-0000-0000-0000-000000000022",
+  "requestId" : "00000000-0000-0000-0000-000000000022",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000021",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284728604
+}

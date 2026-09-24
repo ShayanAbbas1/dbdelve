@@ -1,0 +1,32 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 57
+    } ],
+    "rowType" : [ {
+      "name" : "multiple statement execution",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : null,
+      "byteLength" : 134217728,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["Multiple statements executed successfully."] ],
+  "code" : "090001",
+  "statementHandles" : [ "00000000-0000-0000-0000-000000000010", "00000000-0000-0000-0000-000000000011" ],
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000009?requestId=00000000-0000-0000-0000-000000000012",
+  "requestId" : "00000000-0000-0000-0000-000000000012",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000009",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284318989
+}

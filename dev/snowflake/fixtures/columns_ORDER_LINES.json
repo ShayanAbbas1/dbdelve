@@ -1,0 +1,70 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 4,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 4,
+      "uncompressedSize" : 143
+    } ],
+    "rowType" : [ {
+      "name" : "column_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "COLUMNS",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "data_type",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : true,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "nullable",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 12,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 3,
+      "type" : "text"
+    }, {
+      "name" : "column_default",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "precision" : null,
+      "byteLength" : 134217728,
+      "scale" : null,
+      "nullable" : false,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["ORDER_ID","number(38,0)","no",""],
+["LINE_NO","number(38,0)","no",""],
+["SKU","varchar","yes",""],
+["QTY","number(38,0)","yes",""] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000025?requestId=00000000-0000-0000-0000-000000000026",
+  "requestId" : "00000000-0000-0000-0000-000000000026",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000025",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284734409
+}

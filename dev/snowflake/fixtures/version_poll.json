@@ -1,0 +1,31 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 13
+    } ],
+    "rowType" : [ {
+      "name" : "CURRENT_VERSION()",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : true,
+      "scale" : null,
+      "byteLength" : 134217728,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["10.34.101"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000001?requestId=00000000-0000-0000-0000-000000000002",
+  "requestId" : "00000000-0000-0000-0000-000000000002",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000001",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284772452
+}

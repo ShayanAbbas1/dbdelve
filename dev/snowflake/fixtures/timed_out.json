@@ -1,0 +1,6 @@
+{
+  "code" : "000630",
+  "message" : "Statement reached its statement or warehouse timeout of 3 second(s) and was canceled.",
+  "sqlState" : "57014",
+  "statementHandle" : null
+}

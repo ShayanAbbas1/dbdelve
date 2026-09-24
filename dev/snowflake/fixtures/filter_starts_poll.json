@@ -1,0 +1,32 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 2,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 2,
+      "uncompressedSize" : 33
+    } ],
+    "rowType" : [ {
+      "name" : "label",
+      "database" : "",
+      "schema" : "",
+      "table" : "SYS$_VIEW_60",
+      "collation" : null,
+      "byteLength" : 28,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 7,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["percent"],
+["plain"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000056?requestId=00000000-0000-0000-0000-000000000057",
+  "requestId" : "00000000-0000-0000-0000-000000000057",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000056",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284744775
+}

@@ -1,0 +1,59 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 5,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 5,
+      "uncompressedSize" : 169
+    } ],
+    "rowType" : [ {
+      "name" : "schema_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "TABLES",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "relation_name",
+      "database" : "DBDELVE_TEST",
+      "schema" : "INFORMATION_SCHEMA",
+      "table" : "TABLES",
+      "collation" : null,
+      "byteLength" : 134217728,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 134217728,
+      "type" : "text"
+    }, {
+      "name" : "relation_kind",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "byteLength" : 68,
+      "nullable" : false,
+      "scale" : null,
+      "precision" : null,
+      "length" : 17,
+      "type" : "text"
+    } ]
+  },
+  "data" : [ ["PUBLIC","PEOPLE","table"],
+["SALES","CUSTOMERS","table"],
+["SALES","ORDERS","table"],
+["SALES","ORDER_LINES","table"],
+["SALES","REVENUE_BY_COUNTRY","view"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000019?requestId=00000000-0000-0000-0000-000000000020",
+  "requestId" : "00000000-0000-0000-0000-000000000020",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000019",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284726202
+}

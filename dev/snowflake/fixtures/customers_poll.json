@@ -1,0 +1,129 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 3,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 3,
+      "uncompressedSize" : 546
+    } ],
+    "rowType" : [ {
+      "name" : "ID",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : false,
+      "scale" : 0,
+      "precision" : 38,
+      "length" : null,
+      "type" : "fixed"
+    }, {
+      "name" : "NAME",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : 67108864,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "EMAIL",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : 67108864,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "COUNTRY",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : 67108864,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 16777216,
+      "type" : "text"
+    }, {
+      "name" : "SIGNED_UP",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : 9,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_ntz"
+    }, {
+      "name" : "LAST_SEEN",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : 9,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_ltz"
+    }, {
+      "name" : "CREATED_TZ",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : 9,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_tz"
+    }, {
+      "name" : "AVATAR",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : 8388608,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : 8388608,
+      "type" : "binary"
+    }, {
+      "name" : "PREFS",
+      "database" : "DBDELVE_TEST",
+      "schema" : "SALES",
+      "table" : "CUSTOMERS",
+      "collation" : null,
+      "byteLength" : null,
+      "nullable" : true,
+      "scale" : null,
+      "precision" : null,
+      "length" : null,
+      "type" : "variant"
+    } ]
+  },
+  "data" : [ ["1","eug6VhDX","c1aoec@example.com","DE","1753124040.000000000","1790282997.992000000","1790282997.992000000 1020","31624950","{\n  \"beta\": true,\n  \"theme\": \"light\"\n}"],
+["2","lFAuPfb5","siox1q@example.com","DE","1757688840.000000000","1790282997.992000000","1790282997.992000000 1020","50713872","{\n  \"beta\": true,\n  \"theme\": \"light\"\n}"],
+["3","caTYxdol","ayngjh@example.com","DE","1736235960.000000000","1790282997.992000000","1790282997.992000000 1020","526C7861","{\n  \"beta\": true,\n  \"theme\": \"light\"\n}"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000007?requestId=00000000-0000-0000-0000-000000000008",
+  "requestId" : "00000000-0000-0000-0000-000000000008",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000007",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284301655
+}

@@ -1,0 +1,67 @@
+{
+  "resultSetMetaData" : {
+    "numRows" : 1,
+    "format" : "jsonv2",
+    "partitionInfo" : [ {
+      "rowCount" : 1,
+      "uncompressedSize" : 68
+    } ],
+    "rowType" : [ {
+      "name" : "'2021-03-19 17:06:59.250'::TIMESTAMP_NTZ(3)",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : 3,
+      "byteLength" : null,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_ntz"
+    }, {
+      "name" : "'2021-03-19 17:06:59 +05:30'::TIMESTAMP_TZ(0)",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : 0,
+      "byteLength" : null,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_tz"
+    }, {
+      "name" : "'23:01:59.123'::TIME(3)",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : 3,
+      "byteLength" : null,
+      "precision" : 0,
+      "length" : null,
+      "type" : "time"
+    }, {
+      "name" : "'1969-12-31 23:59:59.500'::TIMESTAMP_NTZ(3)",
+      "database" : "",
+      "schema" : "",
+      "table" : "",
+      "collation" : null,
+      "nullable" : false,
+      "scale" : 3,
+      "byteLength" : null,
+      "precision" : 0,
+      "length" : null,
+      "type" : "timestamp_ntz"
+    } ]
+  },
+  "data" : [ ["1616173619.250","1616153819 1770","82919.123","-0.500"] ],
+  "code" : "090001",
+  "statementStatusUrl" : "/api/v2/statements/00000000-0000-0000-0000-000000000005?requestId=00000000-0000-0000-0000-000000000006",
+  "requestId" : "00000000-0000-0000-0000-000000000006",
+  "sqlState" : "00000",
+  "statementHandle" : "00000000-0000-0000-0000-000000000005",
+  "message" : "Statement executed successfully.",
+  "createdOn" : 1790284288801
+}
