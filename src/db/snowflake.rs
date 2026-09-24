@@ -806,10 +806,12 @@ impl Connection {
             .lock()
             .map(|running| running.clone())
             .unwrap_or_default();
-        for handle in handles {
-            self.stop(&handle)?;
-        }
-        Ok(())
+        // Every one is asked, and the first refusal reported after: one that
+        // failed is no reason to leave the others running.
+        handles
+            .iter()
+            .map(|handle| self.stop(handle))
+            .fold(Ok(()), Result::and)
     }
 
     /// Read through `INFORMATION_SCHEMA`, which needs a running warehouse --
@@ -2313,6 +2315,57 @@ mod tests {
             assert!(thread.join().expect("no panic").is_err());
         }
         assert!(catalog.join().expect("no panic").is_err());
+    }
+
+    #[test]
+    fn a_cancel_that_fails_for_one_statement_still_asks_for_the_rest() {
+        let mock = Mock::start();
+        let first_sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let first = mock.accept(first_sql, "query");
+        let second_sql = "SELECT * FROM SALES.CUSTOMERS ORDER BY 1 LIMIT 3";
+        let second = mock.accept(second_sql, "customers");
+        for handle in [&first, &second] {
+            mock.on(
+                "GET",
+                &format!("/{handle}"),
+                [Response::fixture(202, "wait_running.json")],
+            );
+        }
+        mock.on(
+            "POST",
+            &format!("/{first}/cancel"),
+            [Response::text(503, "Service Unavailable")],
+        );
+        mock.on(
+            "POST",
+            &format!("/{second}/cancel"),
+            [Response::fixture(200, "cancel.json")],
+        );
+        let connection = connected(&mock);
+        let run = CancelToken::default();
+        let mut queries = Vec::new();
+        for (sql, handle) in [(first_sql, &first), (second_sql, &second)] {
+            let (connection, token) = (connection.clone(), run.clone());
+            queries.push(std::thread::spawn(move || {
+                connection.query_with(sql, &token)
+            }));
+            until_polled(&mock, handle);
+        }
+
+        let error = connection.cancel(&run).expect_err("one was not stopped");
+        assert!(error.message.contains("HTTP 503"), "{error}");
+        assert_eq!(mock.hits("POST", &format!("/{second}/cancel")), 1);
+
+        for handle in [&first, &second] {
+            mock.on(
+                "GET",
+                &format!("/{handle}"),
+                [Response::fixture(422, "cancelled.json")],
+            );
+        }
+        for query in queries {
+            assert!(query.join().expect("no panic").is_err());
+        }
     }
 
     #[test]
