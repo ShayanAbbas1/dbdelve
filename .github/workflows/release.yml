@@ -120,8 +120,25 @@ jobs:
           path: target/DBDelve-*.dmg
           if-no-files-found: error
 
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
+      # and rc.exe (the icon resource). If CI needs something more, the
+      # README is wrong too.
+      - run: powershell -File dev/package-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/windows/dbdelve-*.zip
+          if-no-files-found: error
+
   release:
-    needs: [version, linux, macos]
+    needs: [version, linux, macos, windows]
     if: inputs.publish
     runs-on: ubuntu-latest
     steps:
@@ -137,7 +154,8 @@ jobs:
       - run: |
           for ASSET in "DBDelve-$VERSION.dmg" \
             "dbdelve-$VERSION-linux-x86_64.tar.gz" "dbdelve-$VERSION-x86_64.AppImage" \
-            "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage"; do
+            "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
+            "dbdelve-$VERSION-windows-x86_64.zip"; do
             if [[ ! -f "dist/$ASSET" ]]; then
               echo "no $ASSET among the built assets" >&2
               ls dist >&2

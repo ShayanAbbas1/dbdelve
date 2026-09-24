@@ -134,10 +134,10 @@ registry! {
     ("reset_editor_zoom", "Reset Editor Zoom", None, ["secondary-0"], ResetEditorZoom),
     ("edit_cell", "Edit Cell", Some("Table"), ["enter"], EditCell),
     ("copy_cell", "Copy Cell", Some("Table"), ["secondary-c"], CopyCell),
-    // Not the spreadsheet's `ctrl-shift-n`: on Linux that is New Connection's
+    // Not the spreadsheet's `ctrl-shift-n`: off macOS that is New Connection's
     // keys, and New Connection wins even with a cell focused -- which left
     // this unreachable there. Clearing a cell with the delete key is the
-    // gesture anyway, and it collides with nothing on either platform.
+    // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("Table"), ["secondary-backspace"], SetNull),
     ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),

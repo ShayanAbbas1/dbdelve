@@ -155,17 +155,8 @@ fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, Stri
 /// ponytail: one appended file, never rotated. A few kilobytes per crash; if
 /// that ever becomes a real number, truncate on open past some size.
 fn install_panic_log() {
-    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+    let Some(directory) = panic_log_directory() else {
         return;
-    };
-    // A crash log is state, not cache: XDG puts it under the state directory,
-    // and a cache cleaner is entitled to delete anything in the other one.
-    #[cfg(target_os = "macos")]
-    let directory = PathBuf::from(home).join("Library/Logs/dbdelve");
-    #[cfg(not(target_os = "macos"))]
-    let directory = match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        Some(state_home) => PathBuf::from(state_home).join("dbdelve"),
-        None => PathBuf::from(home).join(".local/state/dbdelve"),
     };
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -191,6 +182,39 @@ fn install_panic_log() {
         }
         previous(info);
     }));
+}
+
+/// A crash log is state, not cache. macOS uses `Logs`, Linux the XDG state
+/// directory — a cache cleaner is entitled to delete anything in the other
+/// one. Windows uses LocalAppData for the same reason: it stays on this machine.
+fn panic_log_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+        Some(PathBuf::from(home).join("Library/Logs/dbdelve"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let root = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .filter(|value| !value.is_empty())
+                    .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
+            })?;
+        Some(root.join("dbdelve"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+        Some(
+            match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+                Some(state_home) => PathBuf::from(state_home).join("dbdelve"),
+                None => PathBuf::from(home).join(".local/state/dbdelve"),
+            },
+        )
+    }
 }
 
 fn main() {
@@ -286,21 +310,24 @@ fn main() {
                 },
             ]);
 
-            // The platform titlebar is kept only for its window buttons: a system
-            // bar in its own grey above dbdelve's chrome is the seam every native app
-            // avoids. dbdelve paints that strip itself, and the buttons sit over it.
+            // The platform titlebar is kept only for its window buttons on macOS:
+            // a system bar in its own grey above dbdelve's chrome is the seam
+            // every native app avoids. dbdelve paints that strip itself, and the
+            // buttons sit over it. Windows draws no buttons into it, so
+            // `ui::titlebar` draws them there. GPUI's Windows backend has no
+            // usable system caption to fall back on either.
             //
             // ponytail: there is nothing to sit over on Linux -- no compositor
             // draws window buttons into a transparent titlebar -- so the window
             // asks for the real one and wears the seam. The upgrade is drawing
-            // close, minimise and maximise into `ui::titlebar` and switching
-            // back to `WindowDecorations::Client`.
+            // close, minimise and maximise into `ui::titlebar` there too and
+            // switching back to `WindowDecorations::Client`.
             let options = WindowOptions {
                 window_background: theme.window_background(),
                 titlebar: Some(TitlebarOptions {
                     title: Some("dbdelve".into()),
-                    appears_transparent: !cfg!(target_os = "linux"),
-                    traffic_light_position: (!cfg!(target_os = "linux")).then(|| {
+                    appears_transparent: ui::CLIENT_TITLEBAR,
+                    traffic_light_position: cfg!(target_os = "macos").then(|| {
                         point(
                             px(layout::SPACE_MD),
                             px((layout::TITLEBAR_HEIGHT - TRAFFIC_LIGHT_DIAMETER) / 2.),

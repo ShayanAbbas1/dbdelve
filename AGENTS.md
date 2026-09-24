@@ -1,6 +1,6 @@
 # AGENTS.md
 
-DBDelve is a native database client in Rust on GPUI for macOS and Linux,
+DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
 speaking Postgres, MySQL and SQLite. A data browser and a SQL editor as equals:
 open a table and browse it — page, sort, filter, edit — or write the statement
 yourself.
@@ -313,7 +313,8 @@ Four things in the script are load-bearing:
 the Actions tab: run `.github/workflows/release.yml` on main with **publish**
 ticked. It builds the Linux tarballs and AppImages and, on a macOS runner,
 `dev/bundle.sh` (`DBDELVE_CHANNEL=release DBDELVE_SIGN_ID=-`) wrapped into
-`DBDelve-$VERSION.dmg` with an `/Applications` symlink alongside it. Only once
+`DBDelve-$VERSION.dmg` with an `/Applications` symlink alongside it, and on a
+Windows runner `dev/package-windows.ps1`'s unsigned zip. Only once
 every asset exists does it tag the commit `v$VERSION` and publish the release,
 then it rewrites `Casks/dbdelve.rb` in the `ShayanAbbas1/homebrew-dbdelve` tap
 through the `TAP_TOKEN` secret. The version comes from `Cargo.toml`, so bump it
