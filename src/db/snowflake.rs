@@ -154,7 +154,10 @@ fn key_pair(config: &SnowflakeConfig) -> Result<RsaKeyPair, DbError> {
         plain_error(format!("The private key at {path} was not read: {error}."))
     })?;
     let source = format!("The private key at {path}");
-    if text.contains("ENCRYPTED PRIVATE KEY") {
+    // PKCS#8's own header, and PKCS#1's `Proc-Type: 4,ENCRYPTED` -- the
+    // scheme `openssl genrsa -aes256 -traditional` writes, which a PEM this
+    // narrow otherwise waves through as DER and fails to parse unhelpfully.
+    if text.contains("ENCRYPTED PRIVATE KEY") || text.contains("Proc-Type: 4,ENCRYPTED") {
         return Err(plain_error(format!("{source} is encrypted.")));
     }
 
@@ -1281,6 +1284,20 @@ mod tests {
         let error = token(&config("test-key-encrypted.p8"), 0).expect_err("refused");
         assert!(error.message.ends_with("is encrypted."), "{error}");
         assert!(error.message.contains("test-key-encrypted.p8"), "{error}");
+    }
+
+    #[test]
+    fn an_encrypted_traditional_key_is_refused_by_name_too() {
+        // `BEGIN RSA PRIVATE KEY` with `Proc-Type: 4,ENCRYPTED` -- the PKCS#1
+        // shape `openssl genrsa -aes256 -traditional` writes, not PKCS#8's own
+        // `ENCRYPTED PRIVATE KEY` header. Left undetected it reads as DER,
+        // fails to parse, and says "is not a private key" instead.
+        let error = token(&config("test-key-encrypted-pkcs1.p8"), 0).expect_err("refused");
+        assert!(error.message.ends_with("is encrypted."), "{error}");
+        assert!(
+            error.message.contains("test-key-encrypted-pkcs1.p8"),
+            "{error}"
+        );
     }
 
     #[test]
