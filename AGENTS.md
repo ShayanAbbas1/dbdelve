@@ -287,10 +287,18 @@ Pick the engine on the form's chip row first; it decides which fields exist.
 Then paste a URL and choose **Use URL**, or fill the fields in. Connecting is
 the connection test; there is deliberately no separate test button.
 
-Snowflake has no container. Its unit tests need nothing; its live tests are
+Snowflake has no container. Its unit tests need nothing, and neither do its
+mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses
+recorded from a real account (`dev/snowflake/fixtures`), with scripted
+sequences, error statuses and truncated or stalled bodies for the failure
+paths. A test build alone accepts an `http://` host, which is how a
+connection reaches it; everywhere else the API is HTTPS. Its live tests are
 `#[ignore]`d and read `DBDELVE_SNOWFLAKE_ACCOUNT`, `_USER`, `_PRIVATE_KEY` (an
-absolute path) and `_DATABASE`, plus `_WAREHOUSE`, `_ROLE` and `_HOST` when set. The
-catalog test creates and drops a `DBDELVE_TEST` schema.
+absolute path) and `_DATABASE`, plus `_WAREHOUSE`, `_ROLE` and `_HOST` when set,
+run with `cargo test snowflake -- --ignored`. The catalog test creates and
+drops a `DBDELVE_TEST` schema. A recording that no longer matches what the
+server says is re-recorded from a live account, with handles and request ids
+replaced by placeholders.
 
 SQLite has no server to connect to. Build the file once, then give the form its
 absolute path:
@@ -315,13 +323,14 @@ locally:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                      # unit tests; no database needed
-cargo test -- --include-ignored # plus the live_ tests, against the dev databases
+cargo test -- --include-ignored --skip snowflake::tests::live_ # plus the live_ tests
 ```
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL` and `dbdelve_SQLITE_PATH` (the
 lowercase prefix is what they read); the `tests` job in `ci.yml` has the values
-for the dev databases. CI lints on Linux, macOS and Windows, runs the live tests
+for the dev databases. It has no Snowflake account, so it skips the Snowflake
+live tests but for the one that needs none; the mock tests stand in for them. CI lints on Linux, macOS and Windows, runs the live tests
 on Linux, and runs the unit tests on Windows too, since the storage tests are
 what exercise the `APPDATA` paths.
 
