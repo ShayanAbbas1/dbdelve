@@ -743,9 +743,11 @@ impl Workspace {
                             catalog.merge(loaded);
                             *routines = Routines::Loaded;
                         }
+                        // On this profile, not through `note`: that writes to
+                        // whichever one is active, and the user may have moved on.
                         Err(error) => {
                             *routines = Routines::Failed;
-                            workspace.note(error.message, cx);
+                            profile.session.notice = Some(error.message);
                         }
                     }
                     workspace.install_completions(&id, cx);
