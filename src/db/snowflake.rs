@@ -546,7 +546,15 @@ impl Connection {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("https://{}/api/v2/statements{path}", self.config.host())
+        let host = self.config.host();
+        // The offline tests' mock speaks plain HTTP on loopback. Only a test
+        // build reads a scheme out of the host; anywhere else one is part of
+        // an unreachable name, so a profile cannot opt out of TLS.
+        #[cfg(test)]
+        if host.starts_with("http://") {
+            return format!("{host}/api/v2/statements{path}");
+        }
+        format!("https://{host}/api/v2/statements{path}")
     }
 
     /// One exchange: a fresh token, the request, and the body as JSON whatever
