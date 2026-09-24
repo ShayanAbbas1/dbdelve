@@ -1005,6 +1005,9 @@ fn foreign_keys(imported: &QueryResult, relation: &str, database: &str) -> Vec<F
 }
 
 #[cfg(test)]
+mod mock;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1863,5 +1866,465 @@ mod tests {
         let started = Instant::now();
         connection.routines().expect("routines");
         println!("relations {relations:?}, routines {:?}", started.elapsed());
+    }
+
+    // The same ground as the live tests, against responses recorded from a
+    // real account and replayed by `mock`, so it runs anywhere.
+
+    use super::mock::{Mock, Response};
+
+    fn connected(mock: &Mock) -> Connection {
+        Connection::open(&mock.config()).expect("connects")
+    }
+
+    #[test]
+    fn a_query_is_submitted_verbatim_and_polled_to_its_result() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.answer(sql, "query");
+        let result = connected(&mock).query(sql).expect("runs");
+
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.data_type.as_deref().unwrap_or_default()))
+                .collect::<Vec<_>>(),
+            [
+                ("ONE", "number(1,0)"),
+                ("NOTHING", "varchar"),
+                ("BLANK", "varchar"),
+                ("LEAP", "date")
+            ]
+        );
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                Some("1".into()),
+                None,
+                Some(String::new()),
+                Some("2024-02-29".into())
+            ]]
+        );
+
+        let requests = mock.requests();
+        let submit = requests
+            .iter()
+            .find(|request| request.body["statement"] == sql)
+            .expect("submitted");
+        assert_eq!(submit.target, "?async=true");
+        assert_eq!(submit.body["database"], "DBDELVE_TEST");
+        assert_eq!(submit.body["warehouse"], "COMPUTE_WH");
+        assert_eq!(
+            submit.header("X-Snowflake-Authorization-Token-Type"),
+            Some("KEYPAIR_JWT")
+        );
+        assert!(
+            submit
+                .header("Authorization")
+                .is_some_and(|value| value.starts_with("Bearer ey"))
+        );
+        assert_eq!(mock.hits("GET", &format!("/{handle}")), 1);
+    }
+
+    #[test]
+    fn a_statement_still_running_is_polled_until_it_finishes() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [
+                Response::fixture(202, "wait_running.json"),
+                Response::fixture(202, "wait_running.json"),
+                Response::fixture(200, "query_poll.json"),
+            ],
+        );
+        let result = connected(&mock).query(sql).expect("runs");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(mock.hits("GET", &format!("/{handle}")), 3);
+    }
+
+    #[test]
+    fn recorded_values_of_every_awkward_type_render_as_text() {
+        let mock = Mock::start();
+        let temporal = "SELECT '2021-03-19 17:06:59.250'::TIMESTAMP_NTZ(3), \
+                        '2021-03-19 17:06:59 +05:30'::TIMESTAMP_TZ(0), \
+                        '23:01:59.123'::TIME(3), \
+                        '1969-12-31 23:59:59.500'::TIMESTAMP_NTZ(3)";
+        mock.answer(temporal, "temporal");
+        let customers = "SELECT * FROM SALES.CUSTOMERS ORDER BY 1 LIMIT 3";
+        mock.answer(customers, "customers");
+        let connection = connected(&mock);
+
+        assert_eq!(
+            connection.query(temporal).expect("runs").rows[0],
+            vec![
+                Some("2021-03-19 17:06:59.250".to_string()),
+                Some("2021-03-19 17:06:59 +05:30".to_string()),
+                Some("23:01:59.123".to_string()),
+                Some("1969-12-31 23:59:59.500".to_string()),
+            ]
+        );
+
+        let result = connection.query(customers).expect("runs");
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .filter_map(|c| c.data_type.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                "number(38,0)",
+                "varchar",
+                "varchar",
+                "varchar",
+                "timestamp_ntz",
+                "timestamp_ltz",
+                "timestamp_tz",
+                "binary",
+                "variant"
+            ]
+        );
+        assert_eq!(
+            result.rows[0],
+            vec![
+                Some("1".to_string()),
+                Some("eug6VhDX".to_string()),
+                Some("c1aoec@example.com".to_string()),
+                Some("DE".to_string()),
+                Some("2025-07-21 18:54:00.000000000".to_string()),
+                Some("2026-09-24 20:49:57.992000000Z".to_string()),
+                Some("2026-09-24 13:49:57.992000000 -07:00".to_string()),
+                // Binary arrives as hex and a variant as its JSON text, and
+                // both are shown as they came.
+                Some("31624950".to_string()),
+                Some("{\n  \"beta\": true,\n  \"theme\": \"light\"\n}".to_string()),
+            ]
+        );
+        assert_eq!(result.rows.len(), 3);
+    }
+
+    #[test]
+    fn several_statements_answer_with_the_last_ones_result() {
+        let mock = Mock::start();
+        mock.answer("SELECT 1; SELECT 2 AS two", "multi");
+        let last = super::mock::fixture("multi_poll.json");
+        let last: Value = serde_json::from_slice(&last).expect("JSON");
+        let child = last_child(&last).expect("a handle per statement");
+        mock.on(
+            "GET",
+            &format!("/{child}"),
+            [Response::fixture(200, "multi_child.json")],
+        );
+
+        let result = connected(&mock)
+            .query("SELECT 1; SELECT 2 AS two")
+            .expect("runs");
+        assert_eq!(result.columns[0].name, "TWO");
+        assert_eq!(result.rows, vec![vec![Some("2".into())]]);
+    }
+
+    #[test]
+    fn a_large_result_is_read_across_its_compressed_partitions() {
+        let mock = Mock::start();
+        let sql = "SELECT SEQ4() AS N FROM TABLE(GENERATOR(ROWCOUNT => 20000))";
+        let handle = mock.accept(sql, "large");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(200, "large_poll.json.gz")],
+        );
+        mock.on(
+            "GET",
+            &format!("/{handle}?partition=1"),
+            [Response::fixture(200, "large_partition_1.json.gz")],
+        );
+
+        let result = connected(&mock).query(sql).expect("runs");
+        assert_eq!(result.rows.len(), 20_000);
+        assert_eq!(result.rows[0], vec![Some("0".to_string())]);
+        assert_eq!(result.rows[19_999], vec![Some("19999".to_string())]);
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 1);
+    }
+
+    #[test]
+    fn cancel_posts_to_the_running_handle_and_the_query_ends_in_the_servers_words() {
+        let mock = Mock::start();
+        let handle = mock.accept("CALL SYSTEM$WAIT(60)", "wait");
+        let poll = format!("/{handle}");
+        mock.on("GET", &poll, [Response::fixture(202, "wait_running.json")]);
+        mock.on(
+            "POST",
+            &format!("/{handle}/cancel"),
+            [Response::fixture(200, "cancel.json")],
+        );
+        let connection = connected(&mock);
+
+        let waiting = connection.clone();
+        let query = std::thread::spawn(move || waiting.query("CALL SYSTEM$WAIT(60)"));
+        let started = Instant::now();
+        while mock.hits("GET", &poll) == 0 {
+            assert!(started.elapsed() < Duration::from_secs(10), "never polled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        connection.cancel().expect("the cancel is accepted");
+        assert_eq!(mock.hits("POST", &format!("/{handle}/cancel")), 1);
+        // What the server says to the next poll once the cancel has landed.
+        mock.on("GET", &poll, [Response::fixture(422, "cancelled.json")]);
+
+        let error = query.join().expect("no panic").expect_err("stopped");
+        assert_eq!(error.message, "SQL execution canceled");
+        // Nothing left running, so a second cancel sends nothing.
+        connection.cancel().expect("nothing to cancel");
+        assert_eq!(mock.hits("POST", &format!("/{handle}/cancel")), 1);
+    }
+
+    #[test]
+    fn a_statement_timeout_is_sent_and_its_expiry_reported() {
+        let mock = Mock::start();
+        let handle = mock.accept("CALL SYSTEM$WAIT(60)", "timeout");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(408, "timed_out.json")],
+        );
+        let mut config = mock.config();
+        config.statement_timeout = 3;
+        let connection = Connection::open(&config).expect("connects");
+
+        let error = connection
+            .query("CALL SYSTEM$WAIT(60)")
+            .expect_err("stopped");
+        assert_eq!(
+            error.message,
+            "Statement reached its statement or warehouse timeout of 3 second(s) and was canceled."
+        );
+        assert!(
+            mock.requests()
+                .iter()
+                .filter(|request| request.method == "POST")
+                .all(|request| request.body["timeout"] == 3)
+        );
+    }
+
+    #[test]
+    fn a_refused_statement_is_an_error_in_the_servers_words() {
+        let mock = Mock::start();
+        let handle = mock.accept("USE SCHEMA", "use");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(422, "use_refused.json")],
+        );
+        let handle = mock.accept("FORM PEOPLE", "syntax");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(422, "syntax_error.json")],
+        );
+        let connection = connected(&mock);
+
+        let error = connection
+            .query("USE SCHEMA INFORMATION_SCHEMA")
+            .expect_err("refused");
+        assert_eq!(error.message, "Command not supported by SQL API: USE");
+        let error = connection
+            .query("SELECT * FORM PEOPLE")
+            .expect_err("refused");
+        assert_eq!(
+            error.message,
+            "SQL compilation error:\nsyntax error line 1 at position 9 unexpected 'FORM'."
+        );
+    }
+
+    #[test]
+    fn a_key_the_account_does_not_know_fails_the_connect() {
+        let mock = Mock::start();
+        mock.on_statement(
+            "?async=true",
+            "CURRENT_VERSION",
+            [Response::fixture(401, "auth_failure.json")],
+        );
+        let error = Connection::open(&mock.config()).err().expect("refused");
+        assert_eq!(error.message, "JWT token is invalid. null");
+    }
+
+    #[test]
+    fn an_account_that_does_not_exist_is_the_status_its_host_answered() {
+        // What `live_an_account_that_does_not_exist_is_an_error_in_words`
+        // gets back: an HTML page with no message to quote.
+        let mock = Mock::start();
+        mock.on_statement(
+            "?async=true",
+            "CURRENT_VERSION",
+            [Response::fixture(404, "unknown_account.html")],
+        );
+        let error = Connection::open(&mock.config())
+            .err()
+            .expect("nobody is there");
+        assert!(error.message.ends_with("answered HTTP 404."), "{error}");
+    }
+
+    #[test]
+    fn the_catalog_routines_and_structure_are_read_from_recorded_answers() {
+        use super::super::{RelationKind, RoutineKind};
+        let mock = Mock::start();
+        let within = "IN SCHEMA \"DBDELVE_TEST\".\"SALES\"";
+        for (statement, name) in [
+            ("FROM INFORMATION_SCHEMA.TABLES", "relations"),
+            ("FROM INFORMATION_SCHEMA.FUNCTIONS", "functions"),
+            ("FROM INFORMATION_SCHEMA.PROCEDURES", "procedures"),
+            ("TABLE_NAME = 'ORDER_LINES'", "columns_ORDER_LINES"),
+            (
+                "TABLE_NAME = 'REVENUE_BY_COUNTRY'",
+                "columns_REVENUE_BY_COUNTRY",
+            ),
+            (&format!("SHOW PRIMARY KEYS {within}"), "show_primary"),
+            (&format!("SHOW UNIQUE KEYS {within}"), "show_unique"),
+            (&format!("SHOW IMPORTED KEYS {within}"), "show_imported"),
+        ] {
+            mock.on_statement(
+                "",
+                statement,
+                [Response::fixture(200, &format!("{name}.json"))],
+            );
+        }
+        let connection = connected(&mock);
+
+        let mut catalog = connection.catalog().expect("the relations load");
+        catalog.merge(connection.routines().expect("the routines load"));
+        let listed: Vec<_> = catalog
+            .schemas
+            .iter()
+            .flat_map(|schema| {
+                schema
+                    .relations
+                    .iter()
+                    .map(move |r| (schema.name.as_str(), r.name.as_str(), r.kind))
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("PUBLIC", "PEOPLE", RelationKind::Table),
+                ("SALES", "CUSTOMERS", RelationKind::Table),
+                ("SALES", "ORDERS", RelationKind::Table),
+                ("SALES", "ORDER_LINES", RelationKind::Table),
+                ("SALES", "REVENUE_BY_COUNTRY", RelationKind::View),
+            ]
+        );
+        let sales = catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "SALES")
+            .expect("listed");
+        let routines: Vec<_> = sales
+            .routines
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind, r.identity_arguments.as_str()))
+            .collect();
+        assert_eq!(
+            routines,
+            [
+                ("WITH_VAT", RoutineKind::Function, "(AMOUNT NUMBER)"),
+                ("REFUND", RoutineKind::Procedure, "(ORDER_ID NUMBER)"),
+            ]
+        );
+
+        let lines = connection
+            .structure("SALES", "ORDER_LINES")
+            .expect("described");
+        assert_eq!(
+            lines
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.data_type.as_str(), c.nullable))
+                .collect::<Vec<_>>(),
+            [
+                ("ORDER_ID", "number(38,0)", false),
+                ("LINE_NO", "number(38,0)", false),
+                ("SKU", "varchar", true),
+                ("QTY", "number(38,0)", true),
+            ]
+        );
+        assert_eq!(
+            lines
+                .constraints
+                .iter()
+                .map(|c| c.definition.as_str())
+                .collect::<Vec<_>>(),
+            [
+                r#"PRIMARY KEY ("ORDER_ID", "LINE_NO")"#,
+                r#"FOREIGN KEY ("ORDER_ID") REFERENCES "SALES"."ORDERS" ("ID")"#,
+            ]
+        );
+        assert_eq!(
+            lines.foreign_keys,
+            vec![ForeignKey {
+                column: "ORDER_ID".into(),
+                referenced_schema: "SALES".into(),
+                referenced_table: "ORDERS".into(),
+                referenced_column: "ID".into(),
+            }]
+        );
+
+        let view = connection
+            .structure("SALES", "REVENUE_BY_COUNTRY")
+            .expect("described");
+        assert_eq!(view.columns.len(), 3);
+        assert!(view.constraints.is_empty() && view.foreign_keys.is_empty());
+
+        // dbdelve's own statements skip the asynchronous round trip.
+        assert!(
+            mock.requests()
+                .iter()
+                .filter(|request| request.body["statement"]
+                    .as_str()
+                    .is_some_and(|sql| !sql.contains("CURRENT_VERSION")))
+                .all(|request| request.target.is_empty())
+        );
+    }
+
+    #[test]
+    fn each_filter_writes_the_statement_that_was_recorded_against_the_server() {
+        // Routed by the whole predicate, so a filter that starts writing
+        // different SQL finds no recording and fails here rather than live.
+        use crate::filter::Operator;
+        let mock = Mock::start();
+        let connection = connected(&mock);
+        for (name, operator, value, expected) in [
+            ("contains", Operator::Contains, "50%", &["percent"][..]),
+            ("starts", Operator::StartsWith, "50", &["percent", "plain"]),
+            ("ends", Operator::EndsWith, "%", &["percent"]),
+            ("notcontains", Operator::NotContains, "5", &["quoted"]),
+            ("equals", Operator::Equals, r"it's ok\", &["quoted"]),
+            (
+                "regex_digit",
+                Operator::Regex,
+                r"^5\d",
+                &["percent", "plain"],
+            ),
+            ("regex_ok", Operator::Regex, "ok", &["quoted"]),
+            ("isnull", Operator::IsNull, "", &["absent"]),
+            (
+                "inlist",
+                Operator::InList,
+                "500, 50%",
+                &["percent", "plain"],
+            ),
+        ] {
+            let predicate =
+                crate::filter::filter_predicate(Engine::Snowflake, "state", operator, value)
+                    .expect("a predicate");
+            mock.answer(
+                &format!(") WHERE {predicate} ORDER BY 1"),
+                &format!("filter_{name}"),
+            );
+            let kept = kept(&connection, "state", operator, value)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(kept, expected, "{name}");
+        }
     }
 }
