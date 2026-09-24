@@ -6,7 +6,7 @@
 use gpui_component::checkbox::Checkbox;
 
 use super::*;
-use crate::sql::Stop;
+use crate::sql::{Destructive, Stop};
 
 impl Workspace {
     pub(crate) fn render_connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -569,10 +569,28 @@ impl Workspace {
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
                 "Mode",
-                format!(
-                    "{name} is in {current_mode} mode. This needs {}.",
-                    needed.label()
-                ),
+                // `Destructive::Unreadable` only reaches `Upgrade` on an engine
+                // with no server-side read-only setting to fall back on
+                // (`Engine::holds_read_only`): there is nothing stopping a
+                // write it cannot parse, so the reason is worth spelling out
+                // rather than reading like an ordinary mode shortfall.
+                if pending
+                    .verdict
+                    .destructive
+                    .contains(&Destructive::Unreadable)
+                {
+                    format!(
+                        "{name} is in {current_mode} mode. dbdelve can't parse this, and \
+                         this database has no server-side read-only setting to stop it if \
+                         it writes, so it needs {}.",
+                        needed.label()
+                    )
+                } else {
+                    format!(
+                        "{name} is in {current_mode} mode. This needs {}.",
+                        needed.label()
+                    )
+                },
                 if sql.is_some() {
                     format!("Switch to {} and run", needed.label())
                 } else {
