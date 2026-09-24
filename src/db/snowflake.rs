@@ -486,11 +486,23 @@ const RETRIES: u32 = 4;
 /// Cancel. ponytail: a total rather than an idle bound, which ureq does not
 /// offer; ten minutes is a compressed partition over a slow link many times
 /// over.
-const RECV_BODY: Duration = if cfg!(test) {
-    Duration::from_secs(1)
-} else {
-    Duration::from_secs(600)
-};
+const RECV_BODY: Duration = Duration::from_secs(600);
+
+/// A test build pointed at the mock stalls a body on purpose and should not
+/// wait ten minutes to see it cut off; the live tests keep the real bound,
+/// since a real partition takes longer than a second to download.
+fn recv_body(config: &SnowflakeConfig) -> Duration {
+    let mocked = cfg!(test)
+        && config
+            .host
+            .as_deref()
+            .is_some_and(|host| host.starts_with("http://"));
+    if mocked {
+        Duration::from_secs(1)
+    } else {
+        RECV_BODY
+    }
+}
 
 /// The statement whose rows a finished response stands for.
 ///
@@ -590,7 +602,7 @@ impl Connection {
             // Bounds a server that accepts and then says nothing. Not a bound
             // on the statement: that is polled, a short request at a time.
             .timeout_recv_response(Some(Duration::from_secs(120)))
-            .timeout_recv_body(Some(RECV_BODY))
+            .timeout_recv_body(Some(recv_body(config)))
             .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
