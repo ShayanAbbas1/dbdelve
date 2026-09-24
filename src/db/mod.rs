@@ -728,6 +728,11 @@ impl Catalog {
     /// Assembled by name rather than by position, because the two halves are
     /// separate queries and a schema can appear in either alone -- one holding
     /// only functions is in the second and not the first.
+    ///
+    /// A new schema goes on the end, never in name order: explorer ids and
+    /// palette targets taken before the merge address schemas by index, and a
+    /// sorted insert would point them at a neighbour. [`Self::by_name`] is the
+    /// order to show them in.
     pub fn merge(&mut self, other: Self) {
         for schema in other.schemas {
             match self
@@ -739,7 +744,13 @@ impl Catalog {
                 None => self.schemas.push(schema),
             }
         }
-        self.schemas.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    /// Every schema with its index, in name order.
+    pub fn by_name(&self) -> Vec<(usize, &Schema)> {
+        let mut schemas = self.schemas.iter().enumerate().collect::<Vec<_>>();
+        schemas.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
+        schemas
     }
 }
 
@@ -1335,8 +1346,8 @@ mod tests {
     fn the_second_half_of_a_catalog_joins_the_first_by_name() {
         let mut catalog = Catalog {
             schemas: vec![
-                schema("public", &["accounts"], &[]),
                 schema("ops", &["jobs"], &[]),
+                schema("public", &["accounts"], &[]),
             ],
         };
         catalog.merge(Catalog {
@@ -1360,14 +1371,23 @@ mod tests {
         assert_eq!(named("public").routines[0].name, "digest");
         assert_eq!(named("audit").relations, []);
         assert_eq!(named("ops").routines, []);
-        // Still in one order, wherever each schema came from.
+        // A schema keeps the index it had before the merge, so a target taken
+        // then still names it; name order is the presentation's to impose.
         assert_eq!(
             catalog
                 .schemas
                 .iter()
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>(),
-            ["audit", "ops", "public"]
+            ["ops", "public", "audit"]
+        );
+        assert_eq!(
+            catalog
+                .by_name()
+                .into_iter()
+                .map(|(index, s)| (index, s.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, "audit"), (0, "ops"), (1, "public")]
         );
     }
 
