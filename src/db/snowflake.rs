@@ -427,12 +427,30 @@ fn reply(host: &str, status: u16, body: &Value) -> Result<Reply, DbError> {
     match status {
         200 => Ok(Reply::Finished),
         202 => Ok(Reply::Running),
-        _ => Err(plain_error(match body["message"].as_str() {
-            Some(message) => message.to_string(),
-            None => format!("{host} answered HTTP {status}."),
-        })),
+        _ => Err(refusal(host, status, body)),
     }
 }
+
+fn refusal(host: &str, status: u16, body: &Value) -> DbError {
+    plain_error(match body["message"].as_str() {
+        Some(message) => message.to_string(),
+        None => format!("{host} answered HTTP {status}."),
+    })
+}
+
+/// Throttling, or a server or gateway that failed this once.
+fn transient(status: u16) -> bool {
+    status == 429 || status >= 500
+}
+
+/// The pause before the first retry of a [`Connection::fetch`], doubling for
+/// each of [`RETRIES`]: seven and a half seconds in all.
+const RETRY_PAUSE: Duration = if cfg!(test) {
+    Duration::from_millis(1)
+} else {
+    Duration::from_millis(500)
+};
+const RETRIES: u32 = 4;
 
 /// The statement whose rows a finished response stands for.
 ///
@@ -615,6 +633,44 @@ impl Connection {
         Ok((status, body))
     }
 
+    /// A GET, asked again while its failure is one a moment might fix. Only
+    /// reads are repeated: a submit that failed may still have reached the
+    /// server, and sending it again could run the statement twice.
+    fn fetch(&self, url: &str) -> Result<(u16, Value), DbError> {
+        let mut pause = RETRY_PAUSE;
+        for _ in 0..RETRIES {
+            match self.exchange(url, None) {
+                Ok((status, _)) if transient(status) => {}
+                Err(_) => {}
+                answer => return answer,
+            }
+            std::thread::sleep(pause);
+            pause *= 2;
+        }
+        self.exchange(url, None)
+    }
+
+    /// Ask the server to stop one statement.
+    fn stop(&self, handle: &str) -> Result<(), DbError> {
+        let url = self.url(&format!("/{handle}/cancel"));
+        let (status, body) = self.exchange(&url, Some(&json!({})))?;
+        reply(&self.config.host(), status, &body).map(|_| ())
+    }
+
+    /// A poll that gave up leaves the statement running where nobody is
+    /// watching it, free to commit a write the user will run again. So it is
+    /// stopped on the way out, and the error says whether that worked.
+    fn abandon(&self, handle: &str, error: DbError) -> DbError {
+        let outcome = match self.stop(handle) {
+            Ok(()) => "It was asked to stop rather than left running unseen.".to_string(),
+            Err(stop) => format!(
+                "It may still be running: asking it to stop failed too ({}).",
+                stop.message
+            ),
+        };
+        plain_error(format!("{} {outcome}", error.message))
+    }
+
     /// Run one submission verbatim and return its last result.
     ///
     /// Submitted asynchronously, which costs a round trip: a synchronous submit
@@ -674,7 +730,13 @@ impl Connection {
         let mut finished = accepted;
         let mut pause = Duration::from_millis(100);
         while answer == Reply::Running {
-            let (status, body) = self.exchange(&self.url(&format!("/{handle}")), None)?;
+            let (status, body) = match self.fetch(&self.url(&format!("/{handle}"))) {
+                Ok((status, body)) if transient(status) => {
+                    return Err(self.abandon(&handle, refusal(&host, status, &body)));
+                }
+                Err(error) => return Err(self.abandon(&handle, error)),
+                Ok(polled) => polled,
+            };
             answer = reply(&host, status, &body)?;
             finished = body;
             if answer == Reply::Running {
@@ -685,7 +747,7 @@ impl Connection {
 
         let mut handle = handle;
         if let Some(child) = last_child(&finished).map(str::to_string) {
-            let (status, body) = self.exchange(&self.url(&format!("/{child}")), None)?;
+            let (status, body) = self.fetch(&self.url(&format!("/{child}")))?;
             reply(&host, status, &body)?;
             finished = body;
             handle = child;
@@ -708,7 +770,7 @@ impl Connection {
         // ceiling the Postgres path has too.
         for partition in 1..partition_count(&finished) {
             let (status, body) =
-                self.exchange(&self.url(&format!("/{handle}?partition={partition}")), None)?;
+                self.fetch(&self.url(&format!("/{handle}?partition={partition}")))?;
             reply(&host, status, &body)?;
             result.rows.extend(rows(&body, &row_types));
         }
@@ -734,11 +796,8 @@ impl Connection {
             .lock()
             .map(|running| running.clone())
             .unwrap_or_default();
-        let host = self.config.host();
         for handle in handles {
-            let (status, body) =
-                self.exchange(&self.url(&format!("/{handle}/cancel")), Some(&json!({})))?;
-            reply(&host, status, &body)?;
+            self.stop(&handle)?;
         }
         Ok(())
     }
@@ -2081,6 +2140,62 @@ mod tests {
 
         let error = connected(&mock).query(sql).expect_err("half a result");
         assert!(error.message.contains("was not read whole"), "{error}");
+    }
+
+    #[test]
+    fn a_poll_or_partition_that_fails_for_a_moment_is_asked_again() {
+        let mock = Mock::start();
+        let sql = "SELECT SEQ4() AS N FROM TABLE(GENERATOR(ROWCOUNT => 20000))";
+        let handle = mock.accept(sql, "large");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [
+                Response::text(503, "Service Unavailable"),
+                Response::fixture(202, "wait_running.json").truncated(10),
+                Response::text(429, "Too Many Requests"),
+                Response::fixture(200, "large_poll.json.gz"),
+            ],
+        );
+        let partition = format!("/{handle}?partition=1");
+        mock.on(
+            "GET",
+            &partition,
+            [
+                Response::text(504, "Gateway Timeout"),
+                Response::fixture(200, "large_partition_1.json.gz"),
+            ],
+        );
+
+        let result = connected(&mock).query(sql).expect("runs");
+        assert_eq!(result.rows.len(), 20_000);
+        assert_eq!(mock.hits("GET", &format!("/{handle}")), 4);
+        assert_eq!(mock.hits("GET", &partition), 2);
+    }
+
+    #[test]
+    fn a_poll_that_keeps_failing_asks_the_statement_to_stop_before_giving_up() {
+        let mock = Mock::start();
+        let handle = mock.accept("INSERT INTO T VALUES (1)", "wait");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(503, "Service Unavailable")],
+        );
+        let stop = format!("/{handle}/cancel");
+        mock.on("POST", &stop, [Response::fixture(200, "cancel.json")]);
+
+        let error = connected(&mock)
+            .query("INSERT INTO T VALUES (1)")
+            .expect_err("never answered");
+        assert!(error.message.contains("HTTP 503"), "{error}");
+        assert!(error.message.contains("asked to stop"), "{error}");
+        assert_eq!(mock.hits("POST", &stop), 1);
+        assert_eq!(
+            mock.hits("POST", "?async=true"),
+            2,
+            "the submit is sent once"
+        );
     }
 
     #[test]
