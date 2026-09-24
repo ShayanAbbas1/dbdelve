@@ -474,8 +474,8 @@ pub struct Theme {
 impl Theme {
     /// Every theme dbdelve ships, in the order the switcher cycles them. The
     /// first is the default.
-    pub fn all() -> [Self; 3] {
-        [Self::glass(), Self::dark(), Self::light()]
+    pub fn all() -> [Self; 4] {
+        [Self::glass(), Self::black(), Self::dark(), Self::light()]
     }
 
     /// The theme after this one, by name. Falls back to the default, so a theme
@@ -772,7 +772,7 @@ impl Theme {
     /// planes here is mostly how much they let through — see [`OPACITY_DEFAULT`].
     pub fn glass() -> Self {
         Self {
-            name: "dbdelve Glass",
+            name: "DBDelve Glass",
             is_glass: true,
             opacity: OPACITY_DEFAULT,
 
@@ -797,6 +797,26 @@ impl Theme {
         }
     }
 
+    /// Glass at full opacity, toned on its own: the planes sit a couple of
+    /// sRGB levels apart, close enough to read as one black window. That is
+    /// the rectangle [`OPACITY_MAX`] keeps glass from reaching, chosen here on
+    /// purpose; the hairlines and the header carry the structure instead.
+    pub fn black() -> Self {
+        Self {
+            name: "DBDelve Black",
+            is_glass: false,
+
+            bg: neutral(0.155),
+            panel: neutral(0.148),
+            surface: neutral(0.140),
+            overlay: neutral(0.200),
+
+            control: neutral(0.300),
+
+            ..Self::dark()
+        }
+    }
+
     /// The tones run chrome → editor → results, dark grey to lighter grey:
     /// the answer gets the light, the prompt sits a step behind it. Near-black
     /// is deliberately absent: a plane at 4% lightness reads as a void — which
@@ -804,7 +824,7 @@ impl Theme {
     /// gets to ignore.
     pub fn dark() -> Self {
         Self {
-            name: "dbdelve Dark",
+            name: "DBDelve Dark",
             appearance: Appearance::Dark,
             is_glass: false,
             opacity: OPACITY_DEFAULT,
@@ -851,7 +871,7 @@ impl Theme {
 
     pub fn light() -> Self {
         Self {
-            name: "dbdelve Light",
+            name: "DBDelve Light",
             appearance: Appearance::Light,
             is_glass: false,
             opacity: OPACITY_DEFAULT,
@@ -898,10 +918,15 @@ impl Theme {
 
 /// A theme read back from disk, by name. An absent or unknown name is the
 /// default: a palette dropped from `all` between launches must not strand the
-/// app on a name nothing answers to.
+/// app on a name nothing answers to. Case-blind because the names were
+/// once spelled "dbdelve Dark" and profiles written then still say so.
 pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
-    name.and_then(|name| Theme::all().into_iter().find(|theme| theme.name == name))
-        .unwrap_or_default()
+    name.and_then(|name| {
+        Theme::all()
+            .into_iter()
+            .find(|theme| theme.name.eq_ignore_ascii_case(name))
+    })
+    .unwrap_or_default()
 }
 
 /// Push a theme everywhere it is read from. Only a glass theme wants the
@@ -1161,7 +1186,9 @@ mod tests {
         // every text token clears WCAG against its raw tint, with no credit for
         // whatever light the wallpaper happens to add.
         let level = |c: Srgb| (c.r + c.g + c.b) / 3.0 * 255.0;
-        for t in Theme::all().into_iter().filter(|t| !t.is_glass) {
+        // Black is glass at full opacity and the one rectangle by design.
+        let graded = |t: &Theme| !t.is_glass && t.name != Theme::black().name;
+        for t in Theme::all().into_iter().filter(graded) {
             for (name, near, far) in [
                 ("bg to panel", t.bg, t.panel),
                 ("panel to surface", t.panel, t.surface),
@@ -1200,6 +1227,11 @@ mod tests {
             seen.push(theme.name);
         }
         assert_eq!(theme.next().name, Theme::default().name);
+    }
+
+    #[test]
+    fn a_theme_stored_under_its_old_lowercase_name_is_still_restored() {
+        assert_eq!(restored_theme(Some("dbdelve Dark")).name, "DBDelve Dark");
     }
 
     #[test]
