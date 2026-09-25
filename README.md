@@ -1,7 +1,7 @@
 # DBDelve
 
 A modern, performant, cross-platform database client for Postgres, MySQL,
-SQLite and Snowflake, on macOS, Linux and Windows. Written in Rust with GPUI. Buttery smooth,
+SQLite, Snowflake and SQL Server, on macOS, Linux and Windows. Written in Rust with GPUI. Buttery smooth,
 small memory footprint, fast navigation and stays performant on large datasets.
 
 > Early days. Everything listed below works today.
@@ -23,6 +23,8 @@ I wanted something which is performant, modern and consumes little ram. The exis
 - **SQLite:** supported
 - **Snowflake:** supported, without in-line editing since Snowflake doesn't
   enforce primary keys. See [docs/snowflake.md](docs/snowflake.md) for setup.
+- **SQL Server:** supported, 2017 or later, without Explain. See
+  [docs/mssql.md](docs/mssql.md) for what differs.
 
 Support for other database engines is planned, and more will be added over
 time.

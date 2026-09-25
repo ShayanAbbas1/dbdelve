@@ -78,16 +78,23 @@ impl Workspace {
     pub(crate) fn apply_filter(&mut self, id: u64, cx: &mut Context<Self>) {
         self.clear_notice();
         let engine = self.engine();
-        let Some(bars) = self.profile().and_then(|profile| {
+        let Some(derived) = self.profile().and_then(|profile| {
             let tab = profile.session.objects.iter().find(|tab| tab.id == id)?;
             match &tab.body {
-                ObjectBody::Relation { filters, .. } => Some(filter_bars(filters, cx)),
+                ObjectBody::Relation {
+                    filters, structure, ..
+                } => {
+                    let columns = match structure {
+                        StructureState::Loaded(structure) => structure.columns.as_slice(),
+                        _ => &[],
+                    };
+                    Some(derived_filter(engine, &filter_bars(filters, cx), columns))
+                }
                 ObjectBody::Routine(_) => None,
             }
         }) else {
             return;
         };
-        let derived = derived_filter(engine, &bars);
         self.requery_relation(
             id,
             move |filter, _, _, offset| changed_filter(filter, offset, &derived),

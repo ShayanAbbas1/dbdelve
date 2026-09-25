@@ -130,6 +130,8 @@ pub struct ResultGrid {
     /// own double-click handler, which has no route back to the profile.
     /// `Workspace::set_mode` is the only thing that writes it after construction.
     mode: Mode,
+    /// Asked, never matched on, which of the column types is bytes.
+    engine: db::Engine,
     /// The table's own focus handle, recorded by the right click that opens the
     /// row menu. The menu dispatches its action into whatever holds focus, and
     /// `context_menu` is handed the delegate alone -- the table is mid-update
@@ -181,6 +183,8 @@ pub struct PendingRow {
     /// The key columns' real names against their **as-fetched** values: the row
     /// is identified by what the server holds, not by what the user has typed.
     pub keys: Vec<(String, String)>,
+    /// Real column name against its type, where the result says it.
+    pub types: Vec<(String, String)>,
 }
 
 impl ResultGrid {
@@ -234,8 +238,14 @@ impl ResultGrid {
             has_default: Vec::new(),
             follow_groups: Vec::new(),
             mode,
+            engine: db::Engine::default(),
             focus: None,
         }
+    }
+
+    pub fn with_engine(mut self, engine: db::Engine) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// The sort the statement asked the server for, so the headers can say
@@ -551,7 +561,7 @@ impl ResultGrid {
     /// Nor a binary column. What the grid shows there is a blob *literal* the
     /// user could not type a replacement for anyway, and the value that came
     /// back would be written as the text it looks like — see
-    /// [`db::is_binary_type`].
+    /// [`db::Engine::is_binary_type`].
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -568,7 +578,7 @@ impl ResultGrid {
                 .columns
                 .get(col)
                 .and_then(|column| column.data_type.as_deref())
-                .is_some_and(db::is_binary_type)
+                .is_some_and(|data_type| self.engine.is_binary_type(data_type))
     }
 
     /// Whether a column's values want their last digit lined up with the one
@@ -785,8 +795,22 @@ impl ResultGrid {
                     table: edit.table.clone(),
                     sets,
                     keys: self.key_values(edit, row)?,
+                    types: self.column_types(),
                 })
             })
+            .collect()
+    }
+
+    /// Each edit target column's real name against the type the result gave
+    /// it, for the SQL writers that spell a literal by its column's type.
+    pub fn column_types(&self) -> Vec<(String, String)> {
+        let Some(edit) = &self.result.edit else {
+            return Vec::new();
+        };
+        edit.columns
+            .iter()
+            .zip(&self.result.columns)
+            .filter_map(|(name, column)| Some((name.clone()?, column.data_type.clone()?)))
             .collect()
     }
 
@@ -1880,6 +1904,38 @@ mod tests {
             assert!(!grid.set_pending(0, 1, value("x'CD'")), "{data_type}");
             assert!(!grid.has_pending(), "{data_type}");
         }
+    }
+
+    #[test]
+    fn an_image_column_is_binary_only_on_sql_server() {
+        // A SQLite column declared `image` holds whatever it is given, and a
+        // Postgres domain may be called anything.
+        let grid = |engine: db::Engine| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: vec![
+                        column("id"),
+                        DbColumn {
+                            name: "picture".into(),
+                            data_type: Some("image".into()),
+                        },
+                    ],
+                    rows: vec![vec![Some("7".into()), Some("cat.png".into())]],
+                    edit: Some(EditTarget {
+                        schema: "main".into(),
+                        table: "pets".into(),
+                        columns: vec![Some("id".into()), Some("picture".into())],
+                        keys: vec![0],
+                    }),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+            .with_engine(engine)
+        };
+        assert!(grid(db::Engine::Sqlite).editable(0, 1));
+        assert!(grid(db::Engine::Postgres).editable(0, 1));
+        assert!(!grid(db::Engine::SqlServer).editable(0, 1));
     }
 
     #[test]

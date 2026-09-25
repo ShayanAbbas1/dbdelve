@@ -29,7 +29,7 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, ServerConfig, SslMode,
     Structure, assemble_catalog, assemble_foreign_keys, assemble_structure, non_utf8_error,
-    percent_decoded, plain_error, required_cell,
+    plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -223,58 +223,7 @@ ORDER BY SEQ_IN_INDEX
 /// option nor the reason, which is the same trap the Postgres side documents.
 /// dbdelve owns both TLS keys and builds the driver's options from fields.
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
-    let parsed =
-        url::Url::parse(url).map_err(|error| format!("Connection URL is invalid: {error}"))?;
-
-    let host = parsed
-        .host_str()
-        .filter(|host| !host.is_empty())
-        .ok_or_else(|| "Connection URL does not contain a host.".to_string())?
-        .to_string();
-    let database = parsed.path().trim_start_matches('/').to_string();
-    if database.is_empty() {
-        return Err("Connection URL does not contain a database.".into());
-    }
-    let user = percent_decoded(parsed.username())?;
-    if user.is_empty() {
-        return Err("Connection URL does not contain a username.".into());
-    }
-
-    let mut sslmode = SslMode::default();
-    let mut root_certificate = None;
-    for (key, value) in parsed.query_pairs() {
-        match key.as_ref() {
-            "sslmode" => sslmode = SslMode::parse(value.as_ref())?,
-            "sslrootcert" => {
-                root_certificate = Some(value.trim().to_string()).filter(|path| !path.is_empty());
-            }
-            // Refused rather than dropped. The driver's options are built from
-            // fields here, so a parameter dbdelve does not carry has nowhere to
-            // go, and silently ignoring one is how a connection ends up not
-            // being the connection that was asked for.
-            other => {
-                return Err(format!(
-                    "Connection URL parameter {other} is not one dbdelve can pass to MySQL."
-                ));
-            }
-        }
-    }
-
-    Ok(ServerConfig {
-        host,
-        port: parsed.port(),
-        database: percent_decoded(&database)?,
-        user,
-        password: parsed
-            .password()
-            .map(percent_decoded)
-            .transpose()?
-            .unwrap_or_default(),
-        sslmode,
-        root_certificate,
-        // A URL has nowhere to say it; the form is where it is set.
-        statement_timeout: 0,
-    })
+    super::server_from_url(url, "MySQL")
 }
 
 /// The fields every connection needs, query or cancel alike.

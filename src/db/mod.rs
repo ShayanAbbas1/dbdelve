@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+mod mssql;
 mod mysql;
 mod postgres;
 mod snowflake;
@@ -57,6 +58,7 @@ pub enum Engine {
     MySql,
     Sqlite,
     Snowflake,
+    SqlServer,
 }
 
 /// The shape of a connection's details. The form draws one of these and never
@@ -111,7 +113,13 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 4] = [Self::Postgres, Self::MySql, Self::Sqlite, Self::Snowflake];
+    pub const ALL: [Self; 5] = [
+        Self::Postgres,
+        Self::MySql,
+        Self::Sqlite,
+        Self::Snowflake,
+        Self::SqlServer,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -119,6 +127,7 @@ impl Engine {
             Self::MySql => "MySQL",
             Self::Sqlite => "SQLite",
             Self::Snowflake => "Snowflake",
+            Self::SqlServer => "SQL Server",
         }
     }
 
@@ -130,6 +139,7 @@ impl Engine {
             Self::MySql => "mysql",
             Self::Sqlite => "sqlite",
             Self::Snowflake => "snowflake",
+            Self::SqlServer => "mssql",
         }
     }
 
@@ -141,6 +151,7 @@ impl Engine {
             "mysql" | "mariadb" => Ok(Self::MySql),
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
             "snowflake" => Ok(Self::Snowflake),
+            "mssql" | "sqlserver" => Ok(Self::SqlServer),
             other => Err(format!("{other} is not a database engine dbdelve speaks.")),
         }
     }
@@ -151,7 +162,7 @@ impl Engine {
     /// password and no transport to choose.
     pub fn fields(self) -> Fields {
         match self {
-            Self::Postgres | Self::MySql => Fields::Server,
+            Self::Postgres | Self::MySql | Self::SqlServer => Fields::Server,
             Self::Sqlite => Fields::File,
             Self::Snowflake => Fields::Account,
         }
@@ -178,6 +189,11 @@ impl Engine {
             (Self::Sqlite, ExplainMode::Analyze) => None,
             // Its plan is a fourth shape `explain.rs` does not read yet.
             (Self::Snowflake, _) => None,
+            // SQL Server has no prefix form. A plan comes from `SET SHOWPLAN_XML
+            // ON`, a session switch that has to be a batch of its own, so
+            // Explain would mean changing the session around the user's
+            // statement rather than putting a word on a copy of it.
+            (Self::SqlServer, _) => None,
         }
     }
 
@@ -200,6 +216,9 @@ impl Engine {
             Self::Sqlite => Some("BEGIN"),
             // Every statement autocommits unless the submission brackets it.
             Self::Snowflake => Some("BEGIN"),
+            // A bare `BEGIN` opens a statement block in T-SQL, not a
+            // transaction. The gate's grammar reads this spelling too.
+            Self::SqlServer => Some("BEGIN TRANSACTION"),
         }
     }
 
@@ -212,8 +231,20 @@ impl Engine {
     /// of those inside `src/db/` — the caller asks, and never matches.
     pub fn assigns_default(self) -> bool {
         match self {
-            Self::Postgres | Self::MySql | Self::Snowflake => true,
+            Self::Postgres | Self::MySql | Self::Snowflake | Self::SqlServer => true,
             Self::Sqlite => false,
+        }
+    }
+
+    /// Whether a preview page is ordered by the relation's key when nothing
+    /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
+    /// one that orders nothing lets a parallel plan repeat or skip rows from
+    /// one page to the next, so its first page waits for the structure that
+    /// names the key (`sql::paged` writes it).
+    pub fn pages_by_key(self) -> bool {
+        match self {
+            Self::SqlServer => true,
+            Self::Postgres | Self::MySql | Self::Sqlite | Self::Snowflake => false,
         }
     }
 
@@ -235,6 +266,11 @@ impl Engine {
             // one exactly, and the catalog reports names as stored -- so quoting
             // what the catalog said is always the name it meant.
             Self::Postgres | Self::Sqlite | Self::Snowflake => '"',
+            // Not T-SQL's own `[name]`: the grammar every gate in `sql.rs`
+            // parses with has no brackets, and the pin does not move. The
+            // standard quote names an identifier under `QUOTED_IDENTIFIER`,
+            // which the driver's login turns on.
+            Self::SqlServer => '"',
             Self::MySql => '`',
         }
     }
@@ -277,7 +313,94 @@ impl Engine {
             Self::MySql | Self::Snowflake => {
                 format!("'{}'", value.replace('\\', r"\\").replace('\'', "''"))
             }
+            // `N` because a bare literal is converted to the database's code
+            // page first, and a character it lacks arrives as `?`. No
+            // backslash escape in T-SQL.
+            Self::SqlServer => format!("N'{}'", value.replace('\'', "''")),
         }
+    }
+
+    /// [`Self::quote_literal`] for a value bound for a column of `data_type`,
+    /// on the one engine where the type changes how its literal is spelled.
+    ///
+    /// SQL Server's binary value is its hex literal, bare: quoted, it is a
+    /// string, compared by its UTF-16 bytes, and matches no row. Bare only when
+    /// it is exactly such a literal, because this is the one way a value enters
+    /// a statement unquoted. And `N` only where a column needs it: an
+    /// `nvarchar` literal against a `varchar` key converts the column rather
+    /// than itself, so the edit scans the index. An ASCII value reads the same
+    /// in every code page, which is what makes dropping the `N` safe.
+    pub fn quote_value(self, value: &str, data_type: Option<&str>) -> String {
+        let (Self::SqlServer, Some(data_type)) = (self, data_type) else {
+            return self.quote_literal(value);
+        };
+        let lowered = data_type.to_ascii_lowercase();
+        let name = lowered.split('(').next().unwrap_or_default().trim();
+        let hex = value
+            .get(..2)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("0x"))
+            .and_then(|_| value.get(2..))
+            .filter(|digits| {
+                digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        let narrow = matches!(
+            name,
+            "char"
+                | "varchar"
+                | "text"
+                | "bit"
+                | "tinyint"
+                | "smallint"
+                | "int"
+                | "bigint"
+                | "decimal"
+                | "numeric"
+                | "real"
+                | "float"
+                | "money"
+                | "smallmoney"
+                | "date"
+                | "time"
+                | "datetime"
+                | "datetime2"
+                | "smalldatetime"
+                | "datetimeoffset"
+                | "uniqueidentifier"
+        );
+        if let Some(digits) = hex.filter(|_| self.is_binary_type(name)) {
+            format!("0x{digits}")
+        } else if matches!(name, "datetime" | "smalldatetime")
+            && let Some(iso) = iso_datetime(value)
+        {
+            iso
+        } else if narrow && value.is_ascii() {
+            format!("'{}'", value.replace('\'', "''"))
+        } else {
+            self.quote_literal(value)
+        }
+    }
+
+    /// Whether a [`Column::data_type`] names a type whose values are bytes.
+    ///
+    /// Substrings because the families are open-ended in two directions: MySQL
+    /// prefixes its blobs and binaries, and SQLite gives BLOB affinity to any
+    /// declared type merely *containing* `blob`. `image` only on SQL Server,
+    /// where it is the legacy binary type; elsewhere it is a name anyone may
+    /// give a column or a domain, and a SQLite `image` column holds text.
+    ///
+    /// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
+    /// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
+    /// characters it looks like, so an edited blob column becomes text. The grid
+    /// refuses the edit instead. Absent here means unknown, not text: a driver
+    /// that could not name the type says nothing, and treating silence as binary
+    /// would make ordinary columns read-only.
+    pub fn is_binary_type(self, data_type: &str) -> bool {
+        let name = data_type.to_ascii_lowercase();
+        name == "bytea"
+            || name.contains("blob")
+            || name.contains("binary")
+            || (self == Self::SqlServer
+                && matches!(name.as_str(), "image" | "rowversion" | "timestamp"))
     }
 
     pub fn qualified(self, schema: &str, name: &str) -> String {
@@ -287,6 +410,42 @@ impl Engine {
             self.quote_identifier(name)
         )
     }
+}
+
+/// A `datetime` value as `'YYYY-MM-DDThh:mm:ss…'`, the one spelling of it
+/// `DATEFORMAT` and `SET LANGUAGE` never reorder: with a space instead of the
+/// `T`, or as a bare date, `british` reads `2024-01-02` as the first of
+/// February. `None` for anything not shaped like the grid's own rendering.
+fn iso_datetime(value: &str) -> Option<String> {
+    // Every byte of the shape is ASCII, so matching bytes also keeps the
+    // slices below on character boundaries.
+    let shaped = |text: &[u8], shape: &[u8]| {
+        text.len() == shape.len()
+            && text.iter().zip(shape).all(|(byte, want)| match want {
+                b'9' => byte.is_ascii_digit(),
+                _ => byte == want,
+            })
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() < 10 || !shaped(&bytes[..10], b"9999-99-99") {
+        return None;
+    }
+    let time = match &bytes[10..] {
+        [] => b" 00:00:00".as_slice(),
+        rest => rest,
+    };
+    let clock = time.len() >= 9 && shaped(&time[..9], b" 99:99:99");
+    let fraction = &time[time.len().min(9)..];
+    let fraction_ok = match fraction {
+        [] => true,
+        [b'.', digits @ ..] => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    let time = value
+        .get(11..)
+        .filter(|time| !time.is_empty())
+        .unwrap_or("00:00:00");
+    (clock && fraction_ok).then(|| format!("'{}T{time}'", &value[..10]))
 }
 
 /// A URL is percent-encoded by definition, and a path with a space in it is
@@ -312,6 +471,63 @@ pub(super) fn percent_decoded(value: &str) -> Result<String, String> {
     }
 
     String::from_utf8(decoded).map_err(|_| "Connection URL path is not valid UTF-8.".to_string())
+}
+
+/// A server engine's URL, read by dbdelve rather than by any driver: the
+/// userinfo, host, port and database, plus the two TLS keys dbdelve owns.
+pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, String> {
+    let parsed =
+        url::Url::parse(url).map_err(|error| format!("Connection URL is invalid: {error}"))?;
+
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "Connection URL does not contain a host.".to_string())?
+        .to_string();
+    let database = parsed.path().trim_start_matches('/').to_string();
+    if database.is_empty() {
+        return Err("Connection URL does not contain a database.".into());
+    }
+    let user = percent_decoded(parsed.username())?;
+    if user.is_empty() {
+        return Err("Connection URL does not contain a username.".into());
+    }
+
+    let mut sslmode = SslMode::default();
+    let mut root_certificate = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "sslmode" => sslmode = SslMode::parse(value.as_ref())?,
+            "sslrootcert" => {
+                root_certificate = Some(value.trim().to_string()).filter(|path| !path.is_empty());
+            }
+            // Refused rather than dropped. The driver's options are built from
+            // fields here, so a parameter dbdelve does not carry has nowhere to
+            // go, and silently ignoring one is how a connection ends up not
+            // being the connection that was asked for.
+            other => {
+                return Err(format!(
+                    "Connection URL parameter {other} is not one dbdelve can pass to {engine}."
+                ));
+            }
+        }
+    }
+
+    Ok(ServerConfig {
+        host,
+        port: parsed.port(),
+        database: percent_decoded(&database)?,
+        user,
+        password: parsed
+            .password()
+            .map(percent_decoded)
+            .transpose()?
+            .unwrap_or_default(),
+        sslmode,
+        root_certificate,
+        // A URL has nowhere to say it; the form is where it is set.
+        statement_timeout: 0,
+    })
 }
 
 /// What an engine needs to reach a server. SQLite has none of it.
@@ -372,6 +588,7 @@ impl ServerConfig {
 pub enum ConnectionConfig {
     Postgres(ServerConfig),
     MySql(ServerConfig),
+    SqlServer(ServerConfig),
     Sqlite {
         path: String,
         statement_timeout: u32,
@@ -384,6 +601,7 @@ impl ConnectionConfig {
         match self {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(_) => Engine::MySql,
+            Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite { .. } => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
         }
@@ -393,7 +611,7 @@ impl ConnectionConfig {
     /// there is one — the credential fields, and the Keychain.
     pub fn server(&self) -> Option<&ServerConfig> {
         match self {
-            Self::Postgres(server) | Self::MySql(server) => Some(server),
+            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => Some(server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
@@ -402,7 +620,7 @@ impl ConnectionConfig {
     /// reads it from the Keychain, which the profile on disk never holds.
     pub fn server_mut(&mut self) -> Option<&mut ServerConfig> {
         match self {
-            Self::Postgres(server) | Self::MySql(server) => Some(server),
+            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => Some(server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
@@ -426,6 +644,7 @@ impl ConnectionConfig {
         })? {
             Engine::Postgres => postgres::config_from_url(url).map(Self::Postgres),
             Engine::MySql => mysql::config_from_url(url).map(Self::MySql),
+            Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
             Engine::Sqlite => sqlite::path_from_url(url).map(|path| Self::Sqlite {
                 path,
                 // A URL has nowhere to say it; the form is where it is set.
@@ -443,7 +662,9 @@ impl ConnectionConfig {
     /// which variant is carrying it.
     pub fn statement_timeout(&self) -> u32 {
         match self {
-            Self::Postgres(server) | Self::MySql(server) => server.statement_timeout,
+            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => {
+                server.statement_timeout
+            }
             Self::Sqlite {
                 statement_timeout, ..
             } => *statement_timeout,
@@ -473,7 +694,9 @@ impl ConnectionConfig {
     /// What was being talked to, for an error or a title to name.
     pub fn endpoint(&self) -> String {
         match self {
-            Self::Postgres(server) | Self::MySql(server) => server.endpoint(),
+            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => {
+                server.endpoint()
+            }
             Self::Sqlite { path, .. } => path.clone(),
             Self::Snowflake(account) => account.host(),
         }
@@ -486,6 +709,7 @@ impl ConnectionConfig {
 pub enum Connection {
     Postgres(postgres::Connection),
     MySql(mysql::Connection),
+    SqlServer(mssql::Connection),
     Sqlite(sqlite::Connection),
     Snowflake(snowflake::Connection),
 }
@@ -497,6 +721,9 @@ impl Connection {
                 postgres::Connection::open(&server).map(Self::Postgres)
             }
             ConnectionConfig::MySql(server) => mysql::Connection::open(&server).map(Self::MySql),
+            ConnectionConfig::SqlServer(server) => {
+                mssql::Connection::open(&server).map(Self::SqlServer)
+            }
             ConnectionConfig::Sqlite {
                 path,
                 statement_timeout,
@@ -516,8 +743,22 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.query(sql),
             Self::MySql(connection) => connection.query(sql),
+            Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
+        }
+    }
+
+    /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
+    /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
+    /// Server alone runs it differently: its session options are the user's to
+    /// `SET`, and dbdelve's SQL is written for particular ones.
+    pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+        match self {
+            Self::SqlServer(connection) => connection.generated(sql),
+            Self::Postgres(_) | Self::MySql(_) | Self::Sqlite(_) | Self::Snowflake(_) => {
+                self.query(sql, cancel)
+            }
         }
     }
 
@@ -533,6 +774,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.catalog(),
             Self::MySql(connection) => connection.catalog(),
+            Self::SqlServer(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
         }
@@ -544,6 +786,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.routines(),
             Self::MySql(connection) => connection.routines(),
+            Self::SqlServer(connection) => connection.routines(),
             Self::Sqlite(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
         }
@@ -553,6 +796,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.structure(schema, relation),
             Self::MySql(connection) => connection.structure(schema, relation),
+            Self::SqlServer(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
         }
@@ -582,6 +826,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
+            Self::SqlServer(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
         }
@@ -599,6 +844,7 @@ impl Connection {
         let engine = match self {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(_) => Engine::MySql,
+            Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite(_) => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
         };
@@ -622,28 +868,9 @@ pub struct Column {
     pub data_type: Option<String>,
 }
 
-/// Whether a [`Column::data_type`] names a type whose values are bytes.
-///
-/// Three engines' spellings in one predicate rather than three, because nothing
-/// above this module is allowed to know which engine answered (AGENTS.md, hard
-/// rule 4). Substrings because the families are open-ended in two directions:
-/// MySQL prefixes its blobs and binaries, and SQLite gives BLOB affinity to any
-/// declared type merely *containing* `blob`.
-///
-/// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
-/// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
-/// characters it looks like, so an edited blob column becomes text. The grid
-/// refuses the edit instead. Absent here means unknown, not text: a driver that
-/// could not name the type says nothing, and treating silence as binary would
-/// make ordinary columns read-only.
-pub fn is_binary_type(data_type: &str) -> bool {
-    let name = data_type.to_ascii_lowercase();
-    name == "bytea" || name.contains("blob") || name.contains("binary")
-}
-
 /// Whether a [`Column::data_type`] names a type whose values are numbers.
 ///
-/// Exact names rather than the substrings [`is_binary_type`] can afford: the
+/// Exact names rather than the substrings [`Engine::is_binary_type`] can afford: the
 /// numeric families collide with types that are not numbers at all -- `interval`
 /// and `point` both contain `int`, and `bit` is a string of them. A wrong answer
 /// here only costs one column its alignment, but a column of timestamps flushed
@@ -688,6 +915,7 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "dec"
             | "number"
             | "money"
+            | "smallmoney"
     )
 }
 
@@ -791,6 +1019,33 @@ pub struct Structure {
     pub indexes: Vec<NamedDefinition>,
     pub constraints: Vec<NamedDefinition>,
     pub foreign_keys: Vec<ForeignKey>,
+}
+
+impl Structure {
+    /// The columns that tell one row from another: the primary key's, else the
+    /// first unique constraint's, read back out of their `PRIMARY KEY (a, b)`
+    /// rendering. Empty when none reads back as columns the relation has --
+    /// a name holding `, ` cannot be told from two names, and is not guessed at.
+    pub fn row_key(&self) -> Vec<String> {
+        let key = |prefix: &str| {
+            self.constraints.iter().find_map(|constraint| {
+                let names: Vec<String> = constraint
+                    .definition
+                    .strip_prefix(prefix)?
+                    .strip_suffix(')')?
+                    .split(", ")
+                    .map(str::to_string)
+                    .collect();
+                names
+                    .iter()
+                    .all(|name| self.columns.iter().any(|column| &column.name == name))
+                    .then_some(names)
+            })
+        };
+        key("PRIMARY KEY (")
+            .or_else(|| key("UNIQUE ("))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1081,6 +1336,9 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         (Engine::Sqlite, _) => None,
         // There is no session to set anything on.
         (Engine::Snowflake, _) => None,
+        // No session-level switch exists. `ApplicationIntent=ReadOnly` routes a
+        // login to a readable replica and is ignored by a primary.
+        (Engine::SqlServer, _) => None,
     }
 }
 
@@ -1261,6 +1519,10 @@ mod tests {
         assert_eq!(Engine::Postgres.transaction_start(), None);
         assert_eq!(Engine::MySql.transaction_start(), Some("BEGIN"));
         assert_eq!(Engine::Sqlite.transaction_start(), Some("BEGIN"));
+        assert_eq!(
+            Engine::SqlServer.transaction_start(),
+            Some("BEGIN TRANSACTION")
+        );
     }
 
     #[test]
@@ -1278,7 +1540,7 @@ mod tests {
         );
         assert_eq!(Engine::MySql.quote_identifier("odd`name"), "`odd``name`");
 
-        for engine in Engine::ALL {
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
             assert_eq!(
                 engine.quote_literal("odd'value"),
                 "'odd''value'",
@@ -1326,6 +1588,159 @@ mod tests {
             Engine::Snowflake.qualified("PUBLIC", "ORDERS"),
             "\"PUBLIC\".\"ORDERS\""
         );
+    }
+
+    #[test]
+    fn sql_server_quotes_the_standard_way_and_writes_unicode_literals() {
+        // `"name"` rather than `[name]`: the gates' grammar reads only the
+        // first, and the login's `QUOTED_IDENTIFIER` makes it an identifier.
+        assert_eq!(
+            Engine::SqlServer.quote_identifier("odd\"name"),
+            "\"odd\"\"name\""
+        );
+        assert_eq!(
+            Engine::SqlServer.qualified("dbo", "accounts"),
+            "\"dbo\".\"accounts\""
+        );
+        // `N` so a character outside the database's code page is not stored
+        // as `?`; a backslash is an ordinary character in T-SQL.
+        assert_eq!(Engine::SqlServer.quote_literal("李'小"), "N'李''小'");
+        assert_eq!(
+            Engine::SqlServer.quote_literal(r"back\slash"),
+            r"N'back\slash'"
+        );
+    }
+
+    #[test]
+    fn sql_server_spells_a_value_for_its_column_type() {
+        let quote = |value, data_type| Engine::SqlServer.quote_value(value, data_type);
+        // Bytes as the bare hex literal the grid shows, so a binary key matches.
+        assert_eq!(quote("0x00FF", Some("binary")), "0x00FF");
+        assert_eq!(quote("0xab", Some("varbinary(16)")), "0xab");
+        assert_eq!(quote("0x", Some("image")), "0x");
+        // Anything that is not exactly a hex literal stays quoted: this is the
+        // one unquoted path into a statement.
+        // Either case of the prefix, written the way the grid shows it.
+        assert_eq!(quote("0X00ff", Some("varbinary")), "0x00ff");
+        // A rowversion is bytes too, whichever of its names the catalog uses.
+        assert_eq!(
+            quote("0x00000000000007D1", Some("rowversion")),
+            "0x00000000000007D1"
+        );
+        assert_eq!(
+            quote("0x00000000000007D1", Some("timestamp")),
+            "0x00000000000007D1"
+        );
+        for value in [
+            "0x0",
+            "0xZZ",
+            "0x00; DROP TABLE t",
+            "00FF",
+            "0X0",
+            " 0x00",
+            "0x0é",
+        ] {
+            assert_eq!(
+                quote(value, Some("varbinary")),
+                format!("N'{}'", value.replace('\'', "''")),
+                "{value}"
+            );
+        }
+        assert_eq!(quote("0x00FF", Some("varchar")), "'0x00FF'");
+        // `N` only where the column is Unicode, or the value needs it.
+        assert_eq!(quote("o'hara", Some("varchar")), "'o''hara'");
+        assert_eq!(quote("o'hara", Some("CHAR(10)")), "'o''hara'");
+        assert_eq!(quote("42", Some("int")), "'42'");
+        assert_eq!(quote("2024-01-01", Some("datetime2")), "'2024-01-01'");
+        // `datetime` in the one form no `DATEFORMAT` or language reorders.
+        assert_eq!(
+            quote("2024-01-02 03:04:05.000", Some("datetime")),
+            "'2024-01-02T03:04:05.000'"
+        );
+        assert_eq!(
+            quote("2024-01-02 03:04:00", Some("smalldatetime")),
+            "'2024-01-02T03:04:00'"
+        );
+        assert_eq!(
+            quote("2024-01-02", Some("datetime")),
+            "'2024-01-02T00:00:00'"
+        );
+        // Anything else shaped differently is left as typed.
+        for value in [
+            "2024-01-02 03:04",
+            "2024-01-02 03:04:05.",
+            "yesterday",
+            "%2024%",
+        ] {
+            assert_eq!(
+                quote(value, Some("datetime")),
+                format!("'{value}'"),
+                "{value}"
+            );
+        }
+        assert_eq!(quote("李'小", Some("varchar")), "N'李''小'");
+        for data_type in [
+            Some("nvarchar"),
+            Some("nchar"),
+            Some("xml"),
+            Some("sql_variant"),
+        ] {
+            assert_eq!(quote("x", data_type), "N'x'", "{data_type:?}");
+        }
+        assert_eq!(quote("x", Some("dbo.custom")), "N'x'");
+        assert_eq!(quote("x", None), "N'x'");
+        // Every other engine is unchanged: Postgres's `\x…` round-trips quoted.
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+            assert_eq!(
+                engine.quote_value("0x00FF", Some("bytea")),
+                engine.quote_literal("0x00FF")
+            );
+            assert_eq!(
+                engine.quote_value("v", Some("varchar")),
+                engine.quote_literal("v")
+            );
+        }
+    }
+
+    #[test]
+    fn image_is_binary_on_sql_server_alone() {
+        assert!(Engine::SqlServer.is_binary_type("image"));
+        assert!(Engine::SqlServer.is_binary_type("rowversion"));
+        assert!(Engine::SqlServer.is_binary_type("timestamp"));
+        assert!(!Engine::Postgres.is_binary_type("timestamp"));
+        assert!(!Engine::Sqlite.is_binary_type("image"));
+        assert!(!Engine::Postgres.is_binary_type("image"));
+        for engine in Engine::ALL {
+            for data_type in ["bytea", "blob", "longblob", "varbinary(16)", "BINARY"] {
+                assert!(engine.is_binary_type(data_type), "{engine:?} {data_type}");
+            }
+        }
+    }
+
+    #[test]
+    fn sql_server_is_a_server_engine_reached_by_either_url_scheme() {
+        for url in [
+            "mssql://someone%40example.com@db.example.test:1433/dbdelve_dev",
+            "sqlserver://someone%40example.com@db.example.test:1433/dbdelve_dev",
+        ] {
+            let config = ConnectionConfig::from_url(url).unwrap();
+            assert_eq!(config.engine(), Engine::SqlServer, "{url}");
+            let server = config.server().expect("a server half, for the Keychain");
+            assert_eq!(server.user, "someone@example.com");
+            assert_eq!(server.password, "", "blank is valid");
+            assert_eq!(server.port, Some(1433));
+        }
+        assert_eq!(Engine::parse("mssql"), Ok(Engine::SqlServer));
+        assert_eq!(Engine::SqlServer.fields(), Fields::Server);
+        assert_eq!(
+            Engine::SqlServer.transaction_start(),
+            Some("BEGIN TRANSACTION")
+        );
+        // No prefix form to put on a copy, and no session switch for Read-only.
+        for mode in ExplainMode::ALL {
+            assert_eq!(Engine::SqlServer.explain_prefix(mode), None);
+        }
+        assert!(!Engine::SqlServer.holds_read_only());
     }
 
     #[test]
@@ -1654,6 +2069,41 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_row_key_is_the_primary_key_else_a_unique_one_else_nothing() {
+        let structure = |constraints: &[&str]| Structure {
+            columns: ["id", "line, no", "code"]
+                .map(|name| ColumnDefinition {
+                    name: name.into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                })
+                .to_vec(),
+            indexes: Vec::new(),
+            constraints: constraints
+                .iter()
+                .map(|definition| NamedDefinition {
+                    name: "k".into(),
+                    definition: definition.to_string(),
+                })
+                .collect(),
+            foreign_keys: Vec::new(),
+        };
+        assert_eq!(
+            structure(&["UNIQUE (code)", "PRIMARY KEY (id, code)"]).row_key(),
+            ["id", "code"]
+        );
+        assert_eq!(structure(&["UNIQUE (code)"]).row_key(), ["code"]);
+        // `line, no` reads as two columns the relation does not have.
+        assert!(
+            structure(&["PRIMARY KEY (id, line, no)"])
+                .row_key()
+                .is_empty()
+        );
+        assert!(structure(&["CHECK (id > 0)"]).row_key().is_empty());
     }
 
     #[test]

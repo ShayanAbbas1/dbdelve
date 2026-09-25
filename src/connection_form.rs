@@ -260,6 +260,7 @@ impl ConnectionForm {
             }
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
+            Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
         };
 
@@ -369,9 +370,9 @@ impl ConnectionForm {
 /// engine that has one, and the file for an engine that is one.
 pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
     match config {
-        ConnectionConfig::Postgres(server) | ConnectionConfig::MySql(server) => {
-            server.database.clone()
-        }
+        ConnectionConfig::Postgres(server)
+        | ConnectionConfig::MySql(server)
+        | ConnectionConfig::SqlServer(server) => server.database.clone(),
         ConnectionConfig::Sqlite { path, .. } => file_stem(path).to_string(),
         ConnectionConfig::Snowflake(account) => account.database.clone(),
     }

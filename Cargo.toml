@@ -128,6 +128,35 @@ ureq = { version = "=3.4.2", default-features = false, features = [
 ring = "=0.17.14"
 base64 = "=0.22.1"
 
+# SQL Server. tiberius is the only maintained TDS client, and it is
+# runtime-agnostic async rather than blocking. So it is driven the way the
+# `postgres` crate drives tokio-postgres: each connection owns a tokio
+# current-thread runtime and every call is a `block_on` on the background
+# thread the query already runs on. Nothing tokio-shaped reaches GPUI's
+# executor (AGENTS.md, "Do not add tokio").
+#
+# Default features off: they are `native-tls`, which is OpenSSL on Linux, and
+# `winauth`. `rustls` is the only TLS it offers otherwise, and it is
+# tokio-rustls 0.24 on rustls 0.21 -- a second rustls major version beside the
+# 0.23 the other engines share. Pure Rust and still on `ring`, so no second
+# crypto library, but a second copy of the TLS stack all the same, and one
+# `tls.rs` cannot configure: tiberius builds its own rustls config.
+tiberius = { version = "=0.12.3", default-features = false, features = [
+    "tds73",
+    "rustls",
+] }
+# The runtime tiberius is driven on, and the adapter from tokio's socket to the
+# `futures` I/O traits tiberius speaks. Pinned to the versions already locked,
+# so naming them adds no copy.
+tokio = { version = "=1.53.1", default-features = false, features = [
+    "rt",
+    "net",
+    "time",
+] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["compat"] }
+# `try_next` over tiberius's result stream. Already linked through tiberius.
+futures-util = { version = "=0.3.34", default-features = false }
+
 # The palette's scorer. gpui-component ships the list, the virtualized scroll
 # and the search field, but no fuzzy matching at all -- and ranking that reads
 # as obvious (whole words, word starts, runs of adjacent characters) is not a

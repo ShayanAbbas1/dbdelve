@@ -164,6 +164,12 @@ pub struct StoredObject {
     /// schema from a relation in a key.
     #[serde(default)]
     pub active: bool,
+    /// The engine [`Self::filter`] was written for (`Engine::as_str`). On that
+    /// engine the filter reopens exactly as it ran, literals spelled by column
+    /// types a restore has not loaded yet included. Absent, from a file
+    /// written before it was kept, the filter is re-derived from the bars.
+    #[serde(default)]
+    pub filter_engine: Option<String>,
     /// The filter bars [`Self::filter`] was derived from. The bars are the
     /// editable state and the expression is what runs, so both are kept:
     /// nothing here parses a `WHERE` back into controls. Last, because TOML
@@ -1125,6 +1131,7 @@ user = "shayan"
                     routine: false,
                     kind: RelationKind::MaterializedView,
                     filter: String::new(),
+                    filter_engine: None,
                     filters: Vec::new(),
                     active: true,
                     bars: Vec::new(),
@@ -1135,6 +1142,7 @@ user = "shayan"
                     routine: true,
                     kind: RelationKind::default(),
                     filter: String::new(),
+                    filter_engine: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -1221,6 +1229,7 @@ open_objects = []
                 routine: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
+                filter_engine: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1286,6 +1295,7 @@ open_objects = []
                 routine: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
+                filter_engine: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1438,6 +1448,7 @@ open_objects = []
                 routine: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
+                filter_engine: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1870,6 +1881,7 @@ open_objects = []
                 routine: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
+                filter_engine: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -2146,6 +2158,7 @@ name = \"accounts\"
                     routine: false,
                     kind: RelationKind::Table,
                     filter: String::new(),
+                    filter_engine: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -2156,6 +2169,7 @@ name = \"accounts\"
                     routine: false,
                     kind: RelationKind::Table,
                     filter: r#""id" = '42'"#.into(),
+                    filter_engine: Some("postgres".into()),
                     filters: Vec::new(),
                     active: true,
                     bars: vec![StoredFilter {
@@ -2192,6 +2206,7 @@ name = \"accounts\"
             routine: false,
             kind: RelationKind::Table,
             filter: r#"("state" = 'it''s ok') OR ("tier" LIKE '%2%' ESCAPE '\')"#.into(),
+            filter_engine: Some("postgres".into()),
             filters: Vec::new(),
             active: true,
             bars: vec![

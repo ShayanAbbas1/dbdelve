@@ -164,6 +164,7 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
+        let connected = profile.connection().is_some();
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
@@ -175,6 +176,7 @@ impl Workspace {
             limit,
             offset,
             stale,
+            structure,
             ..
         } = &mut tab.body
         else {
@@ -183,18 +185,33 @@ impl Workspace {
         if !change(filter, sort, limit, offset) {
             return;
         }
+        let key = match structure {
+            StructureState::Loaded(structure) => structure.row_key(),
+            // A first page in one order and a second in another is how rows
+            // repeat and go missing, so the page waits for the key. The
+            // structure's arrival runs it. Not without a connection, though:
+            // then no structure is coming (`load_structure` gave up, or a
+            // reconnect is dropping its answer) and the run is what says the
+            // connection is not open. A reconnect reloads the tab in front,
+            // and any other on its next visit.
+            StructureState::Loading if engine.pages_by_key() && connected => return,
+            _ => Vec::new(),
+        };
 
         let sql = relation_sql(engine, &schema, &relation, filter, sort, *limit, *offset);
         // Checked before anything leaves the machine, and before the tab's
         // staleness is spent: a refused filter leaves the rows on screen and
         // the bars as they stand, so it can be corrected rather than retyped.
-        if !sql::is_generated_select(&sql) {
+        let paged = sql::is_generated_select(&sql)
+            .then(|| sql::paged(engine, &sql, &key))
+            .flatten();
+        let Some(sql) = paged else {
             self.note(
                 "dbdelve will not run a filter it cannot read as one SELECT.".into(),
                 cx,
             );
             return;
-        }
+        };
 
         // The one run that must not blank the grid first: a restored tab's rows
         // are the rows it was showing, and clearing them to fetch the same
@@ -292,7 +309,9 @@ impl Workspace {
                     else {
                         return;
                     };
+                    let mut waited = false;
                     if let ObjectBody::Relation { structure, .. } = &mut tab.body {
+                        waited = matches!(structure, StructureState::Loading);
                         *structure = match result {
                             Ok(loaded) => StructureState::Loaded(loaded),
                             Err(error) => StructureState::Failed(error.message),
@@ -302,6 +321,10 @@ impl Workspace {
                     // The rows and the structure are two requests and either can
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
+                    // The page `requery_relation` held back for this key.
+                    if waited && workspace.engine().pages_by_key() {
+                        workspace.requery_relation(id, |_, _, _, _| true, cx);
+                    }
                 })
                 .ok();
         })
@@ -394,8 +417,19 @@ impl Workspace {
         let Some(bar) = foreign_key_filter(&key, grid.active_value()) else {
             return;
         };
+        // The referencing column's type stands in for the referenced one's,
+        // which SQL Server requires to match and whose structure is not loaded.
+        let columns: Vec<ColumnDefinition> = structure
+            .columns
+            .iter()
+            .filter(|column| column.name == key.column)
+            .map(|column| ColumnDefinition {
+                name: key.referenced_column.clone(),
+                ..column.clone()
+            })
+            .collect();
         let filters = vec![bar];
-        let filter = derived_filter(engine, &filters);
+        let filter = derived_filter(engine, &filters, &columns);
         // The catalog is the only authority on what the referenced relation is;
         // a default is what a tab opened before it loaded would have worn too.
         let kind = match &profile.catalog {
@@ -494,7 +528,7 @@ impl Workspace {
         else {
             return;
         };
-        show_snapshot(&results, &snapshot, mode, cx);
+        show_snapshot(&results, &snapshot, mode, self.engine(), cx);
         let preview_rows = self.settings.preview_rows;
         let Some(profile) = self.profile_mut() else {
             return;
@@ -736,6 +770,7 @@ mod tests {
             routine,
             kind: RelationKind::Table,
             filter: String::new(),
+            filter_engine: None,
             filters: Vec::new(),
             active: false,
             bars: Vec::new(),

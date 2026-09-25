@@ -137,7 +137,7 @@ impl Operator {
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || engine != Engine::Sqlite
+        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -288,7 +288,7 @@ pub(crate) fn filter_bars(filters: &[FilterRow], cx: &App) -> Vec<FilterBar> {
 /// file.
 pub(crate) fn applied_filters(engine: Engine, bars: &[FilterBar]) -> Vec<FilterBar> {
     bars.iter()
-        .filter(|bar| bar_predicate(engine, bar).is_some())
+        .filter(|bar| bar_predicate(engine, bar, &[]).is_some())
         .cloned()
         .collect()
 }
@@ -300,10 +300,18 @@ pub(crate) fn applied_filters(engine: Engine, bars: &[FilterBar]) -> Vec<FilterB
 /// `a OR (b AND c)` that SQL's own precedence would give it. A lone bar is
 /// unwrapped, which is also what keeps a tab filtered before joiners existed
 /// on the grid-snapshot key it already had.
-pub(crate) fn derived_filter(engine: Engine, bars: &[FilterBar]) -> String {
+///
+/// `columns` are the relation's, where its structure is known, for the types
+/// that spell a value's literal (`Engine::quote_value`); empty spells every
+/// value as a column of unknown type.
+pub(crate) fn derived_filter(
+    engine: Engine,
+    bars: &[FilterBar],
+    columns: &[db::ColumnDefinition],
+) -> String {
     let mut folded: Option<String> = None;
     for bar in bars {
-        let Some(predicate) = bar_predicate(engine, bar) else {
+        let Some(predicate) = bar_predicate(engine, bar, columns) else {
             continue;
         };
         folded = Some(match folded {
@@ -317,7 +325,11 @@ pub(crate) fn derived_filter(engine: Engine, bars: &[FilterBar]) -> String {
 /// The predicate one bar contributes, or `None` for a bar that narrows nothing:
 /// no column picked, no value where the operator needs one, an empty list, half
 /// a range, or an operator this engine does not have.
-pub(crate) fn bar_predicate(engine: Engine, bar: &FilterBar) -> Option<String> {
+pub(crate) fn bar_predicate(
+    engine: Engine,
+    bar: &FilterBar,
+    columns: &[db::ColumnDefinition],
+) -> Option<String> {
     let value = bar.value.trim();
     if bar.raw {
         // Verbatim, and checked as a whole statement by `is_generated_select`
@@ -329,7 +341,11 @@ pub(crate) fn bar_predicate(engine: Engine, bar: &FilterBar) -> Option<String> {
     if !bar.operator.on(engine) || (bar.operator.takes_value() && value.is_empty()) {
         return None;
     }
-    filter_predicate(engine, column, bar.operator, value)
+    let data_type = columns
+        .iter()
+        .find(|definition| definition.name == column)
+        .map(|definition| definition.data_type.as_str());
+    filter_predicate(engine, column, data_type, bar.operator, value)
 }
 
 /// One filter against the tab's, trimmed. `false` when nothing moved, so
@@ -353,16 +369,17 @@ pub(crate) fn changed_filter(filter: &mut String, offset: &mut usize, typed: &st
 ///
 /// A SQL-generating call site (`AGENTS.md`, engine divergences), and the only
 /// place a filter bar becomes SQL -- every operator composes here, through
-/// `quote_identifier` and `quote_literal`, so there is one place a quote can be
+/// `quote_identifier` and `quote_value`, so there is one place a quote can be
 /// got wrong rather than one per operator.
 pub(crate) fn filter_predicate(
     engine: Engine,
     column: &str,
+    data_type: Option<&str>,
     operator: Operator,
     value: &str,
 ) -> Option<String> {
     let name = engine.quote_identifier(column);
-    let literal = |value: &str| engine.quote_literal(value);
+    let literal = |value: &str| engine.quote_value(value, data_type);
     let comparison = |symbol: &str| Some(format!("{name} {symbol} {}", literal(value)));
     // `<>` rather than `!=` on both of the negations, because it is the
     // spelling all three engines agree on; the dropdown says `!=` because that
@@ -379,7 +396,7 @@ pub(crate) fn filter_predicate(
         Operator::IsEmpty => Some(format!("{name} = {}", literal(""))),
         Operator::IsNotEmpty => Some(format!("{name} <> {}", literal(""))),
         Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith => {
-            Some(substring(engine, &name, operator, value))
+            Some(substring(engine, &name, data_type, operator, value))
         }
         Operator::InList | Operator::NotInList => {
             let items: Vec<_> = value
@@ -419,7 +436,8 @@ pub(crate) fn filter_predicate(
         Operator::Regex => match engine {
             Engine::Postgres => comparison("~"),
             Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
-            Engine::Sqlite => None,
+            // SQL Server has no regex before 2025's `REGEXP_LIKE`.
+            Engine::Sqlite | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
@@ -445,7 +463,13 @@ pub(crate) fn filter_predicate(
 /// question with no pattern to escape. They are case-sensitive where SQLite's
 /// `LIKE` is not, which is the cost of the trade and is smaller than answering
 /// a question nobody asked.
-pub(crate) fn substring(engine: Engine, name: &str, operator: Operator, value: &str) -> String {
+pub(crate) fn substring(
+    engine: Engine,
+    name: &str,
+    data_type: Option<&str>,
+    operator: Operator,
+    value: &str,
+) -> String {
     let literal = engine.quote_literal(value);
     if engine == Engine::Sqlite {
         return match operator {
@@ -474,7 +498,19 @@ pub(crate) fn substring(engine: Engine, name: &str, operator: Operator, value: &
         };
         return format!("{negation}{function}({name}, {literal})");
     }
-    let escaped = like_pattern(value);
+    // T-SQL's `LIKE` has no default escape either, but a bracket makes any
+    // character literal, so `[%]` is a percent sign -- and `[` itself has to be
+    // bracketed, since it opens a character class there.
+    let escaped = match engine {
+        Engine::SqlServer => value
+            .chars()
+            .map(|character| match character {
+                '%' | '_' | '[' => format!("[{character}]"),
+                other => other.to_string(),
+            })
+            .collect(),
+        _ => like_pattern(value),
+    };
     let pattern = match operator {
         Operator::StartsWith => format!("{escaped}%"),
         Operator::EndsWith => format!("%{escaped}"),
@@ -486,7 +522,7 @@ pub(crate) fn substring(engine: Engine, name: &str, operator: Operator, value: &
             Operator::NotContains => "NOT ",
             _ => "",
         },
-        engine.quote_literal(&pattern)
+        engine.quote_value(&pattern, data_type)
     )
 }
 
@@ -538,19 +574,23 @@ pub(crate) fn stored_filter(bar: &FilterBar) -> store::StoredFilter {
 
 /// What a stored tab's `WHERE` is on the engine it is being reopened on.
 ///
-/// Derived from the bars rather than trusted as written: the two agree for a
-/// profile that has not changed engine, and where it has, an operator the new
-/// engine cannot express drops out rather than being sent to a server that
-/// cannot parse it (spec §7). A tab stored before the bars existed has none,
-/// and keeps the expression it came with.
+/// As written on the engine it was written for: re-deriving it there would
+/// lose what the column types spelled (SQL Server's `0x…` and plain `'…'`),
+/// whose structure a restore has not loaded, and with it the grid snapshot and
+/// tab identity keyed by the string. On another engine, or from a file that did
+/// not record one, it is derived from the bars, so an operator the new engine
+/// cannot express drops out rather than being sent to a server that cannot
+/// parse it (spec §7). A tab stored before the bars existed has none, and keeps
+/// the expression it came with.
 pub(crate) fn restored_filter(
     engine: Engine,
     stored: &store::StoredObject,
 ) -> (String, Vec<FilterBar>) {
     let bars = stored_bars(stored);
-    let filter = match bars.is_empty() {
+    let written_here = stored.filter_engine.as_deref() == Some(engine.as_str());
+    let filter = match bars.is_empty() || written_here {
         true => stored.filter.clone(),
-        false => derived_filter(engine, &bars),
+        false => derived_filter(engine, &bars, &[]),
     };
     (filter, bars)
 }
@@ -685,7 +725,7 @@ mod tests {
 
     /// The predicate one operator writes over one column.
     fn predicate(engine: Engine, operator: Operator, value: &str) -> Option<String> {
-        bar_predicate(engine, &bar(Some("state"), operator, value))
+        bar_predicate(engine, &bar(Some("state"), operator, value), &[])
     }
 
     #[test]
@@ -709,13 +749,14 @@ mod tests {
         // An apostrophe in the value and a quote in the column name are the two
         // ways a typed value becomes SQL of its own.
         assert_eq!(
-            filter_predicate(Engine::Postgres, r#"od"d"#, Operator::Equals, "it's").as_deref(),
+            filter_predicate(Engine::Postgres, r#"od"d"#, None, Operator::Equals, "it's")
+                .as_deref(),
             Some(r#""od""d" = 'it''s'"#)
         );
         // And a backslash is the third, on the one engine that reads it as an
         // escape.
         assert_eq!(
-            filter_predicate(Engine::MySql, "path", Operator::Equals, r"a\b").as_deref(),
+            filter_predicate(Engine::MySql, "path", None, Operator::Equals, r"a\b").as_deref(),
             Some(r"`path` = 'a\\b'")
         );
     }
@@ -903,6 +944,90 @@ mod tests {
     }
 
     #[test]
+    fn sql_server_brackets_the_wildcards_it_would_otherwise_read() {
+        // T-SQL's `LIKE` has no default escape, and `[` opens a character class
+        // there, so each of the three is bracketed to stand for itself.
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::Contains, "50%_[x]").as_deref(),
+            Some(r#""state" LIKE N'%50[%][_][[]x]%'"#)
+        );
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::StartsWith, r"C:\").as_deref(),
+            Some(r#""state" LIKE N'C:\%'"#)
+        );
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::NotContains, "ok").as_deref(),
+            Some(r#""state" NOT LIKE N'%ok%'"#)
+        );
+        // No regex before SQL Server 2025, so the dropdown does not offer one.
+        assert!(!Operator::Regex.on(Engine::SqlServer));
+        assert_eq!(predicate(Engine::SqlServer, Operator::Regex, "^a"), None);
+    }
+
+    #[test]
+    fn a_sql_server_filter_spells_its_literal_by_the_columns_type() {
+        let columns = [
+            ("code", "varchar(20)"),
+            ("hash", "binary(16)"),
+            ("name", "nvarchar(50)"),
+        ]
+        .map(|(name, data_type)| db::ColumnDefinition {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: true,
+            default: None,
+        });
+        let sql = |column: &str, operator, value: &str| {
+            bar_predicate(
+                Engine::SqlServer,
+                &bar(Some(column), operator, value),
+                &columns,
+            )
+            .expect("applied")
+        };
+        // No `N` against a `varchar`, which would convert the column and scan.
+        assert_eq!(sql("code", Operator::Equals, "k-1"), r#""code" = 'k-1'"#);
+        assert_eq!(
+            sql("code", Operator::InList, "a, b"),
+            r#""code" IN ('a', 'b')"#
+        );
+        assert_eq!(
+            sql("code", Operator::StartsWith, "5%"),
+            r#""code" LIKE '5[%]%'"#
+        );
+        // Unless the value needs it, and then the `N` is what keeps it intact.
+        assert_eq!(sql("code", Operator::Equals, "Zoë"), r#""code" = N'Zoë'"#);
+        // A binary value is its bare hex, since a quoted one is never equal.
+        assert_eq!(
+            sql("hash", Operator::Equals, "0x00FF"),
+            r#""hash" = 0x00FF"#
+        );
+        let preview = relation_sql(
+            Engine::SqlServer,
+            "dbo",
+            "t",
+            &sql("hash", Operator::Equals, "0x00FF"),
+            &[],
+            10,
+            0,
+        );
+        assert!(sql::is_generated_select(&preview), "{preview}");
+        assert_eq!(sql("hash", Operator::Equals, "00FF"), r#""hash" = N'00FF'"#);
+        assert_eq!(sql("name", Operator::Equals, "k-1"), r#""name" = N'k-1'"#);
+        // A column the structure does not list is spelled as unknown.
+        assert_eq!(sql("other", Operator::Equals, "k-1"), r#""other" = N'k-1'"#);
+        // And the type means nothing to another engine.
+        assert_eq!(
+            bar_predicate(
+                Engine::Postgres,
+                &bar(Some("hash"), Operator::Equals, "0x00FF"),
+                &columns
+            ),
+            Some(r#""hash" = '0x00FF'"#.to_string())
+        );
+    }
+
+    #[test]
     fn a_snowflake_regex_matches_anywhere_like_the_others() {
         // `REGEXP_LIKE` there anchors to the whole value, which would make the
         // same dropdown entry mean something narrower on one engine.
@@ -923,6 +1048,7 @@ mod tests {
                     value: value.to_string(),
                     ..FilterBar::default()
                 },
+                &[],
             )
         };
         // Nothing here inspects it: `is_generated_select` is what stands behind
@@ -1002,7 +1128,11 @@ mod tests {
     /// What following a key ends up asking for: the bar it writes, composed the
     /// way the tab composes its bars.
     fn followed(engine: Engine, key: &db::ForeignKey, value: Option<&str>) -> Option<String> {
-        Some(derived_filter(engine, &[foreign_key_filter(key, value)?]))
+        Some(derived_filter(
+            engine,
+            &[foreign_key_filter(key, value)?],
+            &[],
+        ))
     }
 
     #[test]
@@ -1086,7 +1216,7 @@ mod tests {
 
     /// The bars as the UI holds them, straight through to the `WHERE`.
     fn filter_of(engine: Engine, bars: &[FilterBar]) -> String {
-        derived_filter(engine, bars)
+        derived_filter(engine, bars, &[])
     }
 
     /// An equality bar joined to the one above it.
@@ -1263,6 +1393,7 @@ mod tests {
             routine: false,
             kind: RelationKind::default(),
             filter: String::new(),
+            filter_engine: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1312,6 +1443,7 @@ mod tests {
             routine: false,
             kind: RelationKind::default(),
             filter: r#"("state" ~ '^a') AND ("tier" = '2')"#.into(),
+            filter_engine: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1344,6 +1476,43 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_restored_onto_its_own_engine_runs_the_filter_it_ran() {
+        // Spelled by a column type the restore has not loaded: re-derived, it
+        // would be `N'0x00FF'`, match nothing, and miss the grid snapshot.
+        let mut stored = store::StoredObject {
+            schema: "dbo".into(),
+            name: "blobs_by_hash".into(),
+            routine: false,
+            kind: RelationKind::default(),
+            filter: r#""hash" = 0x00FF"#.into(),
+            filter_engine: Some("mssql".into()),
+            filters: Vec::new(),
+            active: true,
+            bars: vec![store::StoredFilter {
+                column: "hash".into(),
+                value: "0x00FF".into(),
+                operator: "equals".into(),
+                conjunction: "AND".into(),
+                raw: false,
+            }],
+        };
+        assert_eq!(
+            restored_filter(Engine::SqlServer, &stored).0,
+            r#""hash" = 0x00FF"#
+        );
+        // Another engine, or a file that did not say, derives it from the bars.
+        assert_eq!(
+            restored_filter(Engine::Postgres, &stored).0,
+            r#""hash" = '0x00FF'"#
+        );
+        stored.filter_engine = None;
+        assert_eq!(
+            restored_filter(Engine::SqlServer, &stored).0,
+            r#""hash" = N'0x00FF'"#
+        );
+    }
+
+    #[test]
     fn a_bar_written_before_operators_comes_back_as_the_equality_it_was() {
         // The one field an older profile has, read once on the way in. An
         // operator or joiner this build cannot read falls the same way.
@@ -1353,6 +1522,7 @@ mod tests {
             routine: false,
             kind: RelationKind::default(),
             filter: r#""state" = 'ok'"#.into(),
+            filter_engine: None,
             filters: vec![("state".into(), "ok".into())],
             active: true,
             bars: Vec::new(),

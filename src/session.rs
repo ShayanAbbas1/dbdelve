@@ -823,6 +823,7 @@ impl ObjectTab {
             schema: self.schema.clone(),
             name: self.name.clone(),
             filter: self.filter().to_string(),
+            filter_engine: (!self.filter().is_empty()).then(|| engine.as_str().to_string()),
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
             filters: Vec::new(),
@@ -1030,10 +1031,11 @@ pub(crate) fn show_snapshot(
     results: &Entity<TableState<ResultGrid>>,
     grid: &store::StoredGrid,
     mode: Mode,
+    engine: Engine,
     cx: &mut Context<Workspace>,
 ) {
     results.update(cx, |table, cx| {
-        *table.delegate_mut() = ResultGrid::restored(grid, mode);
+        *table.delegate_mut() = ResultGrid::restored(grid, mode).with_engine(engine);
         table.refresh(cx);
     });
 }
@@ -1294,7 +1296,8 @@ mod tests {
             .map(|(column, value)| (column.as_str(), value.as_deref()))
             .collect();
 
-        let statement = sql::insert_row(Engine::Postgres, "public", "accounts", &borrowed).unwrap();
+        let statement =
+            sql::insert_row(Engine::Postgres, "public", "accounts", &borrowed, &[]).unwrap();
         assert_eq!(
             statement,
             r#"INSERT INTO "public"."accounts" ("name", "note", "bio") VALUES ('Ada', NULL, '')"#

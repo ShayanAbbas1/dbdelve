@@ -128,17 +128,23 @@ impl Workspace {
             return;
         };
 
-        let Some(sql) = self.sql_to_run(&editor, window, cx) else {
-            if let Some(profile) = self.profile_mut()
-                && let Some((state, _)) = profile.session.slot(tab)
-            {
-                *state = QueryState::Failed(DbError {
-                    message: "There is no statement to run.".into(),
-                    position: None,
-                });
+        let sql = match self.sql_to_run(&editor, window, cx) {
+            Some(Ok(sql)) => sql,
+            refused => {
+                let message = refused
+                    .and_then(Result::err)
+                    .unwrap_or_else(|| "There is no statement to run.".into());
+                if let Some(profile) = self.profile_mut()
+                    && let Some((state, _)) = profile.session.slot(tab)
+                {
+                    *state = QueryState::Failed(DbError {
+                        message,
+                        position: None,
+                    });
+                }
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         };
 
         self.execute_sql(sql, tab, cx);
@@ -198,9 +204,10 @@ impl Workspace {
             );
             return;
         };
-        let Some(sql) = self.sql_to_run(&editor, window, cx) else {
-            failure(self, "There is no statement to explain.", cx);
-            return;
+        let sql = match self.sql_to_run(&editor, window, cx) {
+            Some(Ok(sql)) => sql,
+            Some(Err(message)) => return failure(self, &message, cx),
+            None => return failure(self, "There is no statement to explain.", cx),
         };
 
         self.execute_and_then(
@@ -648,8 +655,8 @@ impl Workspace {
     /// Runs a statement, if the connection's mode allows it.
     ///
     /// The check lives here rather than in each caller because every path that
-    /// runs SQL routes through this one -- `connection.query` has exactly one
-    /// call site in the app, inside `execute_unchecked`. A stopped statement is
+    /// runs SQL routes through this one -- `connection.query` and
+    /// `connection.generated` are called in one place, `execute_unchecked`. A stopped statement is
     /// held on `pending_run` rather than run: nothing here sets
     /// `QueryState::Running` or appends to history, because a statement that
     /// did not run is not history and must not leave a spinner behind.
@@ -778,7 +785,13 @@ impl Workspace {
         // Read from the statement that is about to run, so the headers say what
         // the rows on screen are actually ordered by rather than what dbdelve
         // last intended to ask for.
-        let keys = sql::order_by(&sql);
+        // A preview runs in the engine's own paging, which on SQL Server the
+        // grammar cannot read; its sort is read from the spelling it was
+        // generated in. A buffer's statement is read as typed.
+        let keys = match tab {
+            Tab::Object(_) => sql::order_by(&sql::unpaged(&sql)),
+            Tab::Query(_) => sql::order_by(&sql),
+        };
         let sortable = keys.is_some();
         let keys = keys.unwrap_or_default();
         // Kept only where it is read back: the query tab's grid has to be able
@@ -804,9 +817,16 @@ impl Workspace {
             let _ = store::append_history(&profile.id, statement);
             remember_statement(&mut profile.session.history, statement);
         }
-        let query_task = cx
-            .background_executor()
-            .spawn(async move { connection.query(&sql, &cancel) });
+        // Everything an object tab runs is dbdelve's, and a query tab runs
+        // dbdelve's statement only when an edit is applied from its grid, the
+        // one run that carries a refresh.
+        let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
+        let query_task = cx.background_executor().spawn(async move {
+            match generated {
+                true => connection.generated(&sql, &cancel),
+                false => connection.query(&sql, &cancel),
+            }
+        });
 
         cx.spawn(async move |workspace, cx| {
             let result = query_task.await;
@@ -867,8 +887,9 @@ impl Workspace {
                                 let produced_grid = !result.columns.is_empty();
                                 results.update(cx, |table, cx| {
                                     let sort = sort_columns(engine, &keys, &result.columns);
-                                    *table.delegate_mut() =
-                                        ResultGrid::new(result, mode).with_sort(sort, sortable);
+                                    *table.delegate_mut() = ResultGrid::new(result, mode)
+                                        .with_engine(engine)
+                                        .with_sort(sort, sortable);
                                     table.refresh(cx);
                                 });
                                 (true, produced_grid, None)
@@ -979,7 +1000,7 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let Some(formatted) = crate::sql::format(&text) else {
+        let Some(formatted) = crate::sql::format(self.engine(), &text) else {
             self.note(
                 "Not formatting: a dollar-quoted body would be rewritten.".into(),
                 cx,
@@ -1017,7 +1038,8 @@ impl Workspace {
         editor: &Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<String> {
+    ) -> Option<Result<String, String>> {
+        let engine = self.engine();
         let selection = editor.update(cx, |editor, cx| {
             let selection = editor.selected_text_range(false, window, cx)?;
             if selection.range.is_empty() {
@@ -1028,14 +1050,17 @@ impl Workspace {
             editor.text_for_range(selection.range, &mut adjusted_range, window, cx)
         });
 
-        if selection.is_some() {
-            return selection;
+        if let Some(selection) = selection {
+            return match sql::one_batch(engine, &selection) {
+                Ok(batch) if batch.trim().is_empty() => None,
+                batch => Some(batch.map(str::to_string)),
+            };
         }
 
         let editor = editor.read(cx);
         let sql = editor.value();
-        let range = Buffer::parse(&sql).statement_at(editor.cursor())?;
-        Some(sql[range].to_string())
+        let range = Buffer::for_engine(engine, &sql).statement_at(editor.cursor())?;
+        Some(sql::batch_repeats(engine, &sql, range.end).map(|()| sql[range].to_string()))
     }
 }
 

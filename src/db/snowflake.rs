@@ -2065,8 +2065,9 @@ mod tests {
         operator: crate::filter::Operator,
         value: &str,
     ) -> Result<Vec<String>, DbError> {
-        let predicate = crate::filter::filter_predicate(Engine::Snowflake, column, operator, value)
-            .expect("the bar adds up to a predicate");
+        let predicate =
+            crate::filter::filter_predicate(Engine::Snowflake, column, None, operator, value)
+                .expect("the bar adds up to a predicate");
         let sql = format!(
             "SELECT \"label\" FROM (\
                  SELECT column1 AS \"label\", column2 AS \"state\", column3 AS \"n\" \
@@ -2869,7 +2870,7 @@ mod tests {
             ),
         ] {
             let predicate =
-                crate::filter::filter_predicate(Engine::Snowflake, "state", operator, value)
+                crate::filter::filter_predicate(Engine::Snowflake, "state", None, operator, value)
                     .expect("a predicate");
             mock.answer(
                 &format!(") WHERE {predicate} ORDER BY 1"),

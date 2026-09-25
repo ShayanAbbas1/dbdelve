@@ -117,12 +117,17 @@ impl Workspace {
                     .map(|value| (field.column.clone(), value))
             })
             .collect();
+        let types: Vec<(String, String)> = form
+            .fields
+            .iter()
+            .map(|field| (field.column.clone(), field.data_type.clone()))
+            .collect();
         let borrowed: Vec<(&str, Option<&str>)> = filled
             .iter()
             .map(|(column, value)| (column.as_str(), value.as_deref()))
             .collect();
 
-        let Some(statement) = sql::insert_row(engine, &schema, &table, &borrowed) else {
+        let Some(statement) = sql::insert_row(engine, &schema, &table, &borrowed, &types) else {
             self.note("There is nothing in this row to insert.".into(), cx);
             return;
         };
@@ -351,7 +356,7 @@ impl Workspace {
             let editor = editor.read(cx);
             (editor.value().to_string(), editor.cursor())
         };
-        let Some(range) = Buffer::parse(&text).statement_at(cursor) else {
+        let Some(range) = Buffer::for_engine(engine, &text).statement_at(cursor) else {
             return;
         };
         let statement = &text[range.clone()];
@@ -661,6 +666,7 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
+        let types = grid.delegate().column_types();
         let key = grid
             .delegate()
             .active()
@@ -680,7 +686,7 @@ impl Workspace {
             .iter()
             .map(|(column, value)| (column.as_str(), value.as_str()))
             .collect();
-        let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed) else {
+        let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed, &types) else {
             self.note(
                 "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
                 cx,
