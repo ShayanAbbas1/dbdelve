@@ -704,6 +704,19 @@ impl Connection {
         }
     }
 
+    /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
+    /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
+    /// Server alone runs it differently: its session options are the user's to
+    /// `SET`, and dbdelve's SQL is written for particular ones.
+    pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+        match self {
+            Self::SqlServer(connection) => connection.generated(sql),
+            Self::Postgres(_) | Self::MySql(_) | Self::Sqlite(_) | Self::Snowflake(_) => {
+                self.query(sql, cancel)
+            }
+        }
+    }
+
     /// The relations of every schema, and no routines.
     ///
     /// Split from [`Connection::routines`] because the two are separate

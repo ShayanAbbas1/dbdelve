@@ -655,8 +655,8 @@ impl Workspace {
     /// Runs a statement, if the connection's mode allows it.
     ///
     /// The check lives here rather than in each caller because every path that
-    /// runs SQL routes through this one -- `connection.query` has exactly one
-    /// call site in the app, inside `execute_unchecked`. A stopped statement is
+    /// runs SQL routes through this one -- `connection.query` and
+    /// `connection.generated` are called in one place, `execute_unchecked`. A stopped statement is
     /// held on `pending_run` rather than run: nothing here sets
     /// `QueryState::Running` or appends to history, because a statement that
     /// did not run is not history and must not leave a spinner behind.
@@ -817,9 +817,16 @@ impl Workspace {
             let _ = store::append_history(&profile.id, statement);
             remember_statement(&mut profile.session.history, statement);
         }
-        let query_task = cx
-            .background_executor()
-            .spawn(async move { connection.query(&sql, &cancel) });
+        // Everything an object tab runs is dbdelve's, and a query tab runs
+        // dbdelve's statement only when an edit is applied from its grid, the
+        // one run that carries a refresh.
+        let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
+        let query_task = cx.background_executor().spawn(async move {
+            match generated {
+                true => connection.generated(&sql, &cancel),
+                false => connection.query(&sql, &cancel),
+            }
+        });
 
         cx.spawn(async move |workspace, cx| {
             let result = query_task.await;

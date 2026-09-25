@@ -311,6 +311,37 @@ ORDER BY column_ordinal
 /// the TCP connect alone would not.
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
+/// What every statement dbdelve writes assumes of the session, and what a
+/// user's `SET` can change under it: `XACT_ABORT` is what makes a bracketed
+/// batch all-or-nothing, the quoting and the `datetime` literals it writes
+/// read differently without the next four, and `ROWCOUNT` would cut a preview
+/// short. `SET LANGUAGE` resets `DATEFORMAT`, so it is asserted rather than
+/// left at the login's. See [`scoped`] for why they do not outlive the batch.
+///
+/// One line: it goes in front of the statement, whose line numbers the
+/// server's errors are counted in.
+const SESSION_OPTIONS: &str = "SET XACT_ABORT ON; SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON; \
+    SET ANSI_WARNINGS ON; SET IMPLICIT_TRANSACTIONS OFF; SET ROWCOUNT 0; SET DATEFORMAT ymd; ";
+
+/// Asked before a statement runs: how many transactions are open, and what the
+/// first result set will hold. The count is what says afterwards whether a
+/// failure took a transaction with it. The columns are what stops a type
+/// tiberius cannot decode (sql_variant, and CLR types such as geography, 240)
+/// from panicking the driver part way through a result, which closes the
+/// session and the transaction in it. The join keeps the count when the
+/// describe returns nothing.
+const PREFLIGHT_SQL: &str = "
+SELECT
+    @@TRANCOUNT AS open_transactions,
+    d.name AS column_name,
+    d.system_type_id,
+    d.system_type_name
+FROM (SELECT 1 AS one) AS t
+LEFT JOIN sys.dm_exec_describe_first_result_set({statement}, NULL, 0) AS d
+    ON d.error_number IS NULL AND d.is_hidden = 0
+ORDER BY d.column_ordinal
+";
+
 /// A `mssql://` or `sqlserver://` URL, read by dbdelve. tiberius parses only
 /// ADO.NET and JDBC strings, neither of which is a URL.
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
@@ -363,6 +394,62 @@ fn encryption(mode: SslMode) -> EncryptionLevel {
 struct Session {
     runtime: Runtime,
     client: Tds,
+    /// The profile's statement timeout, which bounds every round trip.
+    timeout: u32,
+    /// Set when a round trip left the session unusable: a read abandoned part
+    /// way, or a driver panic, leaves the stream where nothing can resume it.
+    lost: Option<Lost>,
+}
+
+enum Lost {
+    TimedOut,
+    Panicked(String),
+}
+
+impl Session {
+    /// One round trip, under the statement timeout. `None` once a trip has
+    /// lost the session, which `Connection::run` answers by reconnecting.
+    fn trip(&mut self, sql: &str) -> Option<Result<Collected, tiberius::error::Error>> {
+        if self.lost.is_some() {
+            return None;
+        }
+        let (runtime, client, seconds) = (&self.runtime, &mut self.client, self.timeout);
+        let outcome = guarded(|| {
+            runtime.block_on(async {
+                let collect = collect(client, sql);
+                match seconds {
+                    0 => Ok(collect.await),
+                    seconds => {
+                        tokio::time::timeout(Duration::from_secs(seconds.into()), collect).await
+                    }
+                }
+            })
+        });
+        match outcome {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(_)) => {
+                self.lost = Some(Lost::TimedOut);
+                None
+            }
+            Err(error) => {
+                self.lost = Some(Lost::Panicked(error.message));
+                None
+            }
+        }
+    }
+}
+
+/// Who wrote a statement, which decides what runs around it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Typed by the user: run as typed, under whatever the user has `SET`.
+    User,
+    /// Written by dbdelve at the user's ask, a relation tab's preview or an
+    /// edit: run under [`SESSION_OPTIONS`], and cancellable.
+    Generated,
+    /// dbdelve's catalog and structure queries: under [`SESSION_OPTIONS`],
+    /// never editable, and not what Cancel is for.
+    Internal,
 }
 
 /// What Cancel reaches without the session mutex, which the running statement
@@ -374,8 +461,15 @@ struct InFlight {
     /// signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary login
     /// does not have.
     socket: Option<std::net::TcpStream>,
+    /// A statement Cancel is for holds the session. A catalog load does not
+    /// count: Cancel stops the user's statement, never the explorer's.
     running: bool,
     stopped: bool,
+    /// Statements Cancel is for, waiting for the session.
+    queued: usize,
+    /// A Cancel that arrived while one was waiting, carried out when it gets
+    /// the session.
+    cancel_queued: bool,
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -417,21 +511,25 @@ impl Connection {
             .build()
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
 
-        let (client, socket) = {
-            let attempt = |encryption| {
-                guarded(|| runtime.block_on(login(&self.server, encryption)))
-                    .and_then(|result| result.map_err(|error| connect_error(&error, &self.server)))
-            };
-            match attempt(encryption(self.server.sslmode)) {
-                Err(_) if matches!(self.server.sslmode, SslMode::Prefer | SslMode::Disable) => {
-                    attempt(EncryptionLevel::NotSupported)?
-                }
-                other => other?,
+        let attempt = |encryption| guarded(|| runtime.block_on(login(&self.server, encryption)));
+        let (client, socket) = match attempt(encryption(self.server.sslmode))? {
+            Err(error)
+                if matches!(self.server.sslmode, SslMode::Prefer | SslMode::Disable)
+                    && negotiation_failed(&error) =>
+            {
+                attempt(EncryptionLevel::NotSupported)?
             }
-        };
+            other => other,
+        }
+        .map_err(|error| connect_error(&error, &self.server))?;
 
         self.in_flight().socket = Some(socket);
-        Ok(Session { runtime, client })
+        Ok(Session {
+            runtime,
+            client,
+            timeout: self.server.statement_timeout,
+            lost: None,
+        })
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -449,6 +547,9 @@ impl Connection {
     pub fn cancel(&self) -> Result<(), DbError> {
         let mut in_flight = self.in_flight();
         if !in_flight.running {
+            // Waiting behind a catalog load: stopping the load would let the
+            // statement run anyway.
+            in_flight.cancel_queued = in_flight.queued > 0;
             return Ok(());
         }
         in_flight.stopped = true;
@@ -466,93 +567,202 @@ impl Connection {
     /// limits belong to the caller that *generated* a query, never to one the
     /// user typed.
     pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, true)
+        self.run(sql, Origin::User)
+    }
+
+    /// A statement dbdelve wrote at the user's ask, run under the session
+    /// options it was written for.
+    pub fn generated(&self, sql: &str) -> Result<QueryResult, DbError> {
+        self.run(sql, Origin::Generated)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for
     /// the describe that would say where they came from.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false)
+        self.run(sql, Origin::Internal)
     }
 
-    fn run(&self, sql: &str, editable: bool) -> Result<QueryResult, DbError> {
-        let mut guard = self.session.lock().map_err(|_| DbError {
+    fn run(&self, sql: &str, origin: Origin) -> Result<QueryResult, DbError> {
+        let cancellable = origin != Origin::Internal;
+        if cancellable {
+            self.in_flight().queued += 1;
+        }
+        let locked = self.session.lock();
+        let cancelled = cancellable && {
+            let mut in_flight = self.in_flight();
+            in_flight.queued -= 1;
+            std::mem::take(&mut in_flight.cancel_queued)
+        };
+        let mut guard = locked.map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
+        if cancelled {
+            return Err(plain_error(
+                "Cancelled before it started: nothing was sent to the server.".into(),
+            ));
+        }
         if guard.is_none() {
             *guard = Some(self.connect()?);
         }
         let session = guard.as_mut().expect("connected above");
 
-        {
+        if cancellable {
             let mut in_flight = self.in_flight();
             in_flight.running = true;
             in_flight.stopped = false;
         }
-        let limit = self.server.statement_timeout;
-        // Timed from here, not from the call: one connection serialises a
-        // profile's queries, and time spent waiting behind the catalog load is
-        // not time the server spent on this statement.
-        let started = Instant::now();
-        let outcome = guarded(|| {
-            session.runtime.block_on(async {
-                let collect = collect(&mut session.client, sql);
-                match limit {
-                    0 => Ok(collect.await),
-                    seconds => {
-                        tokio::time::timeout(Duration::from_secs(seconds.into()), collect).await
-                    }
-                }
-            })
-        });
-        let elapsed = started.elapsed();
+        let ran = self.execute(session, sql, origin);
         let stopped = {
             let mut in_flight = self.in_flight();
             in_flight.running = false;
             std::mem::take(&mut in_flight.stopped)
         };
 
-        let collected = match outcome {
-            Ok(Ok(Ok(collected))) if !stopped => collected,
-            Ok(Ok(Err(error))) if !stopped => {
-                let error = query_error(&error, sql);
-                return Err(rolled_back(session, sql, error));
-            }
+        let limit = self.server.statement_timeout;
+        let lost = session.lost.take();
+        if stopped || lost.is_some() {
             // The server has no statement timeout, so the timer is dbdelve's,
             // and what it stops has to be stopped the way Cancel stops it.
-            Ok(Err(_)) => {
-                return Err(self.stop(
-                    &mut guard,
-                    format!(
-                        "The statement ran past the {limit}-second statement timeout and was \
-                         stopped by closing its connection."
-                    ),
-                ));
-            }
-            Ok(Ok(_)) => {
-                return Err(self.stop(
-                    &mut guard,
-                    "Cancelled: the statement was stopped by closing its connection.".into(),
-                ));
-            }
-            Err(error) => {
-                return Err(self.stop(&mut guard, error.message));
-            }
-        };
-
-        if editable && mentions_use(sql) {
-            held_to_database(session, &self.server.database)?;
+            let what = match (ran, lost) {
+                (None, Some(Lost::TimedOut)) => format!(
+                    "The statement ran past the {limit}-second statement timeout and was stopped \
+                     by closing its connection."
+                ),
+                (None, Some(Lost::Panicked(message))) => message,
+                (None, None) => {
+                    "Cancelled: the statement was stopped by closing its connection.".into()
+                }
+                // What dbdelve asks after the statement is what was stopped,
+                // and the statement's own work stands.
+                (Some(ran), lost) => {
+                    let outcome = match ran.result {
+                        Ok(_) => "The statement finished".to_string(),
+                        Err(error) => format!("{}\n\nThe statement failed", error.message),
+                    };
+                    let after = match lost {
+                        Some(Lost::TimedOut) => format!(
+                            "a query dbdelve sends after it ran past the {limit}-second statement \
+                             timeout."
+                        ),
+                        Some(Lost::Panicked(message)) => format!("then {message}"),
+                        None => "Cancel arrived after that.".into(),
+                    };
+                    format!("{outcome}, but {after}")
+                }
+            };
+            return Err(self.stop(&mut guard, what));
         }
 
-        let mut result = collected.result;
-        result.elapsed = elapsed;
-        if editable && collected.sets == 1 && !result.columns.is_empty() {
-            let probed = describe_columns(session, sql, &result.columns);
+        let Some(Ran { result, probed }) = ran else {
+            unreachable!("a run that did not finish was stopped or lost the session")
+        };
+        let mut result = result?;
+        if !probed.is_empty() {
             drop(guard);
             result.edit = self.edit_target(&probed);
         }
         Ok(result)
+    }
+
+    /// The statement and every round trip that belongs to it, all inside the
+    /// one window Cancel and the statement timeout reach. `None` when the
+    /// statement itself did not finish.
+    fn execute(&self, session: &mut Session, sql: &str, origin: Origin) -> Option<Ran> {
+        let mut statement = sql.to_string();
+        let mut before = None;
+        if origin != Origin::Internal
+            && let Some(Ok(preflight)) = session.trip(&scoped(
+                &PREFLIGHT_SQL.replace("{statement}", &Engine::SqlServer.quote_literal(sql)),
+            ))
+        {
+            let described = &preflight.result;
+            before = described
+                .rows
+                .first()
+                .and_then(|row| named(described, row, "open_transactions")?.parse().ok());
+            let unreadable = unreadable_columns(described);
+            if !unreadable.is_empty() {
+                match readable_preview(sql, described).filter(|_| origin == Origin::Generated) {
+                    Some(projected) => statement = projected,
+                    None => {
+                        return Some(Ran {
+                            result: Err(plain_error(unreadable_error(&unreadable))),
+                            probed: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let submitted = match origin {
+            Origin::User => statement.clone(),
+            Origin::Generated | Origin::Internal => scoped(&statement),
+        };
+        // Timed from here, not from the call: one connection serialises a
+        // profile's queries, and time spent waiting behind the catalog load is
+        // not time the server spent on this statement.
+        let started = Instant::now();
+        let outcome = session.trip(&submitted)?;
+        let elapsed = started.elapsed();
+        let mut result = match outcome {
+            Ok(mut collected) => {
+                collected.result.elapsed = elapsed;
+                Ok(collected)
+            }
+            Err(error @ tiberius::error::Error::Server(_)) => Err(query_error(&error, sql)),
+            // The socket Cancel shut down, rather than anything the server said.
+            Err(_) if self.in_flight().stopped => return None,
+            Err(error) => Err(query_error(&error, sql)),
+        };
+        if origin == Origin::Internal {
+            return Some(Ran {
+                result: result.map(|collected| collected.result),
+                probed: Vec::new(),
+            });
+        }
+
+        if let Err(error) = result {
+            result = Err(transaction_outcome(session, sql, origin, before, error));
+        }
+        if let Ok(collected) = &mut result
+            && collected.sets == 0
+        {
+            // tiberius keeps the done tokens to itself, so the count is asked
+            // for. It is the last statement's, as Postgres reports it.
+            collected.result.rows_affected = session
+                .trip("SELECT @@ROWCOUNT")
+                .and_then(Result::ok)
+                .and_then(|count| count.result.rows.first()?.first()?.clone()?.parse().ok());
+        }
+        // After a failure too: a batch that moved the session and then failed
+        // leaves it moved all the same.
+        if mentions_use(sql)
+            && let Err(moved) = held_to_database(session, &self.server.database)
+            && session.lost.is_none()
+        {
+            result = Err(match result {
+                Ok(_) => moved,
+                Err(error) => DbError {
+                    message: format!("{}\n\n{}", error.message, moved.message),
+                    position: error.position,
+                },
+            });
+        }
+
+        let (result, probed) = match result {
+            Ok(collected) => {
+                let rows = collected.result;
+                let probed = if collected.sets == 1 && !rows.columns.is_empty() {
+                    describe_columns(session, &statement, &rows.columns, origin)
+                } else {
+                    Vec::new()
+                };
+                (Ok(rows), probed)
+            }
+            Err(error) => (Err(error), Vec::new()),
+        };
+        Some(Ran { result, probed })
     }
 
     /// Close what is left of a stopped session and open another, saying what
@@ -564,8 +774,8 @@ impl Connection {
             let _ = socket.shutdown(Shutdown::Both);
         }
         *session = None;
-        let lost = "The server rolls back whatever a closed session had open, and its \
-                    temporary tables and SET options go with it.";
+        let lost = "The connection was reset: the server rolled back any transaction that was \
+                    open, and temporary tables and SET options are gone with the session.";
         let reconnected = match self.connect() {
             Ok(fresh) => {
                 *session = Some(fresh);
@@ -671,8 +881,9 @@ async fn login(
                 }
                 other => other?,
             };
-            // A session default, like the other engines' statement timeouts:
-            // what makes a bracketed batch all-or-nothing (see `rolled_back`).
+            // A session default, like the other engines' statement timeouts,
+            // for the user's statements; dbdelve's own assert it again, since
+            // the user can `SET` it off (see `transaction_outcome`).
             client
                 .simple_query("SET XACT_ABORT ON")
                 .await?
@@ -696,6 +907,94 @@ async fn login(
 struct Collected {
     result: QueryResult,
     sets: usize,
+}
+
+/// A statement that finished, one way or the other, and where its columns
+/// came from when that is worth asking the catalog about.
+struct Ran {
+    result: Result<QueryResult, DbError>,
+    probed: Vec<ProbedColumn>,
+}
+
+/// A column of a result dbdelve asked for, by name, null or absent alike.
+fn named<'a>(result: &QueryResult, row: &'a [Cell], name: &str) -> Option<&'a str> {
+    let index = result
+        .columns
+        .iter()
+        .position(|column| column.name == name)?;
+    row.get(index)?.as_deref()
+}
+
+/// dbdelve's own SQL, run inside `sp_executesql` behind [`SESSION_OPTIONS`]: a
+/// `SET` there lasts until the dynamic batch returns, so whatever the user set
+/// is theirs again for their next statement.
+fn scoped(sql: &str) -> String {
+    format!(
+        "EXEC sp_executesql {}",
+        Engine::SqlServer.quote_literal(&format!("{SESSION_OPTIONS}{sql}"))
+    )
+}
+
+/// The preflight's columns tiberius cannot decode: its `todo!()`s for
+/// sql_variant (98) and every CLR type (240), geography, geometry and
+/// hierarchyid among them.
+fn unreadable_columns(described: &QueryResult) -> Vec<(usize, String, String)> {
+    described
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(named(described, row, "system_type_id"), Some("98" | "240")))
+        .map(|(index, row)| {
+            (
+                index,
+                named(described, row, "column_name")
+                    .unwrap_or_default()
+                    .to_string(),
+                named(described, row, "system_type_name")
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+fn unreadable_error(columns: &[(usize, String, String)]) -> String {
+    let named = columns
+        .iter()
+        .map(|(index, name, kind)| match name.is_empty() {
+            true => format!("column {} ({kind})", index + 1),
+            false => format!("{name} ({kind})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "The statement was not run: its result would hold {named}, which the SQL Server driver \
+         cannot read. A CLR type such as geography reads as text through .ToString(), and \
+         sql_variant through CAST(… AS nvarchar(4000))."
+    )
+}
+
+/// A relation tab's `SELECT *` with every column tiberius cannot decode read
+/// as text, under its own name. The expressions have no source column, so the
+/// describe leaves them uneditable.
+///
+/// ponytail: rewrites only the one shape `explorer::preview_sql` writes; a
+/// user's own statement is refused instead, never rewritten (hard rule 1).
+fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
+    let rest = sql.strip_prefix("SELECT * FROM ")?;
+    let columns = described
+        .rows
+        .iter()
+        .map(|row| {
+            let name = Engine::SqlServer.quote_identifier(named(described, row, "column_name")?);
+            Some(match named(described, row, "system_type_id")? {
+                "240" => format!("{name}.ToString() AS {name}"),
+                "98" => format!("CAST({name} AS nvarchar(4000)) AS {name}"),
+                _ => name,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("SELECT {} FROM {rest}", columns.join(", ")))
 }
 
 async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::error::Error> {
@@ -972,13 +1271,19 @@ struct ProbedColumn {
 /// one the grid shows only when there is one. It compiles the statement and
 /// executes nothing. A column list that disagrees with what came back is
 /// nothing known, since everything here is positional.
-fn describe_columns(session: &mut Session, sql: &str, columns: &[Column]) -> Vec<ProbedColumn> {
+fn describe_columns(
+    session: &mut Session,
+    sql: &str,
+    columns: &[Column],
+    origin: Origin,
+) -> Vec<ProbedColumn> {
     let describe = DESCRIBE_SQL.replace("{statement}", &Engine::SqlServer.quote_literal(sql));
-    let Ok(Ok(collected)) = guarded(|| {
-        session
-            .runtime
-            .block_on(collect(&mut session.client, &describe))
-    }) else {
+    // Compiled under the options the statement ran under.
+    let describe = match origin {
+        Origin::User => describe,
+        Origin::Generated | Origin::Internal => scoped(&describe),
+    };
+    let Some(Ok(collected)) = session.trip(&describe) else {
         return Vec::new();
     };
     let described = &collected.result;
@@ -1113,8 +1418,12 @@ fn query_error(error: &tiberius::error::Error, sql: &str) -> DbError {
         message: describe(error),
         // SQL Server names a line rather than a character, so the offset is
         // where that line starts: true, if less precise than Postgres's.
+        // Inside a procedure, trigger or function the line is the module's,
+        // which says nothing about the batch; the message names the module.
         position: match error {
-            tiberius::error::Error::Server(token) => line_start(sql, token.line()),
+            tiberius::error::Error::Server(token) if token.procedure().is_empty() => {
+                line_start(sql, token.line())
+            }
             _ => None,
         },
     }
@@ -1153,13 +1462,10 @@ fn mentions_use(sql: &str) -> bool {
 }
 
 fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
-    let mut ask = |statement: &str| {
-        guarded(|| {
-            session
-                .runtime
-                .block_on(collect(&mut session.client, statement))
-        })?
-        .map_err(|error| plain_error(describe(&error)))
+    let mut ask = |statement: &str| match session.trip(statement) {
+        Some(result) => result.map_err(|error| plain_error(describe(&error))),
+        // The session is lost, which `run` reports in place of this.
+        None => Err(plain_error(String::new())),
     };
     let current = ask("SELECT DB_NAME()")?
         .result
@@ -1178,47 +1484,83 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
     )))
 }
 
-/// Say what state a failed generated batch left the data in.
+/// Say what a failed statement did to the transactions open around it.
 ///
-/// `SET XACT_ABORT ON` is what makes the brackets atomic here at all: without
-/// it a constraint violation ends only its own statement, the batch carries on,
-/// and the `COMMIT` dbdelve wrote commits the rows before it. T-SQL has no
-/// nested transactions, so the rollback it forces takes any transaction the
-/// user already had open with it -- which `@@TRANCOUNT` reports.
-fn rolled_back(session: &mut Session, sql: &str, error: DbError) -> DbError {
-    let Some(start) = Engine::SqlServer.transaction_start() else {
+/// `SET XACT_ABORT ON` is what makes a generated batch's brackets atomic:
+/// without it a constraint violation ends only its own statement, the batch
+/// carries on, and the `COMMIT` dbdelve wrote commits the rows before it. It is
+/// the session's default too, so a failing statement of the user's ends a
+/// transaction they began earlier. T-SQL has no nested transactions, so either
+/// takes every open level with it -- which the counts before and after tell.
+fn transaction_outcome(
+    session: &mut Session,
+    sql: &str,
+    origin: Origin,
+    before: Option<u64>,
+    error: DbError,
+) -> DbError {
+    let Some(before) = before else {
         return error;
     };
-    if !sql
-        .trim_start()
-        .get(..start.len())
-        .is_some_and(|word| word.eq_ignore_ascii_case(start))
-    {
+    let mut ask = |statement: &str| session.trip(statement).and_then(Result::ok);
+    let Some(after) = ask("SELECT @@TRANCOUNT").and_then(|collected| {
+        collected
+            .result
+            .rows
+            .first()?
+            .first()?
+            .as_deref()?
+            .parse::<u64>()
+            .ok()
+    }) else {
         return error;
-    }
-
-    let mut ask = |statement: &str| {
-        guarded(|| {
-            session
-                .runtime
-                .block_on(collect(&mut session.client, statement))
-        })
-        .ok()
-        .and_then(Result::ok)
     };
-    let open = ask("SELECT @@TRANCOUNT")
-        .and_then(|collected| collected.result.rows.first()?.first()?.clone())
-        .is_some_and(|count| count != "0");
-    let outcome = match open {
-        false => "The transaction was rolled back; nothing the batch wrote remains.",
-        true => match ask("ROLLBACK") {
-            Some(_) => "The transaction was rolled back; nothing the batch wrote remains.",
-            None => "The transaction the batch opened is still open: the rollback failed too.",
-        },
+    // Only a batch dbdelve wrote is known to end at its own `COMMIT`.
+    let bracketed = origin == Origin::Generated
+        && Engine::SqlServer.transaction_start().is_some_and(|start| {
+            sql.trim_start()
+                .get(..start.len())
+                .is_some_and(|word| word.eq_ignore_ascii_case(start))
+        });
+    let outcome = if after > before {
+        // A `ROLLBACK` takes every level, so it is sent only when the batch
+        // opened all of them.
+        match bracketed && before == 0 {
+            true => match ask("ROLLBACK") {
+                Some(_) => "The transaction was rolled back: nothing the batch wrote remains.",
+                None => "The transaction the batch opened is still open: the rollback failed too.",
+            },
+            false => "The transaction the batch began is still open.",
+        }
+    } else if after == 0 && before > 0 {
+        "The transaction that was open before this statement was rolled back, and everything \
+         written in it is gone."
+    } else if bracketed {
+        match before {
+            0 => "The transaction did not commit: nothing the batch wrote remains.",
+            _ => "Nothing the batch wrote remains, and the transaction open before it still is.",
+        }
+    } else {
+        return error;
     };
     DbError {
         message: format!("{}\n\n{outcome}", error.message),
         position: error.position,
+    }
+}
+
+/// Whether a failed connect may have failed at the encryption handshake, the
+/// one failure a second attempt without encryption can get past. A refused
+/// login or an unreachable host would fail the same way twice, and a second
+/// failed login counts against a lockout policy.
+fn negotiation_failed(error: &tiberius::error::Error) -> bool {
+    match error {
+        tiberius::error::Error::Tls(_) => true,
+        tiberius::error::Error::Io { kind, .. } => !matches!(
+            kind,
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut
+        ),
+        _ => false,
     }
 }
 
@@ -1457,6 +1799,62 @@ mod tests {
     }
 
     #[test]
+    fn only_a_failed_handshake_is_retried_without_encryption() {
+        use std::io::ErrorKind;
+        use tiberius::error::Error;
+        let io = |kind| Error::Io {
+            kind,
+            message: String::new(),
+        };
+        assert!(negotiation_failed(&Error::Tls("handshake".into())));
+        assert!(negotiation_failed(&io(ErrorKind::UnexpectedEof)));
+        assert!(!negotiation_failed(&io(ErrorKind::ConnectionRefused)));
+        assert!(!negotiation_failed(&io(ErrorKind::TimedOut)));
+        assert!(!negotiation_failed(&Error::Protocol("login".into())));
+    }
+
+    #[test]
+    fn a_preview_reads_unreadable_columns_as_text_and_nothing_else_is_rewritten() {
+        let described = QueryResult {
+            columns: ["column_name", "system_type_id"]
+                .map(|name| Column {
+                    name: name.into(),
+                    data_type: None,
+                })
+                .to_vec(),
+            rows: [("id", "56"), ("place", "240"), ("any\"thing", "98")]
+                .map(|(name, kind)| vec![Some(name.to_string()), Some(kind.to_string())])
+                .to_vec(),
+            ..QueryResult::default()
+        };
+        assert_eq!(
+            readable_preview("SELECT * FROM \"dbo\".\"t\" ORDER BY 1", &described).as_deref(),
+            Some(
+                "SELECT \"id\", \"place\".ToString() AS \"place\", \
+                 CAST(\"any\"\"thing\" AS nvarchar(4000)) AS \"any\"\"thing\" \
+                 FROM \"dbo\".\"t\" ORDER BY 1"
+            )
+        );
+        assert_eq!(readable_preview("SELECT id FROM t", &described), None);
+        assert_eq!(
+            unreadable_columns(&described)
+                .iter()
+                .map(|(index, ..)| *index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn scoped_sql_keeps_the_statement_on_its_own_line_numbers() {
+        assert!(!SESSION_OPTIONS.contains('\n'));
+        assert_eq!(
+            scoped("SELECT 'a'"),
+            format!("EXEC sp_executesql N'{SESSION_OPTIONS}SELECT ''a'''")
+        );
+    }
+
+    #[test]
     fn only_a_use_as_a_word_asks_where_the_session_is() {
         assert!(mentions_use("USE master; SELECT 1"));
         assert!(mentions_use("select 1;\nuse [x]"));
@@ -1600,12 +1998,12 @@ mod tests {
         assert_eq!(names(&empty), vec!["id", "label"]);
         assert!(empty.rows.is_empty());
 
-        // A write returns no rows and, from tiberius, no count.
+        // A write returns no rows, and the last statement's count.
         let write = connection
             .query("DECLARE @t TABLE (id int); INSERT INTO @t VALUES (1)")
             .expect("query should succeed");
         assert!(write.columns.is_empty());
-        assert_eq!(write.rows_affected, None);
+        assert_eq!(write.rows_affected, Some(1));
     }
 
     #[test]
@@ -2067,7 +2465,9 @@ mod tests {
             );
             assert!(sql::is_generated_select(&sql), "{sql}");
             let paged = sql::paged(Engine::SqlServer, &sql, &[]).expect("a preview has a page");
-            connection.query(&paged).expect("the preview should run")
+            connection
+                .generated(&paged)
+                .expect("the preview should run")
         };
 
         // Rows whose sensor is `sensor-03` are ids 3, 27, 51 … 4995; sorted
@@ -2091,7 +2491,7 @@ mod tests {
         assert!(preview(&literal, 0).rows.is_empty());
         let unsorted = relation_sql(Engine::SqlServer, "dbo", "orders", "", &[], 100, 0);
         let unsorted = sql::paged(Engine::SqlServer, &unsorted, &[]).unwrap();
-        assert_eq!(connection.query(&unsorted).unwrap().rows.len(), 3);
+        assert_eq!(connection.generated(&unsorted).unwrap().rows.len(), 3);
     }
 
     #[test]
@@ -2176,7 +2576,15 @@ mod tests {
             "{}",
             error.message
         );
-        // `XACT_ABORT` ends the transaction on that error, as it would a batch's.
+        // `XACT_ABORT` ends the transaction on that error, as it would a
+        // batch's, and the error says so.
+        assert!(
+            error
+                .message
+                .contains("open before this statement was rolled back"),
+            "{}",
+            error.message
+        );
         let open = connection.query("SELECT @@TRANCOUNT").unwrap();
         assert_eq!(first(&open), vec![Some("0")]);
     }
@@ -2187,7 +2595,7 @@ mod tests {
         let connection = live();
         let run = |sql: &str| {
             assert!(sql::is_generated_write(sql), "the gate refused {sql}");
-            connection.query(sql)
+            connection.generated(sql)
         };
         let name_of = |id: &str| {
             connection
@@ -2253,7 +2661,11 @@ mod tests {
         )
         .unwrap();
         let error = run(&failing).expect_err("NULL into a NOT NULL column fails");
-        assert!(error.message.contains("rolled back"), "{}", error.message);
+        assert!(
+            error.message.contains("nothing the batch wrote remains"),
+            "{}",
+            error.message
+        );
         assert_eq!(name_of("901").as_deref(), Some("first"));
         assert_eq!(
             first(&connection.query("SELECT @@TRANCOUNT").unwrap()),
@@ -2415,6 +2827,245 @@ mod tests {
         assert!(error.message.contains("moved it back"), "{}", error.message);
         let here = connection.query("SELECT DB_NAME()").unwrap();
         assert_eq!(first(&here), vec![Some(live_config().database.as_str())]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_use_is_moved_back_when_the_batch_fails_too() {
+        let connection = live();
+        let error = connection
+            .query("USE master; SELECT * FROM no_such_relation")
+            .expect_err("the relation does not exist");
+        assert!(
+            error.message.contains("no_such_relation"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("moved it back"), "{}", error.message);
+        let here = connection.query("SELECT DB_NAME()").unwrap();
+        assert_eq!(first(&here), vec![Some(live_config().database.as_str())]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_type_the_driver_cannot_read_is_refused_without_losing_the_session() {
+        let connection = live();
+        connection
+            .query("CREATE TABLE #shapes (id int PRIMARY KEY, place geography, node hierarchyid, anything sql_variant)")
+            .unwrap();
+        connection
+            .query(
+                "INSERT INTO #shapes VALUES \
+                 (1, geography::Point(1, 2, 4326), hierarchyid::Parse('/1/2/'), CAST(5 AS int))",
+            )
+            .unwrap();
+        connection.query("BEGIN TRANSACTION").unwrap();
+        for sql in [
+            "SELECT SERVERPROPERTY('ProductVersion')",
+            "SELECT * FROM #shapes",
+        ] {
+            let error = connection
+                .query(sql)
+                .expect_err("the driver cannot decode it");
+            assert!(error.message.contains("was not run"), "{}", error.message);
+        }
+        // The session, its transaction and its temporary table all survived.
+        let open = connection.query("SELECT @@TRANCOUNT").unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        connection.query("ROLLBACK").unwrap();
+
+        // A relation tab reads the same columns as text.
+        let preview = connection
+            .generated(
+                "SELECT * FROM \"#shapes\" ORDER BY (SELECT NULL) \
+                 OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+            )
+            .expect("the preview should run");
+        assert_eq!(names(&preview), vec!["id", "place", "node", "anything"]);
+        assert_eq!(
+            first(&preview),
+            vec![Some("1"), Some("POINT (2 1)"), Some("/1/2/"), Some("5")]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_dbdelves_statements_run_under_their_own_options_and_leave_the_users_alone() {
+        let connection = live();
+        connection
+            .query("CREATE TABLE #edits (id int PRIMARY KEY, name nvarchar(20) NOT NULL)")
+            .unwrap();
+        connection
+            .query("INSERT INTO #edits VALUES (1, N'first'), (2, N'second')")
+            .unwrap();
+        connection
+            .query(
+                "SET XACT_ABORT OFF; SET QUOTED_IDENTIFIER OFF; SET ROWCOUNT 1; \
+                 SET LANGUAGE british; SET IMPLICIT_TRANSACTIONS ON",
+            )
+            .unwrap();
+
+        // `ROWCOUNT` would cut the page to a row, and `QUOTED_IDENTIFIER OFF`
+        // would read the quoted names as strings.
+        let page = connection
+            .generated(
+                "SELECT \"id\" FROM \"dbo\".\"measurements\" ORDER BY \"id\" \
+                 OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY",
+            )
+            .unwrap();
+        assert_eq!(page.rows.len(), 5);
+        // British reads a `datetime` literal as year-day-month.
+        let month = connection
+            .generated("SELECT MONTH(CAST(N'2024-01-02 03:04:05.000' AS datetime)) AS month")
+            .unwrap();
+        assert_eq!(first(&month), vec![Some("1")]);
+
+        // All-or-nothing, though the user turned `XACT_ABORT` off.
+        let error = connection
+            .generated(
+                "BEGIN TRANSACTION; \
+                 UPDATE \"#edits\" SET \"name\" = N'changed' WHERE \"id\" = N'1'; \
+                 UPDATE \"#edits\" SET \"name\" = NULL WHERE \"id\" = N'2'; COMMIT;",
+            )
+            .expect_err("NULL into a NOT NULL column fails");
+        assert!(
+            error.message.contains("nothing the batch wrote remains"),
+            "{}",
+            error.message
+        );
+        // Still counted in the statement's own lines inside `sp_executesql`.
+        assert_eq!(error.position, Some(0));
+        let names = connection
+            .generated("SELECT \"name\" FROM \"#edits\" ORDER BY \"id\"")
+            .unwrap();
+        assert_eq!(names.rows[0][0].as_deref(), Some("first"));
+        // Committed, not left in a transaction `IMPLICIT_TRANSACTIONS` opened.
+        let update = connection
+            .generated("UPDATE \"#edits\" SET \"name\" = N'third' WHERE \"id\" = N'1'")
+            .unwrap();
+        assert_eq!(update.rows_affected, Some(1));
+        let open = connection.query("SELECT @@TRANCOUNT").unwrap();
+        assert_eq!(first(&open), vec![Some("0")]);
+
+        // And the user's own settings are still theirs.
+        let options = connection
+            .query("SELECT @@OPTIONS & 16384 AS xact_abort, @@OPTIONS & 256 AS quoted, @@OPTIONS & 2 AS implicit")
+            .unwrap();
+        assert_eq!(first(&options), vec![Some("0"), Some("0"), Some("2")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_failure_says_what_it_did_to_a_transaction_begun_before_it() {
+        let connection = live();
+        connection.query("CREATE TABLE #work (id int)").unwrap();
+        connection
+            .query("BEGIN TRANSACTION; INSERT INTO #work VALUES (1)")
+            .unwrap();
+        // A syntax error: the batch never starts, and the transaction the user
+        // began is theirs to finish.
+        let error = connection
+            .query("BEGIN TRANSACTION;\nSELECT FROM WHERE")
+            .expect_err("the batch does not parse");
+        assert!(!error.message.contains("rolled back"), "{}", error.message);
+        let open = connection.query("SELECT @@TRANCOUNT").unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        let kept = connection.query("SELECT count(*) FROM #work").unwrap();
+        assert_eq!(first(&kept), vec![Some("1")]);
+
+        let error = connection
+            .query("SELECT 1/0")
+            .expect_err("division by zero");
+        assert!(
+            error
+                .message
+                .contains("open before this statement was rolled back"),
+            "{}",
+            error.message
+        );
+        let open = connection.query("SELECT @@TRANCOUNT").unwrap();
+        assert_eq!(first(&open), vec![Some("0")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_write_reports_the_rows_it_affected() {
+        let connection = live();
+        let count = |sql: &str| connection.query(sql).unwrap().rows_affected;
+        assert_eq!(count("CREATE TABLE #counted (id int)"), Some(0));
+        assert_eq!(count("INSERT INTO #counted VALUES (1), (2), (3)"), Some(3));
+        assert_eq!(count("UPDATE #counted SET id = id WHERE id > 5"), Some(0));
+        assert_eq!(count("DELETE FROM #counted WHERE id < 3"), Some(2));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_an_error_inside_a_procedure_points_at_nothing_in_the_batch() {
+        let connection = live();
+        connection
+            .query("CREATE PROCEDURE #fails AS\nSELECT 1/0")
+            .unwrap();
+        let error = connection
+            .query("SELECT 1;\nEXEC #fails")
+            .expect_err("division by zero");
+        assert_eq!(error.position, None, "{}", error.message);
+        let error = connection
+            .query("SELECT 1;\nSELECT 1/0")
+            .expect_err("division by zero");
+        assert_eq!(error.position, Some(10));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_round_trip_beside_the_statement_is_bounded_by_the_timeout() {
+        let observer = live();
+        observer
+            .query("CREATE TABLE ##dbdelve_lock_probe (id int)")
+            .unwrap();
+        // A schema lock, held until the rollback, blocks even describing it.
+        observer
+            .query("BEGIN TRANSACTION; ALTER TABLE ##dbdelve_lock_probe ADD extra int")
+            .unwrap();
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        let started = Instant::now();
+        let error = connection
+            .query("SELECT * FROM ##dbdelve_lock_probe")
+            .expect_err("the lock outlasts the timeout");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(error.message.contains("1-second"), "{}", error.message);
+        observer.query("ROLLBACK").unwrap();
+        assert!(connection.query("SELECT 1").is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_while_queued_behind_a_catalog_load_stops_the_statement_not_the_load() {
+        let connection = live();
+        let loader = connection.clone();
+        let load = std::thread::spawn(move || {
+            loader.internal_query("WAITFOR DELAY '00:00:02'; SELECT 1 AS one")
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let user = connection.clone();
+        let queued = std::thread::spawn(move || user.query("SELECT 2 AS two"));
+        std::thread::sleep(Duration::from_millis(500));
+        connection.cancel().unwrap();
+
+        assert!(load.join().unwrap().is_ok());
+        let error = queued
+            .join()
+            .unwrap()
+            .expect_err("the statement was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
+        assert!(connection.query("SELECT 1").is_ok());
     }
 
     /// What each mode does against the compose server, whose certificate is
