@@ -321,7 +321,9 @@ pub(crate) const STALE_ROWS: &str = "stale-rows";
 /// An edit on a restored grid, stopped until the user answers whether to edit
 /// rows fetched in an earlier session.
 pub(crate) struct StaleEdit {
-    pub(crate) resume: StaleResume,
+    /// The edit to carry on with, or `None` when the prompt was opened from
+    /// the status bar only to refresh, with no edit waiting.
+    pub(crate) resume: Option<StaleResume>,
     pub(crate) dont_ask: bool,
 }
 

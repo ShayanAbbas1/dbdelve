@@ -547,12 +547,21 @@ impl Workspace {
         if !results.read(cx).delegate().unconfirmed() {
             return true;
         }
+        // Restored rows with a run in flight are the background refresh's, and
+        // its result replaces the grid wholesale, edits staged on it included.
+        if matches!(
+            profile.session.active_query(),
+            Some(QueryState::Running { .. })
+        ) {
+            self.note(Self::REFRESHING.into(), cx);
+            return false;
+        }
         if profile.confirmed_stale {
             results.update(cx, |table, _| table.delegate_mut().confirm_stale());
             return true;
         }
         profile.session.stale_edit = Some(StaleEdit {
-            resume,
+            resume: Some(resume),
             dont_ask: false,
         });
         cx.notify();
@@ -594,12 +603,28 @@ impl Workspace {
         }
     }
 
+    /// The status bar's Refresh on restored rows: the same prompt, so the
+    /// statement is on screen before it is sent, with no edit behind it.
+    pub(crate) fn ask_refresh_stale(&mut self, cx: &mut Context<Self>) {
+        if let Some(profile) = self.profile_mut() {
+            profile.session.stale_edit = Some(StaleEdit {
+                resume: None,
+                dont_ask: false,
+            });
+        }
+        cx.notify();
+    }
+
     /// Accept the rows as they are and carry on with the edit that asked.
     pub(crate) fn edit_stale_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let Some(StaleEdit { resume, dont_ask }) = profile.session.stale_edit.take() else {
+        let Some(StaleEdit {
+            resume: Some(resume),
+            dont_ask,
+        }) = profile.session.stale_edit.take()
+        else {
             return;
         };
         if let Some(results) = profile.session.active_results().cloned() {

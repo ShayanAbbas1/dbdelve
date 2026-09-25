@@ -707,13 +707,22 @@ impl Workspace {
     pub(crate) fn render_stale_edit(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = *theme(cx);
         let profile = self.profile()?;
-        let dont_ask = profile.session.stale_edit.as_ref()?.dont_ask;
+        let stale = profile.session.stale_edit.as_ref()?;
+        let dont_ask = stale.dont_ask;
+        let editing = stale.resume.is_some();
         let age = profile
             .session
             .active_results()
             .and_then(|results| results.read(cx).delegate().captured())
             .map(|captured| relative_age(store::captured_at().saturating_sub(captured)))
             .unwrap_or_else(|| "moments".into());
+        // What Refresh sends, shown for the same reason the mode prompt shows
+        // its statement. Only a buffer's: a relation's is dbdelve's own
+        // preview of the table.
+        let refresh_sql = profile
+            .session
+            .active_query_tab()
+            .and_then(|tab| tab.last_query.clone());
 
         let cancel = cx.entity().downgrade();
         let refresh = cancel.clone();
@@ -731,9 +740,14 @@ impl Workspace {
                     dialog(t)
                         .child(section_label(
                             t,
-                            "Edit rows restored from your last session?",
+                            match editing {
+                                true => "Edit rows restored from your last session?",
+                                false => "Refresh with this query?",
+                            },
                         ))
-                        .child(
+                        // From the status bar's Refresh, the statement alone:
+                        // it is what the question is about.
+                        .children(editing.then(|| {
                             div()
                                 .text_size(px(layout::TEXT_SM))
                                 .text_color(t.text_muted)
@@ -743,9 +757,30 @@ impl Workspace {
                                      than read again. Anything changed in the database since \
                                      isn't shown here, and an edit overwrites whatever the \
                                      cell holds now."
-                                )),
-                        )
-                        .child(
+                                ))
+                        }))
+                        .children(refresh_sql.map(|sql| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_XS))
+                                .children(editing.then(|| {
+                                    div()
+                                        .text_size(px(layout::TEXT_SM))
+                                        .text_color(t.text_muted)
+                                        .child("Refresh runs:")
+                                }))
+                                .child(
+                                    div()
+                                        .p(px(layout::SPACE_SM))
+                                        .rounded(px(layout::RADIUS_CONTROL))
+                                        .bg(t.surface)
+                                        .text_size(px(layout::TEXT_SM))
+                                        .text_color(t.text)
+                                        .child(sql),
+                                )
+                        }))
+                        .children(editing.then(|| {
                             Checkbox::new("dont-ask-stale")
                                 .text_size(px(layout::TEXT_SM))
                                 .font_weight(FontWeight::BOLD)
@@ -755,8 +790,8 @@ impl Workspace {
                                     _ = tick.update(cx, |workspace, cx| {
                                         workspace.toggle_stale_dont_ask(cx);
                                     });
-                                }),
-                        )
+                                })
+                        }))
                         .child(
                             div()
                                 .flex()
@@ -782,7 +817,10 @@ impl Workspace {
                                     button(
                                         "refresh-stale-edit",
                                         "Refresh",
-                                        Tone::Quiet,
+                                        match editing {
+                                            true => Tone::Quiet,
+                                            false => Tone::Primary,
+                                        },
                                         Control::Standard,
                                         t,
                                     )
@@ -794,7 +832,7 @@ impl Workspace {
                                         },
                                     ),
                                 )
-                                .child(
+                                .children(editing.then(|| {
                                     button(
                                         "approve-stale-edit",
                                         "Edit anyway",
@@ -808,8 +846,8 @@ impl Workspace {
                                                 workspace.edit_stale_anyway(window, cx);
                                             });
                                         },
-                                    ),
-                                ),
+                                    )
+                                })),
                         ),
                 )
                 .into_any_element(),
