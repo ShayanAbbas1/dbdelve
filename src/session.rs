@@ -694,6 +694,15 @@ pub(crate) struct QueryTab {
     /// edits appends the `UPDATE` to the buffer, so the cursor no longer sits on
     /// the `SELECT` and the text can no longer say where these rows came from.
     pub(crate) last_query: Option<String>,
+    /// Where in the buffer the statement last sent from it began, and its
+    /// text. Taken by the run it was sent for once that run starts, so a run
+    /// the mode gate stopped, or one refused while another was in flight,
+    /// cannot re-label the error already on screen.
+    pub(crate) sent_from: Option<(usize, String)>,
+    /// The same for the statement behind `query`: what places an error's
+    /// position in the buffer. `None` when the buffer did not supply it, as
+    /// for a grid edit's or a sort's.
+    pub(crate) ran_from: Option<(usize, String)>,
     /// Whether this tab's snapshot has been looked for yet. Set on the first
     /// attempt whether or not one was found, so a tab reached a second time
     /// cannot read the disk again and put stale rows over live ones.
@@ -765,6 +774,8 @@ impl QueryTab {
             query: QueryState::Idle,
             open_query: stored.name.clone(),
             last_query: None,
+            sent_from: None,
+            ran_from: None,
             hydrated: false,
             plan: None,
             showing_plan: false,

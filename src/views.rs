@@ -40,8 +40,8 @@ use crate::{
     result_grid,
     result_grid::ResultGrid,
     session::{
-        CloseTarget, Explained, ObjectBody, ObjectTab, Profile, QueryState, StructureState, Tab,
-        result_pane_is_expanded,
+        CloseTarget, Explained, ObjectBody, ObjectTab, Profile, QueryState, QueryTab,
+        StructureState, Tab, result_pane_is_expanded,
     },
     theme::{
         FontSlot, OPACITY_DEFAULT, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
@@ -51,7 +51,10 @@ use crate::{
         Control, Tone, button, button_label, compact_count, dialog, group_thousands, icon_button,
         key_hint, keycap_for, keycap_text, object_icon, row_icon, section_label,
     },
-    workspace::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, SettingsTab, editor_zoom_percent},
+    workspace::{
+        EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, SettingsTab, editor_zoom_percent,
+        error_in_buffer,
+    },
 };
 
 /// What the row panel needs that is not part of any one tab: whether it is
@@ -183,7 +186,7 @@ fn render_query_surface(
         None => render_results(
             &tab.query,
             &tab.results,
-            true,
+            Some(tab),
             tab.row_panel_folded,
             &tab.row_panel_split,
             row_panel,
@@ -507,7 +510,7 @@ fn render_object(
         .child(div().flex_1().min_h_0().child(render_results(
             query,
             results,
-            false,
+            None,
             *row_panel_folded,
             row_panel_split,
             row_panel,
@@ -903,10 +906,13 @@ fn render_routine(tab: &ObjectTab, cx: &mut Context<Workspace>) -> AnyElement {
 /// SQL above it. The grid and every message are alternatives, not layers: a
 /// full-size message beside a full-size table gets pushed off the pane
 /// entirely.
+///
+/// `query_tab` is the buffer's tab, and `None` for an object tab's preview,
+/// which has no buffer.
 fn render_results(
     query: &QueryState,
     results: &Entity<TableState<ResultGrid>>,
-    is_query: bool,
+    query_tab: Option<&QueryTab>,
     folded: bool,
     split: &Entity<ResizableState>,
     row_panel: &RowPanel,
@@ -976,7 +982,7 @@ fn render_results(
     let has_rows = results.read(cx).delegate().rows_count(cx) > 0;
 
     let message = match query {
-        QueryState::Idle if is_query => Some(centered(
+        QueryState::Idle if query_tab.is_some() => Some(centered(
             key_hint(
                 t,
                 "secondary-enter",
@@ -999,17 +1005,48 @@ fn render_results(
                 .into_any_element(),
         )),
         QueryState::Failed(error) => {
-            let position = error
-                .position
-                .map(|position| format!(" (at byte {position})"))
-                .unwrap_or_default();
+            let at = query_tab
+                .and_then(|tab| error_in_buffer(tab, cx))
+                .map(|(at, _)| at);
+            let position = match (at, error.position) {
+                (None, Some(position)) => format!(" (at byte {position})"),
+                _ => String::new(),
+            };
             Some(
                 div()
                     .size_full()
                     .p(px(layout::SPACE_LG))
-                    .font_family(code)
-                    .text_color(t.danger)
-                    .child(format!("{}{position}", error.message))
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_MD))
+                    .child(
+                        div()
+                            .font_family(code)
+                            .text_color(t.danger)
+                            .child(format!("{}{position}", error.message)),
+                    )
+                    .when_some(at, |pane, at| {
+                        pane.child(
+                            div().flex().child(
+                                button(
+                                    "jump-to-error",
+                                    format!(
+                                        "Go to line {}, column {}",
+                                        at.line + 1,
+                                        at.character + 1
+                                    ),
+                                    Tone::Quiet,
+                                    Control::Compact,
+                                    t,
+                                )
+                                .on_click(cx.listener(
+                                    |workspace, _, window, cx| {
+                                        workspace.jump_to_error(window, cx);
+                                    },
+                                )),
+                            ),
+                        )
+                    })
                     .into_any_element(),
             )
         }

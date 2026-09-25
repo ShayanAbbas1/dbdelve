@@ -3,6 +3,8 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use std::ops::Range;
+
 use super::*;
 use crate::session::{PendingRun, Resume};
 
@@ -112,7 +114,7 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_query(&mut self, _: &RunQuery, _: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
@@ -128,8 +130,8 @@ impl Workspace {
             return;
         };
 
-        let sql = match self.sql_to_run(&editor, window, cx) {
-            Some(Ok(sql)) => sql,
+        let (start, sql) = match self.sql_to_run(&editor, cx) {
+            Some(Ok(statement)) => statement,
             refused => {
                 let message = refused
                     .and_then(Result::err)
@@ -147,7 +149,18 @@ impl Workspace {
             }
         };
 
+        self.sent_from(tab, start, &sql);
         self.execute_sql(sql, tab, cx);
+    }
+
+    fn sent_from(&mut self, tab: Tab, start: usize, sql: &str) {
+        if let Tab::Query(id) = tab
+            && let Some(tab) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(id))
+        {
+            tab.sent_from = Some((start, sql.to_string()));
+        }
     }
 
     /// Ask the server how it would run the statement the user is pointing at.
@@ -160,7 +173,7 @@ impl Workspace {
     pub(crate) fn explain_query(
         &mut self,
         action: &ExplainQuery,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
@@ -204,11 +217,12 @@ impl Workspace {
             );
             return;
         };
-        let sql = match self.sql_to_run(&editor, window, cx) {
-            Some(Ok(sql)) => sql,
+        let (start, sql) = match self.sql_to_run(&editor, cx) {
+            Some(Ok(statement)) => statement,
             Some(Err(message)) => return failure(self, &message, cx),
             None => return failure(self, "There is no statement to explain.", cx),
         };
+        self.sent_from(tab, start, &sql);
 
         self.execute_and_then(
             format!("{prefix}{sql}"),
@@ -811,6 +825,14 @@ impl Workspace {
             let prefix = engine.explain_prefix(mode).unwrap_or_default();
             sql.strip_prefix(prefix).unwrap_or(&sql).to_string()
         });
+        if let Tab::Query(query) = tab
+            && let Some(tab) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(query))
+        {
+            let ran = statement.as_ref().or(explained.as_ref());
+            tab.ran_from = tab.sent_from.take().filter(|(_, sent)| Some(sent) == ran);
+        }
         // Recorded on the way out rather than on the way back: the history is
         // what the user ran, and a statement that failed is exactly the one
         // worth getting back. Only the buffer's — a relation's preview is SQL
@@ -900,7 +922,16 @@ impl Workspace {
                                 });
                                 (true, produced_grid, None)
                             }
-                            Err(error) => {
+                            Err(mut error) => {
+                                // Into the user's statement, not the prefix
+                                // dbdelve put in front of it, which is on no
+                                // screen to count from.
+                                let prefix = explain
+                                    .and_then(|mode| engine.explain_prefix(mode))
+                                    .map_or(0, str::len);
+                                error.position = error
+                                    .position
+                                    .and_then(|position| position.checked_sub(prefix));
                                 let cancelled = matches!(
                                     state,
                                     QueryState::Running {
@@ -1055,34 +1086,53 @@ impl Workspace {
         });
     }
 
+    /// Put the cursor on what the error in front points at, with it selected.
+    pub(crate) fn jump_to_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+        else {
+            return;
+        };
+        let Some((_, span)) = error_in_buffer(tab, cx) else {
+            return;
+        };
+        tab.editor.clone().update(cx, |editor, cx| {
+            editor.set_selected_range(span, cx);
+            editor.focus(window, cx);
+        });
+    }
+
+    /// The statement to run and where it begins in the buffer.
     pub(crate) fn sql_to_run(
         &self,
         editor: &Entity<EditorState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Result<String, String>> {
+        cx: &App,
+    ) -> Option<Result<(usize, String), String>> {
         let engine = self.engine();
-        let selection = editor.update(cx, |editor, cx| {
-            let selection = editor.selected_text_range(false, window, cx)?;
-            if selection.range.is_empty() {
-                return None;
-            }
+        let editor = editor.read(cx);
+        let sql = editor.value();
+        let selection = editor.selected_range();
 
-            let mut adjusted_range = None;
-            editor.text_for_range(selection.range, &mut adjusted_range, window, cx)
-        });
-
-        if let Some(selection) = selection {
-            return match sql::one_batch(engine, &selection) {
+        if !selection.is_empty() {
+            let selected = &sql[selection.clone()];
+            return match sql::one_batch(engine, selected) {
                 Ok(batch) if batch.trim().is_empty() => None,
-                batch => Some(batch.map(str::to_string)),
+                // Past the empty case, `one_batch` hands back a slice of the
+                // selection, so the two pointers say where in it the batch sits.
+                Ok(batch) => Some(Ok((
+                    selection.start + (batch.as_ptr() as usize - selected.as_ptr() as usize),
+                    batch.to_string(),
+                ))),
+                Err(message) => Some(Err(message)),
             };
         }
 
-        let editor = editor.read(cx);
-        let sql = editor.value();
         let range = Buffer::for_engine(engine, &sql).statement_at(editor.cursor())?;
-        Some(sql::batch_repeats(engine, &sql, range.end).map(|()| sql[range].to_string()))
+        Some(
+            sql::batch_repeats(engine, &sql, range.end)
+                .map(|()| (range.start, sql[range].to_string())),
+        )
     }
 }
 
@@ -1116,6 +1166,52 @@ fn position_at(text: &str, offset: usize) -> Position {
     )
 }
 
+/// Where a query tab's error points in its buffer: the position to name and
+/// the span to select. `None` unless the buffer still holds the statement that
+/// failed, where it stood when it ran.
+///
+/// ponytail: copies the buffer on every render an error is on screen. Compare
+/// against the rope in place if a buffer ever gets big enough to feel it.
+pub(crate) fn error_in_buffer(tab: &QueryTab, cx: &App) -> Option<(Position, Range<usize>)> {
+    let QueryState::Failed(DbError {
+        position: Some(position),
+        ..
+    }) = &tab.query
+    else {
+        return None;
+    };
+    let (start, sql) = tab.ran_from.as_ref()?;
+    error_span(&tab.editor.read(cx).value(), *start, sql, *position)
+}
+
+/// `position` is a byte offset into `sql`, which ran from `start` in `buffer`.
+/// The span is the word there, or the one character when it is not in a word,
+/// and empty on whitespace or at the end of the statement.
+fn error_span(
+    buffer: &str,
+    start: usize,
+    sql: &str,
+    position: usize,
+) -> Option<(Position, Range<usize>)> {
+    if !buffer.get(start..)?.starts_with(sql) {
+        return None;
+    }
+    let rest = sql.get(position..)?;
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let token = match rest.chars().next() {
+        Some(c) if is_word(c) => {
+            sql[..position].trim_end_matches(is_word).len()
+                ..position + rest.find(|c| !is_word(c)).unwrap_or(rest.len())
+        }
+        Some(c) if !c.is_whitespace() => position..position + c.len_utf8(),
+        _ => position..position,
+    };
+    Some((
+        position_at(buffer, start + position),
+        start + token.start..start + token.end,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,5 +1230,43 @@ mod tests {
         let sql = "select 1;\n  select 2;";
         let offset = statement_starts(sql)[1];
         assert_eq!(position_at(sql, offset), Position::new(1, 2));
+    }
+
+    #[test]
+    fn an_error_lands_on_its_word_in_the_buffer() {
+        let buffer = "select 1;\nSELECT 'éé', nme FROM t;";
+        let sql = "SELECT 'éé', nme FROM t";
+        // Postgres says character 14; `postgres::query_error` hands it over as
+        // byte 15, which is past the two two-byte characters.
+        let (at, span) = error_span(buffer, 10, sql, 15).unwrap();
+        assert_eq!(at, Position::new(1, 13));
+        assert_eq!(&buffer[span], "nme");
+        // Inside the word, it is still the whole word.
+        let (_, span) = error_span(buffer, 10, sql, 16).unwrap();
+        assert_eq!(&buffer[span], "nme");
+    }
+
+    #[test]
+    fn an_error_off_a_word_selects_one_character_or_none() {
+        let buffer = "SELECT (1 FROM";
+        let (_, span) = error_span(buffer, 0, buffer, 7).unwrap();
+        assert_eq!(&buffer[span], "(");
+        let (_, span) = error_span(buffer, 0, buffer, 6).unwrap();
+        assert!(span.is_empty());
+        // "at end of input": the cursor goes after the statement, and nothing
+        // past it is taken for part of it.
+        let (at, span) = error_span("SELECT 1 FROM;", 0, "SELECT 1 FROM", 13).unwrap();
+        assert_eq!((at, span), (Position::new(0, 13), 13..13));
+    }
+
+    #[test]
+    fn an_error_is_not_placed_in_a_buffer_that_moved_on() {
+        let sql = "SELECT nme FROM t";
+        assert!(error_span(sql, 0, sql, sql.len() + 1).is_none());
+        // Not a character boundary.
+        assert!(error_span("SELECT 'é'", 0, "SELECT 'é'", 9).is_none());
+        assert!(error_span("-- edited\nSELECT nme FROM t", 0, sql, 7).is_none());
+        assert!(error_span("SELECT", 0, sql, 0).is_none());
+        assert!(error_span(sql, 40, sql, 0).is_none());
     }
 }
