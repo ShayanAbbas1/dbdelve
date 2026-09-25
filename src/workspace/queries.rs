@@ -778,7 +778,13 @@ impl Workspace {
         // Read from the statement that is about to run, so the headers say what
         // the rows on screen are actually ordered by rather than what dbdelve
         // last intended to ask for.
-        let keys = sql::order_by(&sql);
+        // A preview runs in the engine's own paging, which on SQL Server the
+        // grammar cannot read; its sort is read from the spelling it was
+        // generated in. A buffer's statement is read as typed.
+        let keys = match tab {
+            Tab::Object(_) => sql::order_by(&sql::unpaged(&sql)),
+            Tab::Query(_) => sql::order_by(&sql),
+        };
         let sortable = keys.is_some();
         let keys = keys.unwrap_or_default();
         // Kept only where it is read back: the query tab's grid has to be able

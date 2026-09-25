@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, SQLite and Snowflake.
+speaking Postgres, MySQL, SQLite, Snowflake and SQL Server.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -91,12 +91,12 @@ require it, stop and raise it instead.
 
 4. **Driver types do not reach the UI layer.** The grid receives rendered
    strings and type tags, never a `postgres::Row`, a `mysql::Value`, a
-   `rusqlite::ValueRef`, an OID, a storage class or an epoch count off
-   Snowflake's wire. Engine dispatch is a closed enum inside `src/db/` and stops
+   `rusqlite::ValueRef`, a `tiberius::ColumnData`, an OID, a storage class or
+   an epoch count off Snowflake's wire. Engine dispatch is a closed enum inside `src/db/` and stops
    there: no trait, no plugin surface. A UI that knows which engine it is
    talking to grows an engine-shaped special case in every view, and those are
    the special cases nobody ever removes. An enum rather than a trait for the
-   same reason in miniature: four arms the compiler makes every match
+   same reason in miniature: five arms the compiler makes every match
    enumerate, instead of an open extension point.
 
    The one thing that crosses out is `db::Engine`, because DBDelve writes SQL
@@ -147,15 +147,15 @@ an upgrade, or ask for confirmation.
   confirmation, before any mode comparison: every typo lands there, and asking
   for Full to get a syntax error back would teach people to live in Full.
   The exception is Read-only on an engine where `Engine::holds_read_only` is
-  false (SQLite, Snowflake): nothing on the server would stop it writing, so
+  false (SQLite, Snowflake, SQL Server): nothing on the server would stop it writing, so
   the verdict carries Read-write and the gate asks for that instead.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
   mode into every open grid, which caches it.
 - `Connection::set_read_only` holds a Read-only session to reads on the server
-  (Postgres and MySQL; SQLite has no such setting, and Snowflake no session
-  to hold it in). It is a backstop, not the boundary: `sql::gate` is. A
+  (Postgres and MySQL; SQLite has no such setting, Snowflake no session
+  to hold it in, and SQL Server no session-level switch). It is a backstop, not the boundary: `sql::gate` is. A
   write-less role is the only real privilege boundary.
 
 ---
@@ -188,6 +188,11 @@ keyring = "4"              # passwords: Keychain, Secret Service, Credential Man
 ureq = "=3.4.2"            # Snowflake's SQL REST API; blocking. dff = false, rustls on ring
 ring = "=0.17.14"          # its key-pair tokens. Already linked as the TLS provider
 base64 = "=0.22.1"
+
+tiberius = "=0.12.3"       # SQL Server (TDS). dff = false, tds73 + rustls. Async, see below
+tokio = "=1.53.1"          # tiberius's runtime, one per connection. dff = false: rt, net, time
+tokio-util = "=0.7.19"     # compat: tokio's socket as the futures I/O tiberius speaks
+futures-util = "=0.3.34"   # try_next over tiberius's result stream. dff = false
 
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
@@ -238,6 +243,14 @@ Without `x11` or `wayland` the Linux backend panics on the first frame.
 - `sqlparser`: its defaults build assembly through `cc` (`psm`) to guard
   against pathological nesting nobody sends from a local buffer.
 - `sqlformat`: its defaults colourise a token dump nothing prints.
+- `tiberius`: its defaults are `native-tls` (OpenSSL on Linux) and `winauth`.
+  Its `rustls` feature is **tokio-rustls 0.24 on rustls 0.21**, a second rustls
+  major version beside the 0.23 everything else shares: pure Rust and still on
+  `ring`, so no second crypto library, but a second copy of the TLS stack, and
+  one `tls.rs` cannot configure, because tiberius builds its own rustls config.
+  It drags `rustls-native-certs` 0.6, `rustls-pemfile` 1 and a second
+  `security-framework` in with it. Accepted, because it is the only maintained
+  TDS client and its only TLS that is not OpenSSL.
 
 **Build profiles are deliberate.** `[profile.dev.package."*"] opt-level = 3`
 builds dependencies optimized, because GPUI lays out and shapes text on the CPU
@@ -252,17 +265,27 @@ partition after the first arrives compressed. Snowflake publishes no Rust
 driver and the community ones are tokio futures, which is why this is an HTTP
 client and not a driver.
 
-**Do not add tokio.** GPUI's executor is `async-task` with no reactor (Grand
-Central Dispatch on macOS). A tokio future on `cx.background_executor().spawn(...)`
-_panics_ the moment it touches a socket or timer. Database work uses blocking
-drivers, which own their runtimes internally, spawned onto the background
-executor. `rusqlite` is blocking by construction and has no runtime at all.
+**Do not put tokio on GPUI's executor.** GPUI's executor is `async-task` with no
+reactor (Grand Central Dispatch on macOS). A tokio future on
+`cx.background_executor().spawn(...)` _panics_ the moment it touches a socket or
+timer. Database work uses blocking drivers, which own their runtimes
+internally, spawned onto the background executor. `rusqlite` is blocking by
+construction and has no runtime at all.
+
+`tokio` is a direct dependency for one reason, and the same rule is why it is
+safe: tiberius is async with no runtime of its own, so `mssql::Connection`
+owns a tokio current-thread runtime per connection and every call into the
+driver is a `runtime.block_on(...)` on the background thread the query was
+already spawned onto. That is what the `postgres` crate does privately around
+tokio-postgres, written out. The runtime lives behind the connection mutex and
+nothing that leaves `src/db/mssql.rs` is a future.
 
 `tokio-rustls` in the tree is not a breach of that rule, and the rule is why:
 the TLS handshake is a future belonging to the connection, so it runs inside the
 runtime the blocking client already owns, on the same thread as the connect it
-is part of. Nothing tokio-shaped reaches GPUI's executor. Adding a tokio future
-anywhere DBDelve spawns one still panics.
+is part of. The same holds for tiberius's tokio-rustls 0.24, inside the runtime
+`mssql.rs` owns. Nothing tokio-shaped reaches GPUI's executor. Adding a tokio
+future anywhere DBDelve spawns one still panics.
 
 **Do not fork gpui or gpui-component.**
 
@@ -280,9 +303,12 @@ configured. The repository-owned development databases accept:
 ```text
 postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
+mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
 ```
 
-The ports can be moved with `DBDELVE_POSTGRES_PORT` and `DBDELVE_MYSQL_PORT`.
+The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT` and
+`DBDELVE_MSSQL_PORT`. The SQL Server image is `linux/amd64` only, so on Apple
+silicon it runs under emulation and takes a while to come up.
 Pick the engine on the form's chip row first; it decides which fields exist.
 Then paste a URL and choose **Use URL**, or fill the fields in. Connecting is
 the connection test; there is deliberately no separate test button.
@@ -327,7 +353,8 @@ cargo test -- --include-ignored --skip snowflake::tests::live_ # plus the live_ 
 ```
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
-`PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL` and `dbdelve_SQLITE_PATH` (the
+`PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MSSQL_URL` and
+`dbdelve_SQLITE_PATH` (the
 lowercase prefix is what they read); the `tests` job in `ci.yml` has the values
 for the dev databases. It has no Snowflake account, so it skips the Snowflake
 live tests but for the one that needs none; the mock tests stand in for them. CI lints on Linux, macOS and Windows, runs the live tests
@@ -442,7 +469,8 @@ Decided, and not to be re-litigated:
   `filter::substring` and `filter::like_pattern` included;
   `filter::foreign_key_filter` yields a bar rather than a `WHERE`, and
   `filter::derived_filter` folds the bars through `filter_predicate` rather than
-  quoting anything itself.
+  quoting anything itself. `sql::paged` writes too, but only two integers, into
+  a preview's limit (see the SQL Server paging entry below).
 - **Three filter operators are written differently per engine, and two of those
   are decided by the grammar rather than by any server.**
   `sql::is_generated_select` refuses whatever `tree_sitter_sequel` cannot parse
@@ -454,10 +482,12 @@ Decided, and not to be re-litigated:
   **SQLite, which has no default escape at all**, gets `instr`/`substr`
   substring arithmetic instead: case-sensitive where its own `LIKE` is not,
   which is the price of not silently widening a match on a value containing
-  `%`. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
+  `%`. **SQL Server has no default escape either**, but a bracket makes any
+  character literal there, so its pattern brackets `%`, `_` and `[` (`[%]`)
+  and keeps `LIKE`. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
   (8.0.4 and later, so not MariaDB), and **omitted from the dropdown on
-  SQLite**, which ships no `REGEXP` at all.
-- **MySQL and SQLite both bracket a generated multi-row batch** in
+  SQLite and SQL Server**, which ship no regex (SQL Server not before 2025).
+- **MySQL, SQLite and SQL Server bracket a generated multi-row batch** in
   `BEGIN`/`COMMIT` (`sql::update_batch`), because each commits every statement
   on its own where a Postgres `simple_query` submission is one implicit
   transaction. The brackets go in the statement text, never around it
@@ -467,7 +497,9 @@ Decided, and not to be re-litigated:
   went unbracketed while this file claimed it was atomic. `BEGIN` rather than
   MySQL's own `START TRANSACTION` because the gate has to read the brackets back
   and the grammar knows only the first; MySQL takes it as an alias outside a
-  stored program.
+  stored program. SQL Server's is `BEGIN TRANSACTION`, because a bare `BEGIN`
+  opens a statement block in T-SQL; the grammar reads that spelling and
+  `generated_statements` sees through its second word.
 - **A batch that fails part way is rolled back, and the error says which state
   the data is in.** Without that the brackets produce a third state, neither
   applied nor discarded, and rendered as applied, because the refresh `SELECT`
@@ -476,6 +508,12 @@ Decided, and not to be re-litigated:
   in an earlier run is theirs to finish. SQLite asks `is_autocommit` before and
   after; MySQL cannot, because the driver keeps the server's
   `SERVER_STATUS_IN_TRANS` flag private, so it reads the submitted text instead.
+  **SQL Server's session runs with `SET XACT_ABORT ON`**, set at connect like
+  a timeout, because without it a constraint violation ends only its own
+  statement and the batch carries on to the `COMMIT` dbdelve wrote. It reads
+  the submitted text like MySQL, then asks `@@TRANCOUNT`. T-SQL has no nested
+  transactions, so that rollback takes a transaction the user opened earlier
+  with it, and the error says the transaction was rolled back.
 - **A statement timeout is one number per profile, applied at connect**, and
   each engine buys something different with it. Postgres's `statement_timeout`
   bounds any statement; MySQL's `max_execution_time` bounds read-only `SELECT`s
@@ -483,24 +521,34 @@ Decided, and not to be re-litigated:
   server older than 5.7.8 (or MariaDB, which spells it differently) fails the
   connect rather than the statement; SQLite has no such setting and gets a
   wall-clock timer firing `sqlite3_interrupt`, which counts waiting on a lock
-  the same as scanning. It goes in at connect and never into the user's
+  the same as scanning; SQL Server has none either and gets a timer around the
+  run, which stops the statement the way Cancel does. It goes in at connect and never into the user's
   submission (hard rule 1, and on Postgres a `SET` inside their submission
   would be scoped to the implicit transaction around it). It therefore bounds
   DBDelve's own catalog and structure queries too, which is intended.
 - **Cancel reaches the running statement and nothing queued behind it.** The
   handle it needs (Postgres's `CancelToken`, MySQL's connection id, SQLite's
-  `InterruptHandle`) is captured in each engine's `open`, before the client
-  goes behind the connection mutex, because the statement being cancelled is
-  holding that mutex. `Connection::cancel` takes `&self` and locks nothing.
+  `InterruptHandle`, a second handle on SQL Server's socket) is captured in
+  each engine's `open`, before the client goes behind the connection mutex,
+  because the statement being cancelled is holding that mutex.
+  `Connection::cancel` takes `&self` and locks nothing but its own flags.
+- **SQL Server's Cancel closes the connection.** tiberius cannot send TDS's
+  attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary
+  login lacks, so Cancel shuts the socket down and the server abandons the
+  batch, rolling back what it had open (`live_a_cancel_stops_the_statement_on_the_server_and_reconnects`
+  proves the statement behind a `WAITFOR` never runs). The session does not
+  survive, so the run reconnects and its error says what was lost.
 - **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL and
   `EXPLAIN QUERY PLAN` on SQLite, which has no analyze form, so that mode is not
-  offered there (`Engine::explain_prefix` returns `None`). Server versions are
+  offered there (`Engine::explain_prefix` returns `None`). SQL Server offers
+  neither: its plans come from `SET SHOWPLAN_XML`, a session switch that must be
+  a batch of its own, which is not a prefix on a copy of the statement. Server versions are
   not detected: an older server refuses the statement and says so.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
-- **Read-only has no server-side backstop on SQLite or Snowflake.** Postgres
-  gets `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION READ
-  ONLY`. So on SQLite and Snowflake, Read-only refuses a statement `sql::classify` cannot
+- **Read-only has no server-side backstop on SQLite, Snowflake or SQL Server.**
+  Postgres gets `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION
+  READ ONLY`. So on the other three, Read-only refuses a statement `sql::classify` cannot
   read rather than offering to run it once (`Engine::holds_read_only`).
 - **Snowflake has no session, because it is spoken to over its SQL REST API.**
   It publishes no Rust driver. Each submission is one HTTPS request, so nothing
@@ -508,7 +556,7 @@ Decided, and not to be re-litigated:
   not even pretend: a `USE` comes back as "Command not supported by SQL API:
   USE", which `live_a_use_is_refused_rather_than_quietly_forgotten` pins. The database, warehouse, role, timeout and `MULTI_STATEMENT_COUNT`
   are fields of the request and never SQL — hard rule 1.
-- **Snowflake has no connection mutex**, alone among the four: there is no
+- **Snowflake has no connection mutex**, alone among the five: there is no
   socket to serialise, so a catalog load does not queue behind a slow query,
   and `snowflake::Connection::at_once` runs a structure load's four statements
   on four threads rather than one after another (1.3s against 3.6s, measured).
@@ -575,6 +623,44 @@ Decided, and not to be re-litigated:
   `information_schema.CHECK_CONSTRAINTS` only exists from 8.0.16.
 - **MySQL verifies certificates against `webpki-roots`**, not the platform
   trust store the Postgres path reads. It fails loudly, which rule 7 permits.
+- **SQL Server identifiers are double-quoted, not bracketed.** The grammar
+  every gate parses with has no `[name]` and its pin does not move; the login
+  tiberius sends turns `QUOTED_IDENTIFIER` on, so `"name"` is an identifier.
+  Literals are `N'…'`, because a bare one is converted to the database's code
+  page and a character it lacks is stored as `?`; `sql::equality_columns`
+  accepts the prefix as a single-quoted literal.
+- **SQL Server previews page with `OFFSET … FETCH`.** T-SQL has no `LIMIT` and
+  the grammar has no `FETCH`, so a preview is generated, sorted and gated as
+  `LIMIT n OFFSET m` and re-spelled by `sql::paged` afterwards (`ORDER BY (SELECT
+  NULL)` when unsorted, since `OFFSET` requires one). It replaces only the
+  `limit` node the parse tree locates, with the two integers read out of it;
+  what runs, and what the tab shows, is the T-SQL. A user's own `TOP` or
+  `[bracketed]` statement cannot be sorted from a header, for the grammar's
+  reason.
+- **SQL Server edit targets come from a describe**, as Postgres's do:
+  `sys.dm_exec_describe_first_result_set` in mode 2 (a view is its own source,
+  and has no key), after the statement ran, only when it returned exactly one
+  result set, and only when the described names match the result's. A column
+  from another database is not local, since an `EditTarget` names no
+  database. Writes report no row count: tiberius keeps the done tokens to
+  itself.
+- **A SQL Server profile is held to its database.** Every name dbdelve writes
+  stops at the schema, so after a `USE` a generated `DELETE` would find the same
+  name elsewhere. A run whose text says `USE` is followed by `DB_NAME()`; if it
+  moved, the session is moved back and the run fails saying so.
+- **SQL Server's TLS is tiberius's.** `disable` is `EncryptionLevel::Off`,
+  which still encrypts the login packet; the promising rungs are `Required`
+  (never `On`, which panics the driver when the server offers less); `prefer`
+  and `disable` alone retry with `NotSupported` for a server that cannot
+  encrypt. `verify-ca` checks the hostname too, since tiberius cannot switch
+  that alone off: stricter, which rule 7 permits. A named root certificate must
+  be one certificate.
+- **SQL Server values are rendered in `mssql::render`.** TDS is binary, so the
+  server's own formats are rebuilt there: dates from day counts, `datetime`'s
+  1/300 s ticks, `datetimeoffset` from its UTC instant plus offset, decimals from
+  the unscaled integer. `money` arrives from tiberius as an `f64`, exact below
+  about 9 × 10¹¹. Driver panics (unimplemented tokens, an empty trust store) are
+  caught and reported rather than poisoning the mutex.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
 

@@ -2057,36 +2057,44 @@ fn render_tab_strip(
         // Beside Run, because it asks about the same statement Run would run.
         // A menu rather than a button: the two modes differ by whether the
         // statement is executed, and a single button would have to pick one of
-        // those on the user's behalf.
-        .children((runnable && !session.naming).then(|| {
-            icon_button(
-                "explain-query",
-                icon::PLAN,
-                Tone::Quiet,
-                Control::Compact,
-                t,
-            )
-            .tooltip_with_action(
-                "Explain",
-                &ExplainQuery {
-                    mode: ExplainMode::Plan,
-                },
-                None,
-            )
-            .dropdown_menu(move |menu, _, _| {
-                ExplainMode::ALL
+        // those on the user's behalf. Absent on an engine with no mode at all,
+        // rather than a menu with nothing in it.
+        .children(
+            (runnable
+                && !session.naming
+                && ExplainMode::ALL
                     .into_iter()
-                    // A mode the engine does not have is not offered, the
-                    // same way a filter operator it cannot express is not.
-                    .filter(|mode| engine.explain_prefix(*mode).is_some())
-                    .fold(menu, |menu, mode| {
-                        menu.menu(
-                            format!("{} — {}", mode.label(), mode.caption()),
-                            Box::new(ExplainQuery { mode }),
-                        )
-                    })
-            })
-        }))
+                    .any(|mode| engine.explain_prefix(mode).is_some()))
+            .then(|| {
+                icon_button(
+                    "explain-query",
+                    icon::PLAN,
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .tooltip_with_action(
+                    "Explain",
+                    &ExplainQuery {
+                        mode: ExplainMode::Plan,
+                    },
+                    None,
+                )
+                .dropdown_menu(move |menu, _, _| {
+                    ExplainMode::ALL
+                        .into_iter()
+                        // A mode the engine does not have is not offered, the
+                        // same way a filter operator it cannot express is not.
+                        .filter(|mode| engine.explain_prefix(*mode).is_some())
+                        .fold(menu, |menu, mode| {
+                            menu.menu(
+                                format!("{} — {}", mode.label(), mode.caption()),
+                                Box::new(ExplainQuery { mode }),
+                            )
+                        })
+                })
+            }),
+        )
         .children(runnable.then(|| {
             // Filled where its neighbours are ghosts: running the buffer is
             // what the surface is for, and the fill is the only hierarchy

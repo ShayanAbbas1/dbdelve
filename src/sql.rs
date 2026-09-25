@@ -19,10 +19,11 @@ use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, CopySource, CopyTarget, Query, SetExpr, Statement, UtilityOption,
+    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Query, SetExpr,
+    Statement, UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::parser::Parser as SqlParser;
 use tree_sitter::{Node, Parser, Tree};
@@ -185,6 +186,64 @@ pub fn with_order_by(statement: &str, keys: &[SortKey]) -> Option<String> {
         .unwrap_or(anchor.byte_range().end);
 
     Some(splice(sql, insert_at..insert_at, &clause))
+}
+
+/// A generated preview's page, spelled the way `engine` reads one.
+///
+/// Every engine but SQL Server takes the `LIMIT … OFFSET …` a preview is
+/// generated with. T-SQL has no `LIMIT`, and the grammar the gates parse with
+/// has none of T-SQL's `OFFSET … FETCH`, so the preview is generated, sorted and
+/// checked in the one spelling and re-spelled here after the gate has read it.
+/// Only the `limit` node the parse tree locates is replaced, with two integers
+/// read out of it: nothing the user typed into a filter is touched. `OFFSET`
+/// needs an `ORDER BY`, and an unsorted preview gets the one that orders
+/// nothing.
+///
+/// `None` for a statement with no limit this can read, which is not a preview.
+pub fn paged(engine: Engine, statement: &str) -> Option<String> {
+    if engine != Engine::SqlServer {
+        return Some(statement.to_string());
+    }
+    let tree = parse(statement)?;
+    let anchor = clause_anchor(&tree, statement)?;
+    let limit = child_of_kind(&anchor, "limit")?;
+    let number = |node: tree_sitter::Node| -> Option<usize> {
+        statement
+            .get(child_of_kind(&node, "literal")?.byte_range())?
+            .parse()
+            .ok()
+    };
+    let rows = number(limit)?;
+    let offset = match child_of_kind(&limit, "offset") {
+        Some(offset) => number(offset)?,
+        None => 0,
+    };
+    let order = match child_of_kind(&anchor, "order_by") {
+        Some(_) => "",
+        None => "ORDER BY (SELECT NULL) ",
+    };
+    Some(splice(
+        statement,
+        limit.byte_range(),
+        &format!("{order}OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"),
+    ))
+}
+
+/// [`paged`] undone: the `LIMIT … OFFSET …` spelling back from the
+/// `OFFSET … FETCH` one, so the preview that runs can be read by the same
+/// parse that wrote it. Anything not in exactly the shape `paged` writes
+/// comes back unchanged.
+pub fn unpaged(statement: &str) -> String {
+    let unpage = || {
+        let (head, tail) = statement.rsplit_once(" OFFSET ")?;
+        let (offset, tail) = tail.split_once(" ROWS FETCH NEXT ")?;
+        let rows = tail.strip_suffix(" ROWS ONLY")?;
+        offset.parse::<usize>().ok()?;
+        rows.parse::<usize>().ok()?;
+        let head = head.strip_suffix(" ORDER BY (SELECT NULL)").unwrap_or(head);
+        Some(format!("{head} LIMIT {rows} OFFSET {offset}"))
+    };
+    unpage().unwrap_or_else(|| statement.to_string())
 }
 
 /// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
@@ -442,7 +501,12 @@ fn generated_statements<'tree>(root: &Node<'tree>) -> Option<Vec<Node<'tree>>> {
     }
 
     let mut cursor = transaction.walk();
-    let bracketed: Vec<_> = transaction.named_children(&mut cursor).collect();
+    let mut bracketed: Vec<_> = transaction.named_children(&mut cursor).collect();
+    // `BEGIN TRANSACTION`, which is how T-SQL has to spell it: the grammar
+    // hangs the second word beside the first.
+    if bracketed.get(1).map(|node| node.kind()) == Some("keyword_transaction") {
+        bracketed.remove(1);
+    }
     match bracketed.as_slice() {
         [begin, statements @ .., commit]
             if begin.kind() == "keyword_begin" && commit.kind() == "keyword_commit" =>
@@ -592,8 +656,10 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
             };
             // A value is a single-quoted literal and nothing else. `"other"` is
             // a `literal` to this grammar too, and matching a column against a
-            // column is not naming a row.
-            if right.kind() != "literal" || !value.starts_with('\'') {
+            // column is not naming a row. `N'…'` is SQL Server's single-quoted
+            // literal.
+            let quoted = value.strip_prefix(['N', 'n']).unwrap_or(value);
+            if right.kind() != "literal" || !quoted.starts_with('\'') {
                 return false;
             }
             match column_name(*left, sql) {
@@ -1160,6 +1226,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::MySql => Box::new(MySqlDialect {}),
         Engine::Sqlite => Box::new(SQLiteDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
+        Engine::SqlServer => Box::new(MsSqlDialect {}),
     };
 
     // All or nothing: one statement it cannot read makes the whole submission
@@ -1277,6 +1344,15 @@ fn variant_verdict(statement: &Statement) -> Verdict {
                     .fold(Verdict::READ, Verdict::max)
             }
         }
+
+        // T-SQL's `IF … ELSE` is as dangerous as what it holds. Every branch
+        // counts, since which one runs is the server's to decide.
+        Statement::If(branching) => std::iter::once(&branching.if_block)
+            .chain(&branching.elseif_blocks)
+            .chain(&branching.else_block)
+            .flat_map(ConditionalStatementBlock::statements)
+            .map(statement_verdict)
+            .fold(Verdict::READ, Verdict::max),
 
         Statement::ShowTables { .. }
         | Statement::ShowCatalogs { .. }
@@ -2594,6 +2670,145 @@ mod tests {
 
         let postgres = update_batch(Engine::Postgres, &rows).unwrap();
         assert!(!postgres.contains("BEGIN"), "{postgres}");
+    }
+
+    #[test]
+    fn a_sql_server_batch_opens_the_way_t_sql_spells_it_and_passes_the_gate() {
+        // A bare `BEGIN` opens a statement block in T-SQL, so the brackets are
+        // `BEGIN TRANSACTION`; the gate has to see through that spelling too.
+        let rows = vec![
+            pending_row(&[("name", set("李"))], &[("id", "1")]),
+            pending_row(&[("name", set("Bo"))], &[("id", "2")]),
+        ];
+        let batch = update_batch(Engine::SqlServer, &rows).unwrap();
+        assert_eq!(
+            batch,
+            "BEGIN TRANSACTION;\n\
+             UPDATE \"public\".\"accounts\" SET \"name\" = N'李' WHERE \"id\" = N'1';\n\
+             UPDATE \"public\".\"accounts\" SET \"name\" = N'Bo' WHERE \"id\" = N'2';\n\
+             COMMIT;"
+        );
+        assert!(is_generated_write(&batch), "{batch}");
+    }
+
+    #[test]
+    fn the_gate_reads_sql_server_spellings_and_refuses_what_it_always_refused() {
+        for admitted in [
+            "INSERT INTO \"dbo\".\"accounts\" (\"name\") VALUES (N'x')",
+            "DELETE FROM \"dbo\".\"accounts\" WHERE \"id\" = N'1'",
+            "BEGIN TRANSACTION; UPDATE \"dbo\".\"a\" SET \"x\" = N'1' WHERE \"id\" = N'1'; COMMIT;",
+        ] {
+            assert!(is_generated_write(admitted), "{admitted}");
+        }
+        assert!(delete_matches_key(
+            "DELETE FROM \"dbo\".\"accounts\" WHERE \"id\" = N'1'",
+            &["id"]
+        ));
+        for refused in [
+            // A transaction it cannot see closed, and one hiding a drop.
+            "BEGIN TRANSACTION; UPDATE \"dbo\".\"a\" SET \"x\" = N'1' WHERE \"id\" = N'1';",
+            "BEGIN TRANSACTION; DROP TABLE x; COMMIT;",
+            // Brackets are T-SQL's own quoting and the pinned grammar's error,
+            // which is why dbdelve never writes them.
+            "UPDATE [dbo].[a] SET [x] = N'1' WHERE [id] = N'1'",
+            // A national prefix on a column is still a column, not a literal.
+            "DELETE FROM \"dbo\".\"accounts\" WHERE \"id\" = N\"other\"",
+        ] {
+            assert!(!is_generated_write(refused), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_sql_server_preview_is_paged_with_offset_and_fetch() {
+        let statement = |limit: &str| format!("SELECT * FROM \"dbo\".\"accounts\"{limit}");
+        // `OFFSET` needs an `ORDER BY`, so an unsorted page gets one that
+        // orders nothing.
+        assert_eq!(
+            paged(Engine::SqlServer, &statement(" LIMIT 1000")).as_deref(),
+            Some(
+                "SELECT * FROM \"dbo\".\"accounts\" ORDER BY (SELECT NULL) \
+                 OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY"
+            )
+        );
+        let sorted = with_order_by(
+            "SELECT * FROM \"dbo\".\"accounts\" WHERE \"name\" LIKE N'%a[%]%' LIMIT 10 OFFSET 20",
+            &[SortKey::new("\"id\"", false)],
+        )
+        .unwrap();
+        assert!(is_generated_select(&sorted), "{sorted}");
+        assert_eq!(
+            paged(Engine::SqlServer, &sorted).as_deref(),
+            Some(
+                "SELECT * FROM \"dbo\".\"accounts\" WHERE \"name\" LIKE N'%a[%]%' \
+                 ORDER BY \"id\" DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
+            )
+        );
+        // Every other engine runs the statement the gate read, unchanged.
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+            assert_eq!(
+                paged(engine, &sorted).as_deref(),
+                Some(sorted.as_str()),
+                "{engine:?}"
+            );
+        }
+        // Not a preview: nothing to re-spell, so nothing to run.
+        assert_eq!(paged(Engine::SqlServer, &statement("")), None);
+        assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1"), None);
+    }
+
+    #[test]
+    fn an_unpaged_preview_reads_back_the_sort_it_runs_with() {
+        let unsorted = "SELECT * FROM \"dbo\".\"accounts\" LIMIT 1000 OFFSET 0";
+        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", false)]).unwrap();
+        for statement in [unsorted, sorted.as_str()] {
+            let paged = paged(Engine::SqlServer, statement).unwrap();
+            assert_eq!(order_by(&paged), None, "the grammar cannot read {paged}");
+            assert_eq!(order_by(&unpaged(&paged)), order_by(statement), "{paged}");
+        }
+        assert_eq!(
+            order_by(&unpaged(&paged(Engine::SqlServer, &sorted).unwrap())),
+            Some(vec![SortKey::new("\"id\"", false)])
+        );
+        // Not `paged`'s shape: left alone.
+        let typed = "SELECT * FROM t ORDER BY id OFFSET 5 ROWS";
+        assert_eq!(unpaged(typed), typed);
+    }
+
+    #[test]
+    fn classify_reads_t_sql_spellings() {
+        let cases: &[(&str, Verdict)] = &[
+            ("SELECT [id] FROM [dbo].[accounts]", Verdict::READ),
+            ("SELECT TOP 10 * FROM t", Verdict::READ),
+            (
+                "SELECT * FROM t ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+                Verdict::READ,
+            ),
+            ("SELECT N'李' AS name", Verdict::READ),
+            (
+                "UPDATE [dbo].[t] SET [x] = N'a' WHERE [id] = 1",
+                Verdict::WRITE,
+            ),
+            (
+                "BEGIN TRANSACTION; UPDATE t SET x = N'1' WHERE id = N'1'; COMMIT;",
+                Verdict::WRITE,
+            ),
+            ("TRUNCATE TABLE t", Verdict::destroys(Destructive::Truncate)),
+            ("DROP TABLE [t]", Verdict::destroys(Destructive::Drop)),
+            (
+                "BEGIN TRAN; DELETE FROM t; COMMIT TRAN",
+                Verdict::destroys(Destructive::UnfilteredDelete),
+            ),
+            // Every branch counts: which one runs is the server's decision.
+            (
+                "IF 1 = 1 SELECT 1 ELSE DELETE FROM t",
+                Verdict::destroys(Destructive::UnfilteredDelete),
+            ),
+            ("IF 1 = 1 SELECT 1", Verdict::READ),
+            ("EXEC dbo.deactivate_account 1", Verdict::FULL),
+        ];
+        for (sql, verdict) in cases {
+            assert_eq!(classify(Engine::SqlServer, sql), *verdict, "{sql}");
+        }
     }
 
     #[test]

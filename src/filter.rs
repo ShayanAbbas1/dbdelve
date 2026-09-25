@@ -137,7 +137,7 @@ impl Operator {
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || engine != Engine::Sqlite
+        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -419,7 +419,8 @@ pub(crate) fn filter_predicate(
         Operator::Regex => match engine {
             Engine::Postgres => comparison("~"),
             Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
-            Engine::Sqlite => None,
+            // SQL Server has no regex before 2025's `REGEXP_LIKE`.
+            Engine::Sqlite | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
@@ -474,7 +475,19 @@ pub(crate) fn substring(engine: Engine, name: &str, operator: Operator, value: &
         };
         return format!("{negation}{function}({name}, {literal})");
     }
-    let escaped = like_pattern(value);
+    // T-SQL's `LIKE` has no default escape either, but a bracket makes any
+    // character literal, so `[%]` is a percent sign -- and `[` itself has to be
+    // bracketed, since it opens a character class there.
+    let escaped = match engine {
+        Engine::SqlServer => value
+            .chars()
+            .map(|character| match character {
+                '%' | '_' | '[' => format!("[{character}]"),
+                other => other.to_string(),
+            })
+            .collect(),
+        _ => like_pattern(value),
+    };
     let pattern = match operator {
         Operator::StartsWith => format!("{escaped}%"),
         Operator::EndsWith => format!("%{escaped}"),
@@ -900,6 +913,27 @@ mod tests {
             predicate(Engine::Snowflake, Operator::EndsWith, "ok").as_deref(),
             Some(r#"ENDSWITH("state", 'ok')"#)
         );
+    }
+
+    #[test]
+    fn sql_server_brackets_the_wildcards_it_would_otherwise_read() {
+        // T-SQL's `LIKE` has no default escape, and `[` opens a character class
+        // there, so each of the three is bracketed to stand for itself.
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::Contains, "50%_[x]").as_deref(),
+            Some(r#""state" LIKE N'%50[%][_][[]x]%'"#)
+        );
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::StartsWith, r"C:\").as_deref(),
+            Some(r#""state" LIKE N'C:\%'"#)
+        );
+        assert_eq!(
+            predicate(Engine::SqlServer, Operator::NotContains, "ok").as_deref(),
+            Some(r#""state" NOT LIKE N'%ok%'"#)
+        );
+        // No regex before SQL Server 2025, so the dropdown does not offer one.
+        assert!(!Operator::Regex.on(Engine::SqlServer));
+        assert_eq!(predicate(Engine::SqlServer, Operator::Regex, "^a"), None);
     }
 
     #[test]

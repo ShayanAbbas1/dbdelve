@@ -188,13 +188,16 @@ impl Workspace {
         // Checked before anything leaves the machine, and before the tab's
         // staleness is spent: a refused filter leaves the rows on screen and
         // the bars as they stand, so it can be corrected rather than retyped.
-        if !sql::is_generated_select(&sql) {
+        let paged = sql::is_generated_select(&sql)
+            .then(|| sql::paged(engine, &sql))
+            .flatten();
+        let Some(sql) = paged else {
             self.note(
                 "dbdelve will not run a filter it cannot read as one SELECT.".into(),
                 cx,
             );
             return;
-        }
+        };
 
         // The one run that must not blank the grid first: a restored tab's rows
         // are the rows it was showing, and clearing them to fetch the same
