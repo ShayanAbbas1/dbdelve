@@ -345,6 +345,19 @@ impl Workspace {
         let tab_id = tab.id;
         let editor = tab.editor.clone();
         let results = tab.results.clone();
+        let Some(last_query) = tab.last_query.clone() else {
+            return;
+        };
+        // A sort re-runs the statement behind the grid, and one that writes
+        // would write again.
+        if !sql::rerunnable(engine, &last_query) {
+            self.note(
+                "These rows came from a statement that writes, and sorting would run it again."
+                    .into(),
+                cx,
+            );
+            return;
+        }
 
         let Some(expression) =
             sort_expression(engine, results.read(cx).delegate().columns(), column)
@@ -356,7 +369,13 @@ impl Workspace {
             let editor = editor.read(cx);
             (editor.value().to_string(), editor.cursor())
         };
-        let Some(range) = Buffer::for_engine(engine, &text).statement_at(cursor) else {
+        // The grid's own statement, not whatever the cursor is on: that may be
+        // another statement entirely, and one that never ran.
+        let Some(range) = Buffer::for_engine(engine, &text).find(&text, cursor, &last_query) else {
+            self.note(
+                "The statement behind these rows is no longer in the editor.".into(),
+                cx,
+            );
             return;
         };
         let statement = &text[range.clone()];

@@ -88,7 +88,7 @@ impl Workspace {
                         StructureState::Loaded(structure) => structure.columns.as_slice(),
                         _ => &[],
                     };
-                    Some(derived_filter(engine, &filter_bars(filters, cx), columns))
+                    Some(derived_filter(engine, &filter_bars(filters), columns))
                 }
                 ObjectBody::Routine(_) => None,
             }
@@ -100,6 +100,25 @@ impl Workspace {
             move |filter, _, _, offset| changed_filter(filter, offset, &derived),
             cx,
         );
+    }
+
+    /// Enter in one bar: what it holds now becomes what it applies, and the
+    /// filter runs. Only that bar -- text typed into another stays unsent
+    /// until Enter there.
+    pub(crate) fn submit_filter(
+        &mut self,
+        id: u64,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) {
+        let value = input.read(cx).value().to_string();
+        if let Some(row) = self
+            .filter_rows_mut(id)
+            .and_then(|rows| rows.iter_mut().find(|row| &row.value == input))
+        {
+            row.applied = value;
+        }
+        self.apply_filter(id, cx);
     }
 
     /// Add a bar to the active preview, ready to be filled in. Nothing runs
@@ -177,6 +196,9 @@ impl Workspace {
             return;
         };
         filter.raw = true;
+        // What it applied was a value to compare against, quoted; as raw SQL
+        // it would run as written, which nobody has asked for yet.
+        filter.applied.clear();
         let input = filter.value.clone();
         input.update(cx, |input, cx| {
             input.set_placeholder(value_placeholder(true, Operator::default()), window, cx);

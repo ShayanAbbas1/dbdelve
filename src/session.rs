@@ -69,7 +69,7 @@ impl Profile {
         }
     }
 
-    pub(crate) fn stored(&self, cx: &App) -> store::StoredProfile {
+    pub(crate) fn stored(&self) -> store::StoredProfile {
         let engine = self.config.engine();
         // Tabs read back from disk that the catalog has not named yet are still
         // the truth about this profile: writing the live list instead would
@@ -81,7 +81,7 @@ impl Profile {
             .iter()
             .map(|tab| store::StoredObject {
                 active: active == Tab::Object(tab.id),
-                ..tab.stored(engine, cx)
+                ..tab.stored(engine)
             })
             .collect::<Vec<_>>();
         // Both lists, because a restore now opens the relations first and
@@ -819,19 +819,17 @@ impl ObjectTab {
 
     /// The bars this tab's `WHERE` was derived from, the ones that narrow
     /// something only.
-    pub(crate) fn filters(&self, engine: Engine, cx: &App) -> Vec<store::StoredFilter> {
+    pub(crate) fn filters(&self, engine: Engine) -> Vec<store::StoredFilter> {
         match &self.body {
-            ObjectBody::Relation { filters, .. } => {
-                applied_filters(engine, &filter_bars(filters, cx))
-                    .iter()
-                    .map(stored_filter)
-                    .collect()
-            }
+            ObjectBody::Relation { filters, .. } => applied_filters(engine, &filter_bars(filters))
+                .iter()
+                .map(stored_filter)
+                .collect(),
             ObjectBody::Routine(_) => Vec::new(),
         }
     }
 
-    pub(crate) fn stored(&self, engine: Engine, cx: &App) -> store::StoredObject {
+    pub(crate) fn stored(&self, engine: Engine) -> store::StoredObject {
         store::StoredObject {
             schema: self.schema.clone(),
             name: self.name.clone(),
@@ -840,7 +838,7 @@ impl ObjectTab {
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
             filters: Vec::new(),
-            bars: self.filters(engine, cx),
+            bars: self.filters(engine),
             routine: matches!(self.kind, ObjectKind::Routine(_)),
             kind: match self.kind {
                 ObjectKind::Relation(kind) => kind,

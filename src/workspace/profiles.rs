@@ -24,7 +24,7 @@ impl Workspace {
         let profiles = self
             .profiles
             .iter()
-            .map(|profile| profile.stored(cx))
+            .map(|profile| profile.stored())
             .collect::<Vec<_>>();
         let active = self.profile().map(|profile| profile.id.clone());
         let picked = fonts(cx);

@@ -7,7 +7,7 @@
 //! Everything here was a free function or a plain data type at the crate root.
 //! They moved out whole; nothing changed but their visibility.
 
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
 use serde::Deserialize;
 
@@ -231,6 +231,10 @@ pub(crate) struct FilterRow {
     pub(crate) conjunction: Conjunction,
     pub(crate) raw: bool,
     pub(crate) value: Entity<InputState>,
+    /// The value as of this bar's last Enter, which is all that reaches a
+    /// statement or the file. The input's own text can be anything typed
+    /// since, and changing another bar or reopening the tab must not run it.
+    pub(crate) applied: String,
 }
 
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
@@ -242,14 +246,15 @@ pub(crate) fn filter_row(
     cx: &mut Context<Workspace>,
 ) -> FilterRow {
     let placeholder = value_placeholder(bar.raw, bar.operator);
+    let applied = bar.value.clone();
     let input = cx.new(|cx| {
         let mut state = InputState::new(window, cx).placeholder(placeholder);
         state.set_value(bar.value, window, cx);
         state
     });
-    cx.subscribe(&input, move |workspace, _, event: &InputEvent, cx| {
+    cx.subscribe(&input, move |workspace, input, event: &InputEvent, cx| {
         if matches!(event, InputEvent::PressEnter { .. }) {
-            workspace.apply_filter(id, cx);
+            workspace.submit_filter(id, &input, cx);
         }
     })
     .detach();
@@ -259,6 +264,7 @@ pub(crate) fn filter_row(
         conjunction: bar.conjunction,
         raw: bar.raw,
         value: input,
+        applied,
     }
 }
 
@@ -269,8 +275,8 @@ pub(crate) fn value_placeholder(raw: bool, operator: Operator) -> &'static str {
     }
 }
 
-/// Every bar as it stands, unfinished ones included.
-pub(crate) fn filter_bars(filters: &[FilterRow], cx: &App) -> Vec<FilterBar> {
+/// Every bar as last applied, unfinished ones included.
+pub(crate) fn filter_bars(filters: &[FilterRow]) -> Vec<FilterBar> {
     filters
         .iter()
         .map(|row| FilterBar {
@@ -278,7 +284,7 @@ pub(crate) fn filter_bars(filters: &[FilterRow], cx: &App) -> Vec<FilterBar> {
             operator: row.operator,
             conjunction: row.conjunction,
             raw: row.raw,
-            value: row.value.read(cx).value().to_string(),
+            value: row.applied.clone(),
         })
         .collect()
 }
