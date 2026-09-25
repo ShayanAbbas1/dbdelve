@@ -45,11 +45,9 @@ impl Workspace {
                 div()
                     .w(px(layout::DIALOG_WIDTH))
                     .p(px(layout::SPACE_LG))
-                    // A tint, so on the glass theme the card is glass over
-                    // the frost rather than an opaque slab on it.
-                    .bg(t.panel_glass())
+                    .bg(t.panel)
                     .border_1()
-                    .border_color(t.border_strong)
+                    .border_color(t.border)
                     .rounded(px(layout::RADIUS_PANEL))
                     .shadow_lg()
                     .flex()
