@@ -905,6 +905,79 @@ pub struct Field {
     pub value: Option<SharedString>,
 }
 
+enum Step {
+    Rows(isize),
+    Cols(isize),
+}
+
+/// Take an open input's value and hand the keyboard back to the grid. `false`
+/// when the mode refused the write.
+fn commit_from_input(
+    table: &mut TableState<ResultGrid>,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) -> bool {
+    cx.stop_propagation();
+    cx.notify();
+    if !table.delegate_mut().commit_edit(cx) {
+        // A mode refusal has an action attached -- raise the mode -- and the
+        // grid has nowhere to put one. The input stays open behind the prompt,
+        // so answering it and pressing the key again commits what was typed.
+        window.dispatch_action(Box::new(crate::RequestWriteMode), cx);
+        return false;
+    }
+    table.focus_handle(cx).focus(window, cx);
+    true
+}
+
+/// Commit, then carry the edit one cell along, the way a spreadsheet does:
+/// `up`/`down` by row, `tab`/`shift-tab` by column. At an edge there is nowhere
+/// to go, and the key does nothing, the same as `left` at the caret's start.
+///
+/// Stepped from the active cell rather than handed to the table's own
+/// `SelectDown` or `SelectNextColumn`: the grid runs the library in row and
+/// column selection, not its cell mode, so whichever half it last tracked is
+/// stale.
+fn commit_and_step(
+    table: &mut TableState<ResultGrid>,
+    step: Step,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    cx.stop_propagation();
+    let grid = table.delegate();
+    let Some(to) = grid
+        .active()
+        .and_then(|from| step_target(from, &step, grid.rows_count(cx), grid.columns.len()))
+    else {
+        return;
+    };
+    if !commit_from_input(table, window, cx) {
+        return;
+    }
+    // A cell that cannot be edited just takes the ring.
+    table.delegate_mut().begin_edit(to.0, to.1);
+    match step {
+        Step::Rows(_) => table.set_selected_row(to.0, cx),
+        Step::Cols(_) => table.set_selected_col(to.1, cx),
+    }
+}
+
+/// The cell one `step` from `from` in a `rows` by `cols` grid, or `None` at the
+/// edge the step points off.
+fn step_target(
+    (row, col): (usize, usize),
+    step: &Step,
+    rows: usize,
+    cols: usize,
+) -> Option<(usize, usize)> {
+    let to = match *step {
+        Step::Rows(by) => (row.checked_add_signed(by).filter(|&r| r < rows)?, col),
+        Step::Cols(by) => (row, col.checked_add_signed(by).filter(|&c| c < cols)?),
+    };
+    Some(to)
+}
+
 /// A column wide enough for what it holds. One fixed width for every column
 /// wastes the screen on a boolean and hides most of a UUID; a table's own
 /// shape is the only thing that knows how wide its columns want to be.
@@ -1204,16 +1277,7 @@ impl TableDelegate for ResultGrid {
                 // otherwise reaches the workspace and moves focus to the editor.
                 .on_action(cx.listener(
                     move |table, _: &gpui_component::input::Enter, window, cx| {
-                        match table.delegate_mut().commit_edit(cx) {
-                            true => table.focus_handle(cx).focus(window, cx),
-                            // A mode refusal has an action attached -- raise the
-                            // mode -- and the grid has nowhere to put one. The
-                            // input stays open behind the prompt, so answering it
-                            // and pressing `enter` again commits what was typed.
-                            false => window.dispatch_action(Box::new(crate::RequestWriteMode), cx),
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
+                        commit_from_input(table, window, cx);
                     },
                 ))
                 .on_action(cx.listener(
@@ -1222,6 +1286,38 @@ impl TableDelegate for ResultGrid {
                         table.focus_handle(cx).focus(window, cx);
                         cx.stop_propagation();
                         cx.notify();
+                    },
+                ))
+                // The input hands `left` at its start and `right` at its end up
+                // to its ancestors, where the table's own bindings for the same
+                // keys would move the ring off the cell and drop the edit.
+                // Swallowed here, so the caret never leaves the cell by arrow.
+                .on_action(|_: &gpui_component::input::MoveLeft, _, cx| cx.stop_propagation())
+                .on_action(|_: &gpui_component::input::MoveRight, _, cx| cx.stop_propagation())
+                // Captured rather than bubbled: a single-line input swallows
+                // `up` and `down` without doing anything, so they would never
+                // reach a listener below it.
+                .capture_action(cx.listener(
+                    |table, _: &gpui_component::input::MoveUp, window, cx| {
+                        commit_and_step(table, Step::Rows(-1), window, cx)
+                    },
+                ))
+                .capture_action(cx.listener(
+                    |table, _: &gpui_component::input::MoveDown, window, cx| {
+                        commit_and_step(table, Step::Rows(1), window, cx)
+                    },
+                ))
+                // `tab` reaches here the same way (the input is single-line, so
+                // it never indents), and gets the spreadsheet meaning instead of
+                // the table's: keep the value, then move along the row.
+                .on_action(cx.listener(
+                    |table, _: &gpui_component::input::IndentInline, window, cx| {
+                        commit_and_step(table, Step::Cols(1), window, cx)
+                    },
+                ))
+                .on_action(cx.listener(
+                    |table, _: &gpui_component::input::OutdentInline, window, cx| {
+                        commit_and_step(table, Step::Cols(-1), window, cx)
                     },
                 ));
         }
@@ -2253,6 +2349,18 @@ mod tests {
 
         assert_eq!(clicked_first.active(), Some((1, 2)));
         assert_eq!(event_first.active(), Some((1, 2)));
+    }
+
+    #[test]
+    fn a_step_off_the_edge_of_the_grid_goes_nowhere() {
+        // At an edge the key has to do nothing rather than close the edit or
+        // wrap: the input stays open on the cell the user is typing into.
+        assert_eq!(step_target((1, 1), &Step::Rows(1), 3, 3), Some((2, 1)));
+        assert_eq!(step_target((1, 1), &Step::Cols(-1), 3, 3), Some((1, 0)));
+        assert_eq!(step_target((0, 1), &Step::Rows(-1), 3, 3), None);
+        assert_eq!(step_target((2, 1), &Step::Rows(1), 3, 3), None);
+        assert_eq!(step_target((1, 0), &Step::Cols(-1), 3, 3), None);
+        assert_eq!(step_target((1, 2), &Step::Cols(1), 3, 3), None);
     }
 
     #[test]
