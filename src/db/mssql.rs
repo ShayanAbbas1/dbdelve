@@ -88,7 +88,11 @@ ORDER BY s.name, o.name
 /// DATABASE_DEFAULT`: the catalog's collation is the server's, a database's
 /// can differ, and concatenating across the two is an error rather than a
 /// choice.
-const TYPE_SQL: &str = "(TYPE_NAME(p.user_type_id) COLLATE DATABASE_DEFAULT + CASE
+///
+/// `TYPE_NAME(p.user_type_id)` is null for an alias type the login has no
+/// permission on, so it falls back to the base system type: an approximation,
+/// but never the null that used to fail the whole tab.
+const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_type_id)) COLLATE DATABASE_DEFAULT + CASE
     WHEN p.user_type_id <> p.system_type_id THEN N''
     WHEN TYPE_NAME(p.system_type_id) IN ('varchar', 'char', 'varbinary', 'binary')
         THEN N'(' + CASE WHEN p.max_length = -1 THEN N'max'
@@ -119,7 +123,11 @@ SELECT
             CAST(identity_column.seed_value AS nvarchar(40)), N',',
             CAST(identity_column.increment_value AS nvarchar(40)), N')'
         )
-        WHEN p.is_computed = 1 THEN CONCAT(N'AS ', computed.definition COLLATE DATABASE_DEFAULT)
+        -- `computed.definition` is null without `VIEW DEFINITION`, and `CONCAT`
+        -- turns that into a silent `N'AS '`; say the definition is hidden instead.
+        WHEN p.is_computed = 1 THEN CONCAT(
+            N'AS ', COALESCE(computed.definition COLLATE DATABASE_DEFAULT, N'<hidden>')
+        )
         ELSE COALESCE(default_constraint.definition COLLATE DATABASE_DEFAULT, N'')
     END AS column_default
 FROM sys.columns AS p
@@ -133,26 +141,52 @@ WHERE p.object_id = {object}
 ORDER BY p.column_id
 ";
 
+// A columnstore index's columns all carry key_ordinal 0 and is_included_column
+// 1 -- there is no key -- so the key and include lists below are read through
+// `OUTER APPLY` rather than one inner join, or a columnstore index would join
+// to nothing and vanish, and a `GROUP BY` over both lists at once would cross
+// every key column with every included one.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT
     i.name AS object_name,
-    CONCAT(
-        CASE WHEN i.is_unique = 1 THEN N'UNIQUE ' ELSE N'' END,
-        i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (',
-        STRING_AGG(
-            CAST(c.name COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
-                AS nvarchar(max)),
-            N', '
-        ) WITHIN GROUP (ORDER BY ic.key_ordinal),
-        N')'
-    ) AS definition
+    CASE i.type
+        -- A clustered columnstore index has no key: every column is stored,
+        -- and none is worth naming.
+        WHEN 5 THEN CONCAT(i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX')
+        -- A nonclustered columnstore index has no key either; what it has is
+        -- the columns it stores, read the same way an INCLUDE list is.
+        WHEN 6 THEN CONCAT(
+            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (', included.list, N')'
+        )
+        ELSE CONCAT(
+            CASE WHEN i.is_unique = 1 THEN N'UNIQUE ' ELSE N'' END,
+            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (', keyed.list, N')',
+            CASE WHEN included.list IS NULL THEN N''
+                ELSE CONCAT(N' INCLUDE (', included.list, N')') END,
+            CASE WHEN i.has_filter = 1
+                THEN CONCAT(N' WHERE ', i.filter_definition COLLATE DATABASE_DEFAULT)
+                ELSE N'' END
+        )
+    END AS definition
 FROM sys.indexes AS i
-JOIN sys.index_columns AS ic
-    ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
-JOIN sys.columns AS c
-    ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-WHERE i.object_id = {object}
-GROUP BY i.name, i.is_unique, i.type_desc
+OUTER APPLY (
+    SELECT STRING_AGG(
+        CAST(c.name COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+            AS nvarchar(max)),
+        N', '
+    ) WITHIN GROUP (ORDER BY ic.key_ordinal) AS list
+    FROM sys.index_columns AS ic
+    JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+) AS keyed
+OUTER APPLY (
+    SELECT STRING_AGG(CAST(c.name COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
+        WITHIN GROUP (ORDER BY ic.index_column_id) AS list
+    FROM sys.index_columns AS ic
+    JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+    WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
+) AS included
+WHERE i.object_id = {object} AND i.name IS NOT NULL
 ORDER BY i.name
 ";
 
@@ -188,17 +222,28 @@ SELECT
                 ON c.object_id = fc.parent_object_id AND c.column_id = fc.parent_column_id
             WHERE fc.constraint_object_id = f.object_id
         ),
-        N') REFERENCES ', OBJECT_SCHEMA_NAME(f.referenced_object_id) COLLATE DATABASE_DEFAULT, N'.',
-        OBJECT_NAME(f.referenced_object_id) COLLATE DATABASE_DEFAULT, N' (',
+        -- Referenced identifiers are quoted: unlike the source column list
+        -- above, they cross a schema boundary the reader has no other way to
+        -- see the bounds of.
+        N') REFERENCES ', QUOTENAME(OBJECT_SCHEMA_NAME(f.referenced_object_id), '\"') COLLATE DATABASE_DEFAULT,
+        N'.', QUOTENAME(OBJECT_NAME(f.referenced_object_id), '\"') COLLATE DATABASE_DEFAULT, N' (',
         (
-            SELECT STRING_AGG(CAST(c.name COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
+            SELECT STRING_AGG(CAST(QUOTENAME(c.name, '\"') COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
                 WITHIN GROUP (ORDER BY fc.constraint_column_id)
             FROM sys.foreign_key_columns AS fc
             JOIN sys.columns AS c
                 ON c.object_id = fc.referenced_object_id AND c.column_id = fc.referenced_column_id
             WHERE fc.constraint_object_id = f.object_id
         ),
-        N')'
+        N')',
+        CASE WHEN f.delete_referential_action_desc <> 'NO_ACTION'
+            THEN CONCAT(N' ON DELETE ', REPLACE(f.delete_referential_action_desc, '_', ' ') COLLATE DATABASE_DEFAULT)
+            ELSE N'' END,
+        CASE WHEN f.update_referential_action_desc <> 'NO_ACTION'
+            THEN CONCAT(N' ON UPDATE ', REPLACE(f.update_referential_action_desc, '_', ' ') COLLATE DATABASE_DEFAULT)
+            ELSE N'' END,
+        CASE WHEN f.is_disabled = 1 THEN N' DISABLED' ELSE N'' END,
+        CASE WHEN f.is_not_trusted = 1 THEN N' NOT TRUSTED' ELSE N'' END
     )
 FROM sys.foreign_keys AS f
 WHERE f.parent_object_id = {object}
@@ -252,6 +297,9 @@ SELECT
     source_schema,
     source_table,
     source_column,
+    -- False for a computed, identity or rowversion column, which a positioned
+    -- `UPDATE` refuses; the column still names its row's key when it is one.
+    is_updateable,
     DB_NAME() AS current_database
 FROM sys.dm_exec_describe_first_result_set({statement}, NULL, 2)
 WHERE is_hidden = 0 AND error_number IS NULL
@@ -911,6 +959,10 @@ struct ProbedColumn {
     /// Whether the table is in the database this connection is using. An
     /// edit target names a schema and a table and nothing above them.
     local: bool,
+    /// Whether the server would accept a positioned `UPDATE` of this column:
+    /// false for a computed, identity or rowversion column. It still names its
+    /// row's key when it is one -- see [`resolve_edit_target`].
+    writable: bool,
 }
 
 /// What each column the statement returned was read from, in order.
@@ -954,6 +1006,7 @@ fn describe_columns(session: &mut Session, sql: &str, columns: &[Column]) -> Vec
                         == cell(row, "current_database").as_ref(),
                 column: table.as_ref().and(cell(row, "source_column")),
                 table,
+                writable: cell(row, "is_updateable").as_deref() == Some("1"),
             }
         })
         .collect();
@@ -1015,7 +1068,16 @@ fn resolve_edit_target(
     Some(EditTarget {
         schema: schema.to_string(),
         table: table.to_string(),
-        columns: probed.iter().map(column_of).collect(),
+        // A computed, identity or rowversion column is never a `SET` target --
+        // the server refuses the `UPDATE` -- but one still names its row's key
+        // above, so it is only cleared here, once `keys` no longer needs it.
+        columns: probed
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                column_of(column).filter(|_| column.writable || keys.contains(&index))
+            })
+            .collect(),
         keys,
     })
 }
@@ -1211,6 +1273,7 @@ mod tests {
                 table: table.map(|table| ("dbdelve_dev".into(), "dbo".into(), table.into())),
                 column: column.map(str::to_string),
                 local: true,
+                writable: true,
             })
             .collect()
     }
@@ -1460,6 +1523,33 @@ mod tests {
                 &["id".to_string()],
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_computed_or_identity_column_is_not_a_set_target_but_still_locates_its_row() {
+        // `id` is the key and not writable (an identity column); `total` is an
+        // ordinary column; `label` is a computed column, never part of the key.
+        let mut columns = probed(&[
+            (Some("orders"), Some("id")),
+            (Some("orders"), Some("total")),
+            (Some("orders"), Some("label")),
+        ]);
+        columns[0].writable = false;
+        columns[2].writable = false;
+
+        let target = resolve_edit_target(&columns, "dbo", "orders", &["id".to_string()])
+            .expect("the key is present");
+        assert_eq!(target.keys, vec![0]);
+        assert_eq!(
+            target.columns[0],
+            Some("id".to_string()),
+            "a key still names its row"
+        );
+        assert_eq!(target.columns[1], Some("total".to_string()));
+        assert_eq!(
+            target.columns[2], None,
+            "a computed column is never a SET target"
         );
     }
 
@@ -1724,7 +1814,7 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition
                     == "FOREIGN KEY (order_account_id, order_number) \
-                    REFERENCES dbo.orders (account_id, number)"),
+                    REFERENCES \"dbo\".\"orders\" (\"account_id\", \"number\")"),
             "{:?}",
             items.constraints
         );
@@ -1741,6 +1831,224 @@ mod tests {
                 referenced_column: "id".into(),
             }]
         );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_low_privilege_login_reads_structure_without_a_null_type_or_definition() {
+        let connection = live();
+        // `EXECUTE AS USER` impersonates a user with none of the permissions a
+        // real low-privilege login would lack, on the one connection already in
+        // hand -- no server-level login to create and drop.
+        connection
+            .query(
+                "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'fix_cat_lowpriv')
+                     DROP USER fix_cat_lowpriv;
+                 IF OBJECT_ID('dbo.fix_cat_people') IS NOT NULL DROP TABLE dbo.fix_cat_people;",
+            )
+            .expect("stale scratch objects should drop");
+        connection
+            .query("IF TYPE_ID('dbo.fix_cat_email') IS NOT NULL DROP TYPE dbo.fix_cat_email")
+            .expect("a stale scratch type should drop");
+        connection
+            .query("CREATE TYPE dbo.fix_cat_email FROM NVARCHAR(50) NOT NULL")
+            .expect("the scratch type should be created");
+        connection
+            .query(
+                "CREATE TABLE dbo.fix_cat_people (
+                     id INT IDENTITY(1,1) PRIMARY KEY,
+                     email dbo.fix_cat_email,
+                     tag AS ('t' + CAST(id AS VARCHAR(10))) PERSISTED
+                 );
+                 CREATE USER fix_cat_lowpriv WITHOUT LOGIN;
+                 GRANT SELECT ON dbo.fix_cat_people TO fix_cat_lowpriv;",
+            )
+            .expect("the scratch table and user should be created");
+
+        connection
+            .query("EXECUTE AS USER = 'fix_cat_lowpriv'")
+            .expect("impersonation should start");
+        let structure = connection.structure("dbo", "fix_cat_people");
+        connection
+            .query("REVERT")
+            .expect("impersonation should end");
+        let structure = structure.expect("structure should load despite the withheld permissions");
+
+        let email = structure
+            .columns
+            .iter()
+            .find(|column| column.name == "email")
+            .expect("the email column should be reported");
+        assert_eq!(
+            email.data_type, "nvarchar",
+            "an alias type the login cannot see falls back to its base type"
+        );
+        let tag = structure
+            .columns
+            .iter()
+            .find(|column| column.name == "tag")
+            .expect("the tag column should be reported");
+        assert_eq!(tag.default.as_deref(), Some("AS <hidden>"));
+
+        connection
+            .query(
+                "DROP USER fix_cat_lowpriv;
+                 DROP TABLE dbo.fix_cat_people;",
+            )
+            .expect("cleanup should succeed");
+        connection
+            .query("DROP TYPE dbo.fix_cat_email")
+            .expect("cleanup should succeed");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_indexes_show_included_columns_a_filter_and_columnstore_indexes() {
+        let connection = live();
+        connection
+            .query(
+                "IF OBJECT_ID('dbo.fix_cat_indexed') IS NOT NULL DROP TABLE dbo.fix_cat_indexed;
+                 IF OBJECT_ID('dbo.fix_cat_columnstore') IS NOT NULL
+                     DROP TABLE dbo.fix_cat_columnstore;",
+            )
+            .expect("stale scratch tables should drop");
+        connection
+            .query(
+                "CREATE TABLE dbo.fix_cat_indexed (id INT PRIMARY KEY, a INT, b INT, c INT);
+                 CREATE UNIQUE NONCLUSTERED INDEX fix_cat_ix_filtered
+                     ON dbo.fix_cat_indexed (a) INCLUDE (b, c) WHERE a IS NOT NULL;
+                 CREATE NONCLUSTERED COLUMNSTORE INDEX fix_cat_ix_ncc
+                     ON dbo.fix_cat_indexed (a, b, c);
+                 CREATE TABLE dbo.fix_cat_columnstore (x INT NOT NULL, y INT NOT NULL);
+                 CREATE CLUSTERED COLUMNSTORE INDEX fix_cat_ix_ccs ON dbo.fix_cat_columnstore;",
+            )
+            .expect("the scratch indexes should be created");
+
+        let indexed = connection
+            .structure("dbo", "fix_cat_indexed")
+            .expect("structure should load");
+        assert!(
+            indexed
+                .indexes
+                .iter()
+                .any(|index| index.name == "fix_cat_ix_filtered"
+                    && index.definition
+                        == "UNIQUE NONCLUSTERED INDEX (a) INCLUDE (b, c) WHERE ([a] IS NOT NULL)"),
+            "{:?}",
+            indexed.indexes
+        );
+        assert!(
+            indexed
+                .indexes
+                .iter()
+                .any(|index| index.name == "fix_cat_ix_ncc"
+                    && index.definition == "NONCLUSTERED COLUMNSTORE INDEX (a, b, c)"),
+            "{:?}",
+            indexed.indexes
+        );
+
+        let columnstore = connection
+            .structure("dbo", "fix_cat_columnstore")
+            .expect("structure should load");
+        assert!(
+            columnstore
+                .indexes
+                .iter()
+                .any(|index| index.name == "fix_cat_ix_ccs"
+                    && index.definition == "CLUSTERED COLUMNSTORE INDEX"),
+            "{:?}",
+            columnstore.indexes
+        );
+
+        connection
+            .query(
+                "DROP TABLE dbo.fix_cat_indexed;
+                 DROP TABLE dbo.fix_cat_columnstore;",
+            )
+            .expect("cleanup should succeed");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_foreign_keys_show_actions_and_disabled_state() {
+        let connection = live();
+        connection
+            .query(
+                "IF OBJECT_ID('dbo.fix_cat_child') IS NOT NULL DROP TABLE dbo.fix_cat_child;
+                 IF OBJECT_ID('dbo.fix_cat_parent') IS NOT NULL DROP TABLE dbo.fix_cat_parent;",
+            )
+            .expect("stale scratch tables should drop");
+        connection
+            .query(
+                "CREATE TABLE dbo.fix_cat_parent (id INT PRIMARY KEY);
+                 CREATE TABLE dbo.fix_cat_child (
+                     id INT PRIMARY KEY,
+                     parent_id INT,
+                     CONSTRAINT fix_cat_fk_child_parent FOREIGN KEY (parent_id)
+                         REFERENCES dbo.fix_cat_parent(id)
+                         ON DELETE CASCADE ON UPDATE SET NULL
+                 );
+                 ALTER TABLE dbo.fix_cat_child NOCHECK CONSTRAINT fix_cat_fk_child_parent;",
+            )
+            .expect("the scratch foreign key should be created");
+
+        let child = connection
+            .structure("dbo", "fix_cat_child")
+            .expect("structure should load");
+        assert!(
+            child
+                .constraints
+                .iter()
+                .any(|constraint| constraint.name == "fix_cat_fk_child_parent"
+                    && constraint.definition
+                        == "FOREIGN KEY (parent_id) REFERENCES \"dbo\".\"fix_cat_parent\" (\"id\") \
+                        ON DELETE CASCADE ON UPDATE SET NULL DISABLED NOT TRUSTED"),
+            "{:?}",
+            child.constraints
+        );
+
+        connection
+            .query(
+                "DROP TABLE dbo.fix_cat_child;
+                 DROP TABLE dbo.fix_cat_parent;",
+            )
+            .expect("cleanup should succeed");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_computed_or_identity_column_is_not_editable_but_still_keys_the_row() {
+        let connection = live();
+        connection
+            .query("IF OBJECT_ID('dbo.fix_cat_widgets') IS NOT NULL DROP TABLE dbo.fix_cat_widgets")
+            .expect("a stale scratch table should drop");
+        connection
+            .query(
+                "CREATE TABLE dbo.fix_cat_widgets (
+                     id INT IDENTITY(1,1) PRIMARY KEY,
+                     name NVARCHAR(50) NOT NULL,
+                     double_id AS (id * 2) PERSISTED
+                 );
+                 INSERT INTO dbo.fix_cat_widgets (name) VALUES ('a');",
+            )
+            .expect("the scratch table should be created and seeded");
+
+        let edit = connection
+            .query("SELECT id, name, double_id FROM dbo.fix_cat_widgets")
+            .expect("query should succeed")
+            .edit
+            .expect("fix_cat_widgets has a primary key");
+        assert_eq!(edit.keys, vec![0], "the identity column is the key");
+        assert_eq!(
+            edit.columns,
+            vec![Some("id".into()), Some("name".into()), None],
+            "the identity column still keys the row, but neither it nor the \
+             computed column is a SET target"
+        );
+
+        connection
+            .query("DROP TABLE dbo.fix_cat_widgets")
+            .expect("cleanup should succeed");
     }
 
     #[test]
