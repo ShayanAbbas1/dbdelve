@@ -6,6 +6,7 @@
 use gpui_component::checkbox::Checkbox;
 
 use super::*;
+use crate::connection_form::ConnectionTest;
 use crate::sql::{Destructive, Stop};
 
 impl Workspace {
@@ -18,6 +19,22 @@ impl Workspace {
         let message = form.error.clone();
         let editing = form.editing.is_some();
         let hairline = || div().h(px(1.)).flex_1().bg(t.border);
+        let labelled = |label: &'static str, control: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .child(
+                    div()
+                        .text_size(px(layout::TEXT_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.text_muted)
+                        .child(label),
+                )
+                .child(control)
+        };
 
         div()
             .size_full()
@@ -28,9 +45,11 @@ impl Workspace {
                 div()
                     .w(px(layout::DIALOG_WIDTH))
                     .p(px(layout::SPACE_LG))
-                    .bg(t.panel)
+                    // A tint, so on the glass theme the card is glass over
+                    // the frost rather than an opaque slab on it.
+                    .bg(t.panel_glass())
                     .border_1()
-                    .border_color(t.border)
+                    .border_color(t.border_strong)
                     .rounded(px(layout::RADIUS_PANEL))
                     .shadow_lg()
                     .flex()
@@ -93,46 +112,18 @@ impl Workspace {
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_XS))
-                            .child(
-                                div()
-                                    .text_size(px(layout::TEXT_SM))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(t.text_muted)
-                                    .child("Engine"),
-                            )
-                            .child(
-                                div().flex().gap(px(layout::SPACE_XS)).children(
-                                    Engine::ALL.map(|engine| self.engine_chip(engine, cx)),
-                                ),
-                            ),
+                            .gap(px(layout::SPACE_SM))
+                            .child(labelled("Engine", self.engine_dropdown(cx)))
+                            // Only while creating: past that,
+                            // `Workspace::set_mode` is the one door a mode
+                            // changes through, from the titlebar, and it pushes
+                            // the change into live grids this form has no
+                            // route to.
+                            .when(!editing, |row| {
+                                row.child(labelled("Mode", self.mode_dropdown(cx)))
+                            })
+                            .child(labelled("Color", self.color_dropdown(cx))),
                     )
-                    // Only while creating: past that, `Workspace::set_mode` is
-                    // the one door a mode changes through, from the titlebar,
-                    // and it pushes the change into live grids this form has
-                    // no route to.
-                    .when(!editing, |form| {
-                        form.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(layout::SPACE_XS))
-                                .child(
-                                    div()
-                                        .text_size(px(layout::TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(t.text_muted)
-                                        .child("Mode"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(layout::SPACE_XS))
-                                        .children(Mode::ALL.map(|mode| self.mode_chip(mode, cx))),
-                                ),
-                        )
-                    })
                     // Snowflake has no connection URL: `Engine::fields()` is
                     // where that is decided, not a match on the engine here.
                     .when(form.engine.fields() != Fields::Account, |form_div| {
@@ -188,30 +179,6 @@ impl Workspace {
                             )
                     })
                     .child(self.form_field("Display name", &form.name, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_XS))
-                            .child(
-                                div()
-                                    .text_size(px(layout::TEXT_SM))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(t.text_muted)
-                                    .child("Color"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(layout::SPACE_XS))
-                                    .child(self.color_chip(None, cx))
-                                    .children(
-                                        ConnectionColor::ALL
-                                            .map(|color| self.color_chip(Some(color), cx)),
-                                    ),
-                            ),
-                    )
                     // An engine that is a file has no host, no credentials and
                     // no transport, so those fields are absent rather than
                     // present and inert. A disabled field still reads as
@@ -304,6 +271,21 @@ impl Workspace {
                             .text_color(t.danger)
                             .child(message)
                     }))
+                    .children(form.test.as_ref().map(|test| {
+                        let (color, text) = match test {
+                            ConnectionTest::Running(_) => {
+                                (t.text_muted, "Testing connection…".to_string())
+                            }
+                            ConnectionTest::Passed => {
+                                (t.success, "Connection succeeded.".to_string())
+                            }
+                            ConnectionTest::Failed(message) => (t.danger, message.clone()),
+                        };
+                        div()
+                            .text_size(px(layout::TEXT_SM))
+                            .text_color(color)
+                            .child(text)
+                    }))
                     .child(
                         div()
                             .flex()
@@ -318,6 +300,17 @@ impl Workspace {
                                         workspace.show_editor(&ShowEditor, window, cx);
                                     }))
                             }))
+                            .child(
+                                button(
+                                    "test-connection",
+                                    "Test",
+                                    Tone::Quiet,
+                                    Control::Standard,
+                                    t,
+                                )
+                                .flex_1()
+                                .on_click(cx.listener(Self::test_connection)),
+                            )
                             .child(
                                 button(
                                     "connect",

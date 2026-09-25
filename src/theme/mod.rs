@@ -592,6 +592,13 @@ impl Theme {
         component.colors.primary_foreground = self.text.into();
         component.colors.primary_hover = control_hover.into();
         component.colors.primary_active = control_active.into();
+        // What a `Button::primary()` actually paints from in 0.6.4. Left unset
+        // it stays on the library's own near-black, which is a black slab in
+        // the light theme.
+        component.colors.button_primary = self.control.into();
+        component.colors.button_primary_foreground = self.text.into();
+        component.colors.button_primary_hover = control_hover.into();
+        component.colors.button_primary_active = control_active.into();
         component.colors.secondary = self.control.into();
         component.colors.secondary_foreground = self.text.into();
         component.colors.secondary_hover = control_hover.into();

@@ -7,7 +7,7 @@ engines.
 
 ## Connecting
 
-Pick **SQL Server** on the form's chip row. The fields are the same as
+Pick **SQL Server** in the form's Engine dropdown. The fields are the same as
 Postgres's and MySQL's: host, port (blank is 1433), database, username,
 password and TLS. A URL works too:
 

@@ -4,8 +4,12 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use gpui_component::menu::PopupMenuItem;
+
+use crate::connection_form::ConnectionTest;
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
+use crate::theme::color::Srgb;
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
@@ -291,90 +295,134 @@ impl Workspace {
         cx.notify();
     }
 
-    /// One chip per engine, in the same shape as the `sslmode` row below it.
-    /// The engine decides which fields the form even has, so it is the first
-    /// thing on it and not a dropdown two clicks away.
-    pub(crate) fn engine_chip(&self, engine: Engine, cx: &mut Context<Self>) -> AnyElement {
+    /// A field-shaped button that opens a menu of `options`: the engine, mode
+    /// and colour pickers on the connection form. `pick` writes the choice
+    /// into the form; `swatch` is the colour dot drawn before a label, if any.
+    pub(crate) fn form_dropdown<T: Copy + PartialEq + 'static>(
+        id: &'static str,
+        selected: T,
+        options: Vec<T>,
+        label: fn(T) -> &'static str,
+        swatch: fn(T) -> Option<Srgb>,
+        pick: fn(&mut ConnectionForm, T),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = *theme(cx);
-        let selected = self.form.as_ref().is_some_and(|form| form.engine == engine);
-        div()
-            .id(engine.as_str())
-            .flex()
-            .items_center()
-            .h(px(24.))
+        let workspace = cx.entity().downgrade();
+        let dot = |color: Srgb| div().size(px(layout::SPACE_SM)).rounded_full().bg(color);
+        ui::control(id, Tone::Quiet, Control::Standard)
+            .w_full()
             .px(px(layout::SPACE_SM))
-            .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::TEXT_SM))
-            .whitespace_nowrap()
-            .map(|chip| {
-                if selected {
-                    chip.bg(t.element_active).text_color(t.text)
-                } else {
-                    chip.text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover))
-                }
+            .border_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .text_size(px(layout::TEXT_MD))
+                    .text_color(t.text)
+                    .children(swatch(selected).map(dot))
+                    .child(div().flex_1().whitespace_nowrap().child(label(selected)))
+                    .child(row_icon(t, icon::CHEVRON_DOWN)),
+            )
+            .dropdown_menu(move |menu, _, _| {
+                options.iter().copied().fold(menu, |menu, option| {
+                    let workspace = workspace.clone();
+                    menu.item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_XS))
+                                .children(swatch(option).map(dot))
+                                .child(label(option))
+                        })
+                        .checked(option == selected)
+                        .on_click(move |_, _, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                if let Some(form) = &mut workspace.form {
+                                    pick(form, option);
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                    )
+                })
             })
-            .child(engine.label())
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-                if let Some(form) = &mut workspace.form {
-                    // Only when the field set actually changes: Postgres and
-                    // MySQL show the same fields, so switching between them
-                    // takes nothing away and must not take focus either.
-                    if form.engine.fields() != engine.fields() {
-                        form.needs_focus = Some(match engine.fields() {
-                            Fields::Server => form.host.clone(),
-                            Fields::File => form.path.clone(),
-                            Fields::Account => form.account.clone(),
-                        });
-                    }
-                    form.engine = engine;
-                    // The error belonged to the fields that just left the
-                    // screen, so it would be reporting something invisible.
-                    form.error = None;
-                    cx.notify();
-                }
-            }))
             .into_any_element()
     }
 
-    /// One chip per mode, weakest first. A row of three words rather than a
-    /// dropdown: the choice is the security of the connection, and it should
-    /// be legible without opening anything.
+    /// The engine decides which fields the form even has, so it is the first
+    /// thing on it.
+    pub(crate) fn engine_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        Self::form_dropdown(
+            "engine",
+            form.engine,
+            Engine::ALL.to_vec(),
+            Engine::label,
+            |_| None,
+            |form, engine| {
+                // Only when the field set actually changes: Postgres and
+                // MySQL show the same fields, so switching between them
+                // takes nothing away and must not take focus either.
+                if form.engine.fields() != engine.fields() {
+                    form.needs_focus = Some(match engine.fields() {
+                        Fields::Server => form.host.clone(),
+                        Fields::File => form.path.clone(),
+                        Fields::Account => form.account.clone(),
+                    });
+                }
+                form.engine = engine;
+                // Both belonged to the fields that just left the screen.
+                form.error = None;
+                form.test = None;
+            },
+            cx,
+        )
+    }
+
+    /// Weakest first.
     ///
     /// Read only while a connection already exists: past creation,
     /// `Workspace::set_mode` is the one door a mode changes through, and it
     /// pushes the change into that connection's live grids -- something a
     /// profile still being typed into has none of yet. `render_connection_form`
-    /// draws this row only when there is no `editing` id, for exactly that
-    /// reason.
-    pub(crate) fn mode_chip(&self, mode: Mode, cx: &mut Context<Self>) -> AnyElement {
-        let t = *theme(cx);
-        let selected = self.form.as_ref().is_some_and(|form| form.mode == mode);
-        div()
-            .id(mode.label())
-            .flex()
-            .items_center()
-            .h(px(24.))
-            .px(px(layout::SPACE_SM))
-            .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::TEXT_SM))
-            .whitespace_nowrap()
-            .map(|chip| {
-                if selected {
-                    chip.bg(t.element_active).text_color(t.text)
-                } else {
-                    chip.text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover))
-                }
-            })
-            .child(mode.label())
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-                if let Some(form) = &mut workspace.form {
-                    form.mode = mode;
-                    cx.notify();
-                }
-            }))
-            .into_any_element()
+    /// draws this only when there is no `editing` id, for exactly that reason.
+    pub(crate) fn mode_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        Self::form_dropdown(
+            "mode",
+            form.mode,
+            Mode::ALL.to_vec(),
+            Mode::label,
+            |_| None,
+            |form, mode| {
+                form.mode = mode;
+                // A pass without the Read-only hold did not test it.
+                form.test = None;
+            },
+            cx,
+        )
+    }
+
+    /// The colour only ever labels a connection, so nothing here can make the
+    /// form invalid and nothing has to move focus.
+    pub(crate) fn color_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        Self::form_dropdown(
+            "color",
+            form.color,
+            std::iter::once(None)
+                .chain(ConnectionColor::ALL.map(Some))
+                .collect(),
+            |color| color.map_or("None", ConnectionColor::label),
+            |color| color.map(ConnectionColor::swatch),
+            |form, color| form.color = color,
+            cx,
+        )
     }
 
     pub(crate) fn sslmode_chip(&self, mode: SslMode, cx: &mut Context<Self>) -> AnyElement {
@@ -412,50 +460,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// One chip per swatch, plus the no-colour option the row opens on. The
-    /// colour only ever labels a connection, so nothing here can make the form
-    /// invalid and nothing has to move focus.
-    pub(crate) fn color_chip(
-        &self,
-        color: Option<ConnectionColor>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = *theme(cx);
-        let selected = self.form.as_ref().is_some_and(|form| form.color == color);
-        div()
-            .id(color.map_or("none", ConnectionColor::slug))
-            .flex()
-            .items_center()
-            .gap(px(layout::SPACE_XS))
-            .h(px(24.))
-            .px(px(layout::SPACE_SM))
-            .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::TEXT_SM))
-            .whitespace_nowrap()
-            .map(|chip| {
-                if selected {
-                    chip.bg(t.element_active).text_color(t.text)
-                } else {
-                    chip.text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover))
-                }
-            })
-            .children(color.map(|color| {
-                div()
-                    .size(px(layout::SPACE_SM))
-                    .rounded_full()
-                    .bg(color.swatch())
-            }))
-            .child(color.map_or("None", ConnectionColor::label))
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-                if let Some(form) = &mut workspace.form {
-                    form.color = color;
-                    cx.notify();
-                }
-            }))
-            .into_any_element()
-    }
-
     pub(crate) fn connect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &self.form else {
             return;
@@ -483,6 +487,74 @@ impl Workspace {
                 self.activate(index, cx);
             }
         }
+    }
+
+    /// Opens the form's connection and throws it away, so a profile can be
+    /// checked before it is saved. The same open, keychain lookup and
+    /// Read-only hold `begin_connect` does, or a pass here would not mean the
+    /// connect will.
+    pub(crate) fn test_connection(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let mut config = match form.config(cx) {
+            Ok((_, config)) => config,
+            Err(error) => {
+                form.error = Some(error);
+                form.test = None;
+                cx.notify();
+                return;
+            }
+        };
+        let editing = form.editing.clone();
+        let mode = editing
+            .as_ref()
+            .and_then(|id| self.profiles.iter().find(|profile| &profile.id == id))
+            .map_or(form.mode, |profile| profile.mode);
+        form.error = None;
+
+        let probe = cx.background_executor().spawn(async move {
+            // A blank password on an existing profile means "keep the saved
+            // one", which is what the connect would use.
+            if let Some(id) = editing
+                && let Some(server) = config.server_mut()
+                && server.password.is_empty()
+                && let Some(password) = store::password(&id)?
+            {
+                server.password = password;
+            }
+            let connection = Connection::open(config).map_err(|error| error.message)?;
+            if mode == Mode::ReadOnly {
+                connection
+                    .set_read_only(true)
+                    .map_err(|error| error.message)?;
+            }
+            Ok::<_, String>(())
+        });
+        let task = cx.spawn(async move |workspace, cx| {
+            let result = probe.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(form) = &mut workspace.form else {
+                    return;
+                };
+                let finished = match result {
+                    Ok(()) => ConnectionTest::Passed,
+                    Err(message) => ConnectionTest::Failed(message),
+                };
+                if let Some(ConnectionTest::Running(task)) = form.test.replace(finished) {
+                    // This task: dropping it here would cancel it mid-run.
+                    task.detach();
+                }
+                cx.notify();
+            });
+        });
+        form.test = Some(ConnectionTest::Running(task));
+        cx.notify();
     }
 
     pub(crate) fn save_profile(
