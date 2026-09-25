@@ -128,17 +128,23 @@ impl Workspace {
             return;
         };
 
-        let Some(sql) = self.sql_to_run(&editor, window, cx) else {
-            if let Some(profile) = self.profile_mut()
-                && let Some((state, _)) = profile.session.slot(tab)
-            {
-                *state = QueryState::Failed(DbError {
-                    message: "There is no statement to run.".into(),
-                    position: None,
-                });
+        let sql = match self.sql_to_run(&editor, window, cx) {
+            Some(Ok(sql)) => sql,
+            refused => {
+                let message = refused
+                    .and_then(Result::err)
+                    .unwrap_or_else(|| "There is no statement to run.".into());
+                if let Some(profile) = self.profile_mut()
+                    && let Some((state, _)) = profile.session.slot(tab)
+                {
+                    *state = QueryState::Failed(DbError {
+                        message,
+                        position: None,
+                    });
+                }
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         };
 
         self.execute_sql(sql, tab, cx);
@@ -198,9 +204,10 @@ impl Workspace {
             );
             return;
         };
-        let Some(sql) = self.sql_to_run(&editor, window, cx) else {
-            failure(self, "There is no statement to explain.", cx);
-            return;
+        let sql = match self.sql_to_run(&editor, window, cx) {
+            Some(Ok(sql)) => sql,
+            Some(Err(message)) => return failure(self, &message, cx),
+            None => return failure(self, "There is no statement to explain.", cx),
         };
 
         self.execute_and_then(
@@ -1024,7 +1031,8 @@ impl Workspace {
         editor: &Entity<EditorState>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<String> {
+    ) -> Option<Result<String, String>> {
+        let engine = self.engine();
         let selection = editor.update(cx, |editor, cx| {
             let selection = editor.selected_text_range(false, window, cx)?;
             if selection.range.is_empty() {
@@ -1035,14 +1043,17 @@ impl Workspace {
             editor.text_for_range(selection.range, &mut adjusted_range, window, cx)
         });
 
-        if selection.is_some() {
-            return selection;
+        if let Some(selection) = selection {
+            return match sql::one_batch(engine, &selection) {
+                Ok(batch) if batch.trim().is_empty() => None,
+                batch => Some(batch.map(str::to_string)),
+            };
         }
 
         let editor = editor.read(cx);
         let sql = editor.value();
-        let range = Buffer::parse(&sql).statement_at(editor.cursor())?;
-        Some(sql[range].to_string())
+        let range = Buffer::for_engine(engine, &sql).statement_at(editor.cursor())?;
+        Some(sql::batch_repeats(engine, &sql, range.end).map(|()| sql[range].to_string()))
     }
 }
 

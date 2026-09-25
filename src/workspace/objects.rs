@@ -175,6 +175,7 @@ impl Workspace {
             limit,
             offset,
             stale,
+            structure,
             ..
         } = &mut tab.body
         else {
@@ -183,13 +184,21 @@ impl Workspace {
         if !change(filter, sort, limit, offset) {
             return;
         }
+        let key = match structure {
+            StructureState::Loaded(structure) => structure.row_key(),
+            // A first page in one order and a second in another is how rows
+            // repeat and go missing, so the page waits for the key. The
+            // structure's arrival runs it.
+            StructureState::Loading if engine.pages_by_key() => return,
+            _ => Vec::new(),
+        };
 
         let sql = relation_sql(engine, &schema, &relation, filter, sort, *limit, *offset);
         // Checked before anything leaves the machine, and before the tab's
         // staleness is spent: a refused filter leaves the rows on screen and
         // the bars as they stand, so it can be corrected rather than retyped.
         let paged = sql::is_generated_select(&sql)
-            .then(|| sql::paged(engine, &sql))
+            .then(|| sql::paged(engine, &sql, &key))
             .flatten();
         let Some(sql) = paged else {
             self.note(
@@ -295,7 +304,9 @@ impl Workspace {
                     else {
                         return;
                     };
+                    let mut waited = false;
                     if let ObjectBody::Relation { structure, .. } = &mut tab.body {
+                        waited = matches!(structure, StructureState::Loading);
                         *structure = match result {
                             Ok(loaded) => StructureState::Loaded(loaded),
                             Err(error) => StructureState::Failed(error.message),
@@ -305,6 +316,10 @@ impl Workspace {
                     // The rows and the structure are two requests and either can
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
+                    // The page `requery_relation` held back for this key.
+                    if waited && workspace.engine().pages_by_key() {
+                        workspace.requery_relation(id, |_, _, _, _| true, cx);
+                    }
                 })
                 .ok();
         })

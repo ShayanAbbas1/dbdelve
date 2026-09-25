@@ -1758,7 +1758,7 @@ mod tests {
                 offset,
             );
             assert!(sql::is_generated_select(&sql), "{sql}");
-            let paged = sql::paged(Engine::SqlServer, &sql).expect("a preview has a page");
+            let paged = sql::paged(Engine::SqlServer, &sql, &[]).expect("a preview has a page");
             connection.query(&paged).expect("the preview should run")
         };
 
@@ -1782,7 +1782,7 @@ mod tests {
             filter_predicate(Engine::SqlServer, "sensor", Operator::Contains, "sensor_03").unwrap();
         assert!(preview(&literal, 0).rows.is_empty());
         let unsorted = relation_sql(Engine::SqlServer, "dbo", "orders", "", &[], 100, 0);
-        let unsorted = sql::paged(Engine::SqlServer, &unsorted).unwrap();
+        let unsorted = sql::paged(Engine::SqlServer, &unsorted, &[]).unwrap();
         assert_eq!(connection.query(&unsorted).unwrap().rows.len(), 3);
     }
 

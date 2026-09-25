@@ -356,7 +356,7 @@ impl Workspace {
             let editor = editor.read(cx);
             (editor.value().to_string(), editor.cursor())
         };
-        let Some(range) = Buffer::parse(&text).statement_at(cursor) else {
+        let Some(range) = Buffer::for_engine(engine, &text).statement_at(cursor) else {
             return;
         };
         let statement = &text[range.clone()];

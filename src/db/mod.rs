@@ -236,6 +236,18 @@ impl Engine {
         }
     }
 
+    /// Whether a preview page is ordered by the relation's key when nothing
+    /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
+    /// one that orders nothing lets a parallel plan repeat or skip rows from
+    /// one page to the next, so its first page waits for the structure that
+    /// names the key (`sql::paged` writes it).
+    pub fn pages_by_key(self) -> bool {
+        match self {
+            Self::SqlServer => true,
+            Self::Postgres | Self::MySql | Self::Sqlite | Self::Snowflake => false,
+        }
+    }
+
     /// Whether the server holds a Read-only session to reads -- the backstop
     /// `read_only_statement` sets. Without one, a statement `sql::classify`
     /// cannot read has nothing behind it that would stop a write, so the gate
@@ -949,6 +961,33 @@ pub struct Structure {
     pub indexes: Vec<NamedDefinition>,
     pub constraints: Vec<NamedDefinition>,
     pub foreign_keys: Vec<ForeignKey>,
+}
+
+impl Structure {
+    /// The columns that tell one row from another: the primary key's, else the
+    /// first unique constraint's, read back out of their `PRIMARY KEY (a, b)`
+    /// rendering. Empty when none reads back as columns the relation has --
+    /// a name holding `, ` cannot be told from two names, and is not guessed at.
+    pub fn row_key(&self) -> Vec<String> {
+        let key = |prefix: &str| {
+            self.constraints.iter().find_map(|constraint| {
+                let names: Vec<String> = constraint
+                    .definition
+                    .strip_prefix(prefix)?
+                    .strip_suffix(')')?
+                    .split(", ")
+                    .map(str::to_string)
+                    .collect();
+                names
+                    .iter()
+                    .all(|name| self.columns.iter().any(|column| &column.name == name))
+                    .then_some(names)
+            })
+        };
+        key("PRIMARY KEY (")
+            .or_else(|| key("UNIQUE ("))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1924,6 +1963,41 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_row_key_is_the_primary_key_else_a_unique_one_else_nothing() {
+        let structure = |constraints: &[&str]| Structure {
+            columns: ["id", "line, no", "code"]
+                .map(|name| ColumnDefinition {
+                    name: name.into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                })
+                .to_vec(),
+            indexes: Vec::new(),
+            constraints: constraints
+                .iter()
+                .map(|definition| NamedDefinition {
+                    name: "k".into(),
+                    definition: definition.to_string(),
+                })
+                .collect(),
+            foreign_keys: Vec::new(),
+        };
+        assert_eq!(
+            structure(&["UNIQUE (code)", "PRIMARY KEY (id, code)"]).row_key(),
+            ["id", "code"]
+        );
+        assert_eq!(structure(&["UNIQUE (code)"]).row_key(), ["code"]);
+        // `line, no` reads as two columns the relation does not have.
+        assert!(
+            structure(&["PRIMARY KEY (id, line, no)"])
+                .row_key()
+                .is_empty()
+        );
+        assert!(structure(&["CHECK (id > 0)"]).row_key().is_empty());
     }
 
     #[test]

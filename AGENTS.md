@@ -639,12 +639,20 @@ Decided, and not to be re-litigated:
   beside it. `image` is binary on SQL Server alone (`Engine::is_binary_type`).
 - **SQL Server previews page with `OFFSET … FETCH`.** T-SQL has no `LIMIT` and
   the grammar has no `FETCH`, so a preview is generated, sorted and gated as
-  `LIMIT n OFFSET m` and re-spelled by `sql::paged` afterwards (`ORDER BY (SELECT
-  NULL)` when unsorted, since `OFFSET` requires one). It replaces only the
-  `limit` node the parse tree locates, with the two integers read out of it;
-  what runs, and what the tab shows, is the T-SQL. A user's own `TOP` or
-  `[bracketed]` statement cannot be sorted from a header, for the grammar's
-  reason.
+  `LIMIT n OFFSET m` and re-spelled by `sql::paged` afterwards. `OFFSET`
+  requires an `ORDER BY`, so an unsorted page gets `ORDER BY (SELECT NULL),
+  <key>`: the key (`Structure::row_key`, primary else unique) is what keeps a
+  parallel plan from repeating or skipping rows between pages, which is why
+  the first page waits for the structure (`Engine::pages_by_key`), and the
+  `(SELECT NULL)` is how `sql::unpaged` tells it from a user's sort. It
+  replaces only the `limit` node the parse tree locates, with the two integers
+  read out of it; what runs, and what the tab shows, is the T-SQL. A user's own
+  `TOP` or `[bracketed]` statement cannot be sorted from a header, for the
+  grammar's reason.
+- **A SQL Server buffer is split a batch at a time** (`Buffer::for_engine`):
+  `GO` lines are separators never sent, `[names]` are quoted, a routine's body
+  runs to the end of its batch and a `BEGIN … END` block is never cut. A
+  selection is sent as its one batch; more than one, or `GO n`, is refused.
 - **SQL Server edit targets come from a describe**, as Postgres's do:
   `sys.dm_exec_describe_first_result_set` in mode 2 (a view is its own source,
   and has no key), after the statement ran, only when it returned exactly one

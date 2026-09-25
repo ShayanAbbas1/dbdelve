@@ -19,7 +19,7 @@ use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Query, SetExpr,
+    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Expr, Query, SetExpr,
     Statement, UtilityOption,
 };
 use sqlparser::dialect::{
@@ -37,14 +37,28 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// Every dialect's buffer but SQL Server's, which [`Buffer::for_engine`]
+    /// reads.
     pub fn parse(sql: &str) -> Self {
-        let mut parser = Parser::new();
-        let statements = parser
-            .set_language(&tree_sitter_sequel::LANGUAGE.into())
-            .ok()
-            .and_then(|_| parser.parse(sql, None))
-            .map(|tree| collect_statements(&tree, sql))
-            .unwrap_or_default();
+        Self {
+            statements: statements_in(sql),
+        }
+    }
+
+    /// T-SQL is read a batch at a time, the way the server reads it: `GO`
+    /// lines are hard boundaries that are never part of a statement, `[names]`
+    /// are quoted, a routine's body runs to the end of its batch, and a
+    /// `BEGIN … END` block is one statement however many `;`s it holds. Sending
+    /// the second `DELETE` of an `IF … BEGIN … END` alone runs it outside its
+    /// `IF`.
+    pub fn for_engine(engine: Engine, sql: &str) -> Self {
+        if engine != Engine::SqlServer {
+            return Self::parse(sql);
+        }
+        let statements = batches(sql)
+            .into_iter()
+            .flat_map(|batch| tsql_statements(sql, batch))
+            .collect();
 
         Self { statements }
     }
@@ -196,11 +210,14 @@ pub fn with_order_by(statement: &str, keys: &[SortKey]) -> Option<String> {
 /// checked in the one spelling and re-spelled here after the gate has read it.
 /// Only the `limit` node the parse tree locates is replaced, with two integers
 /// read out of it: nothing the user typed into a filter is touched. `OFFSET`
-/// needs an `ORDER BY`, and an unsorted preview gets the one that orders
-/// nothing.
+/// needs an `ORDER BY`, and an unsorted preview is ordered by `key`, the
+/// columns that tell its rows apart: without a total order the server may hand
+/// the same row to two pages and none to another. The key follows a
+/// `(SELECT NULL)` that orders nothing, which is how [`unpaged`] tells it from
+/// a sort the user asked for, and is all there is when no key is known.
 ///
 /// `None` for a statement with no limit this can read, which is not a preview.
-pub fn paged(engine: Engine, statement: &str) -> Option<String> {
+pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
     if engine != Engine::SqlServer {
         return Some(statement.to_string());
     }
@@ -219,8 +236,14 @@ pub fn paged(engine: Engine, statement: &str) -> Option<String> {
         None => 0,
     };
     let order = match child_of_kind(&anchor, "order_by") {
-        Some(_) => "",
-        None => "ORDER BY (SELECT NULL) ",
+        Some(_) => String::new(),
+        None => {
+            key.iter()
+                .fold("ORDER BY (SELECT NULL)".to_string(), |order, column| {
+                    format!("{order}, {}", engine.quote_identifier(column))
+                })
+                + " "
+        }
     };
     Some(splice(
         statement,
@@ -240,7 +263,12 @@ pub fn unpaged(statement: &str) -> String {
         let rows = tail.strip_suffix(" ROWS ONLY")?;
         offset.parse::<usize>().ok()?;
         rows.parse::<usize>().ok()?;
-        let head = head.strip_suffix(" ORDER BY (SELECT NULL)").unwrap_or(head);
+        // A sort the user asked for ends in its direction, never in a quoted
+        // key column, so one inside a filter's string literal is left alone.
+        let head = head
+            .rsplit_once(" ORDER BY (SELECT NULL)")
+            .filter(|(_, key)| key.is_empty() || (key.starts_with(", ") && key.ends_with('"')))
+            .map_or(head, |(head, _)| head);
         Some(format!("{head} LIMIT {rows} OFFSET {offset}"))
     };
     unpage().unwrap_or_else(|| statement.to_string())
@@ -997,6 +1025,217 @@ fn trim_range(sql: &str, range: Range<usize>) -> Option<Range<usize>> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+fn statements_in(sql: &str) -> Vec<Range<usize>> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_sequel::LANGUAGE.into())
+        .ok()
+        .and_then(|_| parser.parse(sql, None))
+        .map(|tree| collect_statements(&tree, sql))
+        .unwrap_or_default()
+}
+
+/// The bare words of T-SQL text, and where its `[bracketed]` names are: what is
+/// left once strings, quoted names and comments are stepped over, so a `GO`, a
+/// `BEGIN` or an `END` inside one of those is not read as a keyword.
+///
+/// ponytail: block comments are read flat. T-SQL nests them, so an `END`
+/// after the inner `*/` of `/* /* */ END */` counts; nobody has written one.
+fn tsql_scan(text: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let is_word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '@' | '#' | '$');
+    let (mut words, mut brackets) = (Vec::new(), Vec::new());
+    let mut index = 0;
+    while let Some(c) = text[index..].chars().next() {
+        let rest = &text[index..];
+        index += match c {
+            // A doubled quote reads as one string ending and another beginning.
+            '\'' | '"' => 1 + rest[1..].find(c).map_or(rest.len() - 1, |end| end + 1),
+            '[' => {
+                // `]]` is an escaped `]`, not the end of the name.
+                let mut end = 1;
+                loop {
+                    match rest[end..].find(']') {
+                        Some(found) if rest[end + found + 1..].starts_with(']') => end += found + 2,
+                        Some(found) => break end += found + 1,
+                        None => break end = rest.len(),
+                    }
+                }
+                brackets.push(index..index + end);
+                end
+            }
+            '-' if rest.starts_with("--") => rest.find('\n').unwrap_or(rest.len()),
+            '/' if rest.starts_with("/*") => rest.find("*/").map_or(rest.len(), |end| end + 2),
+            c if is_word(c) => {
+                let len = rest.find(|c| !is_word(c)).unwrap_or(rest.len());
+                words.push(index..index + len);
+                len
+            }
+            c => c.len_utf8(),
+        };
+    }
+    (words, brackets)
+}
+
+/// SQL Server's `GO` lines: the word alone on its line, give or take a repeat
+/// count and a trailing comment. `GO` is sqlcmd's and SSMS's batch separator,
+/// never T-SQL, and the server reads one sent to it as a column alias.
+fn go_lines(sql: &str) -> Vec<(Range<usize>, Option<u64>)> {
+    let (words, _) = tsql_scan(sql);
+    words
+        .into_iter()
+        .filter(|word| sql[word.clone()].eq_ignore_ascii_case("go"))
+        .filter_map(|word| {
+            let start = sql[..word.start].rfind('\n').map_or(0, |at| at + 1);
+            let end = sql[word.end..]
+                .find('\n')
+                .map_or(sql.len(), |at| word.end + at);
+            if !sql[start..word.start].trim().is_empty() {
+                return None;
+            }
+            let tail = sql[word.end..end].trim_start();
+            let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            let rest = tail[digits..].trim();
+            if !(rest.is_empty() || rest.starts_with("--")) {
+                return None;
+            }
+            // A count too big to read is still a count, never a plain `GO`.
+            let count = (digits > 0).then(|| tail[..digits].parse().unwrap_or(u64::MAX));
+            Some((start..end, count))
+        })
+        .collect()
+}
+
+/// The text between `GO` lines.
+fn batches(sql: &str) -> Vec<Range<usize>> {
+    let mut batches = Vec::new();
+    let mut start = 0;
+    for (line, _) in go_lines(sql) {
+        batches.push(start..line.start);
+        start = line.end;
+    }
+    batches.push(start..sql.len());
+    batches
+}
+
+/// One batch's statements. The grammar finds the boundaries, reading each
+/// `[name]` as a `"name"` of the same length so a `;` or a `'` inside one
+/// separates nothing and every offset still points into `sql`. Then what T-SQL
+/// holds together is put back together: a routine's body to the end of the
+/// batch, and a `BEGIN … END` block (`CASE … END` counted too, as it closes on
+/// the same word) whole.
+fn tsql_statements(sql: &str, batch: Range<usize>) -> Vec<Range<usize>> {
+    let text = &sql[batch.clone()];
+    let (words, brackets) = tsql_scan(text);
+    let mut masked = text.as_bytes().to_vec();
+    for bracket in brackets {
+        masked[bracket.clone()].fill(b'_');
+        masked[bracket.start] = b'"';
+        if text[bracket.clone()].ends_with(']') {
+            masked[bracket.end - 1] = b'"';
+        }
+    }
+    // Every byte of a bracket is overwritten, continuation bytes included, so
+    // what is left is still UTF-8.
+    let masked = String::from_utf8(masked).unwrap_or_else(|_| text.to_string());
+
+    let word = |index: usize| {
+        words
+            .get(index)
+            .map(|range| text[range.clone()].to_ascii_uppercase())
+    };
+    let mut depth = 0usize;
+    let mut depths = Vec::with_capacity(words.len());
+    for (index, range) in words.iter().enumerate() {
+        match (word(index).as_deref(), word(index + 1).as_deref()) {
+            (
+                Some("BEGIN"),
+                Some("TRAN" | "TRANSACTION" | "DISTRIBUTED" | "DIALOG" | "CONVERSATION"),
+            ) => {}
+            (Some("END"), Some("CONVERSATION")) => {}
+            (Some("BEGIN" | "CASE"), _) => depth += 1,
+            (Some("END"), _) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        depths.push((range.end, depth));
+    }
+    let depth_at = |offset: usize| match depths.partition_point(|(end, _)| *end <= offset) {
+        0 => 0,
+        after => depths[after - 1].1,
+    };
+    let routine = |start: usize| {
+        let first = words.partition_point(|range| range.start < start);
+        let mut opening = (first..first + 4).filter_map(word);
+        let object = match (opening.next().as_deref(), opening.next().as_deref()) {
+            (Some("CREATE"), Some("OR")) => opening.nth(1),
+            (Some("CREATE" | "ALTER"), object) => object.map(str::to_string),
+            _ => None,
+        };
+        matches!(
+            object.as_deref(),
+            Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER")
+        )
+    };
+
+    let mut statements: Vec<Range<usize>> = Vec::new();
+    for statement in statements_in(&masked) {
+        match statements.last_mut() {
+            Some(last) if routine(last.start) || depth_at(last.end) > 0 => last.end = statement.end,
+            _ => statements.push(statement),
+        }
+    }
+    statements
+        .into_iter()
+        .map(|range| batch.start + range.start..batch.start + range.end)
+        .collect()
+}
+
+/// What of `sql` to send to SQL Server: the one batch it holds, without the
+/// `GO` lines around it. More than one batch, or a batch asked to run more than
+/// once, is refused rather than sent as text the server cannot read.
+pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
+    if engine != Engine::SqlServer {
+        return Ok(sql);
+    }
+    for (_, count) in go_lines(sql) {
+        count.map_or(Ok(()), repeats)?;
+    }
+    // A batch of nothing but comments is not a second batch.
+    let mut batches = batches(sql)
+        .into_iter()
+        .filter(|batch| !tsql_statements(sql, batch.clone()).is_empty())
+        .filter_map(|batch| trim_range(sql, batch));
+    match (batches.next(), batches.next()) {
+        (_, Some(_)) => Err("The selection holds more than one batch separated by GO, \
+             and dbdelve sends one batch at a time."
+            .into()),
+        (batch, None) => Ok(batch.map_or("", |batch| &sql[batch])),
+    }
+}
+
+/// Refused when the `GO` that ends the batch holding `offset` carries a count:
+/// running the statement under the cursor once would quietly drop it.
+pub(crate) fn batch_repeats(engine: Engine, sql: &str, offset: usize) -> Result<(), String> {
+    if engine != Engine::SqlServer {
+        return Ok(());
+    }
+    match go_lines(sql)
+        .into_iter()
+        .find(|(line, _)| line.start >= offset)
+    {
+        Some((_, Some(count))) => repeats(count),
+        _ => Ok(()),
+    }
+}
+
+fn repeats(count: u64) -> Result<(), String> {
+    match count {
+        1 => Ok(()),
+        _ => Err(format!(
+            "GO {count} repeats its batch, and dbdelve runs a batch once."
+        )),
+    }
+}
+
 /// Every pending row as one `UPDATE`, joined into a single string.
 ///
 /// All-or-nothing, which each engine reaches differently, and
@@ -1369,14 +1608,25 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             }
         }
 
-        // T-SQL's `IF … ELSE` is as dangerous as what it holds. Every branch
-        // counts, since which one runs is the server's to decide.
-        Statement::If(branching) => std::iter::once(&branching.if_block)
-            .chain(&branching.elseif_blocks)
-            .chain(&branching.else_block)
-            .flat_map(ConditionalStatementBlock::statements)
-            .map(statement_verdict)
-            .fold(Verdict::READ, Verdict::max),
+        // `IF … ELSE` (T-SQL's, and the `IF … END IF` Postgres, MySQL and
+        // Snowflake parse to the same variant) is as dangerous as what it holds.
+        // Every branch counts, since which one runs is the server's to decide,
+        // and so does every condition, since each one runs.
+        Statement::If(branching) => {
+            let blocks = std::iter::once(&branching.if_block)
+                .chain(&branching.elseif_blocks)
+                .chain(&branching.else_block);
+            blocks
+                .clone()
+                .filter_map(|block| block.condition.as_ref())
+                .map(condition_verdict)
+                .chain(
+                    blocks
+                        .flat_map(ConditionalStatementBlock::statements)
+                        .map(statement_verdict),
+                )
+                .fold(Verdict::READ, Verdict::max)
+        }
 
         Statement::ShowTables { .. }
         | Statement::ShowCatalogs { .. }
@@ -1522,6 +1772,54 @@ fn set_expr_verdict(body: &SetExpr) -> Verdict {
         | SetExpr::Update(statement)
         | SetExpr::Delete(statement)
         | SetExpr::Merge(statement) => statement_verdict(statement),
+    }
+}
+
+/// What evaluating an `IF`'s condition can do. Before `IF` had an arm it
+/// needed Full on every engine, and a condition calling a function can still
+/// write anything a Postgres or Snowflake function can, so everything but
+/// operators over names, values and subqueries keeps that verdict. A subquery
+/// is read like any other query.
+fn condition_verdict(condition: &Expr) -> Verdict {
+    match condition {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Verdict::READ,
+        Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::IsUnknown(expr)
+        | Expr::IsNotUnknown(expr)
+        | Expr::Nested(expr)
+        | Expr::UnaryOp { expr, .. } => condition_verdict(expr),
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Like {
+            expr: left,
+            pattern: right,
+            escape_char: None,
+            ..
+        }
+        | Expr::ILike {
+            expr: left,
+            pattern: right,
+            escape_char: None,
+            ..
+        } => condition_verdict(left).max(condition_verdict(right)),
+        Expr::Between {
+            expr, low, high, ..
+        } => condition_verdict(expr)
+            .max(condition_verdict(low))
+            .max(condition_verdict(high)),
+        Expr::InList { expr, list, .. } => list
+            .iter()
+            .map(condition_verdict)
+            .fold(condition_verdict(expr), Verdict::max),
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => query_verdict(subquery),
+        Expr::InSubquery { expr, subquery, .. } => {
+            condition_verdict(expr).max(query_verdict(subquery))
+        }
+        _ => Verdict::FULL,
     }
 }
 
@@ -1916,6 +2214,172 @@ mod tests {
             texts("SELECT ';' AS sep;\nSELECT 2;"),
             vec!["SELECT ';' AS sep", "SELECT 2"]
         );
+    }
+
+    fn tsql(sql: &str) -> Vec<&str> {
+        Buffer::for_engine(Engine::SqlServer, sql)
+            .statements()
+            .iter()
+            .map(|r| &sql[r.clone()])
+            .collect()
+    }
+
+    #[test]
+    fn a_t_sql_routine_runs_to_the_end_of_its_batch() {
+        assert_eq!(
+            tsql("CREATE PROCEDURE p AS\nSET NOCOUNT ON;\nUPDATE t SET x = 1 WHERE id = 2;"),
+            ["CREATE PROCEDURE p AS\nSET NOCOUNT ON;\nUPDATE t SET x = 1 WHERE id = 2"]
+        );
+        for opening in [
+            "CREATE OR ALTER FUNCTION",
+            "ALTER PROC",
+            "create trigger",
+            "CREATE  OR  ALTER\nPROCEDURE",
+        ] {
+            let sql = format!("SELECT 0;\nGO\n{opening} r AS SELECT 1; SELECT 2;\nGO\nSELECT 3");
+            let routine = format!("{opening} r AS SELECT 1; SELECT 2");
+            assert_eq!(
+                tsql(&sql),
+                ["SELECT 0", routine.as_str(), "SELECT 3"],
+                "{opening}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_t_sql_block_is_one_statement() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "IF 1 = 1 BEGIN DELETE FROM t WHERE id = 1; DELETE FROM u WHERE id = 2; END",
+                &["IF 1 = 1 BEGIN DELETE FROM t WHERE id = 1; DELETE FROM u WHERE id = 2; END"],
+            ),
+            (
+                "BEGIN TRY SELECT 1; SELECT 2; END TRY BEGIN CATCH SELECT 3; END CATCH; SELECT 4",
+                &[
+                    "BEGIN TRY SELECT 1; SELECT 2; END TRY BEGIN CATCH SELECT 3; END CATCH",
+                    "SELECT 4",
+                ],
+            ),
+            // Nested, with a `CASE … END` inside that closes nothing else.
+            (
+                "WHILE 1 = 1 BEGIN IF 1 = 1 BEGIN SELECT CASE WHEN 1 = 1 THEN 1 END; BREAK; END; \
+                 SELECT 2; END; SELECT 3",
+                &[
+                    "WHILE 1 = 1 BEGIN IF 1 = 1 BEGIN SELECT CASE WHEN 1 = 1 THEN 1 END; BREAK; END; \
+                     SELECT 2; END",
+                    "SELECT 3",
+                ],
+            ),
+            // Statements, not blocks.
+            (
+                "BEGIN TRAN; UPDATE t SET x = 1; COMMIT; SELECT 5",
+                &["BEGIN TRAN; UPDATE t SET x = 1; COMMIT", "SELECT 5"],
+            ),
+            (
+                "BEGIN DISTRIBUTED TRANSACTION; SELECT 1",
+                &["BEGIN DISTRIBUTED TRANSACTION", "SELECT 1"],
+            ),
+            // Keywords inside strings, comments and quoted names are not keywords.
+            (
+                "SELECT 'BEGIN'; SELECT [begin], \"case\"; /* BEGIN */ SELECT 3; -- BEGIN\nSELECT 4",
+                &[
+                    "SELECT 'BEGIN'",
+                    "SELECT [begin], \"case\"",
+                    "SELECT 3",
+                    "SELECT 4",
+                ],
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(tsql(sql), *expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_t_sql_bracketed_name_is_quoted() {
+        assert_eq!(tsql("SELECT [a;b] FROM t"), ["SELECT [a;b] FROM t"]);
+        assert_eq!(
+            tsql("SELECT [it's] FROM t; DELETE FROM u WHERE id = 1"),
+            ["SELECT [it's] FROM t", "DELETE FROM u WHERE id = 1"]
+        );
+        assert_eq!(
+            tsql("SELECT [x]]y;z], [ünï;code] FROM t; SELECT 2"),
+            ["SELECT [x]]y;z], [ünï;code] FROM t", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn a_go_line_separates_t_sql_batches_and_is_never_sent() {
+        let cases: &[(&str, &[&str])] = &[
+            ("SELECT 1\nGO", &["SELECT 1"]),
+            ("SELECT 1;\nGO 5\nSELECT 2;", &["SELECT 1", "SELECT 2"]),
+            (
+                "SELECT 1\n  go  -- done\nSELECT 2",
+                &["SELECT 1", "SELECT 2"],
+            ),
+            // Not alone on its line, or inside a string or a comment: not a `GO`.
+            ("SELECT 1 GO", &["SELECT 1 GO"]),
+            (
+                "SELECT 'a\nGO\nb'; SELECT 2",
+                &["SELECT 'a\nGO\nb'", "SELECT 2"],
+            ),
+            ("SELECT 1 /*\nGO\n*/", &["SELECT 1"]),
+            ("SELECT 1\nGOTO x", &["SELECT 1\nGOTO x"]),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(tsql(sql), *expected, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_selection_is_sent_as_its_one_batch() {
+        assert_eq!(
+            one_batch(Engine::SqlServer, "SELECT 1\nGO\n"),
+            Ok("SELECT 1")
+        );
+        assert_eq!(one_batch(Engine::SqlServer, "GO\n"), Ok(""));
+        assert_eq!(
+            one_batch(Engine::SqlServer, "SELECT 1\nGO\n-- done\n"),
+            Ok("SELECT 1")
+        );
+        assert!(one_batch(Engine::SqlServer, "SELECT 1\nGO\nSELECT 2").is_err());
+        assert_eq!(
+            one_batch(Engine::SqlServer, "INSERT INTO t DEFAULT VALUES\nGO 5"),
+            Err("GO 5 repeats its batch, and dbdelve runs a batch once.".into())
+        );
+        assert_eq!(
+            one_batch(Engine::SqlServer, "SELECT 1\nGO 1"),
+            Ok("SELECT 1")
+        );
+        assert_eq!(
+            one_batch(Engine::Postgres, "SELECT 1\nGO"),
+            Ok("SELECT 1\nGO")
+        );
+
+        let sql = "INSERT INTO t DEFAULT VALUES;\nSELECT 1\nGO 3\nSELECT 2\nGO";
+        assert!(batch_repeats(Engine::SqlServer, sql, 0).is_err());
+        assert!(batch_repeats(Engine::SqlServer, sql, sql.find("SELECT 2").unwrap()).is_ok());
+        assert!(batch_repeats(Engine::Postgres, sql, 0).is_ok());
+    }
+
+    #[test]
+    fn only_sql_server_reads_t_sql_boundaries() {
+        for sql in [
+            "SELECT ARRAY['a;]'] FROM t; SELECT arr[1] FROM t",
+            "SELECT [it's] FROM t; DELETE FROM u WHERE id = 1",
+            "SELECT `a;b` FROM t; SELECT 2",
+            "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql; SELECT 1",
+            "BEGIN SELECT 1; SELECT 2; END",
+            "SELECT 1\nGO\nSELECT 2",
+        ] {
+            for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+                assert_eq!(
+                    Buffer::for_engine(engine, sql).statements(),
+                    Buffer::parse(sql).statements(),
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2840,7 +3304,7 @@ mod tests {
         // `OFFSET` needs an `ORDER BY`, so an unsorted page gets one that
         // orders nothing.
         assert_eq!(
-            paged(Engine::SqlServer, &statement(" LIMIT 1000")).as_deref(),
+            paged(Engine::SqlServer, &statement(" LIMIT 1000"), &[]).as_deref(),
             Some(
                 "SELECT * FROM \"dbo\".\"accounts\" ORDER BY (SELECT NULL) \
                  OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY"
@@ -2853,7 +3317,7 @@ mod tests {
         .unwrap();
         assert!(is_generated_select(&sorted), "{sorted}");
         assert_eq!(
-            paged(Engine::SqlServer, &sorted).as_deref(),
+            paged(Engine::SqlServer, &sorted, &[]).as_deref(),
             Some(
                 "SELECT * FROM \"dbo\".\"accounts\" WHERE \"name\" LIKE N'%a[%]%' \
                  ORDER BY \"id\" DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
@@ -2862,14 +3326,14 @@ mod tests {
         // Every other engine runs the statement the gate read, unchanged.
         for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
             assert_eq!(
-                paged(engine, &sorted).as_deref(),
+                paged(engine, &sorted, &[]).as_deref(),
                 Some(sorted.as_str()),
                 "{engine:?}"
             );
         }
         // Not a preview: nothing to re-spell, so nothing to run.
-        assert_eq!(paged(Engine::SqlServer, &statement("")), None);
-        assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1"), None);
+        assert_eq!(paged(Engine::SqlServer, &statement(""), &[]), None);
+        assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1", &[]), None);
     }
 
     #[test]
@@ -2877,17 +3341,47 @@ mod tests {
         let unsorted = "SELECT * FROM \"dbo\".\"accounts\" LIMIT 1000 OFFSET 0";
         let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", false)]).unwrap();
         for statement in [unsorted, sorted.as_str()] {
-            let paged = paged(Engine::SqlServer, statement).unwrap();
+            let paged = paged(Engine::SqlServer, statement, &[]).unwrap();
             assert_eq!(order_by(&paged), None, "the grammar cannot read {paged}");
             assert_eq!(order_by(&unpaged(&paged)), order_by(statement), "{paged}");
         }
         assert_eq!(
-            order_by(&unpaged(&paged(Engine::SqlServer, &sorted).unwrap())),
+            order_by(&unpaged(&paged(Engine::SqlServer, &sorted, &[]).unwrap())),
             Some(vec![SortKey::new("\"id\"", false)])
         );
         // Not `paged`'s shape: left alone.
         let typed = "SELECT * FROM t ORDER BY id OFFSET 5 ROWS";
         assert_eq!(unpaged(typed), typed);
+    }
+
+    #[test]
+    fn an_unsorted_sql_server_page_is_ordered_by_the_key() {
+        let unsorted = "SELECT * FROM \"dbo\".\"order lines\" LIMIT 100 OFFSET 200";
+        let key = ["order_id".to_string(), "line]no".to_string()];
+        let page = paged(Engine::SqlServer, unsorted, &key).unwrap();
+        assert_eq!(
+            page,
+            "SELECT * FROM \"dbo\".\"order lines\" ORDER BY (SELECT NULL), \"order_id\", \
+             \"line]no\" OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY"
+        );
+        // Read back as the unsorted preview it is, not as a sort on the key.
+        assert_eq!(unpaged(&page), unsorted);
+        assert_eq!(order_by(&unpaged(&page)), Some(Vec::new()));
+
+        // A sort the user asked for is the order, key or no key.
+        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", true)]).unwrap();
+        assert_eq!(
+            paged(Engine::SqlServer, &sorted, &key),
+            paged(Engine::SqlServer, &sorted, &[])
+        );
+        // One inside a filter's string is the user's text, not paged's marker.
+        let quoted = with_order_by(
+            "SELECT * FROM t WHERE a = ' ORDER BY (SELECT NULL)' LIMIT 5 OFFSET 0",
+            &[SortKey::new("a", false)],
+        )
+        .unwrap();
+        let quoted_page = paged(Engine::SqlServer, &quoted, &key).unwrap();
+        assert_eq!(unpaged(&quoted_page), quoted);
     }
 
     #[test]
@@ -2924,6 +3418,44 @@ mod tests {
         ];
         for (sql, verdict) in cases {
             assert_eq!(classify(Engine::SqlServer, sql), *verdict, "{sql}");
+        }
+    }
+
+    #[test]
+    fn an_if_is_as_strict_as_its_conditions() {
+        let cases: &[(Engine, &str, Verdict)] = &[
+            (
+                Engine::SqlServer,
+                "IF EXISTS (SELECT 1 FROM t) SELECT 1",
+                Verdict::READ,
+            ),
+            (Engine::SqlServer, "IF @x IS NULL SELECT 1", Verdict::READ),
+            (Engine::SqlServer, "IF dbo.f() = 1 SELECT 1", Verdict::FULL),
+            // Before `IF` had an arm it needed Full everywhere; a condition that
+            // calls something still does, on every engine that parses one.
+            (
+                Engine::Snowflake,
+                "BEGIN IF (side_effect() = 1) THEN SELECT 1; END IF; END",
+                Verdict::FULL,
+            ),
+            (
+                Engine::Snowflake,
+                "BEGIN IF (1 = 1) THEN SELECT 1; END IF; END",
+                Verdict::READ,
+            ),
+            (
+                Engine::MySql,
+                "IF 1 = 1 THEN SELECT 1; ELSEIF f() THEN SELECT 2; END IF",
+                Verdict::FULL,
+            ),
+            (
+                Engine::Postgres,
+                "IF 1 = 1 THEN SELECT 1; ELSEIF 2 IN (1, 2) THEN SELECT 2; END IF",
+                Verdict::READ,
+            ),
+        ];
+        for (engine, sql, verdict) in cases {
+            assert_eq!(classify(*engine, sql), *verdict, "{engine:?}: {sql}");
         }
     }
 
