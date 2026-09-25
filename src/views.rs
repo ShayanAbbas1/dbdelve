@@ -898,6 +898,15 @@ fn render_routine(tab: &ObjectTab, cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
+/// How long a sent cancel may go unanswered before the button stops claiming
+/// it is cancelling and admits it is the server that has not replied.
+const CANCEL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn clock(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// The results plane: the brightest tone, because the data is the point.
 ///
 /// A short status is centred and set in the app face -- it is a sentence
@@ -948,13 +957,14 @@ fn render_results(
             .into_any_element()
     };
 
-    let cancelling = matches!(
-        query,
+    let (started, cancelling) = match query {
         QueryState::Running {
-            cancelling: true,
+            started,
+            cancelling,
             ..
-        }
-    );
+        } => (Some(*started), *cancelling),
+        _ => (None, None),
+    };
     let cancel = move |cx: &mut Context<Workspace>| {
         // A word rather than an icon: a square or a cross beside a status line
         // reads as "close this", and the quiet tone is what keeps it from
@@ -963,16 +973,24 @@ fn render_results(
         // Once the request is out the label is the only acknowledgement the
         // click gets, and the statement is still running, so the button goes
         // inert rather than away.
-        let label = if cancelling {
-            "Cancelling…"
-        } else {
-            "Cancel"
+        let label = match cancelling {
+            Some(sent) if sent.elapsed() >= CANCEL_PATIENCE => "Still waiting on server…",
+            Some(_) => "Cancelling…",
+            None => "Cancel",
         };
-        button("cancel-query", label, Tone::Quiet, Control::Compact, t)
-            .disabled(cancelling)
-            .on_click(cx.listener(|workspace, _, window, cx| {
-                workspace.cancel_query(&CancelQuery, window, cx);
-            }))
+        let timer = started.map(|started| quiet_line(clock(started.elapsed())));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .children(timer)
+            .child(
+                button("cancel-query", label, Tone::Quiet, Control::Compact, t)
+                    .disabled(cancelling.is_some())
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.cancel_query(&CancelQuery, window, cx);
+                    })),
+            )
     };
     // A refresh keeps the rows it is replacing (`execute_and_then`'s
     // `keep_rows`), and a centred spinner over rows the user is still reading

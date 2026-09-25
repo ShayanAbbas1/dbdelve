@@ -1085,13 +1085,14 @@ pub(crate) enum Refresh {
 
 pub(crate) enum QueryState {
     Idle,
-    /// `cancelling` says a cancel has been *sent* for this slot, and nothing
+    /// `cancelling` says when a cancel was *sent* for this slot, and nothing
     /// more: the statement is still in flight, so this is still `Running` to
     /// everything that asks. It leaves the flag behind when it leaves the
     /// variant, which is why nothing resets it. `cancel` is what the run went
     /// out under, and all a cancel for this slot may stop.
     Running {
-        cancelling: bool,
+        started: std::time::Instant,
+        cancelling: Option<std::time::Instant>,
         cancel: CancelToken,
     },
     Complete {
@@ -1354,7 +1355,8 @@ mod tests {
     fn result_pane_expands_as_soon_as_a_query_starts() {
         assert!(!result_pane_is_expanded(&QueryState::Idle));
         assert!(result_pane_is_expanded(&QueryState::Running {
-            cancelling: false,
+            started: std::time::Instant::now(),
+            cancelling: None,
             cancel: CancelToken::default(),
         }));
     }
@@ -1364,7 +1366,8 @@ mod tests {
     #[test]
     fn a_query_being_cancelled_is_still_running() {
         let cancelling = QueryState::Running {
-            cancelling: true,
+            started: std::time::Instant::now(),
+            cancelling: Some(std::time::Instant::now()),
             cancel: CancelToken::default(),
         };
         assert!(result_pane_is_expanded(&cancelling));
