@@ -70,6 +70,16 @@ impl Buffer {
         &self.statements
     }
 
+    /// Where `statement` stands in `sql`, the buffer this was parsed from: the
+    /// statement under `cursor` if it is that one, else the first that is.
+    /// `None` once it has been edited away.
+    pub fn find(&self, sql: &str, cursor: usize, statement: &str) -> Option<Range<usize>> {
+        let is_it = |range: &Range<usize>| sql[range.clone()].trim() == statement.trim();
+        self.statement_at(cursor)
+            .filter(is_it)
+            .or_else(|| self.statements.iter().find(|range| is_it(range)).cloned())
+    }
+
     /// The statement to run for a cursor at `offset`.
     ///
     /// Inside a statement, that statement. In whitespace or a comment between
@@ -1963,6 +1973,20 @@ fn has_dollar_quote(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grids_statement_is_found_wherever_it_stands_in_the_buffer() {
+        let sql = "SELECT 1;\nSELECT * FROM t;\nDELETE FROM t;";
+        let buffer = Buffer::parse(sql);
+        let select = sql.find("SELECT *").unwrap();
+        let delete = sql.find("DELETE").unwrap();
+        // The cursor on another statement does not make that one the grid's.
+        let grid = buffer.statement_at(select).unwrap();
+        assert_eq!(buffer.find(sql, delete, &sql[grid.clone()]), Some(grid));
+        let first = buffer.statement_at(0).unwrap();
+        assert_eq!(buffer.find(sql, 0, &sql[first.clone()]), Some(first));
+        assert_eq!(buffer.find(sql, delete, "SELECT * FROM u"), None);
+    }
 
     fn texts(sql: &str) -> Vec<&str> {
         Buffer::parse(sql)
