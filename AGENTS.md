@@ -319,9 +319,10 @@ mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
 The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT` and
 `DBDELVE_MSSQL_PORT`. The SQL Server image is `linux/amd64` only, so on Apple
 silicon it runs under emulation and takes a while to come up.
-Pick the engine on the form's chip row first; it decides which fields exist.
-Then paste a URL and choose **Use URL**, or fill the fields in. Connecting is
-the connection test; there is deliberately no separate test button.
+Pick the engine in the form's Engine dropdown first; it decides which fields exist.
+Then paste a URL and choose **Use URL**, or fill the fields in. **Test** opens
+the connection the way **Connect** would (keychain password, Read-only hold)
+and throws it away, so a profile can be checked before it is saved.
 
 Snowflake has no container. Its unit tests need nothing, and neither do its
 mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses

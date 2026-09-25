@@ -7,7 +7,7 @@
 //! This was a plain type at the crate root. It moved out whole; nothing changed
 //! but its visibility.
 
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, Task, Window};
 use gpui_component::input::InputState;
 
 use crate::{
@@ -44,24 +44,25 @@ pub(crate) struct ConnectionForm {
     pub(crate) root_certificate: Entity<InputState>,
     /// What an account has that a server does not. `host`, `database` and
     /// `user` are shared with the server fields: they mean the same thing, and
-    /// sharing them is what keeps a value typed under one chip there under the
+    /// sharing them is what keeps a value typed under one engine there under the
     /// next.
     pub(crate) account: Entity<InputState>,
     pub(crate) private_key: Entity<InputState>,
     pub(crate) warehouse: Entity<InputState>,
     pub(crate) role: Entity<InputState>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
-    /// unlike the credential fields it is drawn whichever chip is selected.
+    /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
     /// An input to focus once it has been mounted.
     ///
-    /// A chip can unmount the field the user was typing in, and a window with
+    /// A picker can unmount the field the user was typing in, and a window with
     /// nothing focused has no dispatch path — every keybinding in the app goes
-    /// dead until something is clicked. So whichever chip takes a field away
+    /// dead until something is clicked. So whichever picker takes a field away
     /// names the one that replaces it, and `Workspace::render` hands focus over
     /// on the next frame, once it exists to receive it.
     pub(crate) needs_focus: Option<Entity<InputState>>,
     pub(crate) error: Option<String>,
+    pub(crate) test: Option<ConnectionTest>,
     /// The id of the profile being edited, or `None` for a new connection.
     pub(crate) editing: Option<String>,
 }
@@ -210,6 +211,7 @@ impl ConnectionForm {
             role,
             statement_timeout,
             error: None,
+            test: None,
             editing: None,
         }
     }
@@ -227,7 +229,7 @@ impl ConnectionForm {
         let mut form = Self::new(Some(&profile.config), window, cx);
         form.editing = Some(profile.id.clone());
         form.color = profile.color;
-        // No `form.mode` here: the chip row draws only on a fresh form and
+        // No `form.mode` here: the mode dropdown draws only on a fresh form and
         // `save_profile` has no mode to take, so copying it in was a write
         // nothing ever read. The titlebar picker is where an existing
         // connection's mode changes.
@@ -364,6 +366,14 @@ impl ConnectionForm {
             statement_timeout: self.statement_timeout(cx)?,
         })
     }
+}
+
+/// The Test button's last answer. Dropping `Running` drops its task, so a
+/// form closed or retested mid-connect never hears back from the stale one.
+pub(crate) enum ConnectionTest {
+    Running(Task<()>),
+    Passed,
+    Failed(String),
 }
 
 /// What a profile is called when nobody has named it: the database for an
