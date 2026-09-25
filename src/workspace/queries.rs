@@ -751,10 +751,16 @@ impl Workspace {
             return;
         };
         let cancel = CancelToken::default();
-        *state = QueryState::Running {
-            cancelling: false,
-            cancel: cancel.clone(),
-        };
+        let previous = std::mem::replace(
+            state,
+            QueryState::Running {
+                cancelling: false,
+                cancel: cancel.clone(),
+            },
+        );
+        // What a cancelled refresh goes back to: the rows it kept on screen
+        // are still the ones that state describes.
+        let restored = keep_rows.then_some(previous);
         // Whatever plan is on screen describes the last statement, not this one.
         // Turning the pane back to the rows is what puts the spinner and Cancel
         // in front of a run that is in flight -- and what stops a plain Run from
@@ -895,12 +901,28 @@ impl Workspace {
                                 (true, produced_grid, None)
                             }
                             Err(error) => {
-                                *state = QueryState::Failed(error);
+                                let cancelled = matches!(
+                                    state,
+                                    QueryState::Running {
+                                        cancelling: true,
+                                        ..
+                                    }
+                                );
+                                *state = match restored {
+                                    Some(previous) if cancelled => previous,
+                                    _ => QueryState::Failed(error),
+                                };
                                 (false, false, None)
                             }
                         }
                     };
 
+                    if keep_rows
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                        && profile.session.notice.as_deref() == Some(Self::REFRESHING)
+                    {
+                        profile.session.notice = None;
+                    }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
                         // so it is not the statement to go back to — which is

@@ -220,7 +220,11 @@ impl Workspace {
         // clear them.
         let keep_rows = std::mem::take(stale);
         // A preview only re-queries when it is asked to, and this is the ask.
-        *query = QueryState::Idle;
+        // Not for the refresh, whose state still describes the rows it keeps:
+        // a cancel puts that state back.
+        if !keep_rows {
+            *query = QueryState::Idle;
+        }
         self.execute_and_then(sql, Tab::Object(id), None, keep_rows, None, cx);
     }
 

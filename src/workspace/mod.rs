@@ -351,6 +351,11 @@ impl Workspace {
         }
     }
 
+    /// Said over restored rows while their refresh is in flight, and taken
+    /// down by that refresh landing -- only if it is still what the status bar
+    /// says.
+    pub(crate) const REFRESHING: &str = "These rows are being refreshed.";
+
     pub(crate) fn note(&mut self, message: String, cx: &mut Context<Self>) {
         if let Some(profile) = self.profile_mut() {
             profile.session.notice = Some(message);
@@ -571,6 +576,15 @@ impl Render for Workspace {
             .active_results()
             .and_then(|results| results.read(cx).delegate().captured())
             .map(|captured| relative_age(store::captured_at().saturating_sub(captured)));
+        let stale_buffer =
+            snapshot_age.is_some() && matches!(profile.session.active, Tab::Query(_));
+        // Only with the statement to show: a snapshot older than `last_query`
+        // would have the prompt's Refresh run whatever the cursor is on.
+        let refreshable_snapshot = stale_buffer
+            && profile
+                .session
+                .active_query_tab()
+                .is_some_and(|tab| tab.last_query.is_some());
         let query_status = match profile.session.active_query() {
             Some(QueryState::Complete {
                 rows,
@@ -582,7 +596,11 @@ impl Render for Workspace {
                 // A snapshot knows neither how many bytes crossed the wire nor
                 // how long it took, so reporting `0 B · 0.0ns` invents two
                 // numbers. What it does know is when it was taken.
+                // A relation refreshes its own snapshot as soon as it can. A
+                // buffer's statement is the user's to run again, and nothing
+                // else would tell them the rows are waiting on it.
                 Some(match snapshot_age {
+                    Some(age) if stale_buffer => format!("{count} · from {age} ago"),
                     Some(age) => format!("{count} · snapshot from {age} ago"),
                     None => format!("{count} · {} · {elapsed:.1?}", human_bytes(*bytes as u64)),
                 })
@@ -603,6 +621,7 @@ impl Render for Workspace {
         let discard_workspace = apply_workspace.clone();
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
+        let refresh_workspace = apply_workspace.clone();
 
         let content = div()
             // Flush, not a floating card: the split handle already draws the
@@ -784,7 +803,29 @@ impl Render for Workspace {
                             .items_center()
                             .gap(px(layout::SPACE_SM))
                             .children(query_status.map(|query_status| {
-                                div().text_color(t.text_faint).child(query_status)
+                                div()
+                                    .text_color(match stale_buffer {
+                                        true => t.text_muted,
+                                        false => t.text_faint,
+                                    })
+                                    .child(query_status)
+                            }))
+                            // Through the stale-rows prompt rather than straight
+                            // to a run, so the statement is read before it is
+                            // sent.
+                            .children(refreshable_snapshot.then(|| {
+                                button(
+                                    "refresh-snapshot",
+                                    "Refresh…",
+                                    Tone::Quiet,
+                                    Control::Compact,
+                                    t,
+                                )
+                                .on_click(move |_, _, cx| {
+                                    _ = refresh_workspace.update(cx, |workspace, cx| {
+                                        workspace.ask_refresh_stale(cx);
+                                    });
+                                })
                             }))
                             // Named, not one button over a menu: the choice is
                             // between two things, and a control that opens
