@@ -3277,10 +3277,16 @@ mod tests {
         let load = std::thread::spawn(move || {
             loader.internal_query("WAITFOR DELAY '00:00:02'; SELECT 1 AS one")
         });
-        std::thread::sleep(Duration::from_millis(500));
+        // Waits on the state itself, not a sleep: on a busy runner a spawned
+        // thread can take longer than any fixed delay to get going.
+        while connection.session.try_lock().is_ok() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let user = connection.clone();
         let queued = std::thread::spawn(move || user.query("SELECT 2 AS two"));
-        std::thread::sleep(Duration::from_millis(500));
+        while connection.in_flight().queued == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         connection.cancel().unwrap();
 
         assert!(load.join().unwrap().is_ok());
