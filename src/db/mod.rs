@@ -308,6 +308,80 @@ impl Engine {
         }
     }
 
+    /// [`Self::quote_literal`] for a value bound for a column of `data_type`,
+    /// on the one engine where the type changes how its literal is spelled.
+    ///
+    /// SQL Server's binary value is its hex literal, bare: quoted, it is a
+    /// string, compared by its UTF-16 bytes, and matches no row. Bare only when
+    /// it is exactly such a literal, because this is the one way a value enters
+    /// a statement unquoted. And `N` only where a column needs it: an
+    /// `nvarchar` literal against a `varchar` key converts the column rather
+    /// than itself, so the edit scans the index. An ASCII value reads the same
+    /// in every code page, which is what makes dropping the `N` safe.
+    pub fn quote_value(self, value: &str, data_type: Option<&str>) -> String {
+        let (Self::SqlServer, Some(data_type)) = (self, data_type) else {
+            return self.quote_literal(value);
+        };
+        let lowered = data_type.to_ascii_lowercase();
+        let name = lowered.split('(').next().unwrap_or_default().trim();
+        let hex = value.strip_prefix("0x").is_some_and(|digits| {
+            digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        let narrow = matches!(
+            name,
+            "char"
+                | "varchar"
+                | "text"
+                | "bit"
+                | "tinyint"
+                | "smallint"
+                | "int"
+                | "bigint"
+                | "decimal"
+                | "numeric"
+                | "real"
+                | "float"
+                | "money"
+                | "smallmoney"
+                | "date"
+                | "time"
+                | "datetime"
+                | "datetime2"
+                | "smalldatetime"
+                | "datetimeoffset"
+                | "uniqueidentifier"
+        );
+        if hex && self.is_binary_type(name) {
+            value.to_string()
+        } else if narrow && value.is_ascii() {
+            format!("'{}'", value.replace('\'', "''"))
+        } else {
+            self.quote_literal(value)
+        }
+    }
+
+    /// Whether a [`Column::data_type`] names a type whose values are bytes.
+    ///
+    /// Substrings because the families are open-ended in two directions: MySQL
+    /// prefixes its blobs and binaries, and SQLite gives BLOB affinity to any
+    /// declared type merely *containing* `blob`. `image` only on SQL Server,
+    /// where it is the legacy binary type; elsewhere it is a name anyone may
+    /// give a column or a domain, and a SQLite `image` column holds text.
+    ///
+    /// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
+    /// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
+    /// characters it looks like, so an edited blob column becomes text. The grid
+    /// refuses the edit instead. Absent here means unknown, not text: a driver
+    /// that could not name the type says nothing, and treating silence as binary
+    /// would make ordinary columns read-only.
+    pub fn is_binary_type(self, data_type: &str) -> bool {
+        let name = data_type.to_ascii_lowercase();
+        name == "bytea"
+            || name.contains("blob")
+            || name.contains("binary")
+            || (self == Self::SqlServer && name == "image")
+    }
+
     pub fn qualified(self, schema: &str, name: &str) -> String {
         format!(
             "{}.{}",
@@ -724,28 +798,9 @@ pub struct Column {
     pub data_type: Option<String>,
 }
 
-/// Whether a [`Column::data_type`] names a type whose values are bytes.
-///
-/// Every engine's spellings in one predicate rather than three, because nothing
-/// above this module is allowed to know which engine answered (AGENTS.md, hard
-/// rule 4). Substrings because the families are open-ended in two directions:
-/// MySQL prefixes its blobs and binaries, and SQLite gives BLOB affinity to any
-/// declared type merely *containing* `blob`.
-///
-/// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
-/// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
-/// characters it looks like, so an edited blob column becomes text. The grid
-/// refuses the edit instead. Absent here means unknown, not text: a driver that
-/// could not name the type says nothing, and treating silence as binary would
-/// make ordinary columns read-only.
-pub fn is_binary_type(data_type: &str) -> bool {
-    let name = data_type.to_ascii_lowercase();
-    name == "bytea" || name == "image" || name.contains("blob") || name.contains("binary")
-}
-
 /// Whether a [`Column::data_type`] names a type whose values are numbers.
 ///
-/// Exact names rather than the substrings [`is_binary_type`] can afford: the
+/// Exact names rather than the substrings [`Engine::is_binary_type`] can afford: the
 /// numeric families collide with types that are not numbers at all -- `interval`
 /// and `point` both contain `int`, and `bit` is a string of them. A wrong answer
 /// here only costs one column its alignment, but a column of timestamps flushed
@@ -1457,6 +1512,64 @@ mod tests {
             Engine::SqlServer.quote_literal(r"back\slash"),
             r"N'back\slash'"
         );
+    }
+
+    #[test]
+    fn sql_server_spells_a_value_for_its_column_type() {
+        let quote = |value, data_type| Engine::SqlServer.quote_value(value, data_type);
+        // Bytes as the bare hex literal the grid shows, so a binary key matches.
+        assert_eq!(quote("0x00FF", Some("binary")), "0x00FF");
+        assert_eq!(quote("0xab", Some("varbinary(16)")), "0xab");
+        assert_eq!(quote("0x", Some("image")), "0x");
+        // Anything that is not exactly a hex literal stays quoted: this is the
+        // one unquoted path into a statement.
+        for value in ["0x0", "0xZZ", "0x00; DROP TABLE t", "00FF", "0X00", " 0x00"] {
+            assert_eq!(
+                quote(value, Some("varbinary")),
+                format!("N'{}'", value.replace('\'', "''")),
+                "{value}"
+            );
+        }
+        assert_eq!(quote("0x00FF", Some("varchar")), "'0x00FF'");
+        // `N` only where the column is Unicode, or the value needs it.
+        assert_eq!(quote("o'hara", Some("varchar")), "'o''hara'");
+        assert_eq!(quote("o'hara", Some("CHAR(10)")), "'o''hara'");
+        assert_eq!(quote("42", Some("int")), "'42'");
+        assert_eq!(quote("2024-01-01", Some("datetime2")), "'2024-01-01'");
+        assert_eq!(quote("李'小", Some("varchar")), "N'李''小'");
+        for data_type in [
+            Some("nvarchar"),
+            Some("nchar"),
+            Some("xml"),
+            Some("sql_variant"),
+        ] {
+            assert_eq!(quote("x", data_type), "N'x'", "{data_type:?}");
+        }
+        assert_eq!(quote("x", Some("dbo.custom")), "N'x'");
+        assert_eq!(quote("x", None), "N'x'");
+        // Every other engine is unchanged: Postgres's `\x…` round-trips quoted.
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+            assert_eq!(
+                engine.quote_value("0x00FF", Some("bytea")),
+                engine.quote_literal("0x00FF")
+            );
+            assert_eq!(
+                engine.quote_value("v", Some("varchar")),
+                engine.quote_literal("v")
+            );
+        }
+    }
+
+    #[test]
+    fn image_is_binary_on_sql_server_alone() {
+        assert!(Engine::SqlServer.is_binary_type("image"));
+        assert!(!Engine::Sqlite.is_binary_type("image"));
+        assert!(!Engine::Postgres.is_binary_type("image"));
+        for engine in Engine::ALL {
+            for data_type in ["bytea", "blob", "longblob", "varbinary(16)", "BINARY"] {
+                assert!(engine.is_binary_type(data_type), "{engine:?} {data_type}");
+            }
+        }
     }
 
     #[test]

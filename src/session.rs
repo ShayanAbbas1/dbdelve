@@ -1030,10 +1030,11 @@ pub(crate) fn show_snapshot(
     results: &Entity<TableState<ResultGrid>>,
     grid: &store::StoredGrid,
     mode: Mode,
+    engine: Engine,
     cx: &mut Context<Workspace>,
 ) {
     results.update(cx, |table, cx| {
-        *table.delegate_mut() = ResultGrid::restored(grid, mode);
+        *table.delegate_mut() = ResultGrid::restored(grid, mode).with_engine(engine);
         table.refresh(cx);
     });
 }
@@ -1294,7 +1295,8 @@ mod tests {
             .map(|(column, value)| (column.as_str(), value.as_deref()))
             .collect();
 
-        let statement = sql::insert_row(Engine::Postgres, "public", "accounts", &borrowed).unwrap();
+        let statement =
+            sql::insert_row(Engine::Postgres, "public", "accounts", &borrowed, &[]).unwrap();
         assert_eq!(
             statement,
             r#"INSERT INTO "public"."accounts" ("name", "note", "bio") VALUES ('Ada', NULL, '')"#

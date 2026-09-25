@@ -260,6 +260,10 @@ pub fn unpaged(statement: &str) -> String {
 /// `keys` carries plain values, because a row identified by a `NULL` is a row
 /// `=` does not find; the caller drops such a row before it gets here.
 ///
+/// `types` names each column's type where it is known, for the engine whose
+/// literal depends on it (`Engine::quote_value`). A column missing from it is
+/// quoted the way any value is.
+///
 /// `None` when either list is empty. A statement with no `WHERE` rewrites every
 /// row in the table and one with no `SET` is not a statement at all, so a caller
 /// that has lost the row's key gets nothing to run rather than something that
@@ -270,6 +274,7 @@ pub fn update_row(
     table: &str,
     sets: &[(&str, NewValue)],
     keys: &[(&str, &str)],
+    types: &[(String, String)],
 ) -> Option<String> {
     if sets.is_empty() || keys.is_empty() {
         return None;
@@ -282,8 +287,8 @@ pub fn update_row(
     Some(format!(
         "UPDATE {} SET {} WHERE {}",
         engine.qualified(schema, table),
-        assignments(engine, sets, ", "),
-        assignments(engine, &keys, " AND ")
+        assignments(engine, sets, types, ", "),
+        assignments(engine, &keys, types, " AND ")
     ))
 }
 
@@ -307,6 +312,7 @@ pub fn insert_row(
     schema: &str,
     table: &str,
     columns: &[(&str, Option<&str>)],
+    types: &[(String, String)],
 ) -> Option<String> {
     if columns.is_empty() {
         return None;
@@ -320,10 +326,11 @@ pub fn insert_row(
         .iter()
         // An insert leaves a default to apply by omitting the column outright,
         // so the third state the grid's edits carry has nothing to mean here.
-        .map(|&(_, value)| {
+        .map(|&(column, value)| {
             literal(
                 engine,
                 &value.map_or(NewValue::Null, |value| NewValue::Value(value.into())),
+                type_of(types, column),
             )
         })
         .collect();
@@ -350,6 +357,7 @@ pub fn delete_row(
     schema: &str,
     table: &str,
     keys: &[(&str, &str)],
+    types: &[(String, String)],
 ) -> Option<String> {
     if keys.is_empty() {
         return None;
@@ -362,7 +370,7 @@ pub fn delete_row(
     Some(format!(
         "DELETE FROM {} WHERE {}",
         engine.qualified(schema, table),
-        assignments(engine, &keys, " AND ")
+        assignments(engine, &keys, types, " AND ")
     ))
 }
 
@@ -517,27 +525,39 @@ fn generated_statements<'tree>(root: &Node<'tree>) -> Option<Vec<Node<'tree>>> {
     }
 }
 
-fn assignments(engine: Engine, columns: &[(&str, NewValue)], separator: &str) -> String {
+fn assignments(
+    engine: Engine,
+    columns: &[(&str, NewValue)],
+    types: &[(String, String)],
+    separator: &str,
+) -> String {
     columns
         .iter()
         .map(|(column, value)| {
             format!(
                 "{} = {}",
                 engine.quote_identifier(column),
-                literal(engine, value)
+                literal(engine, value, type_of(types, column))
             )
         })
         .collect::<Vec<_>>()
         .join(separator)
 }
 
+fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
+    types
+        .iter()
+        .find(|(name, _)| name == column)
+        .map(|(_, data_type)| data_type.as_str())
+}
+
 /// A value as it goes into a statement: quoted, or one of the two keywords that
 /// stand for there being no value to quote. Unquoted is the only way to write
 /// either — `'NULL'` and `'DEFAULT'` are the words, and a user who typed one of
 /// them into a cell meant the word.
-fn literal(engine: Engine, value: &NewValue) -> String {
+fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String {
     match value {
-        NewValue::Value(value) => engine.quote_literal(value),
+        NewValue::Value(value) => engine.quote_value(value, data_type),
         NewValue::Null => "NULL".to_string(),
         NewValue::Default => "DEFAULT".to_string(),
     }
@@ -657,9 +677,12 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
             // A value is a single-quoted literal and nothing else. `"other"` is
             // a `literal` to this grammar too, and matching a column against a
             // column is not naming a row. `N'…'` is SQL Server's single-quoted
-            // literal.
+            // literal, and `0x…` its binary one, which is never quoted.
             let quoted = value.strip_prefix(['N', 'n']).unwrap_or(value);
-            if right.kind() != "literal" || !quoted.starts_with('\'') {
+            let hex = value
+                .strip_prefix("0x")
+                .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            if right.kind() != "literal" || !(quoted.starts_with('\'') || hex) {
                 return false;
             }
             match column_name(*left, sql) {
@@ -1013,6 +1036,7 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Option<String
                 &row.table,
                 &borrowed_sets(&row.sets),
                 &borrowed(&row.keys),
+                &row.types,
             )
             // Terminated, not separated: the last statement carries its
             // semicolon too, so appending to a buffer cannot fuse it onto
@@ -2046,7 +2070,8 @@ mod tests {
                 "public",
                 "measurements",
                 &[("note", set("ok"))],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "public"."measurements" SET "note" = 'ok' WHERE "id" = '7'"#
@@ -2057,7 +2082,8 @@ mod tests {
                 "public",
                 "measurements",
                 &[("note", set("ok")), ("depth", set("12"))],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "public"."measurements" SET "note" = 'ok', "depth" = '12' WHERE "id" = '7'"#
@@ -2074,7 +2100,8 @@ mod tests {
                 "app",
                 "memberships",
                 &[("role", set("owner"))],
-                &[("org_id", "1"), ("user_id", "2")]
+                &[("org_id", "1"), ("user_id", "2")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "app"."memberships" SET "role" = 'owner' WHERE "org_id" = '1' AND "user_id" = '2'"#
@@ -2091,7 +2118,8 @@ mod tests {
                 "s",
                 "t",
                 &[("a", set("it's"))],
-                &[("id", "o'hara")]
+                &[("id", "o'hara")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "s"."t" SET "a" = 'it''s' WHERE "id" = 'o''hara'"#
@@ -2102,7 +2130,8 @@ mod tests {
                 "s",
                 r#"od"d"#,
                 &[(r#"we"ird"#, set("x"))],
-                &[("id", "1")]
+                &[("id", "1")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "s"."od""d" SET "we""ird" = 'x' WHERE "id" = '1'"#
@@ -2119,7 +2148,8 @@ mod tests {
                 "public",
                 "measurements",
                 &[("note", NewValue::Null)],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "public"."measurements" SET "note" = NULL WHERE "id" = '7'"#
@@ -2132,7 +2162,8 @@ mod tests {
                 "dbdelve_dev",
                 "measurements",
                 &[("note", NewValue::Null), ("depth", set("12"))],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             "UPDATE `dbdelve_dev`.`measurements` SET `note` = NULL, `depth` = '12' WHERE `id` = '7'"
@@ -2144,7 +2175,8 @@ mod tests {
                 "main",
                 "measurements",
                 &[("note", set("NULL"))],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "main"."measurements" SET "note" = 'NULL' WHERE "id" = '7'"#
@@ -2157,6 +2189,7 @@ mod tests {
             "t",
             &[("a", NewValue::Null)],
             &[("id", "1")],
+            &[],
         )
         .unwrap();
         assert!(is_generated_write(&statement), "{statement} was refused");
@@ -2172,7 +2205,8 @@ mod tests {
                 "public",
                 "measurements",
                 &[("note", NewValue::Default)],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "public"."measurements" SET "note" = DEFAULT WHERE "id" = '7'"#
@@ -2183,7 +2217,8 @@ mod tests {
                 "public",
                 "measurements",
                 &[("note", set("DEFAULT"))],
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             r#"UPDATE "public"."measurements" SET "note" = 'DEFAULT' WHERE "id" = '7'"#
@@ -2195,6 +2230,7 @@ mod tests {
             "t",
             &[("a", NewValue::Default)],
             &[("id", "1")],
+            &[],
         )
         .unwrap();
         assert!(is_generated_write(&statement), "{statement} was refused");
@@ -2204,8 +2240,8 @@ mod tests {
     fn an_update_with_nothing_to_match_on_is_refused() {
         // No WHERE rewrites every row in the table. It must not be possible to
         // produce that statement, so a caller with no key gets nothing.
-        assert!(update_row(Engine::Postgres, "s", "t", &[("a", set("1"))], &[]).is_none());
-        assert!(update_row(Engine::Postgres, "s", "t", &[], &[("id", "1")]).is_none());
+        assert!(update_row(Engine::Postgres, "s", "t", &[("a", set("1"))], &[], &[]).is_none());
+        assert!(update_row(Engine::Postgres, "s", "t", &[], &[("id", "1")], &[]).is_none());
     }
 
     #[test]
@@ -2217,13 +2253,14 @@ mod tests {
                 Engine::Postgres,
                 "public",
                 "measurements",
-                &[("note", Some("ok")), ("depth", None)]
+                &[("note", Some("ok")), ("depth", None)],
+                &[]
             )
             .unwrap(),
             r#"INSERT INTO "public"."measurements" ("note", "depth") VALUES ('ok', NULL)"#
         );
         assert_eq!(
-            insert_row(Engine::Sqlite, "main", "t", &[("a", Some("o'hara"))]).unwrap(),
+            insert_row(Engine::Sqlite, "main", "t", &[("a", Some("o'hara"))], &[]).unwrap(),
             r#"INSERT INTO "main"."t" ("a") VALUES ('o''hara')"#
         );
         // The engine whose identifier quote and literal escape are both its
@@ -2234,14 +2271,15 @@ mod tests {
                 Engine::MySql,
                 "dbdelve_dev",
                 "me`as",
-                &[("no`te", Some(r"a\'b"))]
+                &[("no`te", Some(r"a\'b"))],
+                &[]
             )
             .unwrap(),
             r"INSERT INTO `dbdelve_dev`.`me``as` (`no``te`) VALUES ('a\\''b')"
         );
         // An empty form is not `INSERT INTO t DEFAULT VALUES`, which is a
         // statement dbdelve has never been asked for.
-        assert!(insert_row(Engine::Postgres, "s", "t", &[]).is_none());
+        assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_none());
     }
 
     #[test]
@@ -2261,6 +2299,7 @@ mod tests {
             "public",
             "measurements",
             &[("note", Some("it's fine")), ("depth", None)],
+            &[],
         )
         .unwrap();
         assert!(is_generated_write(&statement), "{statement} was refused");
@@ -2384,6 +2423,7 @@ mod tests {
             "measurements",
             &[("note", set("it's fine")), ("depth", set("12"))],
             &[("id", "7"), ("run", "a'b")],
+            &[],
         )
         .unwrap();
 
@@ -2479,7 +2519,14 @@ mod tests {
     #[test]
     fn a_generated_delete_names_the_row_and_only_the_row() {
         assert_eq!(
-            delete_row(Engine::Postgres, "public", "measurements", &[("id", "7")]).unwrap(),
+            delete_row(
+                Engine::Postgres,
+                "public",
+                "measurements",
+                &[("id", "7")],
+                &[]
+            )
+            .unwrap(),
             r#"DELETE FROM "public"."measurements" WHERE "id" = '7'"#
         );
         // Joined by OR, or with a column dropped, this deletes rows the user
@@ -2489,7 +2536,8 @@ mod tests {
                 Engine::Postgres,
                 "app",
                 "memberships",
-                &[("org_id", "1"), ("user_id", "2")]
+                &[("org_id", "1"), ("user_id", "2")],
+                &[]
             )
             .unwrap(),
             r#"DELETE FROM "app"."memberships" WHERE "org_id" = '1' AND "user_id" = '2'"#
@@ -2499,35 +2547,36 @@ mod tests {
                 Engine::MySql,
                 "dbdelve_demo",
                 "measurements",
-                &[("id", "7")]
+                &[("id", "7")],
+                &[]
             )
             .unwrap(),
             "DELETE FROM `dbdelve_demo`.`measurements` WHERE `id` = '7'"
         );
         assert_eq!(
-            delete_row(Engine::Sqlite, "main", "t", &[("id", "o'hara")]).unwrap(),
+            delete_row(Engine::Sqlite, "main", "t", &[("id", "o'hara")], &[]).unwrap(),
             r#"DELETE FROM "main"."t" WHERE "id" = 'o''hara'"#
         );
         // No WHERE empties the table, so it must not be possible to produce.
-        assert!(delete_row(Engine::Postgres, "s", "t", &[]).is_none());
+        assert!(delete_row(Engine::Postgres, "s", "t", &[], &[]).is_none());
     }
 
     #[test]
     fn the_gate_admits_the_delete_dbdelve_writes_and_reads_its_key_back() {
         for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
-            let statement = delete_row(engine, "s", "t", &[("id", "7")]).unwrap();
+            let statement = delete_row(engine, "s", "t", &[("id", "7")], &[]).unwrap();
             assert!(is_generated_write(&statement), "{statement} was refused");
             assert!(delete_matches_key(&statement, &["id"]), "{statement}");
 
             let composite =
-                delete_row(engine, "s", "t", &[("org_id", "1"), ("user_id", "2")]).unwrap();
+                delete_row(engine, "s", "t", &[("org_id", "1"), ("user_id", "2")], &[]).unwrap();
             assert!(is_generated_write(&composite), "{composite} was refused");
             assert!(delete_matches_key(&composite, &["org_id", "user_id"]));
             // Set equality: the key is a set of columns, not a sequence.
             assert!(delete_matches_key(&composite, &["user_id", "org_id"]));
         }
         // A value carrying the quote character still reads back.
-        let statement = delete_row(Engine::Postgres, "s", "t", &[("id", "o'hara")]).unwrap();
+        let statement = delete_row(Engine::Postgres, "s", "t", &[("id", "o'hara")], &[]).unwrap();
         assert!(is_generated_write(&statement), "{statement} was refused");
         assert!(delete_matches_key(&statement, &["id"]));
 
@@ -2536,8 +2585,74 @@ mod tests {
         // the gate refuses dbdelve's own output. That is the safe direction --
         // the row stays -- and a gate that guessed past an unreadable tree is
         // the unsafe one.
-        let odd = delete_row(Engine::Postgres, "s", "t", &[(r#"we"ird"#, "x")]).unwrap();
+        let odd = delete_row(Engine::Postgres, "s", "t", &[(r#"we"ird"#, "x")], &[]).unwrap();
         assert!(!is_generated_write(&odd), "{odd} passed the gate");
+    }
+
+    #[test]
+    fn sql_server_writes_a_key_the_way_its_column_type_compares() {
+        let types = [
+            ("hash".to_string(), "binary".to_string()),
+            ("code".to_string(), "varchar".to_string()),
+            ("name".to_string(), "nvarchar".to_string()),
+        ];
+        let delete = delete_row(
+            Engine::SqlServer,
+            "dbo",
+            "t",
+            &[("hash", "0x00FF"), ("code", "a'b")],
+            &types,
+        )
+        .unwrap();
+        assert_eq!(
+            delete,
+            r#"DELETE FROM "dbo"."t" WHERE "hash" = 0x00FF AND "code" = 'a''b'"#
+        );
+        assert!(is_generated_write(&delete), "{delete} was refused");
+        assert!(delete_matches_key(&delete, &["hash", "code"]));
+        assert_eq!(classify(Engine::SqlServer, &delete), Verdict::WRITE);
+
+        let update = update_row(
+            Engine::SqlServer,
+            "dbo",
+            "t",
+            &[("name", set("李")), ("code", set("x"))],
+            &[("hash", "0x00FF")],
+            &types,
+        )
+        .unwrap();
+        assert_eq!(
+            update,
+            r#"UPDATE "dbo"."t" SET "name" = N'李', "code" = 'x' WHERE "hash" = 0x00FF"#
+        );
+        assert!(is_generated_write(&update), "{update} was refused");
+        assert_eq!(classify(Engine::SqlServer, &update), Verdict::WRITE);
+
+        assert_eq!(
+            insert_row(
+                Engine::SqlServer,
+                "dbo",
+                "t",
+                &[("hash", Some("0xAB"))],
+                &types
+            )
+            .unwrap(),
+            r#"INSERT INTO "dbo"."t" ("hash") VALUES (0xAB)"#
+        );
+
+        // A value that is not exactly a hex literal stays quoted, and a bare
+        // number that is not one is no key the gate reads.
+        let odd = delete_row(
+            Engine::SqlServer,
+            "dbo",
+            "t",
+            &[("hash", "0x1 OR 1=1")],
+            &types,
+        )
+        .unwrap();
+        assert!(odd.ends_with(r#""hash" = N'0x1 OR 1=1'"#), "{odd}");
+        assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 7"#));
+        assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 0x"#));
     }
 
     #[test]
@@ -2614,6 +2729,7 @@ mod tests {
                 .map(|(column, value)| (column.to_string(), value.clone()))
                 .collect(),
             keys: owned(keys),
+            types: Vec::new(),
         }
     }
 
@@ -2826,6 +2942,7 @@ mod tests {
                 "public",
                 "accounts",
                 &[("name", set("Bo"))],
+                &[],
                 &[]
             )
             .is_none()

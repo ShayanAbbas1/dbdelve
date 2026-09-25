@@ -497,7 +497,7 @@ impl Workspace {
         else {
             return;
         };
-        show_snapshot(&results, &snapshot, mode, cx);
+        show_snapshot(&results, &snapshot, mode, self.engine(), cx);
         let preview_rows = self.settings.preview_rows;
         let Some(profile) = self.profile_mut() else {
             return;

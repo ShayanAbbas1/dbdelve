@@ -873,8 +873,9 @@ impl Workspace {
                                 let produced_grid = !result.columns.is_empty();
                                 results.update(cx, |table, cx| {
                                     let sort = sort_columns(engine, &keys, &result.columns);
-                                    *table.delegate_mut() =
-                                        ResultGrid::new(result, mode).with_sort(sort, sortable);
+                                    *table.delegate_mut() = ResultGrid::new(result, mode)
+                                        .with_engine(engine)
+                                        .with_sort(sort, sortable);
                                     table.refresh(cx);
                                 });
                                 (true, produced_grid, None)

@@ -54,7 +54,8 @@ require it, stop and raise it instead.
      can see closed;
    - one `INSERT`, naming the columns it fills;
    - one `DELETE` whose `WHERE` is a conjunction of equality predicates over
-     distinct, unqualified columns against single-quoted literals: no `OR`, no
+     distinct, unqualified columns against single-quoted literals (or a bare
+     `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
      other operator, no subquery, no function call, no CTE beside it, no
      `RETURNING`, no `LIMIT`, and nothing else in the submission.
 
@@ -101,8 +102,8 @@ require it, stop and raise it instead.
 
    The one thing that crosses out is `db::Engine`, because DBDelve writes SQL
    and has to spell it the way the server will read it. It holds no connection.
-   Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`,
-   `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
+   Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
+   `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
    `fields`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
@@ -626,9 +627,16 @@ Decided, and not to be re-litigated:
 - **SQL Server identifiers are double-quoted, not bracketed.** The grammar
   every gate parses with has no `[name]` and its pin does not move; the login
   tiberius sends turns `QUOTED_IDENTIFIER` on, so `"name"` is an identifier.
-  Literals are `N'…'`, because a bare one is converted to the database's code
-  page and a character it lacks is stored as `?`; `sql::equality_columns`
-  accepts the prefix as a single-quoted literal.
+  A value's literal is spelled by its column's type (`Engine::quote_value`,
+  fed the types the grid or insert form knows): `N'…'` for a Unicode or
+  unknown type, or any non-ASCII value, because a bare one is converted to the
+  database's code page and a character it lacks is stored as `?`; plain `'…'`
+  for an ASCII value bound for a `varchar`, numeric or date column, because an
+  `N` literal there converts the column instead and the edit scans the index;
+  and a bare `0x…` for a binary column, only when the value is exactly a hex
+  literal, since a quoted one is compared as text and matches no row.
+  `sql::equality_columns` accepts `N'…'` as a single-quoted literal and `0x…`
+  beside it. `image` is binary on SQL Server alone (`Engine::is_binary_type`).
 - **SQL Server previews page with `OFFSET … FETCH`.** T-SQL has no `LIMIT` and
   the grammar has no `FETCH`, so a preview is generated, sorted and gated as
   `LIMIT n OFFSET m` and re-spelled by `sql::paged` afterwards (`ORDER BY (SELECT

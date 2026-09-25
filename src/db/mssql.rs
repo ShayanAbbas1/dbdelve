@@ -752,11 +752,11 @@ fn render(value: &ColumnData<'_>, kind: ColumnType) -> Cell {
         ColumnData::I16(value) => value.as_ref()?.to_string(),
         ColumnData::I32(value) => value.as_ref()?.to_string(),
         ColumnData::I64(value) => value.as_ref()?.to_string(),
-        ColumnData::F32(value) => value.as_ref()?.to_string(),
+        ColumnData::F32(value) => float(*value.as_ref()?),
         ColumnData::F64(value) if matches!(kind, ColumnType::Money | ColumnType::Money4) => {
             format!("{:.4}", value.as_ref()?)
         }
-        ColumnData::F64(value) => value.as_ref()?.to_string(),
+        ColumnData::F64(value) => float(*value.as_ref()?),
         ColumnData::Bit(value) => u8::from(*value.as_ref()?).to_string(),
         ColumnData::String(value) => value.as_ref()?.to_string(),
         ColumnData::Guid(value) => value.as_ref()?.to_string().to_uppercase(),
@@ -816,6 +816,22 @@ fn render(value: &ColumnData<'_>, kind: ColumnType) -> Cell {
             )
         }
     })
+}
+
+/// The shortest digits that read back as the same value, in exponent form at
+/// the magnitudes where `Display` would spell out hundreds of zeros. `1E+308`,
+/// the way the server prints it, is also a literal T-SQL reads.
+fn float<T: Copy + Into<f64> + std::fmt::Display + std::fmt::UpperExp>(value: T) -> String {
+    let magnitude = value.into().abs();
+    if magnitude != 0.0 && !(1e-4..1e15).contains(&magnitude) {
+        let text = format!("{value:E}");
+        match text.contains("E-") {
+            true => text,
+            false => text.replacen('E', "E+", 1),
+        }
+    } else {
+        value.to_string()
+    }
 }
 
 /// Days from 0001-01-01, the epoch of every TDS 7.3 date.
@@ -1251,6 +1267,26 @@ mod tests {
             let pinned = settings(mode, Some("/tmp/ca.pem"));
             assert!(pinned.contains("CaCertificateLocation"), "{pinned}");
             assert!(!pinned.contains("TrustAll"), "{pinned}");
+        }
+    }
+
+    #[test]
+    fn a_float_far_from_one_renders_in_exponent_form() {
+        let text = |value: ColumnData<'static>| super::render(&value, ColumnType::Floatn).unwrap();
+        assert_eq!(text(ColumnData::F64(Some(1.5))), "1.5");
+        assert_eq!(text(ColumnData::F64(Some(3.0))), "3");
+        assert_eq!(text(ColumnData::F64(Some(0.0))), "0");
+        assert_eq!(text(ColumnData::F64(Some(-0.25))), "-0.25");
+        assert_eq!(text(ColumnData::F64(Some(123_456.789))), "123456.789");
+        assert_eq!(text(ColumnData::F64(Some(1e308))), "1E+308");
+        assert_eq!(text(ColumnData::F64(Some(-1.5e15))), "-1.5E+15");
+        assert_eq!(text(ColumnData::F64(Some(1e-300))), "1E-300");
+        assert_eq!(text(ColumnData::F64(Some(2.5e-5))), "2.5E-5");
+        assert_eq!(text(ColumnData::F32(Some(3.4e38))), "3.4E+38");
+        assert_eq!(text(ColumnData::F32(Some(0.1))), "0.1");
+        for value in [1e308, -1.5e15, 1e-300, 2.5e-5, f64::MIN_POSITIVE, f64::MAX] {
+            let shown = text(ColumnData::F64(Some(value)));
+            assert_eq!(shown.parse::<f64>(), Ok(value), "{shown}");
         }
     }
 
@@ -1858,6 +1894,7 @@ mod tests {
             table: "locations".into(),
             sets: vec![("name".into(), NewValue::Value(name.to_string().into()))],
             keys: vec![("id".into(), id.into())],
+            types: Vec::new(),
         };
         for id in ["901", "902"] {
             let _ = connection.query(&format!("DELETE FROM locations WHERE id = {id}"));
@@ -1866,6 +1903,7 @@ mod tests {
                 "dbo",
                 "locations",
                 &[("id", Some(id)), ("name", Some("placeholder"))],
+                &[],
             )
             .unwrap())
             .expect("the insert should run");
@@ -1877,6 +1915,7 @@ mod tests {
             "locations",
             &[("name", NewValue::Value("Zoë 李 🐉 'quoted'".into()))],
             &[("id", "901")],
+            &[],
         )
         .unwrap())
         .expect("the update should run");
@@ -1915,10 +1954,86 @@ mod tests {
 
         for id in ["901", "902"] {
             let delete =
-                sql::delete_row(Engine::SqlServer, "dbo", "locations", &[("id", id)]).unwrap();
+                sql::delete_row(Engine::SqlServer, "dbo", "locations", &[("id", id)], &[]).unwrap();
             assert!(sql::delete_matches_key(&delete, &["id"]));
             run(&delete).expect("the delete should run");
             assert_eq!(name_of(id), None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_binary_or_varchar_key_names_its_row() {
+        // Through the grid, as an edit and a delete travel: the key is the
+        // value the grid shows, its literal spelled by the column's type.
+        let connection = live();
+        let tables = [
+            (
+                "fix_vals_binary_key",
+                "binary(16)",
+                "0x000102030405060708090A0B0C0D0EFF",
+            ),
+            ("fix_vals_varchar_key", "varchar(20)", "'k-1'"),
+        ];
+        let drop = || {
+            for (table, _, _) in tables {
+                let _ = connection.query(&format!("DROP TABLE IF EXISTS dbo.{table}"));
+            }
+        };
+        drop();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for (table, key, id) in tables {
+                connection
+                    .query(&format!(
+                        "CREATE TABLE dbo.{table} \
+                         (id {key} NOT NULL PRIMARY KEY, name nvarchar(20) NOT NULL); \
+                         INSERT INTO dbo.{table} VALUES ({id}, N'before')"
+                    ))
+                    .unwrap();
+                let select = format!("SELECT id, name FROM dbo.{table}");
+                let name = || {
+                    let rows = connection.query(&select).unwrap().rows;
+                    rows.first().and_then(|row| row[1].clone())
+                };
+                let run = |sql: &str| {
+                    assert!(sql::is_generated_write(sql), "the gate refused {sql}");
+                    connection.query(sql).expect("the write should run");
+                };
+
+                let mut grid = crate::result_grid::ResultGrid::new(
+                    connection.query(&select).unwrap(),
+                    crate::sql::Mode::ReadWrite,
+                )
+                .with_engine(Engine::SqlServer);
+                assert!(grid.set_pending(0, 1, NewValue::Value("after".into())));
+                let batch = sql::update_batch(Engine::SqlServer, &grid.pending_updates()).unwrap();
+                run(&batch);
+                assert_eq!(name().as_deref(), Some("after"), "{batch}");
+
+                let (schema, relation, keys) = grid.row_key(0).expect("a key names the row");
+                let keys: Vec<(&str, &str)> = keys
+                    .iter()
+                    .map(|(column, value)| (column.as_str(), value.as_str()))
+                    .collect();
+                let delete = sql::delete_row(
+                    Engine::SqlServer,
+                    &schema,
+                    &relation,
+                    &keys,
+                    &grid.column_types(),
+                )
+                .unwrap();
+                assert!(sql::delete_matches_key(&delete, &["id"]));
+                run(&delete);
+                assert!(
+                    connection.query(&select).unwrap().rows.is_empty(),
+                    "{delete}"
+                );
+            }
+        }));
+        drop();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
     }
 
