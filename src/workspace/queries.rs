@@ -1000,7 +1000,7 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let Some(formatted) = crate::sql::format(&text) else {
+        let Some(formatted) = crate::sql::format(self.engine(), &text) else {
             self.note(
                 "Not formatting: a dollar-quoted body would be rewritten.".into(),
                 cx,

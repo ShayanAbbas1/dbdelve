@@ -152,6 +152,14 @@ an upgrade, or ask for confirmation.
   the verdict carries Read-write and the gate asks for that instead.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
+- **`IF`/`ELSEIF` conditions are classified, not treated as unreadable.**
+  T-SQL's `IF … ELSE` and the `IF … END IF` Postgres, MySQL and Snowflake
+  parse to the same variant, and every branch and every condition counts,
+  since the server picks which runs. `condition_verdict` reads a plain name,
+  value, comparison or `IS …` test as a read, and a subquery (`EXISTS`, `IN`,
+  a bare subquery) as whatever `sql::classify` would give that query; a
+  function call or anything else it does not recognise still needs Full.
+  Before this a bare `IF` needed Full everywhere, whatever it held.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
   mode into every open grid, which caches it.
 - `Connection::set_read_only` holds a Read-only session to reads on the server
@@ -244,7 +252,8 @@ Without `x11` or `wayland` the Linux backend panics on the first frame.
 - `sqlparser`: its defaults build assembly through `cc` (`psm`) to guard
   against pathological nesting nobody sends from a local buffer.
 - `sqlformat`: its defaults colourise a token dump nothing prints.
-- `tiberius`: its defaults are `native-tls` (OpenSSL on Linux) and `winauth`.
+- `tiberius`: `0.12.3` is its latest release, and its defaults are `native-tls`
+  (OpenSSL on Linux) and `winauth`.
   Its `rustls` feature is **tokio-rustls 0.24 on rustls 0.21**, a second rustls
   major version beside the 0.23 everything else shares: pure Rust and still on
   `ring`, so no second crypto library, but a second copy of the TLS stack, and
@@ -339,7 +348,14 @@ The seed uses `unhex()`, so it needs sqlite3 3.41 or later.
 **The MySQL container reports itself healthy when its init script failed.**
 `mysqladmin ping` does not care whether the seed applied, so a half-seeded
 database looks exactly like a good one. Check a row count, not the status;
-`live_the_development_database_is_fully_seeded` is that check.
+`live_the_development_database_is_fully_seeded` is that check. SQL Server's own
+healthcheck gates the same row count behind the seed marker file, since
+`accounts` fills early in the script and would otherwise look done before it
+is; `dev/mssql/entrypoint.sh` writes the marker only once the whole seed
+succeeds, so `docker compose up -d --wait` waits for the whole seed rather
+than the first table. A seed that failed part way leaves objects behind with no
+marker, so a restart that finds none drops the database and login first and
+reseeds from scratch instead of colliding with what it left behind.
 
 ### Checks and CI
 
@@ -360,7 +376,9 @@ lowercase prefix is what they read); the `tests` job in `ci.yml` has the values
 for the dev databases. It has no Snowflake account, so it skips the Snowflake
 live tests but for the one that needs none; the mock tests stand in for them. CI lints on Linux, macOS and Windows, runs the live tests
 on Linux, and runs the unit tests on Windows too, since the storage tests are
-what exercise the `APPDATA` paths.
+what exercise the `APPDATA` paths. `compose.yaml` and `dev/**` are in the
+workflow's own path filters, so a change to a dev container or a seed script
+runs CI too, not only a change under `src/`.
 
 ### Platforms
 
@@ -466,7 +484,18 @@ Decided, and not to be re-litigated:
   literal_ in MySQL, so `ORDER BY "name"` sorts every row by the same constant
   with no error. `filter::filter_predicate` quotes a _value the user supplied_
   (a filter bar's value, typed or put there by following a foreign key), which
-  is the other half of the same hazard. Every filter operator lives inside it,
+  is the other half of the same hazard. Since SQL Server spells a literal by
+  its column's type, `filter_predicate` and `substring` take the column's
+  `data_type` and quote through `Engine::quote_value`, the same call an edit
+  makes, fed from the tab's loaded structure; a followed foreign key's bar
+  borrows the referencing column's type for the referenced one, whose
+  structure is not loaded, and a bar applied before the structure loads quotes
+  as an unknown type (`N'…'`) until it is applied again. A saved tab records
+  the engine its filter was written for (`StoredObject::filter_engine`) and
+  reopens on that engine with the filter exactly as it ran
+  (`filter::restored_filter`), since re-deriving it without the structure
+  would spell it differently and miss the grid snapshot and tab identity keyed
+  by it. Every filter operator lives inside it,
   `filter::substring` and `filter::like_pattern` included;
   `filter::foreign_key_filter` yields a bar rather than a `WHERE`, and
   `filter::derived_filter` folds the bars through `filter_predicate` rather than
@@ -509,12 +538,48 @@ Decided, and not to be re-litigated:
   in an earlier run is theirs to finish. SQLite asks `is_autocommit` before and
   after; MySQL cannot, because the driver keeps the server's
   `SERVER_STATUS_IN_TRANS` flag private, so it reads the submitted text instead.
-  **SQL Server's session runs with `SET XACT_ABORT ON`**, set at connect like
-  a timeout, because without it a constraint violation ends only its own
-  statement and the batch carries on to the `COMMIT` dbdelve wrote. It reads
-  the submitted text like MySQL, then asks `@@TRANCOUNT`. T-SQL has no nested
-  transactions, so that rollback takes a transaction the user opened earlier
-  with it, and the error says the transaction was rolled back.
+  **SQL Server's session runs with `SET XACT_ABORT ON`**, set at login like a
+  timeout, because without it a constraint violation ends only its own
+  statement and the batch carries on to the `COMMIT` dbdelve wrote. dbdelve's
+  own SQL is reached through `Connection::generated` (`Origin::Generated`: a
+  relation tab's preview, a grid edit) or the private `internal_query`
+  (`Origin::Internal`: catalog and structure queries), never `Connection::query`
+  (`Origin::User`). `execute_unchecked` is the one place either is called:
+  `connection.generated` for an object tab's query and a query tab's
+  grid-edit apply run, `connection.query` for everything else. A
+  statement run under `Origin::Generated` or `Origin::Internal` is wrapped in
+  `EXEC sp_executesql` (`scoped`) behind `SESSION_OPTIONS` (`XACT_ABORT ON`,
+  `QUOTED_IDENTIFIER ON`, `ANSI_NULLS ON`, `ANSI_WARNINGS ON`,
+  `IMPLICIT_TRANSACTIONS OFF`, `ROWCOUNT 0`, `DATEFORMAT ymd`), scoped to that
+  one `sp_executesql` call so a `SET` the user made themselves is exactly as
+  they left it once dbdelve's statement returns; `Origin::User` runs as typed,
+  under nothing but the login default. A preflight before the statement
+  (`PREFLIGHT_SQL`, run under `SESSION_OPTIONS` for dbdelve's own statement
+  and under the user's options for theirs, bar `USER_DESCRIBE_OPTIONS`'
+  `IMPLICIT_TRANSACTIONS OFF` and `ROWCOUNT 0`, so it compiles the statement
+  the way it will run) reads `@@TRANCOUNT`,
+  and `transaction_outcome` reads it again after a failure: T-SQL has no
+  nested transactions, so dbdelve issues its own `ROLLBACK` only when its own
+  `BEGIN TRANSACTION` batch opened the transaction from a count of zero, never
+  one open before it arrived; when `XACT_ABORT` ends a transaction that
+  predates the statement regardless, the error says that transaction -- not
+  dbdelve's -- was rolled back.
+- **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
+  system type id 240) panic tiberius part way through a result it cannot
+  decode**, which would otherwise close the session and the transaction in it.
+  The same preflight describes the first result set's columns
+  (`unreadable_columns`) and refuses before running when one of them is
+  unreadable: `readable_preview` rewrites the one shape `explorer::preview_sql`
+  writes to read such a column as text (`CONVERT(nvarchar(max), …)` for a CLR
+  type, `CAST(… AS nvarchar(4000))` for `sql_variant`, the spellings the
+  gate's grammar reads) under its own name, which is why the column has no
+  source and stays uneditable, and the rewrite passes `sql::is_generated_select`
+  itself before it is sent (hard rule 2); a user's own statement is refused
+  instead of rewritten, naming the column and how to cast it, per hard rule 1.
+  A later result set the preflight cannot see still panics the driver;
+  `Session::trip` catches it (`Lost::Panicked`) and the run reconnects, same as
+  a lost socket, its error carrying the panic message plus that the session
+  reset took any open transaction and temp tables with it.
 - **A statement timeout is one number per profile, applied at connect**, and
   each engine buys something different with it. Postgres's `statement_timeout`
   bounds any statement; MySQL's `max_execution_time` bounds read-only `SELECT`s
@@ -526,13 +591,28 @@ Decided, and not to be re-litigated:
   run, which stops the statement the way Cancel does. It goes in at connect and never into the user's
   submission (hard rule 1, and on Postgres a `SET` inside their submission
   would be scoped to the implicit transaction around it). It therefore bounds
-  DBDelve's own catalog and structure queries too, which is intended.
+  DBDelve's own catalog and structure queries too, which is intended. On SQL
+  Server the timer wraps the whole of `Session::trip`, so it bounds every round
+  trip a run needs and not just the statement: the preflight ahead of it
+  (`@@TRANCOUNT` and the result-set describe) and the follow-ups behind it
+  (`@@ROWCOUNT`, the edit-target describe) run inside the same window and are
+  stopped the same way.
 - **Cancel reaches the running statement and nothing queued behind it.** The
   handle it needs (Postgres's `CancelToken`, MySQL's connection id, SQLite's
   `InterruptHandle`, a second handle on SQL Server's socket) is captured in
   each engine's `open`, before the client goes behind the connection mutex,
   because the statement being cancelled is holding that mutex.
-  `Connection::cancel` takes `&self` and locks nothing but its own flags.
+  `Connection::cancel` takes `&self` and locks nothing but its own flags. A
+  catalog load is never what Cancel is for (`Origin::Internal` is never
+  cancellable on SQL Server, and the other engines' `cancel` stops only the
+  handle their one connection is running, which a catalog load does not
+  register): `live_a_cancel_while_queued_behind_a_catalog_load_stops_the_statement_not_the_load`
+  is the proof for SQL Server. A statement still waiting for the connection
+  mutex behind one that is running, or for SQL Server's reconnect, is cancelled
+  before it is ever sent (`InFlight::cancel_queued`, checked in
+  `Connection::run` once the mutex is taken and the session reconnected), and a Cancel that lands after the statement already finished is
+  answered "Cancel arrived after that." rather than left to look like it did
+  nothing.
 - **SQL Server's Cancel closes the connection.** tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary
   login lacks, so Cancel shuts the socket down and the server abandons the
@@ -628,15 +708,21 @@ Decided, and not to be re-litigated:
   every gate parses with has no `[name]` and its pin does not move; the login
   tiberius sends turns `QUOTED_IDENTIFIER` on, so `"name"` is an identifier.
   A value's literal is spelled by its column's type (`Engine::quote_value`,
-  fed the types the grid or insert form knows): `N'…'` for a Unicode or
+  fed the types the grid, insert form or filter bar knows): `N'…'` for a Unicode or
   unknown type, or any non-ASCII value, because a bare one is converted to the
   database's code page and a character it lacks is stored as `?`; plain `'…'`
   for an ASCII value bound for a `varchar`, numeric or date column, because an
-  `N` literal there converts the column instead and the edit scans the index;
-  and a bare `0x…` for a binary column, only when the value is exactly a hex
-  literal, since a quoted one is compared as text and matches no row.
-  `sql::equality_columns` accepts `N'…'` as a single-quoted literal and `0x…`
-  beside it. `image` is binary on SQL Server alone (`Engine::is_binary_type`).
+  `N` literal there converts the column instead and the edit scans the index,
+  with a `datetime` or `smalldatetime` value in the ISO `T` form
+  (`'2024-01-02T03:04:05.000'`) that no `DATEFORMAT` or `SET LANGUAGE`
+  reorders, since the literal also runs from a query tab's buffer under the
+  user's options; and a bare `0x…` (a `0X` prefix normalised) for a binary
+  column, only when the value is exactly a hex literal, since a quoted one is
+  compared as text and matches no row. `sql::equality_columns` accepts `N'…'`
+  as a single-quoted literal and `0x…` beside it. `image`, `rowversion` and
+  `timestamp` are binary on SQL Server alone (`Engine::is_binary_type`). A
+  binary alias type is known only by its alias name, so it is quoted as an
+  unknown type (known limitation).
 - **SQL Server previews page with `OFFSET … FETCH`.** T-SQL has no `LIMIT` and
   the grammar has no `FETCH`, so a preview is generated, sorted and gated as
   `LIMIT n OFFSET m` and re-spelled by `sql::paged` afterwards. `OFFSET`
@@ -653,30 +739,66 @@ Decided, and not to be re-litigated:
   `GO` lines are separators never sent, `[names]` are quoted, a routine's body
   runs to the end of its batch and a `BEGIN … END` block is never cut. A
   selection is sent as its one batch; more than one, or `GO n`, is refused.
+  Format Query reflows each batch alone with sqlformat's SQL Server dialect,
+  which reads `[names]`, and leaves every `GO` line as written.
 - **SQL Server edit targets come from a describe**, as Postgres's do:
   `sys.dm_exec_describe_first_result_set` in mode 2 (a view is its own source,
   and has no key), after the statement ran, only when it returned exactly one
   result set, and only when the described names match the result's. A column
   from another database is not local, since an `EditTarget` names no
-  database. Writes report no row count: tiberius keeps the done tokens to
-  itself.
+  database. `is_updateable` is false for a computed, identity or rowversion
+  column, so it shows in a result but is never a `SET` target; it still names
+  its row's key when it is one, since the describe's key columns and its
+  `SET`-target columns are read separately. Writes report the last statement's
+  row count: tiberius keeps the done tokens to itself, so it is asked for with
+  a follow-up `SELECT @@ROWCOUNT`, the way Postgres's own last-command count
+  works, whenever the write's own result carried none. That follow-up, and the
+  preflight before the next statement, leave `@@ROWCOUNT` and `@@ERROR` at
+  their own values, not the user's last statement's (known limitation: an
+  `sp_executesql` wrapper does not shield them).
+- **The Structure tab reads more than one privilege level can see.** An alias
+  type's `TYPE_NAME(user_type_id)` is null when the login cannot see it, and
+  falls back to `TYPE_NAME(system_type_id)`, its base type. A computed column's
+  definition is null the same way without `VIEW DEFINITION`, and reads as `AS
+  <hidden>` rather than a bare `AS `. An index's text carries its `INCLUDE`
+  columns and its filter predicate when it has either, and a columnstore index
+  (clustered or not, no key of its own) is read through an `OUTER APPLY`
+  rather than dropped for having none. A foreign key's text carries its `ON
+  DELETE`/`ON UPDATE` actions when they are not `NO ACTION`, and ` DISABLED`
+  or ` NOT TRUSTED` when either is set.
 - **A SQL Server profile is held to its database.** Every name dbdelve writes
   stops at the schema, so after a `USE` a generated `DELETE` would find the same
   name elsewhere. A run whose text says `USE` is followed by `DB_NAME()`; if it
-  moved, the session is moved back and the run fails saying so.
+  moved, the session is moved back and the run fails saying so, whether or not
+  the statement that moved it also failed on its own account -- a batch that
+  moved the session and then failed leaves it moved all the same.
 - **SQL Server's TLS is tiberius's.** `disable` is `EncryptionLevel::Off`,
   which still encrypts the login packet; the promising rungs are `Required`
   (never `On`, which panics the driver when the server offers less); `prefer`
   and `disable` alone retry with `NotSupported` for a server that cannot
-  encrypt. `verify-ca` checks the hostname too, since tiberius cannot switch
+  encrypt, and only after a failed handshake (`negotiation_failed`): a refused
+  login or a connect that timed out fails the same way again, so neither
+  retries. `verify-ca` checks the hostname too, since tiberius cannot switch
   that alone off: stricter, which rule 7 permits. A named root certificate must
   be one certificate.
+- **An error from inside a procedure, trigger or function carries no position.**
+  `token.procedure()` names it when one raised the error; the line the server
+  gives is the routine's own, not the batch's, so `query_error` maps a line
+  back into the submitted text only when that name is empty.
 - **SQL Server values are rendered in `mssql::render`.** TDS is binary, so the
   server's own formats are rebuilt there: dates from day counts, `datetime`'s
   1/300 s ticks, `datetimeoffset` from its UTC instant plus offset, decimals from
   the unscaled integer. `money` arrives from tiberius as an `f64`, exact below
-  about 9 × 10¹¹. Driver panics (unimplemented tokens, an empty trust store) are
-  caught and reported rather than poisoning the mutex.
+  about 9 × 10¹¹. A `float` or `real` outside roughly `1e-4` to `1e15` prints in
+  the exponent form the server itself would, `1E+308`, rather than `Display`'s
+  hundreds of zeros. `Money` and `Datetimen` are what tiberius names a nullable
+  `money`/`smallmoney` or `datetime`/`smalldatetime` column alike, without the
+  length that would tell them apart: a nullable `smallmoney` always renders as
+  `money`, and a nullable `smalldatetime` only corrects itself to
+  `smalldatetime` once a row hands back an actual `SmallDateTime` value, so an
+  empty or all-`NULL` one still reads `datetime` (known limitation). Driver
+  panics (unimplemented tokens, an empty trust store) are caught and reported
+  rather than poisoning the mutex.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
 

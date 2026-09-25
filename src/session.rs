@@ -823,6 +823,7 @@ impl ObjectTab {
             schema: self.schema.clone(),
             name: self.name.clone(),
             filter: self.filter().to_string(),
+            filter_engine: (!self.filter().is_empty()).then(|| engine.as_str().to_string()),
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
             filters: Vec::new(),

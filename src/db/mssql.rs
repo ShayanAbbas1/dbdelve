@@ -313,15 +313,23 @@ const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 /// What every statement dbdelve writes assumes of the session, and what a
 /// user's `SET` can change under it: `XACT_ABORT` is what makes a bracketed
-/// batch all-or-nothing, the quoting and the `datetime` literals it writes
-/// read differently without the next four, and `ROWCOUNT` would cut a preview
-/// short. `SET LANGUAGE` resets `DATEFORMAT`, so it is asserted rather than
-/// left at the login's. See [`scoped`] for why they do not outlive the batch.
+/// batch all-or-nothing, the quoting reads differently without the next four,
+/// and `ROWCOUNT` would cut a preview short. `DATEFORMAT` is belt and braces:
+/// `Engine::quote_value` spells `datetime` in the ISO form no `DATEFORMAT` or
+/// `SET LANGUAGE` reorders, since the same literal is appended to a query
+/// tab's buffer and runs there under the user's. See [`scoped`] for why they do
+/// not outlive the batch.
 ///
 /// One line: it goes in front of the statement, whose line numbers the
 /// server's errors are counted in.
 const SESSION_OPTIONS: &str = "SET XACT_ABORT ON; SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON; \
     SET ANSI_WARNINGS ON; SET IMPLICIT_TRANSACTIONS OFF; SET ROWCOUNT 0; SET DATEFORMAT ymd; ";
+
+/// What the preflight and describe of a user's statement assert of the
+/// session, and nothing more: they compile the statement, so they do it under
+/// the user's quoting and the rest of the user's options, but must neither
+/// open a transaction nor be cut short by the user's `ROWCOUNT`.
+const USER_DESCRIBE_OPTIONS: &str = "SET IMPLICIT_TRANSACTIONS OFF; SET ROWCOUNT 0; ";
 
 /// Asked before a statement runs: how many transactions are open, and what the
 /// first result set will hold. The count is what says afterwards whether a
@@ -587,7 +595,14 @@ impl Connection {
         if cancellable {
             self.in_flight().queued += 1;
         }
-        let locked = self.session.lock();
+        let mut locked = self.session.lock();
+        // Still queued while it reconnects, which can take the whole connect
+        // bound, so a Cancel meanwhile is kept for the check below rather than
+        // finding nothing running to stop.
+        let connected = match &mut locked {
+            Ok(guard) if guard.is_none() => self.connect().map(|session| **guard = Some(session)),
+            _ => Ok(()),
+        };
         let cancelled = cancellable && {
             let mut in_flight = self.in_flight();
             in_flight.queued -= 1;
@@ -602,9 +617,7 @@ impl Connection {
                 "Cancelled before it started: nothing was sent to the server.".into(),
             ));
         }
-        if guard.is_none() {
-            *guard = Some(self.connect()?);
-        }
+        connected?;
         let session = guard.as_mut().expect("connected above");
 
         if cancellable {
@@ -672,8 +685,9 @@ impl Connection {
         let mut statement = sql.to_string();
         let mut before = None;
         if origin != Origin::Internal
-            && let Some(Ok(preflight)) = session.trip(&scoped(
+            && let Some(Ok(preflight)) = session.trip(&describing(
                 &PREFLIGHT_SQL.replace("{statement}", &Engine::SqlServer.quote_literal(sql)),
+                origin,
             ))
         {
             let described = &preflight.result;
@@ -929,10 +943,24 @@ fn named<'a>(result: &QueryResult, row: &'a [Cell], name: &str) -> Option<&'a st
 /// `SET` there lasts until the dynamic batch returns, so whatever the user set
 /// is theirs again for their next statement.
 fn scoped(sql: &str) -> String {
+    scoped_under(SESSION_OPTIONS, sql)
+}
+
+fn scoped_under(options: &str, sql: &str) -> String {
     format!(
         "EXEC sp_executesql {}",
-        Engine::SqlServer.quote_literal(&format!("{SESSION_OPTIONS}{sql}"))
+        Engine::SqlServer.quote_literal(&format!("{options}{sql}"))
     )
+}
+
+/// A question dbdelve asks about a statement, compiling it under the options
+/// that statement runs under: a user's own, where `SET QUOTED_IDENTIFIER OFF`
+/// makes `"position"` a string rather than a column.
+fn describing(sql: &str, origin: Origin) -> String {
+    match origin {
+        Origin::User => scoped_under(USER_DESCRIBE_OPTIONS, sql),
+        Origin::Generated | Origin::Internal => scoped(sql),
+    }
 }
 
 /// The preflight's columns tiberius cannot decode: its `todo!()`s for
@@ -980,6 +1008,11 @@ fn unreadable_error(columns: &[(usize, String, String)]) -> String {
 ///
 /// ponytail: rewrites only the one shape `explorer::preview_sql` writes; a
 /// user's own statement is refused instead, never rewritten (hard rule 1).
+///
+/// The rewrite is what is sent, so it passes `sql::is_generated_select` again
+/// (read back through `sql::unpaged`, as the preview was read before paging)
+/// rather than riding on the approval the preview it replaced was given (hard
+/// rule 2); one that does not is `None`, and the preview is refused.
 fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
     let rest = sql.strip_prefix("SELECT * FROM ")?;
     let columns = described
@@ -988,13 +1021,16 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
         .map(|row| {
             let name = Engine::SqlServer.quote_identifier(named(described, row, "column_name")?);
             Some(match named(described, row, "system_type_id")? {
-                "240" => format!("{name}.ToString() AS {name}"),
+                // Not `.ToString()` or `CAST(… AS nvarchar(max))`, which the
+                // gate's grammar cannot read.
+                "240" => format!("CONVERT(nvarchar(max), {name}) AS {name}"),
                 "98" => format!("CAST({name} AS nvarchar(4000)) AS {name}"),
                 _ => name,
             })
         })
         .collect::<Option<Vec<_>>>()?;
     Some(format!("SELECT {} FROM {rest}", columns.join(", ")))
+        .filter(|projected| crate::sql::is_generated_select(&crate::sql::unpaged(projected)))
 }
 
 async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::error::Error> {
@@ -1041,9 +1077,7 @@ async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::err
     }
 
     // A query's count is the rows it returned. A write's is in the protocol's
-    // done tokens, which tiberius keeps to itself when a batch may return rows,
-    // so a write reports none rather than a zero that would read as "nothing
-    // changed".
+    // done tokens, which tiberius keeps to itself, so `execute` asks for it.
     if sets > 0 {
         result.rows_affected = Some(result.rows.len() as u64);
     }
@@ -1278,12 +1312,7 @@ fn describe_columns(
     origin: Origin,
 ) -> Vec<ProbedColumn> {
     let describe = DESCRIBE_SQL.replace("{statement}", &Engine::SqlServer.quote_literal(sql));
-    // Compiled under the options the statement ran under.
-    let describe = match origin {
-        Origin::User => describe,
-        Origin::Generated | Origin::Internal => scoped(&describe),
-    };
-    let Some(Ok(collected)) = session.trip(&describe) else {
+    let Some(Ok(collected)) = session.trip(&describing(&describe, origin)) else {
         return Vec::new();
     };
     let described = &collected.result;
@@ -1568,7 +1597,7 @@ fn negotiation_failed(error: &tiberius::error::Error) -> bool {
 mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, ForeignKey, RelationKind, RoutineKind};
-    use crate::filter::{Operator, filter_predicate, relation_sql};
+    use crate::filter::{FilterBar, Operator, derived_filter, filter_predicate, relation_sql};
     use crate::result_grid::{NewValue, PendingRow};
     use crate::sql::{self, SortKey};
     use tiberius::numeric::Numeric;
@@ -1822,7 +1851,7 @@ mod tests {
                     data_type: None,
                 })
                 .to_vec(),
-            rows: [("id", "56"), ("place", "240"), ("any\"thing", "98")]
+            rows: [("id", "56"), ("place", "240"), ("extra", "98")]
                 .map(|(name, kind)| vec![Some(name.to_string()), Some(kind.to_string())])
                 .to_vec(),
             ..QueryResult::default()
@@ -1830,12 +1859,23 @@ mod tests {
         assert_eq!(
             readable_preview("SELECT * FROM \"dbo\".\"t\" ORDER BY 1", &described).as_deref(),
             Some(
-                "SELECT \"id\", \"place\".ToString() AS \"place\", \
-                 CAST(\"any\"\"thing\" AS nvarchar(4000)) AS \"any\"\"thing\" \
+                "SELECT \"id\", CONVERT(nvarchar(max), \"place\") AS \"place\", \
+                 CAST(\"extra\" AS nvarchar(4000)) AS \"extra\" \
                  FROM \"dbo\".\"t\" ORDER BY 1"
             )
         );
         assert_eq!(readable_preview("SELECT id FROM t", &described), None);
+        // What is sent is gated again, not only the preview it replaced.
+        let paged = "SELECT * FROM \"dbo\".\"t\" ORDER BY (SELECT NULL), \"id\" \
+                     OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY";
+        assert!(readable_preview(paged, &described).is_some());
+        let smuggled = "SELECT * FROM \"dbo\".\"t\"; DROP TABLE \"dbo\".\"t\"";
+        assert_eq!(readable_preview(smuggled, &described), None);
+        // The grammar does not read a doubled quote inside a name, so neither
+        // does the gate: refused, as a preview of such a table already is.
+        let mut odd = described.clone();
+        odd.rows[2][0] = Some("any\"thing".into());
+        assert_eq!(readable_preview(paged, &odd), None);
         assert_eq!(
             unreadable_columns(&described)
                 .iter()
@@ -2472,8 +2512,14 @@ mod tests {
 
         // Rows whose sensor is `sensor-03` are ids 3, 27, 51 … 4995; sorted
         // down, page three of ten starts twenty rows below the top.
-        let equals =
-            filter_predicate(Engine::SqlServer, "sensor", Operator::Equals, "sensor-03").unwrap();
+        let equals = filter_predicate(
+            Engine::SqlServer,
+            "sensor",
+            None,
+            Operator::Equals,
+            "sensor-03",
+        )
+        .unwrap();
         let page = preview(&equals, 20);
         assert_eq!(page.rows.len(), 10);
         assert_eq!(page.rows[0][0].as_deref(), Some("4515"));
@@ -2486,8 +2532,14 @@ mod tests {
         );
 
         // `_` matches itself, not any character: no sensor is `sensor_03`.
-        let literal =
-            filter_predicate(Engine::SqlServer, "sensor", Operator::Contains, "sensor_03").unwrap();
+        let literal = filter_predicate(
+            Engine::SqlServer,
+            "sensor",
+            None,
+            Operator::Contains,
+            "sensor_03",
+        )
+        .unwrap();
         assert!(preview(&literal, 0).rows.is_empty());
         let unsorted = relation_sql(Engine::SqlServer, "dbo", "orders", "", &[], 100, 0);
         let unsorted = sql::paged(Engine::SqlServer, &unsorted, &[]).unwrap();
@@ -2759,6 +2811,96 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_seeded_binary_or_datetime_key_edits_and_filters_only_its_own_row() {
+        // Under `british` a `datetime` literal reads year-day-month, so the
+        // first row's key, misread, names the second row.
+        let connection = live();
+        let reset = || {
+            connection
+                .query(
+                    "UPDATE dbo.blobs_by_hash SET label = N'first' \
+                     WHERE hash = 0x000102030405060708090A0B0C0D0EFF; \
+                     UPDATE dbo.readings_by_time SET reading = 1.00 \
+                     WHERE taken_at = '2024-01-02T03:04:05'",
+                )
+                .expect("the seeded rows should reset");
+        };
+        reset();
+        connection.query("SET LANGUAGE british").unwrap();
+        for (table, key, after, untouched) in [
+            ("blobs_by_hash", "hash", "edited", "second"),
+            ("readings_by_time", "taken_at", "9.50", "2.00"),
+        ] {
+            let select = format!("SELECT * FROM dbo.{table} ORDER BY {key}");
+            let mut grid = crate::result_grid::ResultGrid::new(
+                connection.query(&select).unwrap(),
+                crate::sql::Mode::ReadWrite,
+            )
+            .with_engine(Engine::SqlServer);
+            assert!(grid.set_pending(0, 1, NewValue::Value(after.into())));
+            let batch = sql::update_batch(Engine::SqlServer, &grid.pending_updates()).unwrap();
+            assert!(sql::is_generated_write(&batch), "the gate refused {batch}");
+            connection.generated(&batch).expect("the edit should run");
+            let rows = connection.query(&select).unwrap().rows;
+            assert_eq!(rows[0][1].as_deref(), Some(after), "{batch}");
+            assert_eq!(rows[1][1].as_deref(), Some(untouched), "{batch}");
+
+            // The filter bar names the same row by the same literal.
+            let structure = connection.structure("dbo", table).unwrap();
+            let bar = FilterBar {
+                column: Some(key.into()),
+                value: rows[0][0].clone().unwrap(),
+                ..FilterBar::default()
+            };
+            let filter = derived_filter(Engine::SqlServer, &[bar], &structure.columns);
+            let preview = relation_sql(Engine::SqlServer, "dbo", table, &filter, &[], 10, 0);
+            assert!(sql::is_generated_select(&preview), "{preview}");
+            let paged = sql::paged(Engine::SqlServer, &preview, &structure.row_key()).unwrap();
+            let found = connection
+                .generated(&paged)
+                .expect("the preview should run");
+            assert_eq!(found.rows.len(), 1, "{paged}");
+            assert_eq!(found.rows[0][1].as_deref(), Some(after), "{paged}");
+        }
+        reset();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_seeded_spatial_preview_reads_as_text_inside_the_users_transaction() {
+        let connection = live();
+        let structure = connection.structure("dbo", "places").unwrap();
+        let preview = relation_sql(Engine::SqlServer, "dbo", "places", "", &[], 10, 0);
+        let paged = sql::paged(Engine::SqlServer, &preview, &structure.row_key()).unwrap();
+        connection.query("BEGIN TRANSACTION").unwrap();
+        let page = connection
+            .generated(&paged)
+            .expect("the preview should run");
+        let rows: Vec<Vec<Option<&str>>> = page
+            .rows
+            .iter()
+            .map(|row| row.iter().map(Option::as_deref).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Some("1"),
+                    Some("POINT (-0.125 51.5)"),
+                    Some("/1/"),
+                    Some("42")
+                ],
+                vec![Some("2"), Some("POINT (0 0)"), Some("/1/2/"), Some("text")],
+                vec![Some("3"), Some("POINT (151.25 -33.5)"), None, None],
+            ]
+        );
+        let open = connection.query("SELECT @@TRANCOUNT").unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        connection.query("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_cancel_stops_the_statement_on_the_server_and_reconnects() {
         // The probe outlives the session it is checked from only as a global
         // temporary table, which lives as long as the session that made it.
@@ -3000,6 +3142,92 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_users_statement_is_checked_under_the_users_own_quoting() {
+        let connection = live();
+        connection.query("SET QUOTED_IDENTIFIER OFF").unwrap();
+        // A string, not the geography column: nothing the driver cannot read.
+        let quoted = connection
+            .query("SELECT \"position\" AS p FROM places")
+            .unwrap();
+        assert_eq!(quoted.rows[0][0].as_deref(), Some("position"));
+        // And the user's `ROWCOUNT` does not hide a column from the check.
+        connection
+            .query("SET QUOTED_IDENTIFIER ON; SET ROWCOUNT 1")
+            .unwrap();
+        let error = connection
+            .query("SELECT id, id AS copy, position FROM places")
+            .expect_err("the third column is a geography");
+        assert!(
+            error.message.contains("position (geography)"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_datetime_literal_reads_the_same_under_any_language() {
+        let connection = live();
+        connection
+            .query(
+                "CREATE TABLE #stamps (at datetime PRIMARY KEY, small smalldatetime); \
+                 INSERT INTO #stamps VALUES ('20240102 03:04:05', '20240102 03:04'), \
+                 ('20240201 03:04:05', '20240201 03:04')",
+            )
+            .unwrap();
+        // The user's own session, not dbdelve's options: a statement appended
+        // to a query tab's buffer runs as the user's.
+        connection.query("SET LANGUAGE british").unwrap();
+        let at = Engine::SqlServer.quote_value("2024-01-02 03:04:05.000", Some("datetime"));
+        let small = Engine::SqlServer.quote_value("2024-01-02 03:04:00", Some("smalldatetime"));
+        let deleted = connection
+            .query(&format!(
+                "DELETE FROM #stamps WHERE at = {at} AND small = {small}"
+            ))
+            .unwrap();
+        assert_eq!(deleted.rows_affected, Some(1));
+        let left = connection
+            .query("SELECT CONVERT(char(8), at, 112) FROM #stamps")
+            .unwrap();
+        assert_eq!(first(&left), vec![Some("20240201")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_rowversion_filters_by_its_bare_hex() {
+        let connection = live();
+        connection
+            .query(
+                "CREATE TABLE #versions (id int PRIMARY KEY, version rowversion); \
+                    INSERT INTO #versions (id) VALUES (1), (2)",
+            )
+            .unwrap();
+        let versions = connection
+            .query("SELECT version FROM #versions WHERE id = 2")
+            .unwrap();
+        let version = versions.rows[0][0].clone().unwrap();
+        // `timestamp` is the name the catalog gives it, and a pasted value may
+        // wear an uppercase prefix.
+        for value in [version.clone(), version.replacen("0x", "0X", 1)] {
+            let predicate = filter_predicate(
+                Engine::SqlServer,
+                "version",
+                Some("timestamp"),
+                Operator::Equals,
+                &value,
+            )
+            .unwrap();
+            let found = connection
+                .generated(&format!(
+                    "SELECT \"id\" FROM \"#versions\" WHERE {predicate}"
+                ))
+                .unwrap();
+            assert_eq!(first(&found), vec![Some("2")], "{predicate}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_an_error_inside_a_procedure_points_at_nothing_in_the_batch() {
         let connection = live();
         connection
@@ -3066,6 +3294,37 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn a_cancel_while_reconnecting_stops_the_statement_before_it_is_sent() {
+        // A server that accepts the connection and never answers the login.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connection = Connection {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            server: config_from_url(&format!(
+                "mssql://someone@127.0.0.1:{port}/db?sslmode=require"
+            ))
+            .unwrap(),
+        };
+        let user = connection.clone();
+        let run = std::thread::spawn(move || user.query("SELECT 1"));
+        // Accepted, so the statement is waiting on its reconnect.
+        let (socket, _) = listener.accept().unwrap();
+        connection.cancel().unwrap();
+        drop((socket, listener));
+
+        let error = run
+            .join()
+            .unwrap()
+            .expect_err("the statement was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
     }
 
     /// What each mode does against the compose server, whose certificate is

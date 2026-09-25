@@ -985,7 +985,10 @@ fn unread_pieces(sql: &str, range: Range<usize>) -> (Vec<Range<usize>>, bool) {
                     .map_or(rest.len() - 1, |end| end + 1)
             }
             b'-' if rest.starts_with("--") => rest.find('\n').unwrap_or(rest.len()),
-            b'/' if rest.starts_with("/*") => rest.find("*/").map_or(rest.len(), |end| end + 2),
+            // From past the `/*`, or `/*/` would read as a whole comment.
+            b'/' if rest.starts_with("/*") => {
+                rest[2..].find("*/").map_or(rest.len(), |end| end + 4)
+            }
             b'$' => {
                 // `$$` or `$tag$`, closed by the same marker.
                 let tag = rest[1..]
@@ -1064,7 +1067,7 @@ fn tsql_scan(text: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
                 end
             }
             '-' if rest.starts_with("--") => rest.find('\n').unwrap_or(rest.len()),
-            '/' if rest.starts_with("/*") => rest.find("*/").map_or(rest.len(), |end| end + 2),
+            '/' if rest.starts_with("/*") => rest[2..].find("*/").map_or(rest.len(), |end| end + 4),
             c if is_word(c) => {
                 let len = rest.find(|c| !is_word(c)).unwrap_or(rest.len());
                 words.push(index..index + len);
@@ -1899,18 +1902,41 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // the quoted regions and formatting only the text between them would still
 // format the rest. Worth doing when someone is actually editing plpgsql here.
 //
-// ponytail: `FormatOptions` carries a `dialect`, deliberately left at Generic.
-// Plumbing the connection's real engine through is the upgrade path if the
-// output ever looks wrong for a specific backend.
-pub(crate) fn format(sql: &str) -> Option<String> {
+// ponytail: `FormatOptions`' `dialect` is Generic except on SQL Server, where
+// Generic splits `[my col]` into `[ my col ]`, another name. Postgres's dialect
+// is the upgrade path if its output ever looks wrong there.
+pub(crate) fn format(engine: Engine, sql: &str) -> Option<String> {
     if has_dollar_quote(sql) {
         return None;
     }
-    Some(sqlformat::format(
-        sql,
-        &sqlformat::QueryParams::default(),
-        &sqlformat::FormatOptions::default(),
-    ))
+    let options = sqlformat::FormatOptions {
+        dialect: match engine {
+            Engine::SqlServer => sqlformat::Dialect::SQLServer,
+            _ => sqlformat::Dialect::Generic,
+        },
+        ..sqlformat::FormatOptions::default()
+    };
+    let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
+    if engine != Engine::SqlServer {
+        return Some(reflow(sql));
+    }
+    // A `GO` line is not T-SQL, and reflowed with its batch `GO 5` becomes a
+    // `GO` and a stray `5` on the next line: a count the refusal no longer
+    // sees. So each batch is reflowed alone and the lines kept as written.
+    let mut formatted = String::new();
+    let mut start = 0;
+    for (line, _) in go_lines(sql) {
+        let batch = reflow(&sql[start..line.start]);
+        if !batch.trim().is_empty() {
+            formatted += batch.trim();
+            formatted.push('\n');
+        }
+        formatted += sql[line.clone()].trim();
+        formatted.push('\n');
+        start = line.end;
+    }
+    formatted += reflow(&sql[start..]).trim();
+    Some(formatted)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -2153,6 +2179,10 @@ mod tests {
             texts("PRAGMA note = 'a;b'; -- c;d\nPRAGMA other"),
             vec!["PRAGMA note = 'a;b'", "-- c;d\nPRAGMA other"]
         );
+        assert_eq!(
+            texts("PRAGMA note = 1 /*/ ; */; PRAGMA other"),
+            vec!["PRAGMA note = 1 /*/ ; */", "PRAGMA other"]
+        );
     }
 
     #[test]
@@ -2324,6 +2354,12 @@ mod tests {
                 &["SELECT 'a\nGO\nb'", "SELECT 2"],
             ),
             ("SELECT 1 /*\nGO\n*/", &["SELECT 1"]),
+            // `/*/` opens a comment and does not close it.
+            ("SELECT 1 /*/\nGO\n*/ AS x", &["SELECT 1 /*/\nGO\n*/ AS x"]),
+            (
+                "SELECT 1 /*/ BEGIN */; DELETE FROM t WHERE id = 1; SELECT 2;",
+                &["SELECT 1", "DELETE FROM t WHERE id = 1", "SELECT 2"],
+            ),
             ("SELECT 1\nGOTO x", &["SELECT 1\nGOTO x"]),
         ];
         for (sql, expected) in cases {
@@ -4052,7 +4088,11 @@ mod tests {
     fn a_comment_the_user_wrote_survives_formatting() {
         // The whole reason formatting is token-level: an AST round trip would
         // drop this line, and the user would not get it back.
-        let formatted = format("select a -- the one we care about\nfrom t").unwrap();
+        let formatted = format(
+            Engine::Postgres,
+            "select a -- the one we care about\nfrom t",
+        )
+        .unwrap();
 
         assert!(
             formatted.contains("-- the one we care about"),
@@ -4065,27 +4105,40 @@ mod tests {
     // hard rule 1; this is the test that catches the day that stops being true.
     #[test]
     fn a_buffer_holding_a_dollar_quoted_body_is_refused() {
-        assert_eq!(format("DO $$ BEGIN DELETE FROM t; END $$"), None);
-        assert_eq!(format("select $tag$ x; y $tag$"), None);
+        assert_eq!(
+            format(Engine::Postgres, "DO $$ BEGIN DELETE FROM t; END $$"),
+            None
+        );
+        assert_eq!(format(Engine::Postgres, "select $tag$ x; y $tag$"), None);
     }
 
     // A placeholder is not a quote, and reading it as one would refuse to format
     // every parameterised statement anybody writes.
     #[test]
     fn a_numbered_placeholder_still_formats() {
-        assert!(format("select a from t where id = $1").is_some());
+        assert!(format(Engine::Postgres, "select a from t where id = $1").is_some());
     }
 
     #[test]
     fn formatting_an_already_formatted_statement_changes_nothing() {
-        let once = format("select a, b from t where x = 1").unwrap();
+        let once = format(Engine::Postgres, "select a, b from t where x = 1").unwrap();
 
-        assert_eq!(format(&once).unwrap(), once);
+        assert_eq!(format(Engine::Postgres, &once).unwrap(), once);
+    }
+
+    #[test]
+    fn sql_server_formatting_keeps_bracketed_names_and_go_lines() {
+        let sql = "select [my col] from t\nGO 5\nselect 2\ngo\n";
+        let formatted = format(Engine::SqlServer, sql).unwrap();
+        assert!(formatted.contains("[my col]"), "{formatted}");
+        assert!(formatted.contains("\nGO 5\n"), "{formatted}");
+        assert_eq!(go_lines(&formatted).len(), 2, "{formatted}");
+        assert_eq!(format(Engine::SqlServer, &formatted).unwrap(), formatted);
     }
 
     #[test]
     fn a_flat_statement_gains_line_breaks() {
-        let formatted = format("select a, b from t where x = 1").unwrap();
+        let formatted = format(Engine::Postgres, "select a, b from t where x = 1").unwrap();
 
         assert!(formatted.lines().count() > 1, "{formatted}");
         assert!(formatted.contains("  "), "{formatted}");

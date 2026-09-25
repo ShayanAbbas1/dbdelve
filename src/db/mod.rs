@@ -336,9 +336,13 @@ impl Engine {
         };
         let lowered = data_type.to_ascii_lowercase();
         let name = lowered.split('(').next().unwrap_or_default().trim();
-        let hex = value.strip_prefix("0x").is_some_and(|digits| {
-            digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-        });
+        let hex = value
+            .get(..2)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("0x"))
+            .and_then(|_| value.get(2..))
+            .filter(|digits| {
+                digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
         let narrow = matches!(
             name,
             "char"
@@ -363,8 +367,12 @@ impl Engine {
                 | "datetimeoffset"
                 | "uniqueidentifier"
         );
-        if hex && self.is_binary_type(name) {
-            value.to_string()
+        if let Some(digits) = hex.filter(|_| self.is_binary_type(name)) {
+            format!("0x{digits}")
+        } else if matches!(name, "datetime" | "smalldatetime")
+            && let Some(iso) = iso_datetime(value)
+        {
+            iso
         } else if narrow && value.is_ascii() {
             format!("'{}'", value.replace('\'', "''"))
         } else {
@@ -391,7 +399,8 @@ impl Engine {
         name == "bytea"
             || name.contains("blob")
             || name.contains("binary")
-            || (self == Self::SqlServer && name == "image")
+            || (self == Self::SqlServer
+                && matches!(name.as_str(), "image" | "rowversion" | "timestamp"))
     }
 
     pub fn qualified(self, schema: &str, name: &str) -> String {
@@ -401,6 +410,42 @@ impl Engine {
             self.quote_identifier(name)
         )
     }
+}
+
+/// A `datetime` value as `'YYYY-MM-DDThh:mm:ss…'`, the one spelling of it
+/// `DATEFORMAT` and `SET LANGUAGE` never reorder: with a space instead of the
+/// `T`, or as a bare date, `british` reads `2024-01-02` as the first of
+/// February. `None` for anything not shaped like the grid's own rendering.
+fn iso_datetime(value: &str) -> Option<String> {
+    // Every byte of the shape is ASCII, so matching bytes also keeps the
+    // slices below on character boundaries.
+    let shaped = |text: &[u8], shape: &[u8]| {
+        text.len() == shape.len()
+            && text.iter().zip(shape).all(|(byte, want)| match want {
+                b'9' => byte.is_ascii_digit(),
+                _ => byte == want,
+            })
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() < 10 || !shaped(&bytes[..10], b"9999-99-99") {
+        return None;
+    }
+    let time = match &bytes[10..] {
+        [] => b" 00:00:00".as_slice(),
+        rest => rest,
+    };
+    let clock = time.len() >= 9 && shaped(&time[..9], b" 99:99:99");
+    let fraction = &time[time.len().min(9)..];
+    let fraction_ok = match fraction {
+        [] => true,
+        [b'.', digits @ ..] => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    let time = value
+        .get(11..)
+        .filter(|time| !time.is_empty())
+        .unwrap_or("00:00:00");
+    (clock && fraction_ok).then(|| format!("'{}T{time}'", &value[..10]))
 }
 
 /// A URL is percent-encoded by definition, and a path with a space in it is
@@ -1575,7 +1620,26 @@ mod tests {
         assert_eq!(quote("0x", Some("image")), "0x");
         // Anything that is not exactly a hex literal stays quoted: this is the
         // one unquoted path into a statement.
-        for value in ["0x0", "0xZZ", "0x00; DROP TABLE t", "00FF", "0X00", " 0x00"] {
+        // Either case of the prefix, written the way the grid shows it.
+        assert_eq!(quote("0X00ff", Some("varbinary")), "0x00ff");
+        // A rowversion is bytes too, whichever of its names the catalog uses.
+        assert_eq!(
+            quote("0x00000000000007D1", Some("rowversion")),
+            "0x00000000000007D1"
+        );
+        assert_eq!(
+            quote("0x00000000000007D1", Some("timestamp")),
+            "0x00000000000007D1"
+        );
+        for value in [
+            "0x0",
+            "0xZZ",
+            "0x00; DROP TABLE t",
+            "00FF",
+            "0X0",
+            " 0x00",
+            "0x0é",
+        ] {
             assert_eq!(
                 quote(value, Some("varbinary")),
                 format!("N'{}'", value.replace('\'', "''")),
@@ -1588,6 +1652,32 @@ mod tests {
         assert_eq!(quote("o'hara", Some("CHAR(10)")), "'o''hara'");
         assert_eq!(quote("42", Some("int")), "'42'");
         assert_eq!(quote("2024-01-01", Some("datetime2")), "'2024-01-01'");
+        // `datetime` in the one form no `DATEFORMAT` or language reorders.
+        assert_eq!(
+            quote("2024-01-02 03:04:05.000", Some("datetime")),
+            "'2024-01-02T03:04:05.000'"
+        );
+        assert_eq!(
+            quote("2024-01-02 03:04:00", Some("smalldatetime")),
+            "'2024-01-02T03:04:00'"
+        );
+        assert_eq!(
+            quote("2024-01-02", Some("datetime")),
+            "'2024-01-02T00:00:00'"
+        );
+        // Anything else shaped differently is left as typed.
+        for value in [
+            "2024-01-02 03:04",
+            "2024-01-02 03:04:05.",
+            "yesterday",
+            "%2024%",
+        ] {
+            assert_eq!(
+                quote(value, Some("datetime")),
+                format!("'{value}'"),
+                "{value}"
+            );
+        }
         assert_eq!(quote("李'小", Some("varchar")), "N'李''小'");
         for data_type in [
             Some("nvarchar"),
@@ -1615,6 +1705,9 @@ mod tests {
     #[test]
     fn image_is_binary_on_sql_server_alone() {
         assert!(Engine::SqlServer.is_binary_type("image"));
+        assert!(Engine::SqlServer.is_binary_type("rowversion"));
+        assert!(Engine::SqlServer.is_binary_type("timestamp"));
+        assert!(!Engine::Postgres.is_binary_type("timestamp"));
         assert!(!Engine::Sqlite.is_binary_type("image"));
         assert!(!Engine::Postgres.is_binary_type("image"));
         for engine in Engine::ALL {

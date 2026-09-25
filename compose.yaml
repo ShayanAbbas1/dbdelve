@@ -50,8 +50,9 @@ services:
       - ./dev/mssql/entrypoint.sh:/entrypoint.sh:ro
     healthcheck:
       # Proves the seed applied (a row count as the app login), not just that
-      # the server answers: the same MySQL "healthy but half-seeded" trap.
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U dbdelve -P DBDelve_dev1 -d dbdelve_dev -b -Q 'SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.accounts;'"]
+      # the server answers: the same MySQL "healthy but half-seeded" trap. The
+      # marker is what says the seed finished, since `accounts` fills early.
+      test: ["CMD-SHELL", "test -f /var/opt/mssql/data/.dbdelve-seeded && /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U dbdelve -P DBDelve_dev1 -d dbdelve_dev -b -Q 'SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.accounts;'"]
       interval: 5s
       timeout: 5s
       retries: 60

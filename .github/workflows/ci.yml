@@ -11,6 +11,8 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "assets/windows/**"
+      - "compose.yaml"
+      - "dev/**"
       - ".github/workflows/ci.yml"
   push:
     branches: [main]
@@ -20,6 +22,8 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "assets/windows/**"
+      - "compose.yaml"
+      - "dev/**"
       - ".github/workflows/ci.yml"
 
 concurrency:

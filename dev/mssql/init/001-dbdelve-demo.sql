@@ -274,6 +274,99 @@ BEGIN
 END
 GO
 
+-- Keys whose literal depends on the column's type: a binary key is a bare
+-- `0x...`, and a `datetime` key has to read the same under a session's
+-- `SET LANGUAGE british`, which reads `2024-01-02` as the first of February:
+-- the other row.
+CREATE TABLE blobs_by_hash (
+    hash binary(16) PRIMARY KEY,
+    label nvarchar(50) NOT NULL
+);
+
+INSERT INTO blobs_by_hash VALUES
+    (0x000102030405060708090A0B0C0D0EFF, N'first'),
+    (0xFF0E0D0C0B0A09080706050403020100, N'second');
+
+CREATE TABLE readings_by_time (
+    taken_at datetime PRIMARY KEY,
+    reading decimal(6, 2) NOT NULL
+);
+
+INSERT INTO readings_by_time VALUES
+    ('2024-01-02T03:04:05', 1.00),
+    ('2024-02-01T03:04:05', 2.00);
+GO
+
+-- Types tiberius cannot decode, which a preview reads as text instead.
+CREATE TABLE places (
+    id int PRIMARY KEY,
+    position geography NOT NULL,
+    node hierarchyid NULL,
+    extra sql_variant NULL
+);
+
+INSERT INTO places VALUES
+    (1, geography::Point(51.5, -0.125, 4326), hierarchyid::Parse('/1/'), CAST(42 AS sql_variant)),
+    (2, geography::Point(0, 0, 4326), hierarchyid::Parse('/1/2/'), CAST(N'text' AS sql_variant)),
+    (3, geography::Point(-33.5, 151.25, 4326), NULL, NULL);
+GO
+
+-- The structure surface's harder cases in one place: an alias type, an
+-- identity and a computed column, a filtered unique index with included
+-- columns, both kinds of columnstore index and a cascading foreign key.
+-- A filtered index refuses writes unless QUOTED_IDENTIFIER is on, and sqlcmd
+-- leaves it off.
+SET QUOTED_IDENTIFIER ON;
+GO
+
+CREATE TYPE dbo.sku FROM varchar(16) NOT NULL;
+GO
+
+CREATE TABLE products (
+    id int IDENTITY(1,1) PRIMARY KEY,
+    sku dbo.sku,
+    name nvarchar(100) NOT NULL,
+    price decimal(10, 2) NOT NULL,
+    discontinued bit NOT NULL,
+    price_with_tax AS (price * 1.2) PERSISTED
+);
+
+CREATE UNIQUE NONCLUSTERED INDEX ux_products_live_sku
+    ON products (sku) INCLUDE (name, price) WHERE discontinued = 0;
+
+CREATE NONCLUSTERED COLUMNSTORE INDEX ncci_products ON products (price, discontinued);
+
+CREATE TABLE product_tags (
+    product_id int NOT NULL,
+    tag varchar(20) NOT NULL,
+    PRIMARY KEY (product_id, tag),
+    CONSTRAINT fk_product_tags_product FOREIGN KEY (product_id)
+        REFERENCES products (id) ON DELETE CASCADE
+);
+
+INSERT INTO products (sku, name, price, discontinued) VALUES
+    ('AE-001', N'Analytical engine', 9999.99, 0),
+    ('PC-500', N'Punch cards', 12.50, 0),
+    ('PC-500', N'Punch cards (old stock)', 10.00, 1);
+
+INSERT INTO product_tags VALUES
+    (1, 'hardware'),
+    (2, 'consumable'),
+    (3, 'consumable');
+
+CREATE TABLE daily_totals (
+    day date NOT NULL,
+    total decimal(12, 2) NOT NULL
+);
+
+CREATE CLUSTERED COLUMNSTORE INDEX cci_daily_totals ON daily_totals;
+
+INSERT INTO daily_totals VALUES
+    ('2024-06-01', 4500.00),
+    ('2024-06-08', 125.75),
+    ('2024-06-12', 890.10);
+GO
+
 -- A million rows and two hundred columns: the fixtures the grid's paging and
 -- horizontal scrolling are measured against, not the hand-written rows above.
 
