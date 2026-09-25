@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use gpui_component::menu::DropdownMenu;
 
+pub(crate) use queries::error_in_buffer;
+
 use crate::connection_form::{Origin, password_to_persist};
 use crate::session::{write_buffer, write_grids};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};

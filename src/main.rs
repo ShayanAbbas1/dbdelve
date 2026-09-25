@@ -23,10 +23,10 @@ mod ui;
 use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, EntityInputHandler,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem,
-    ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window,
-    WindowDecorations, WindowOptions, deferred, div, point, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowDecorations, WindowOptions,
+    deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     Disableable, IndexPath, Root,
