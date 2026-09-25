@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 40] = [
+const ICONS: [(&str, &IconData); 42] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -66,6 +66,8 @@ const ICONS: [(&str, &IconData); 40] = [
     ("icons/type.svg", icondata_lu::LuType),
     ("icons/arrow-up-right.svg", icondata_lu::LuArrowUpRight),
     ("icons/shield-alert.svg", icondata_lu::LuShieldAlert),
+    ("icons/replace.svg", icondata_lu::LuReplace),
+    ("icons/case-sensitive.svg", icondata_lu::LuCaseSensitive),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
