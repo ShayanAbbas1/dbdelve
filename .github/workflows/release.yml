@@ -167,7 +167,8 @@ jobs:
           # --target creates the tag on the commit that was built. A tag made
           # with github.token starts no other workflow run.
           gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" \
-            --title "DBDelve $VERSION" --generate-notes "${PRERELEASE_FLAG[@]}"
+            --title "DBDelve $VERSION" --generate-notes "${PRERELEASE_FLAG[@]}" \
+            --notes "Missing something? [Request it or upvote others' ideas](https://github.com/ShayanAbbas1/dbdelve/discussions/42)."
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
