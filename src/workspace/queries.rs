@@ -90,14 +90,19 @@ impl Workspace {
         // a claim that anything stopped. It bounds the repeat clicks to one
         // cancel per run; a cancel that the server ignores has no answer
         // here, and would need the driver to report one.
-        let Some((QueryState::Running { cancelling, cancel }, _)) = profile.session.slot(tab)
+        let Some((
+            QueryState::Running {
+                cancelling, cancel, ..
+            },
+            _,
+        )) = profile.session.slot(tab)
         else {
             return;
         };
-        if *cancelling {
+        if cancelling.is_some() {
             return;
         }
-        *cancelling = true;
+        *cancelling = Some(std::time::Instant::now());
         let cancel = cancel.clone();
         cx.notify();
         let cancel_task = cx
@@ -751,16 +756,46 @@ impl Workspace {
             return;
         };
         let cancel = CancelToken::default();
+        let started = std::time::Instant::now();
         let previous = std::mem::replace(
             state,
             QueryState::Running {
-                cancelling: false,
+                started,
+                cancelling: None,
                 cancel: cancel.clone(),
             },
         );
         // What a cancelled refresh goes back to: the rows it kept on screen
         // are still the ones that state describes.
         let restored = keep_rows.then_some(previous);
+        // The spinner beside the clock redraws every frame, but not under
+        // reduce motion, so the clock cannot lean on it to tick.
+        cx.spawn({
+            let id = id.clone();
+            async move |workspace, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    let still_running = workspace.update(cx, |workspace, cx| {
+                        let running = workspace
+                            .issued_to(&id, generation)
+                            .and_then(|profile| profile.session.slot(tab))
+                            .is_some_and(|(state, _)| {
+                                matches!(state, QueryState::Running { started: at, .. } if *at == started)
+                            });
+                        if running {
+                            cx.notify();
+                        }
+                        running
+                    });
+                    if !matches!(still_running, Ok(true)) {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
         // Whatever plan is on screen describes the last statement, not this one.
         // Turning the pane back to the rows is what puts the spinner and Cancel
         // in front of a run that is in flight -- and what stops a plain Run from
@@ -904,7 +939,7 @@ impl Workspace {
                                 let cancelled = matches!(
                                     state,
                                     QueryState::Running {
-                                        cancelling: true,
+                                        cancelling: Some(_),
                                         ..
                                     }
                                 );
