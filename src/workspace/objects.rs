@@ -385,6 +385,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active_cut = |grid: &ResultGrid| {
+            grid.active()
+                .is_some_and(|(row, col)| grid.cut_at(row, col))
+        };
+        if self.refuse_clipped_snapshot("following a key", active_cut, cx) {
+            return;
+        }
         let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;

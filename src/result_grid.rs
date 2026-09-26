@@ -32,6 +32,11 @@ const CELL_DISPLAY_LIMIT: usize = 300;
 /// still copies all of it. Raise this if a real value gets cut.
 const FIELD_DISPLAY_LIMIT: usize = 4_000;
 
+/// ponytail: the most value text a snapshot keeps whole. Past it every value is
+/// cut to what a cell shows, because a snapshot is read and written on the
+/// frame thread. Raise it once that happens off-thread.
+const SNAPSHOT_WHOLE_LIMIT: usize = 10 * 1024 * 1024;
+
 /// What an absent value is called wherever one is shown.
 pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
 
@@ -105,6 +110,10 @@ pub struct ResultGrid {
     /// was written. Held beside `captured` and for the same reason: a run
     /// replaces the whole delegate, so a live result cannot keep a stale count.
     restored_total: Option<usize>,
+    /// Whether a snapshot cut any value to what a cell shows. Held beside
+    /// `captured` for the same reason, and it leaves the grid read-only: an
+    /// edit seeded or keyed by a cut value would write it over the real one.
+    clipped: bool,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -232,6 +241,7 @@ impl ResultGrid {
             editing: None,
             captured: None,
             restored_total: None,
+            clipped: false,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -299,6 +309,7 @@ impl ResultGrid {
             .filter(|(row, col)| *row < rows && *col < columns);
         grid.captured = Some(stored.captured);
         grid.restored_total = Some(stored.total_rows);
+        grid.clipped = stored.clipped;
         grid.unconfirmed = stored.edit.is_some();
         grid
     }
@@ -318,6 +329,26 @@ impl ResultGrid {
         self.unconfirmed = false;
     }
 
+    /// Whether some of the values this grid holds are only the start of the
+    /// real ones, which only a restored snapshot's can be.
+    pub fn clipped(&self) -> bool {
+        self.clipped
+    }
+
+    /// Whether this cell holds only the start of its value. Read off the value
+    /// rather than kept per cell: `stored` cuts to exactly this shape, and a
+    /// whole value of the same shape is one the cut would have left as it was.
+    pub fn cut_at(&self, row: usize, col: usize) -> bool {
+        self.clipped
+            && self.cell(row, col).is_some_and(|value| {
+                value.ends_with('…') && value.chars().count() == CELL_DISPLAY_LIMIT + 1
+            })
+    }
+
+    pub fn row_cut(&self, row: usize) -> bool {
+        (0..self.columns.len()).any(|col| self.cut_at(row, col))
+    }
+
     /// How many rows the result behind this grid had. More than the grid holds
     /// only for a restored snapshot the cap trimmed -- which is the one case
     /// where the rows on screen are not the whole result set.
@@ -332,6 +363,37 @@ impl ResultGrid {
     /// `pending` and `editing` are deliberately absent. An unapplied edit is
     /// against rows this session fetched, and a restored grid is not those rows.
     pub fn stored(&self) -> StoredGrid {
+        let rows = &self.result.rows[..self.result.rows.len().min(GRID_ROW_CAP)];
+        let text: usize = rows
+            .iter()
+            .flatten()
+            .map(|cell| cell.as_deref().map_or(0, str::len))
+            .sum();
+        let cut = text > SNAPSHOT_WHOLE_LIMIT;
+        // A restored grid's cut values are already exactly what a cut leaves,
+        // so cutting them again finds nothing to say they were.
+        let mut clipped = self.clipped;
+        // Capped here rather than in `write_grid`, which would have to clone
+        // the whole vector to keep the front of it. A large result's values are
+        // cut here for the same reason: a result of large documents made a
+        // snapshot of hundreds of megabytes.
+        let rows = match cut {
+            false => rows.to_vec(),
+            true => rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| {
+                            cell.as_deref().map(|value| {
+                                let kept = clip_to(value, CELL_DISPLAY_LIMIT);
+                                clipped |= kept != value;
+                                kept
+                            })
+                        })
+                        .collect()
+                })
+                .collect(),
+        };
         StoredGrid {
             columns: self
                 .result
@@ -339,15 +401,7 @@ impl ResultGrid {
                 .iter()
                 .map(|column| column.name.clone())
                 .collect(),
-            // Capped here rather than in `write_grid`, which would have to
-            // clone the whole vector to keep the front of it.
-            rows: self
-                .result
-                .rows
-                .iter()
-                .take(GRID_ROW_CAP)
-                .cloned()
-                .collect(),
+            rows,
             // The result's own size, which a restored grid knows and does not
             // hold: recomputing it from the capped rows is what collapsed a
             // 20,000-row snapshot to 5,000 on the next save.
@@ -368,13 +422,20 @@ impl ResultGrid {
             // is still the rows it was, and restamping it would make every
             // restart claim the cache was just taken.
             captured: self.captured.unwrap_or_else(captured_at),
-            edit: self.result.edit.clone(),
+            // Not kept for cut values: a build older than `clipped` would
+            // ignore the flag and let a cut value be written over the real one.
+            // Without a target, no build can edit the grid.
+            edit: match clipped {
+                false => self.result.edit.clone(),
+                true => None,
+            },
             data_types: self
                 .result
                 .columns
                 .iter()
                 .map(|column| column.data_type.clone())
                 .collect(),
+            clipped,
         }
     }
 
@@ -477,6 +538,7 @@ impl ResultGrid {
                     let value = indented_json(value);
                     clip_to(&value, FIELD_DISPLAY_LIMIT).into()
                 }),
+                cut: self.cut_at(row_ix, col_ix),
             })
             .collect()
     }
@@ -562,6 +624,9 @@ impl ResultGrid {
     /// user could not type a replacement for anyway, and the value that came
     /// back would be written as the text it looks like — see
     /// [`db::Engine::is_binary_type`].
+    ///
+    /// Nor anything in a snapshot that cut its values (see `clipped`), which
+    /// [`ResultGrid::row_key`] refuses too, so no row is named by a cut key.
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -570,7 +635,8 @@ impl ResultGrid {
         let Some(edit) = &self.result.edit else {
             return false;
         };
-        row < self.result.rows.len()
+        !self.clipped
+            && row < self.result.rows.len()
             && edit.columns.get(col).is_some_and(Option::is_some)
             && !edit.keys.contains(&col)
             && !self
@@ -631,7 +697,7 @@ impl ResultGrid {
     /// NULL, so a predicate built from one reaches nothing.
     pub fn row_key(&self, row: usize) -> Option<RowKey> {
         let edit = self.result.edit.as_ref()?;
-        if row >= self.result.rows.len() {
+        if self.clipped || row >= self.result.rows.len() {
             return None;
         }
         Some((
@@ -903,6 +969,8 @@ pub struct Field {
     /// without running the statement twice.
     pub data_type: Option<SharedString>,
     pub value: Option<SharedString>,
+    /// Whether `value` is only the start a snapshot kept of the real one.
+    pub cut: bool,
 }
 
 enum Step {
@@ -1009,17 +1077,53 @@ fn fitted_width(name: &str, display: &[Vec<Option<SharedString>>], col_ix: usize
 /// becomes a space here, so the cell reads from the start of the value. The
 /// value itself is untouched: the inspector lays it out as it is, and a copy
 /// takes the original.
+///
+/// Reads no further into the value than what it keeps, and the blank space it
+/// drops: a cell can hold a geometry of a couple of million characters, and
+/// every cell of a result is clipped on the frame thread. So only a break
+/// inside the part that shows flattens it -- one further in is past the `…`.
 fn clip(value: &str) -> String {
-    if !value.contains(['\n', '\r']) {
+    let shown = match value.char_indices().nth(CELL_DISPLAY_LIMIT) {
+        Some((end, _)) => &value[..end],
+        None => value,
+    };
+    if !shown.contains(['\n', '\r']) {
         return clip_to(value, CELL_DISPLAY_LIMIT);
     }
-    let flattened = value
-        .split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    clip_to(&flattened, CELL_DISPLAY_LIMIT)
+
+    // Each line trimmed, the empty ones dropped, the rest joined by a space --
+    // streamed, so it stops one character past the limit.
+    let mut flattened = String::new();
+    let mut kept = 0;
+    let mut in_line = false;
+    let mut joined = false;
+    let mut space_from = None;
+    for (at, c) in value.char_indices() {
+        if c == '\n' || c == '\r' {
+            joined |= in_line;
+            in_line = false;
+            space_from = None;
+        } else if c.is_whitespace() {
+            if in_line {
+                space_from.get_or_insert(at);
+            }
+        } else {
+            let gap = match space_from.take() {
+                Some(from) => &value[from..at],
+                None if !in_line && joined => " ",
+                None => "",
+            };
+            for c in gap.chars().chain([c]) {
+                flattened.push(c);
+                kept += 1;
+                if kept > CELL_DISPLAY_LIMIT {
+                    return clip_to(&flattened, CELL_DISPLAY_LIMIT);
+                }
+            }
+            in_line = true;
+        }
+    }
+    flattened
 }
 
 /// A JSON object or array laid out over indented lines, or the value unchanged
@@ -1763,6 +1867,7 @@ mod tests {
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                clipped: false,
             },
             Mode::ReadWrite,
         );
@@ -1798,6 +1903,64 @@ mod tests {
         let written = grid.stored();
         assert_eq!(written.rows.len(), GRID_ROW_CAP);
         assert_eq!(written.total_rows, GRID_ROW_CAP + 10);
+    }
+
+    #[test]
+    fn a_large_snapshot_keeps_only_as_much_of_a_value_as_a_cell_shows() {
+        let mut fits = editable_grid();
+        fits.result.rows[1][1] = Some("é".repeat(CELL_DISPLAY_LIMIT * 4));
+        let written = fits.stored();
+        assert!(!written.clipped);
+        assert_eq!(written.rows, fits.result.rows);
+        assert!(written.edit.is_some());
+
+        let value = "é".repeat(SNAPSHOT_WHOLE_LIMIT / 2 + 1);
+        let mut long = editable_grid();
+        long.result.rows[1][1] = Some(value.clone());
+        let written = long.stored();
+        assert!(written.clipped);
+        assert!(written.edit.is_none());
+        assert_eq!(
+            written.rows[1][1],
+            Some(format!("{}…", "é".repeat(CELL_DISPLAY_LIMIT)))
+        );
+        // The restored cell paints what the live one did. Only for a value with
+        // no break in the part that shows: one with a break flattens the kept
+        // start alone, which can come out shorter.
+        let restored = ResultGrid::restored(&written, Mode::ReadWrite);
+        assert_eq!(
+            restored.display[1][1].as_deref(),
+            Some(clip(&value).as_str())
+        );
+        // And saving it again is the same snapshot, still flagged.
+        assert_eq!(restored.stored().rows, written.rows);
+        assert!(restored.stored().clipped);
+    }
+
+    #[test]
+    fn a_snapshot_that_cut_a_value_restores_read_only() {
+        let mut long = editable_grid();
+        long.result.rows[0][1] = Some("x".repeat(SNAPSHOT_WHOLE_LIMIT + 1));
+        let mut written = long.stored();
+        // As a build that kept the target would have written it: the refusal
+        // below has to come from the cut, not from the missing target.
+        written.edit = long.result.edit.clone();
+        let mut grid = ResultGrid::restored(&written, Mode::ReadWrite);
+        grid.confirm_stale();
+
+        assert!(grid.clipped());
+        assert!(grid.cut_at(0, 1));
+        assert!(!grid.cut_at(0, 0));
+        assert!(grid.row_cut(0));
+        assert!(!grid.row_cut(1));
+        assert!(!grid.editable(0, 1));
+        assert!(!grid.begin_edit(0, 1));
+        assert!(!grid.stage(0, 1, NewValue::Null));
+        assert_eq!(grid.row_key(0), None);
+        // The inspector says which values are only their start.
+        let fields = grid.fields(0);
+        assert!(fields[1].cut);
+        assert!(!fields[0].cut);
     }
 
     #[test]
@@ -2630,6 +2793,40 @@ mod tests {
         assert_eq!(clipped.chars().count(), CELL_DISPLAY_LIMIT + 1);
         assert!(clipped.ends_with('…'));
         assert!(clipped.chars().take(CELL_DISPLAY_LIMIT).all(|c| c == '🌍'));
+    }
+
+    #[test]
+    fn streamed_flattening_paints_what_flattening_the_whole_value_did() {
+        fn whole(value: &str) -> String {
+            let flattened = value
+                .split(['\n', '\r'])
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            clip_to(&flattened, CELL_DISPLAY_LIMIT)
+        }
+        let long = "é".repeat(CELL_DISPLAY_LIMIT);
+        let inputs = [
+            "a\nb".to_string(),
+            "\n\n  lead \t  inner  \r\n\r\n\n trail  \n".to_string(),
+            "\r\n".to_string(),
+            " \n \n ".to_string(),
+            format!("é\n{long}"),
+            format!("{}\n{}", "x".repeat(150), "y".repeat(149)),
+            format!("{}\n{}", "x".repeat(150), "y".repeat(150)),
+            format!("{}\n{}", "x".repeat(150), "y".repeat(151)),
+            format!("x\n{}  {}", "y".repeat(297), "z".repeat(10)),
+            format!("x\n{}", " ".repeat(CELL_DISPLAY_LIMIT * 2)),
+        ];
+        for input in &inputs {
+            assert_eq!(clip(input), whole(input), "{input:?}");
+        }
+
+        // No break inside the part that shows: the cell is the value's start,
+        // whatever lies past it.
+        let huge = format!("{}\nend", "g".repeat(4_000_000));
+        assert_eq!(clip(&huge), clip_to(&huge, CELL_DISPLAY_LIMIT));
     }
 
     #[test]

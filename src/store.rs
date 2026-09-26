@@ -254,6 +254,11 @@ pub struct StoredGrid {
     pub edit: Option<EditTarget>,
     #[serde(default)]
     pub data_types: Vec<Option<String>>,
+    /// Whether any value was cut to what a cell shows. A cut value read back as
+    /// the whole one would be copied short or written over the real one, so a
+    /// grid restored from this stays read-only until a run.
+    #[serde(default)]
+    pub clipped: bool,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -655,6 +660,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             captured: grid.captured,
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
+            clipped: grid.clipped,
         };
         &capped
     } else {
@@ -2041,6 +2047,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                clipped: false,
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -2092,6 +2099,7 @@ open_objects = []
                     keys: vec![0],
                 }),
                 data_types: vec![Some("int4".into()), None],
+                clipped: false,
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -2120,6 +2128,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                clipped: false,
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -2166,6 +2175,7 @@ open_objects = []
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                clipped: false,
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -2203,6 +2213,7 @@ open_objects = []
 
         assert_eq!(grid.edit, None);
         assert!(grid.data_types.is_empty());
+        assert!(!grid.clipped);
         assert_eq!(grid.rows, vec![vec![Some("1".to_string()), None]]);
     }
 
