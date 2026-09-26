@@ -57,6 +57,34 @@ services:
       timeout: 5s
       retries: 60
 
+  # Dev SSH bastions for the tunnel feature: `bastion` is reachable from the
+  # host, `bastion2` only through it (no published port), so a tunnel through
+  # either can be exercised against `postgres`/`mysql`/`mssql` by name. Regular
+  # services rather than a profile so local dev and CI stay identical.
+  # `dev/ssh/setup.sh` writes the key and ssh_config they read; `docker compose
+  # up` alone starts them fine with no key mounted, just nobody can log in yet.
+  bastion:
+    build: ./dev/ssh
+    ports:
+      - "${DBDELVE_SSH_PORT:-52222}:22"
+    volumes:
+      - ./dev/ssh/.generated:/keys:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  bastion2:
+    build: ./dev/ssh
+    volumes:
+      - ./dev/ssh/.generated:/keys:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   dbdelve-postgres-data:
   dbdelve-mysql-data:

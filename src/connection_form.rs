@@ -12,7 +12,7 @@ use gpui_component::input::InputState;
 
 use crate::{
     Workspace,
-    db::{ConnectionConfig, Engine, ServerConfig, SnowflakeConfig, SslMode},
+    db::{ConnectionConfig, Engine, ServerConfig, SnowflakeConfig, SshTunnel, SslMode},
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -42,6 +42,13 @@ pub(crate) struct ConnectionForm {
     /// Only reachable while the mode consults one, so the field cannot sit
     /// there filled in and doing nothing.
     pub(crate) root_certificate: Entity<InputState>,
+    /// Off, the SSH fields are kept but not read, the way another engine's
+    /// fields are, so turning it back on finds them as they were typed.
+    pub(crate) ssh: bool,
+    pub(crate) ssh_host: Entity<InputState>,
+    pub(crate) ssh_port: Entity<InputState>,
+    pub(crate) ssh_user: Entity<InputState>,
+    pub(crate) ssh_identity_file: Entity<InputState>,
     /// What an account has that a server does not. `host`, `database` and
     /// `user` are shared with the server fields: they mean the same thing, and
     /// sharing them is what keeps a value typed under one engine there under the
@@ -152,6 +159,19 @@ impl ConnectionForm {
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
         });
+        let ssh = server.and_then(|server| server.ssh.as_ref());
+        let [ssh_host, ssh_port, ssh_user, ssh_identity_file] = ssh_fields(ssh);
+        let mut input = |placeholder: &'static str, value: String| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value)
+            })
+        };
+        let ssh_host = input("Host or ~/.ssh/config alias", ssh_host);
+        let ssh_port = input("Port (optional)", ssh_port);
+        let ssh_user = input("Username (optional)", ssh_user);
+        let ssh_identity_file = input("Identity file (optional)", ssh_identity_file);
         let account_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Account identifier")
@@ -205,6 +225,11 @@ impl ConnectionForm {
             password,
             sslmode: server.map(|server| server.sslmode).unwrap_or_default(),
             root_certificate,
+            ssh: ssh.is_some(),
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            ssh_identity_file,
             account: account_name,
             private_key,
             warehouse,
@@ -363,14 +388,7 @@ impl ConnectionForm {
             }
         }
 
-        let port = if port.is_empty() {
-            None
-        } else {
-            Some(
-                port.parse()
-                    .map_err(|_| "Port must be a number from 1 to 65535.".to_string())?,
-            )
-        };
+        let port = parse_port("Port", &port)?;
 
         // Kept only where it is consulted. A path left behind by switching down
         // to `require` would be stored and shown as though it were in force.
@@ -389,7 +407,68 @@ impl ConnectionForm {
             sslmode: self.sslmode,
             root_certificate,
             statement_timeout: self.statement_timeout(cx)?,
+            ssh: ssh_tunnel(
+                self.ssh,
+                [
+                    read(&self.ssh_host),
+                    read(&self.ssh_port),
+                    read(&self.ssh_user),
+                    read(&self.ssh_identity_file),
+                ],
+            )?,
         })
+    }
+}
+
+/// The SSH fields' text for `ssh`, in the order `ssh_tunnel` reads it back.
+fn ssh_fields(ssh: Option<&SshTunnel>) -> [String; 4] {
+    let ssh = ssh.cloned().unwrap_or_default();
+    [
+        ssh.host,
+        ssh.port.map(|port| port.to_string()).unwrap_or_default(),
+        ssh.user,
+        ssh.identity_file.unwrap_or_default(),
+    ]
+}
+
+/// Blank port, user and identity file defer to `~/.ssh/config`, which is what
+/// lets a config alias carry the whole of it.
+fn ssh_tunnel(
+    on: bool,
+    [host, port, user, identity_file]: [String; 4],
+) -> Result<Option<SshTunnel>, String> {
+    if !on {
+        return Ok(None);
+    }
+    if host.is_empty() {
+        return Err("SSH host is required.".into());
+    }
+    if host.starts_with('-') {
+        return Err("SSH host must not start with '-'.".into());
+    }
+    let identity_file = Some(identity_file).filter(|path| !path.is_empty());
+    if let Some(error) = identity_file
+        .as_deref()
+        .and_then(SshTunnel::identity_file_error)
+    {
+        return Err(error);
+    }
+    Ok(Some(SshTunnel {
+        host,
+        port: parse_port("SSH port", &port)?,
+        user,
+        identity_file,
+    }))
+}
+
+/// Blank is the default port.
+fn parse_port(label: &str, value: &str) -> Result<Option<u16>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse() {
+        Ok(0) | Err(_) => Err(format!("{label} must be a number from 1 to 65535.")),
+        Ok(port) => Ok(Some(port)),
     }
 }
 
@@ -463,6 +542,61 @@ mod tests {
     use super::*;
     use crate::db::{ConnectionConfig, ServerConfig, SslMode};
 
+    fn fields(host: &str, port: &str) -> [String; 4] {
+        [host.into(), port.into(), String::new(), String::new()]
+    }
+
+    #[test]
+    fn the_ssh_fields_are_a_tunnel_only_while_it_is_on() {
+        assert_eq!(ssh_tunnel(false, fields("bastion", "nope")), Ok(None));
+        assert_eq!(
+            ssh_tunnel(true, fields("bastion", "")),
+            Ok(Some(SshTunnel {
+                host: "bastion".into(),
+                port: None,
+                user: String::new(),
+                identity_file: None,
+            }))
+        );
+        assert_eq!(
+            ssh_tunnel(true, fields("", "")),
+            Err("SSH host is required.".into())
+        );
+        assert_eq!(
+            ssh_tunnel(true, fields("-oProxyCommand=x", "")),
+            Err("SSH host must not start with '-'.".into())
+        );
+        for port in ["0", "65536", "22a"] {
+            assert_eq!(
+                ssh_tunnel(true, fields("bastion", port)),
+                Err("SSH port must be a number from 1 to 65535.".into())
+            );
+        }
+        assert_eq!(
+            ssh_tunnel(
+                true,
+                [
+                    "bastion".into(),
+                    String::new(),
+                    String::new(),
+                    "id_ed25519".into()
+                ]
+            ),
+            Err("Identity file must be an absolute path to the key file.".into())
+        );
+    }
+
+    #[test]
+    fn an_edited_tunnel_reads_back_as_it_was_saved() {
+        let saved = SshTunnel {
+            host: "bastion.example".into(),
+            port: Some(2222),
+            user: "deploy".into(),
+            identity_file: Some("~/.ssh/id_ed25519".into()),
+        };
+        assert_eq!(ssh_tunnel(true, ssh_fields(Some(&saved))), Ok(Some(saved)));
+    }
+
     #[test]
     fn a_duplicate_name_does_not_collide_with_one_already_there() {
         assert_eq!(duplicate_profile_name("Prod", &[]), "Prod copy");
@@ -495,6 +629,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
         };
         let typed = ConnectionConfig::Postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

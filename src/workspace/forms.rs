@@ -37,12 +37,21 @@ impl Workspace {
         };
 
         div()
+            .id("connection-form-scroll")
             .size_full()
+            .overflow_y_scroll()
+            .p(px(layout::SPACE_LG))
             .flex()
+            .flex_col()
             .items_center()
-            .justify_center()
             .child(
                 div()
+                    // Centred by auto margins rather than `justify_center`,
+                    // which pushes a form taller than the window (an SSH
+                    // tunnel under a verifying mode) off the top, where
+                    // scrolling cannot reach.
+                    .my_auto()
+                    .flex_shrink_0()
                     .w(px(layout::DIALOG_WIDTH))
                     .p(px(layout::SPACE_LG))
                     .bg(t.panel)
@@ -260,6 +269,63 @@ impl Workspace {
                             // changes nothing reads as though it does.
                             .children(form.sslmode.checks_certificate().then(|| {
                                 self.form_field("Root certificate", &form.root_certificate, cx)
+                            }))
+                            .child(
+                                Checkbox::new("ssh-tunnel")
+                                    .text_size(px(layout::TEXT_SM))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .label("Connect through an SSH tunnel")
+                                    .checked(form.ssh)
+                                    .on_click(cx.listener(|workspace, on: &bool, _, cx| {
+                                        if let Some(form) = &mut workspace.form {
+                                            form.ssh = *on;
+                                            if *on {
+                                                form.needs_focus = Some(form.ssh_host.clone());
+                                            }
+                                            // A pass without the tunnel did not test it.
+                                            form.test = None;
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .children(form.ssh.then(|| {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(layout::SPACE_MD))
+                                    // Host and Port are the far end of the
+                                    // forward, which is easy to read as this
+                                    // machine's view of the network.
+                                    .child(
+                                        div()
+                                            .text_size(px(layout::TEXT_XS))
+                                            .text_color(t.text_faint)
+                                            .child(
+                                                "Host and Port are as the SSH host sees them: \
+                                                 localhost is the SSH host itself.",
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(layout::SPACE_SM))
+                                            .child(div().flex_1().child(self.form_field(
+                                                "SSH host",
+                                                &form.ssh_host,
+                                                cx,
+                                            )))
+                                            .child(div().w(px(96.)).child(self.form_field(
+                                                "SSH port",
+                                                &form.ssh_port,
+                                                cx,
+                                            ))),
+                                    )
+                                    .child(self.form_field("SSH username", &form.ssh_user, cx))
+                                    .child(self.form_field(
+                                        "Identity file",
+                                        &form.ssh_identity_file,
+                                        cx,
+                                    ))
                             }))
                     }))
                     // Outside the server block: every engine can stop a

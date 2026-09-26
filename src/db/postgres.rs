@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -7,10 +8,14 @@ use postgres::{CancelToken, Client, NoTls, SimpleQueryMessage, config::Host};
 
 use crate::tls;
 
+use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, QueryResult, ServerConfig, Structure,
     assemble_catalog, assemble_foreign_keys, assemble_structure, non_utf8_error, required_cell,
 };
+
+/// The port the server listens on when the profile does not say.
+const DEFAULT_PORT: u16 = 5432;
 
 const RELATIONS_SQL: &str = "
 SELECT
@@ -288,6 +293,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         root_certificate,
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
+        ssh: None,
     })
 }
 
@@ -334,6 +340,16 @@ fn connection_string(server: &ServerConfig) -> String {
     parts.join(" ")
 }
 
+/// The server's own name, which TLS verifies, dialled at the tunnel's address
+/// through `hostaddr`, which the certificate check never sees.
+fn tunnelled_string(server: &ServerConfig, dial: SocketAddr) -> String {
+    let dialled = ServerConfig {
+        port: Some(dial.port()),
+        ..server.clone()
+    };
+    format!("{} hostaddr={}", connection_string(&dialled), dial.ip())
+}
+
 fn quote(value: &str) -> String {
     let escaped = value.replace('\\', r"\\").replace('\'', r"\'");
     format!("'{escaped}'")
@@ -357,10 +373,17 @@ pub struct Connection {
     /// second socket to the same server and an `sslmode` is never quietly
     /// weakened for it either (AGENTS.md, hard rule 7).
     connector: Option<tls::MakeRustlsConnect>,
+    /// Held so ssh runs as long as any clone does. The cancel token dials the
+    /// address the client connected to, so a cancel goes through it too.
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
+        tunnelled(server, DEFAULT_PORT, |tunnel| Self::connect(server, tunnel))
+    }
+
+    fn connect(server: &ServerConfig, tunnel: Option<Arc<Tunnel>>) -> Result<Self, DbError> {
         // Two branches rather than a boxed connector: `Client::connect` is
         // generic over it, and `NoTls` is a distinct type whose entire purpose
         // is to refuse. Building one at all is what `disable` means.
@@ -369,7 +392,10 @@ impl Connection {
                 message,
                 position: None,
             })?;
-        let string = connection_string(server);
+        let string = match &tunnel {
+            None => connection_string(server),
+            Some(tunnel) => tunnelled_string(server, tunnel.dial()?),
+        };
         let client = match &connector {
             None => Client::connect(&string, NoTls),
             Some(connector) => Client::connect(&string, connector.clone()),
@@ -380,6 +406,7 @@ impl Connection {
             cancel: client.cancel_token(),
             connector,
             client: Arc::new(Mutex::new(client)),
+            tunnel,
         })
     }
 
@@ -389,6 +416,9 @@ impl Connection {
     /// request was delivered, never that anything stopped -- what the query
     /// eventually returned is the only account dbdelve gives of that.
     pub fn cancel(&self) -> Result<(), DbError> {
+        if let Some(tunnel) = &self.tunnel {
+            tunnel.dial()?;
+        }
         match &self.connector {
             None => self.cancel.cancel_query(NoTls),
             Some(connector) => self.cancel.cancel_query(connector.clone()),
@@ -902,6 +932,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
         }
     }
 
@@ -920,6 +951,18 @@ mod tests {
             sslmode: SslMode::Disable,
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
+        }
+    }
+
+    /// The compose database as the bastion sees it, by service name and the
+    /// port inside the network.
+    fn live_tunnelled(alias: &str) -> ServerConfig {
+        ServerConfig {
+            host: "postgres".into(),
+            port: Some(5432),
+            ssh: crate::db::ssh::live_bastion(alias),
+            ..live_config()
         }
     }
 
@@ -1008,6 +1051,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnelled_connection_verifies_the_servers_name_and_dials_the_tunnel() {
+        let string = tunnelled_string(&config(), "127.0.0.1:40000".parse().unwrap());
+        let parsed: postgres::Config = string.parse().expect("the driver should parse it");
+
+        assert_eq!(parsed.get_hosts(), [Host::Tcp("db.example.test".into())]);
+        assert_eq!(
+            parsed.get_hostaddrs(),
+            ["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
+        );
+        assert_eq!(parsed.get_ports(), [40000]);
+    }
+
+    #[test]
     fn blank_password_is_omitted_not_sent_empty() {
         // An empty `password=''` is not the same as offering no password, and
         // IAM auth relies on the latter.
@@ -1061,6 +1117,7 @@ mod tests {
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
+                ssh: None,
             }
         );
     }
@@ -1434,6 +1491,64 @@ mod tests {
             "the server's own words: {}",
             error.message
         );
+        assert!(connection.query("SELECT 1").is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_query_runs_through_the_bastion() {
+        let connection =
+            Connection::open(&live_tunnelled("dbdelve-bastion")).expect("connection should open");
+        let result = connection
+            .query("SELECT 1 AS one")
+            .expect("query should succeed");
+        assert_eq!(result.rows, vec![vec![Some("1".into())]]);
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_query_runs_through_a_jump_host() {
+        let connection =
+            Connection::open(&live_tunnelled("dbdelve-inner")).expect("connection should open");
+        let result = connection
+            .query("SELECT 1 AS one")
+            .expect("query should succeed");
+        assert_eq!(result.rows, vec![vec![Some("1".into())]]);
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_server_the_bastion_cannot_reach_fails_with_ssh_s_reason() {
+        let Err(error) = Connection::open(&ServerConfig {
+            host: "dbdelve-nowhere.invalid".into(),
+            ..live_tunnelled("dbdelve-bastion")
+        }) else {
+            panic!("a server that does not resolve from the bastion connected");
+        };
+        assert!(
+            error
+                .message
+                .contains("\nSSH tunnel through dbdelve-bastion: open failed: "),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_cancel_reaches_the_server_through_the_tunnel() {
+        let connection =
+            Connection::open(&live_tunnelled("dbdelve-bastion")).expect("connection should open");
+        let canceller = connection.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().expect("the cancel request should send");
+        });
+
+        let error = connection
+            .query("SELECT pg_sleep(30)")
+            .expect_err("the statement should be cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
         assert!(connection.query("SELECT 1").is_ok());
     }
 

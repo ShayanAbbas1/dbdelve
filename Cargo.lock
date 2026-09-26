@@ -1500,6 +1500,7 @@ dependencies = [
  "icondata_core",
  "icondata_lu",
  "keyring",
+ "libc",
  "lsp-types",
  "mysql",
  "nucleo-matcher",
@@ -1522,6 +1523,7 @@ dependencies = [
  "tree-sitter-sequel",
  "ureq",
  "url",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

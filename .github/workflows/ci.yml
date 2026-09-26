@@ -57,6 +57,8 @@ jobs:
       dbdelve_MYSQL_URL: mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
       dbdelve_MSSQL_URL: mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
       dbdelve_SQLITE_PATH: ${{ github.workspace }}/dev/dbdelve_dev.db
+      # For the live_ssh_ tests a later checkpoint adds; setup.sh writes this.
+      dbdelve_SSH_CONFIG: ${{ github.workspace }}/dev/ssh/.generated/ssh_config
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -68,6 +70,7 @@ jobs:
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev sqlite3
       - run: sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
+      - run: dev/ssh/setup.sh
       - run: docker compose up -d --wait
       # CI has no Snowflake account, and the live Snowflake tests panic
       # without one; the mock tests cover the same ground offline. The one

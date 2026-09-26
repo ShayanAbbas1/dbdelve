@@ -64,7 +64,7 @@ pub(crate) struct Profile {
 impl Profile {
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
-            ProfileState::Connected(connection) => Some(connection.clone()),
+            ProfileState::Connected(connection) => Some((**connection).clone()),
             _ => None,
         }
     }
@@ -143,6 +143,7 @@ impl Profile {
             // property of its tab now. Kept on the stored shape only so a
             // profile written by an older build still loads with its buffer.
             open_query: None,
+            ssh: server.and_then(|server| server.ssh.clone()),
             open_queries: self
                 .session
                 .queries
@@ -157,7 +158,10 @@ impl Profile {
 pub(crate) enum ProfileState {
     Idle,
     Connecting,
-    Connected(Connection),
+    // Boxed: a server profile's `ssh` tunnel made `Connection` far larger than
+    // `Failed`'s `String`, and this variant is the one every idle profile pays
+    // for.
+    Connected(Box<Connection>),
     Failed(String),
 }
 
