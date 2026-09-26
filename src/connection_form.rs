@@ -446,11 +446,18 @@ fn ssh_tunnel(
     if host.starts_with('-') {
         return Err("SSH host must not start with '-'.".into());
     }
+    let identity_file = Some(identity_file).filter(|path| !path.is_empty());
+    if let Some(error) = identity_file
+        .as_deref()
+        .and_then(SshTunnel::identity_file_error)
+    {
+        return Err(error);
+    }
     Ok(Some(SshTunnel {
         host,
         port: parse_port("SSH port", &port)?,
         user,
-        identity_file: Some(identity_file).filter(|path| !path.is_empty()),
+        identity_file,
     }))
 }
 
@@ -565,6 +572,18 @@ mod tests {
                 Err("SSH port must be a number from 1 to 65535.".into())
             );
         }
+        assert_eq!(
+            ssh_tunnel(
+                true,
+                [
+                    "bastion".into(),
+                    String::new(),
+                    String::new(),
+                    "id_ed25519".into()
+                ]
+            ),
+            Err("Identity file must be an absolute path to the key file.".into())
+        );
     }
 
     #[test]

@@ -375,7 +375,7 @@ pub struct Connection {
     connector: Option<tls::MakeRustlsConnect>,
     /// Held so ssh runs as long as any clone does. The cancel token dials the
     /// address the client connected to, so a cancel goes through it too.
-    _tunnel: Option<Arc<Tunnel>>,
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
@@ -394,7 +394,7 @@ impl Connection {
             })?;
         let string = match &tunnel {
             None => connection_string(server),
-            Some(tunnel) => tunnelled_string(server, tunnel.local_addr()),
+            Some(tunnel) => tunnelled_string(server, tunnel.dial()?),
         };
         let client = match &connector {
             None => Client::connect(&string, NoTls),
@@ -406,7 +406,7 @@ impl Connection {
             cancel: client.cancel_token(),
             connector,
             client: Arc::new(Mutex::new(client)),
-            _tunnel: tunnel,
+            tunnel,
         })
     }
 
@@ -416,6 +416,9 @@ impl Connection {
     /// request was delivered, never that anything stopped -- what the query
     /// eventually returned is the only account dbdelve gives of that.
     pub fn cancel(&self) -> Result<(), DbError> {
+        if let Some(tunnel) = &self.tunnel {
+            tunnel.dial()?;
+        }
         match &self.connector {
             None => self.cancel.cancel_query(NoTls),
             Some(connector) => self.cancel.cancel_query(connector.clone()),

@@ -2,13 +2,14 @@
 //!
 //! The binary rather than an SSH library, because it brings `~/.ssh/config`
 //! (aliases, `ProxyJump`, `IdentityFile`, `User`), ssh-agent, agent-backed
-//! keys and hardware keys along with it. An engine dials
-//! [`Tunnel::local_addr`] and keeps the server's own name for TLS.
+//! keys and hardware keys along with it. An engine dials [`Tunnel::dial`] and
+//! keeps the server's own name for TLS.
 
-use std::io::{self, Read};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader, Read};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,11 +22,18 @@ const READY_WITHIN: Duration = Duration::from_secs(30);
 /// between releasing it and ssh binding it.
 const ATTEMPTS: usize = 3;
 
-/// How much of ssh's stderr is kept. Its error is the last thing it says.
-const STDERR_TAIL: usize = 8 * 1024;
+/// Lines of what ssh said that are kept, and how many of the last an error
+/// shows. Its error is the last thing it says; a banner comes first.
+const KEPT_LINES: usize = 20;
+const SHOWN_LINES: usize = 3;
 
-/// What ssh prints when `ExitOnForwardFailure` finds the local port taken.
-const FORWARD_FAILED: &str = "Could not request local forwarding";
+/// The longest line read whole; a longer one arrives in pieces.
+const LINE_LIMIT: u64 = 1024;
+
+/// What `-v` prints once every forward is bound, `ExitOnForwardFailure`
+/// having exited ssh before this for any that could not be. "Local forwarding
+/// listening" alone is not enough: ssh prints it before it binds.
+const SESSION_STARTED: &str = "debug1: Entering interactive session.";
 
 /// What ssh prints, per connection, when the SSH host could not reach the
 /// forward's target.
@@ -38,12 +46,25 @@ const EXPLAINED_WITHIN: Duration = Duration::from_millis(500);
 pub struct Tunnel {
     local: SocketAddr,
     host: String,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    process: Child,
+    said: Arc<Mutex<Said>>,
+    /// Behind a mutex so a dial can ask whether ssh is still running.
+    process: Mutex<Child>,
     /// Created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the OS ends ssh
     /// when this handle closes, however DBDelve exits.
     #[cfg(windows)]
     _job: std::os::windows::io::OwnedHandle,
+}
+
+/// What the stderr drain has read.
+#[derive(Default)]
+struct Said {
+    /// What a person might need, newest last: no `-v` debug output, and none
+    /// of the chatter `chatter` names.
+    lines: VecDeque<String>,
+    /// ssh has set our forward's listener up.
+    listening: bool,
+    /// ... and gone on to the session, so it is bound.
+    ready: bool,
 }
 
 impl Tunnel {
@@ -67,6 +88,15 @@ impl Tunnel {
             {
                 args.splice(0..0, ["-F".to_owned(), config]);
             }
+            if host_keys_left_to_default(&args) {
+                args.splice(
+                    0..0,
+                    [
+                        "-o".to_owned(),
+                        "StrictHostKeyChecking=accept-new".to_owned(),
+                    ],
+                );
+            }
 
             let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
             let mut tunnel =
@@ -74,21 +104,26 @@ impl Tunnel {
                     io::ErrorKind::NotFound => no_ssh(),
                     _ => plain_error(format!("Could not start ssh: {error}")),
                 })?;
+            let process = tunnel
+                .process
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let draining = drain(
-                tunnel.process.stderr.take().expect("stderr is piped"),
-                tunnel.stderr.clone(),
+                process.stderr.take().expect("stderr is piped"),
+                tunnel.said.clone(),
+                port,
             );
 
-            match wait_ready(&mut tunnel.process, local) {
+            match wait_ready(process, &tunnel.said) {
                 Ready::Listening => return Ok(tunnel),
                 Ready::Exited(status) => {
                     let _ = draining.join();
-                    let stderr = tunnel.said();
-                    if stderr.contains(FORWARD_FAILED) && attempt < ATTEMPTS {
+                    let said = tunnel.shown();
+                    if our_port_was_taken(&said, port) && attempt < ATTEMPTS {
                         attempt += 1;
                         continue;
                     }
-                    return Err(failure(&ssh.host, status, &stderr));
+                    return Err(failure(&ssh.host, status, &said));
                 }
                 Ready::TimedOut => {
                     return Err(plain_error(format!(
@@ -101,8 +136,25 @@ impl Tunnel {
         }
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local
+    /// The address to dial, once ssh is known to still be running: a freed
+    /// port is one anything local could have bound since.
+    pub fn dial(&self) -> Result<SocketAddr, DbError> {
+        let running = matches!(
+            self.process
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .try_wait(),
+            Ok(None)
+        );
+        if running {
+            return Ok(self.local);
+        }
+        let said = self.shown();
+        Err(plain_error(if said.is_empty() {
+            format!("SSH tunnel through {} closed.", self.host)
+        } else {
+            format!("SSH tunnel through {} closed: {said}", self.host)
+        }))
     }
 
     /// `error`, from an engine that dialled through this tunnel, with ssh's
@@ -111,12 +163,11 @@ impl Tunnel {
     pub fn explain(&self, mut error: DbError) -> DbError {
         let deadline = Instant::now() + EXPLAINED_WITHIN;
         loop {
-            let said = self.said();
-            if let Some((_, reason)) = said
-                .lines()
-                .rev()
-                .find_map(|line| line.split_once(OPEN_FAILED))
-            {
+            let reason = self.said().lines.iter().rev().find_map(|line| {
+                line.split_once(OPEN_FAILED)
+                    .map(|(_, reason)| reason.to_owned())
+            });
+            if let Some(reason) = reason {
                 error.message = format!(
                     "{}\nSSH tunnel through {}: {OPEN_FAILED}{reason}",
                     error.message, self.host
@@ -130,25 +181,23 @@ impl Tunnel {
         }
     }
 
-    fn said(&self) -> String {
-        readable(
-            &self
-                .stderr
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
+    fn said(&self) -> MutexGuard<'_, Said> {
+        self.said
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-}
 
-/// ssh's stderr as lines, bar the one trust-on-first-use prints on a first
-/// connect. ssh ends its lines with CRLF.
-fn readable(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.is_empty() && !line.starts_with("Warning: Permanently added"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    /// The last few lines ssh said, for an error.
+    fn shown(&self) -> String {
+        let said = self.said();
+        let skip = said.lines.len().saturating_sub(SHOWN_LINES);
+        said.lines
+            .iter()
+            .skip(skip)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Opens `server`'s tunnel when it has one, then `connect` through it; an engine
@@ -171,16 +220,20 @@ pub(super) fn tunnelled<C>(
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
+        let process = self
+            .process
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Closing the watchdog's stdin is the same teardown a crash gets.
         #[cfg(unix)]
-        drop(self.process.stdin.take());
+        drop(process.stdin.take());
         #[cfg(windows)]
-        let _ = self.process.kill();
-        let _ = self.process.wait();
+        let _ = process.kill();
+        let _ = process.wait();
     }
 }
 
-/// ssh's arguments, bar the program name.
+/// ssh's arguments, bar the program name and what `Tunnel::open` adds.
 fn ssh_args(
     ssh: &SshTunnel,
     local_port: u16,
@@ -193,6 +246,10 @@ fn ssh_args(
             ssh.host
         )));
     }
+    let identity = ssh.identity_file.as_ref().filter(|path| !path.is_empty());
+    if let Some(error) = identity.and_then(|path| SshTunnel::identity_file_error(path)) {
+        return Err(plain_error(error));
+    }
     let target_host = if target_host.contains(':') && !target_host.starts_with('[') {
         format!("[{target_host}]")
     } else {
@@ -202,16 +259,24 @@ fn ssh_args(
     let mut args: Vec<String> = [
         "-N",
         "-T",
+        // What readiness is read from, and it outranks a config `LogLevel`
+        // quiet enough to hide "open failed" too.
+        "-v",
         "-o",
         "BatchMode=yes",
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        // A config's ControlPersist would fork ssh into the background past
+        // Drop and the watchdog, and an existing master would take the
+        // forward over from a process we do not hold.
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
         "-L",
     ]
     .map(String::from)
@@ -225,11 +290,31 @@ fn ssh_args(
     if !ssh.user.is_empty() {
         args.extend(["-l".to_owned(), ssh.user.clone()]);
     }
-    if let Some(identity) = ssh.identity_file.as_ref().filter(|path| !path.is_empty()) {
-        args.extend(["-i".to_owned(), identity.clone()]);
+    if let Some(identity) = identity {
+        // ssh expands `%` tokens in an identity file, even one given here.
+        args.extend(["-i".to_owned(), identity.replace('%', "%%")]);
     }
     args.extend(["--".to_owned(), ssh.host.clone()]);
     Ok(args)
+}
+
+/// Whether nothing the user configured decides host-key checking. Only then
+/// is trust-on-first-use added, since a command-line `-o` outranks their
+/// config. `ssh -G` evaluates the config for these arguments and exits without
+/// connecting; if it cannot, nothing is added.
+fn host_keys_left_to_default(args: &[String]) -> bool {
+    ssh_command()
+        .arg("-G")
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line == "stricthostkeychecking ask")
+        })
 }
 
 enum Ready {
@@ -238,37 +323,43 @@ enum Ready {
     TimedOut,
 }
 
-fn wait_ready(process: &mut Child, local: SocketAddr) -> Ready {
+fn wait_ready(process: &mut Child, said: &Mutex<Said>) -> Ready {
     let deadline = Instant::now() + READY_WITHIN;
     while Instant::now() < deadline {
         if let Ok(Some(status)) = process.try_wait() {
             return Ready::Exited(status);
         }
-        // ponytail: the probe is one forwarded connection opened and closed
-        // before the engine's, so the database logs a connection that sent
-        // nothing (Postgres "incomplete startup packet"; MySQL counts it toward
-        // max_connect_errors until the real connect resets it), and a stranger
-        // listening on the port before ssh binds it passes too. Upgrade: run
-        // ssh with -v and wait for its "Local forwarding listening" line.
-        if TcpStream::connect_timeout(&local, Duration::from_secs(1)).is_ok() {
+        if said
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ready
+        {
             return Ready::Listening;
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(20));
     }
     Ready::TimedOut
 }
 
-fn failure(host: &str, status: ExitStatus, stderr: &str) -> DbError {
+/// Only our own port is worth another attempt: a forward the user's config
+/// adds collides the same way every time, and each attempt may cost a
+/// hardware-key touch.
+fn our_port_was_taken(said: &str, port: u16) -> bool {
+    let ours = format!("cannot listen to port: {port}");
+    said.lines().any(|line| line.ends_with(&ours))
+}
+
+fn failure(host: &str, status: ExitStatus, said: &str) -> DbError {
     // The watchdog shell's "command not found".
     if cfg!(unix) && status.code() == Some(127) {
         return no_ssh();
     }
-    if stderr.is_empty() {
+    if said.is_empty() {
         plain_error(format!(
             "SSH tunnel through {host} failed: ssh exited ({status})."
         ))
     } else {
-        plain_error(format!("SSH tunnel through {host} failed: {stderr}"))
+        plain_error(format!("SSH tunnel through {host} failed: {said}"))
     }
 }
 
@@ -276,25 +367,71 @@ fn no_ssh() -> DbError {
     plain_error("No ssh executable was found.".to_owned())
 }
 
-/// Reads stderr to the end, so ssh never blocks on a full pipe, keeping the
-/// last [`STDERR_TAIL`] bytes in `tail`.
-fn drain(mut stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
+/// Reads stderr to the end, so ssh never blocks on a full pipe, a line at a
+/// time into `said`.
+fn drain(stderr: ChildStderr, said: Arc<Mutex<Said>>, port: u16) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut chunk = [0; 4096];
+        let listening = format!("debug1: Local forwarding listening on 127.0.0.1 port {port}.");
+        let mut reader = BufReader::new(stderr);
+        let mut raw = Vec::new();
         loop {
-            match stderr.read(&mut chunk) {
+            raw.clear();
+            match (&mut reader).take(LINE_LIMIT).read_until(b'\n', &mut raw) {
                 Ok(0) => break,
-                Ok(read) => {
-                    let mut tail = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    tail.extend_from_slice(&chunk[..read]);
-                    let excess = tail.len().saturating_sub(STDERR_TAIL);
-                    tail.drain(..excess);
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
+            }
+            let line = printable(&String::from_utf8_lossy(&raw));
+            let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if line.starts_with("debug") {
+                if line == listening {
+                    said.listening = true;
+                } else if said.listening && line == SESSION_STARTED {
+                    said.ready = true;
+                }
+            } else if !chatter(&line) {
+                said.lines.push_back(line);
+                if said.lines.len() > KEPT_LINES {
+                    said.lines.pop_front();
+                }
             }
         }
     })
+}
+
+/// A line without its terminal escapes or control characters, which a
+/// `ProxyCommand` may colour its output with.
+fn printable(line: &str) -> String {
+    let mut printable = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(char) = chars.next() {
+        if char == '\x1b' {
+            if chars.next() == Some('[') {
+                for char in chars.by_ref() {
+                    if ('@'..='~').contains(&char) {
+                        break;
+                    }
+                }
+            }
+        } else if !char.is_control() {
+            printable.push(char);
+        }
+    }
+    printable.trim().to_owned()
+}
+
+/// What `-v` and a first connect print that says nothing about a failure.
+fn chatter(line: &str) -> bool {
+    line.is_empty()
+        || [
+            "Warning: Permanently added",
+            "Authenticated to ",
+            "Transferred: ",
+            "Bytes per second: ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
 }
 
 /// ssh runs under a shell holding the read end of a pipe on its stdin, whose
@@ -302,18 +439,26 @@ fn drain(mut stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()> {
 /// pipe closes, `read` returns, and the shell kills ssh. The argv arrives as
 /// `"$@"`, never spliced into the script. `exec 3<&0` because POSIX hands an
 /// asynchronous list /dev/null as its stdin; the shell exits with ssh's status.
+/// ssh alone gets the stderr pipe, as fd 4, so the shell's own job reports
+/// ("Terminated") never reach an error.
 #[cfg(unix)]
-const WATCHDOG: &str = "exec 3<&0; \"$@\" </dev/null & pid=$!; \
-    (read _ <&3; kill $pid) >/dev/null 2>&1 & watcher=$!; \
-    wait $pid; status=$?; kill $watcher 2>/dev/null; exit $status";
+const WATCHDOG: &str = "exec 3<&0 4>&2 2>/dev/null; \
+    \"$@\" </dev/null 2>&4 3<&- 4>&- & pid=$!; \
+    (read _ <&3; kill $pid) >/dev/null 4>&- & watcher=$!; \
+    wait $pid; status=$?; kill $watcher; exit $status";
+
+#[cfg(unix)]
+fn ssh_command() -> Command {
+    Command::new("ssh")
+}
 
 #[cfg(unix)]
 fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
     Ok(Tunnel {
         local,
         host: host.to_owned(),
-        stderr: Arc::default(),
-        process: watched("ssh", args)?,
+        said: Arc::default(),
+        process: Mutex::new(watched("ssh", args)?),
     })
 }
 
@@ -351,35 +496,40 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
     command.spawn()
 }
 
+/// Windows' own OpenSSH, when no other ssh is on PATH: it is not always put
+/// there.
+#[cfg(windows)]
+fn ssh_command() -> Command {
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ssh.exe").is_file()));
+    let program = if on_path {
+        PathBuf::from("ssh")
+    } else {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        Path::new(&root).join(r"System32\OpenSSH\ssh.exe")
+    };
+    let mut command = Command::new(program);
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command
+}
+
 #[cfg(windows)]
 fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
-    use std::os::windows::process::CommandExt;
-    use std::path::Path;
-
-    let command = |program: &Path| {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        command
-    };
-    let mut process = match command(Path::new("ssh")).spawn() {
-        // Windows' own OpenSSH lives here, and is not always on PATH.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-            command(&Path::new(&root).join(r"System32\OpenSSH\ssh.exe")).spawn()?
-        }
-        spawned => spawned?,
-    };
+    let mut process = ssh_command()
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
     match kill_on_close_job(&process) {
         Ok(job) => Ok(Tunnel {
             local,
             host: host.to_owned(),
-            stderr: Arc::default(),
-            process,
+            said: Arc::default(),
+            process: Mutex::new(process),
             _job: job,
         }),
         Err(error) => {
@@ -440,6 +590,7 @@ pub(super) fn live_bastion(alias: &str) -> Option<SshTunnel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
 
     fn tunnel(host: &str) -> SshTunnel {
         SshTunnel {
@@ -448,19 +599,22 @@ mod tests {
         }
     }
 
-    const OPTIONS: [&str; 12] = [
+    const OPTIONS: [&str; 15] = [
         "-N",
         "-T",
+        "-v",
         "-o",
         "BatchMode=yes",
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
     ];
 
     #[test]
@@ -486,7 +640,7 @@ mod tests {
             host: "bastion.example.com".to_owned(),
             port: Some(2222),
             user: "deploy@corp".to_owned(),
-            identity_file: Some("~/.ssh/id_ed25519".to_owned()),
+            identity_file: Some("~/.ssh/100%.key".to_owned()),
         };
         let mut expected = OPTIONS.to_vec();
         expected.extend([
@@ -497,7 +651,7 @@ mod tests {
             "-l",
             "deploy@corp",
             "-i",
-            "~/.ssh/id_ed25519",
+            "~/.ssh/100%%.key",
             "--",
             "bastion.example.com",
         ]);
@@ -527,14 +681,35 @@ mod tests {
     }
 
     #[test]
-    fn what_ssh_said_loses_its_crlf_and_the_first_connect_notice() {
+    fn a_relative_identity_file_is_refused() {
+        let relative = SshTunnel {
+            identity_file: Some("keys/id_ed25519".to_owned()),
+            ..tunnel("bastion")
+        };
+        let error = ssh_args(&relative, 40000, "db", 5432).unwrap_err();
         assert_eq!(
-            readable(
-                b"Warning: Permanently added '[127.0.0.1]:52222' (ED25519) to the list of known hosts.\r\n\
-                  channel 1: open failed: connect failed: Name does not resolve\r\n"
-            ),
-            "channel 1: open failed: connect failed: Name does not resolve"
+            error.message,
+            "Identity file must be an absolute path to the key file."
         );
+    }
+
+    #[test]
+    fn what_ssh_said_is_shown_without_escapes_or_chatter() {
+        assert_eq!(
+            printable("\x1b[31mnc: connect failed\x1b[0m\r\n"),
+            "nc: connect failed"
+        );
+        for chatter_line in [
+            "Warning: Permanently added '[127.0.0.1]:52222' (ED25519) to the list of known hosts.",
+            "Authenticated to 127.0.0.1 ([127.0.0.1]:52222) using \"publickey\".",
+            "Transferred: sent 3524, received 3852 bytes, in 3.9 seconds",
+            "",
+        ] {
+            assert!(chatter(chatter_line), "{chatter_line}");
+        }
+        assert!(!chatter(
+            "channel 1: open failed: connect failed: Name does not resolve"
+        ));
     }
 
     #[cfg(unix)]
@@ -546,6 +721,30 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!status.success());
+
+        // The shell's own "Terminated" report is not ssh's to show.
+        let mut said = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut said)
+            .unwrap();
+        assert_eq!(said, "");
+    }
+
+    #[test]
+    fn only_a_collision_on_our_own_port_is_retried() {
+        let taken = |port| {
+            format!(
+                "bind [127.0.0.1]:{port}: Address already in use\n\
+                 channel_setup_fwd_listener_tcpip: cannot listen to port: {port}\n\
+                 Could not request local forwarding."
+            )
+        };
+        assert!(our_port_was_taken(&taken(47305), 47305));
+        assert!(!our_port_was_taken(&taken(47305), 7305));
+        assert!(!our_port_was_taken(&taken(5432), 47305));
     }
 
     /// Every signal blocked on the spawning thread, as on a GCD worker, which
@@ -632,14 +831,14 @@ mod tests {
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_a_tunnel_reaches_postgres_through_the_bastion() {
         let tunnel = live_tunnel(&tunnel("dbdelve-bastion")).unwrap();
-        postgres_answers(tunnel.local_addr());
+        postgres_answers(tunnel.dial().unwrap());
     }
 
     #[test]
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_a_tunnel_reaches_postgres_through_a_jump_host() {
         let tunnel = live_tunnel(&tunnel("dbdelve-inner")).unwrap();
-        postgres_answers(tunnel.local_addr());
+        postgres_answers(tunnel.dial().unwrap());
     }
 
     #[test]
@@ -681,7 +880,7 @@ mod tests {
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_dropping_the_tunnel_ends_ssh_and_closes_the_port() {
         let tunnel = live_tunnel(&tunnel("dbdelve-bastion")).unwrap();
-        let local = tunnel.local_addr();
+        let local = tunnel.dial().unwrap();
         assert!(ssh_is_running_for(local));
 
         drop(tunnel);
@@ -696,7 +895,7 @@ mod tests {
     fn live_ssh_a_tunnel_opened_with_every_signal_blocked_still_ends_on_drop() {
         let tunnel =
             on_a_thread_blocking_every_signal(|| live_tunnel(&tunnel("dbdelve-bastion")).unwrap());
-        let local = tunnel.local_addr();
+        let local = tunnel.dial().unwrap();
 
         let (dropped, done) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -708,5 +907,61 @@ mod tests {
             "Drop is still waiting on ssh"
         );
         assert!(!ssh_is_running_for(local));
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
+    fn live_ssh_a_tunnel_whose_ssh_has_gone_refuses_to_be_dialled() {
+        let tunnel = live_tunnel(&tunnel("dbdelve-bastion")).unwrap();
+        let port = tunnel.dial().unwrap().port();
+        assert!(
+            Command::new("pkill")
+                .args(["-f", &format!("^ssh .*127.0.0.1:{port}:")])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = loop {
+            match tunnel.dial() {
+                Err(error) => break error,
+                Ok(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Ok(_) => panic!("a tunnel whose ssh was killed still dials"),
+            }
+        };
+        assert!(
+            error
+                .message
+                .starts_with("SSH tunnel through dbdelve-bastion closed"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an ssh executable"]
+    fn live_ssh_trust_on_first_use_is_added_only_where_nothing_configured_it() {
+        let config = std::env::temp_dir().join(format!("dbdelve-ssh-{}.conf", std::process::id()));
+        std::fs::write(
+            &config,
+            "Host strict\n    StrictHostKeyChecking yes\nHost tofu\n    StrictHostKeyChecking accept-new\n",
+        )
+        .unwrap();
+        let defaults = |host: &str| {
+            host_keys_left_to_default(&[
+                "-F".to_owned(),
+                config.display().to_string(),
+                "--".to_owned(),
+                host.to_owned(),
+            ])
+        };
+        let answers = [
+            defaults("unconfigured"),
+            defaults("strict"),
+            defaults("tofu"),
+        ];
+        let _ = std::fs::remove_file(&config);
+        assert_eq!(answers, [true, false, false]);
     }
 }

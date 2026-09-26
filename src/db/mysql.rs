@@ -238,6 +238,10 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
     OptsBuilder::new()
         .ip_or_hostname(Some(host))
         .tcp_port(port)
+        // A loopback address would otherwise have the driver ask the server
+        // for its socket path and reconnect to that path here, on this
+        // machine: past the tunnel, to whatever server is listening locally.
+        .prefer_socket(dial.is_none())
         .db_name(Some(server.database.clone()))
         .user(Some(server.user.clone()))
         // Offered only when there is one. An empty password is not the
@@ -321,7 +325,8 @@ impl Connection {
             return Err(unverifiable_through_a_tunnel(server));
         }
         tunnelled(server, DEFAULT_PORT, |tunnel| {
-            let connection = connect(server, tunnel.as_ref().map(|tunnel| tunnel.local_addr()))?;
+            let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
+            let connection = connect(server, dial)?;
             Ok(Self {
                 connection_id: connection.connection_id(),
                 server: server.clone(),
@@ -331,8 +336,8 @@ impl Connection {
         })
     }
 
-    fn dial(&self) -> Option<SocketAddr> {
-        self.tunnel.as_ref().map(|tunnel| tunnel.local_addr())
+    fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
+        self.tunnel.as_deref().map(Tunnel::dial).transpose()
     }
 
     /// `KILL QUERY` over a connection of its own, because the connection being
@@ -347,7 +352,8 @@ impl Connection {
     /// only trades that for a background thread hung forever with no report.
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
-        let mut connection = open(server, || cancel_options(server, self.dial()))?;
+        let dial = self.dial()?;
+        let mut connection = open(server, || cancel_options(server, dial))?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -1075,6 +1081,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_tunnelled_connection_dials_the_tunnel_and_never_a_local_socket() {
+        let opts: ::mysql::Opts = base_options(
+            &ServerConfig::default(),
+            Some("127.0.0.1:40000".parse().unwrap()),
+        )
+        .into();
+        assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
+        assert_eq!(opts.get_tcp_port(), 40000);
+        assert!(!opts.get_prefer_socket());
     }
 
     #[test]

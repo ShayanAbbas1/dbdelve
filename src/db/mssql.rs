@@ -529,7 +529,7 @@ impl Connection {
             .build()
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
 
-        let dial = self.tunnel.as_ref().map(|tunnel| tunnel.local_addr());
+        let dial = self.tunnel.as_deref().map(Tunnel::dial).transpose()?;
         let attempt =
             |encryption| guarded(|| runtime.block_on(login(&self.server, dial, encryption)));
         let (client, socket) = match attempt(encryption(self.server.sslmode))? {

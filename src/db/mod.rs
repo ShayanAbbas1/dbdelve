@@ -552,6 +552,16 @@ pub struct SshTunnel {
     pub identity_file: Option<String>,
 }
 
+impl SshTunnel {
+    /// Absolute or under `~/`, which ssh expands itself: a relative path
+    /// resolves against wherever the app was launched from, `/` for one
+    /// opened from Finder.
+    pub fn identity_file_error(path: &str) -> Option<String> {
+        (!path.starts_with("~/") && !std::path::Path::new(path).is_absolute())
+            .then(|| "Identity file must be an absolute path to the key file.".to_owned())
+    }
+}
+
 /// What an engine needs to reach a server. SQLite has none of it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerConfig {
