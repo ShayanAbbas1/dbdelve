@@ -626,6 +626,7 @@ impl Render for Workspace {
         let has_results = self.has_results(cx);
         let apply_workspace = cx.entity().downgrade();
         let discard_workspace = apply_workspace.clone();
+        let copy_workspace = apply_workspace.clone();
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
         let refresh_workspace = apply_workspace.clone();
@@ -840,6 +841,20 @@ impl Render for Workspace {
                             // another control to ask which is a click spent on
                             // nothing. It also puts the format on screen, which
                             // a lone "Export" left to the file extension.
+                            .children(has_results.then(|| {
+                                button(
+                                    "copy-results",
+                                    "Copy Results",
+                                    Tone::Quiet,
+                                    Control::Compact,
+                                    t,
+                                )
+                                .on_click(move |_, _, cx| {
+                                    _ = copy_workspace.update(cx, |workspace, cx| {
+                                        workspace.copy_results_as(Format::Tsv, cx);
+                                    });
+                                })
+                            }))
                             .children(has_results.then(|| {
                                 button("export-csv", "Export CSV", Tone::Quiet, Control::Compact, t)
                                     .on_click(move |_, _, cx| {

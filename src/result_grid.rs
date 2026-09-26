@@ -1205,7 +1205,6 @@ impl TableDelegate for ResultGrid {
             .when_some(self.focus.clone(), PopupMenu::action_context)
             .menu("Copy Cell", Box::new(crate::CopyCell))
             .menu("Copy Row", Box::new(crate::CopyRow))
-            .menu("Copy Results", Box::new(crate::CopyResults))
             .when(!stages.is_empty(), PopupMenu::separator);
         stages
             .into_iter()
