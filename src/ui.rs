@@ -98,6 +98,23 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
         )
 }
 
+/// A newer release, quiet at the far end of the titlebar: news, not an alarm.
+pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
+    control("newer-release", Tone::Quiet, Control::Compact)
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .text_size(px(layout::TEXT_XS))
+                .text_color(t.text_muted)
+                .child(format!("DBDelve {version} available"))
+                .child(row_icon(t, icon::CHEVRON_DOWN)),
+        )
+}
+
 /// macOS draws its window buttons over a transparent titlebar, and Windows
 /// draws none at all into one, so both leave the strip to dbdelve. Linux has no
 /// compositor that will draw buttons into it, so it keeps the system bar.
@@ -120,7 +137,7 @@ pub(crate) const CLIENT_TITLEBAR: bool = !cfg!(target_os = "linux");
 /// belongs to the bar the compositor drew.
 pub(crate) fn titlebar(
     t: Theme,
-    mode: Option<AnyElement>,
+    pills: Vec<AnyElement>,
     leading: Vec<AnyElement>,
 ) -> impl IntoElement {
     div()
@@ -152,7 +169,7 @@ pub(crate) fn titlebar(
                 .flex()
                 .items_center()
                 .gap(px(layout::SPACE_SM))
-                .children(mode),
+                .children(pills),
         )
         .when(cfg!(target_os = "windows"), |row| {
             row.child(caption_buttons(t))

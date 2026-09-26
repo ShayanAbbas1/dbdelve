@@ -577,7 +577,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(t, None, Vec::new()))
+                .child(titlebar(t, Vec::new(), Vec::new()))
                 .child(
                     div()
                         .flex_1()
@@ -755,7 +755,7 @@ impl Render for Workspace {
             .flex_col()
             .child(titlebar(
                 t,
-                Some({
+                std::iter::once({
                     let mode = profile.mode;
                     let silenced = profile
                         .confirmed
@@ -790,7 +790,26 @@ impl Render for Workspace {
                             }
                         })
                         .into_any_element()
-                }),
+                })
+                .chain(newer_release.map(|release| {
+                    // On a wrapper: `dropdown_menu` wraps the button, so a
+                    // margin on the button never reaches the titlebar's row.
+                    div()
+                        .ml_auto()
+                        .child(ui::update_pill(t, &release.version).dropdown_menu(
+                            move |menu, _, _| {
+                                menu.label("Update it with your package manager,")
+                                    .label("or download it from GitHub.")
+                                    .separator()
+                                    .link(
+                                        format!("Download {}", release.version),
+                                        release.url.clone(),
+                                    )
+                            },
+                        ))
+                        .into_any_element()
+                }))
+                .collect(),
                 vec![
                     icon_button(
                         "toggle-sidebar",
@@ -844,16 +863,6 @@ impl Render for Workspace {
                             .flex()
                             .items_center()
                             .gap(px(layout::SPACE_SM))
-                            .children(newer_release.map(|release| {
-                                button(
-                                    "newer-release",
-                                    format!("DBDelve {} available", release.version),
-                                    Tone::Quiet,
-                                    Control::Compact,
-                                    t,
-                                )
-                                .on_click(move |_, _, cx| cx.open_url(&release.url))
-                            }))
                             .children(query_status.map(|query_status| {
                                 div()
                                     .text_color(match stale_buffer {
