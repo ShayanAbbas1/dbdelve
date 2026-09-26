@@ -2259,6 +2259,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let families = fonts(cx).clone();
     let font_size = workspace.settings.editor_font_size;
     let preview_rows = workspace.settings.preview_rows;
+    let check_for_updates = workspace.settings.check_for_updates;
 
     let themes: Vec<AnyElement> = Theme::all()
         .into_iter()
@@ -2450,6 +2451,35 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
             t,
             "Default limit",
             div().flex().gap(px(layout::SPACE_XS)).children(limits),
+        ))
+        .child(settings_section(
+            t,
+            "Check for updates",
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .child(div().flex().gap(px(layout::SPACE_XS)).children(
+                    [(true, "On"), (false, "Off")].map(|(check, label)| {
+                        settings_chip(
+                            ("check-for-updates", check as usize),
+                            label,
+                            check == check_for_updates,
+                            cx,
+                            move |workspace, _, cx| workspace.set_check_for_updates(check, cx),
+                        )
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_size(px(layout::TEXT_XS))
+                        .text_color(t.text_faint)
+                        .child(
+                            "One request to GitHub at launch to see whether a \
+                             newer release exists. Nothing is sent about you \
+                             or your databases.",
+                        ),
+                ),
         ))
         .into_any_element()
 }

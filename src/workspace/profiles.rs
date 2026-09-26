@@ -38,6 +38,7 @@ impl Workspace {
             editor_font_size: Some(self.settings.editor_font_size),
             preview_rows: Some(self.settings.preview_rows),
             opacity: Some(self.settings.opacity),
+            check_for_updates: Some(self.settings.check_for_updates),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
         };
         if let Err(message) = store::save_profiles(&profiles, active.as_deref(), &fonts, &settings)

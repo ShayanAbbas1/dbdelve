@@ -36,6 +36,9 @@ pub(crate) struct Settings {
     /// than on the theme the user picked, so it survives switching themes --
     /// it is reapplied to whichever theme gets installed.
     pub(crate) opacity: f32,
+    /// One request to GitHub at launch. Off switch because local-first users
+    /// get to say no to the only request DBDelve makes on its own.
+    pub(crate) check_for_updates: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -47,6 +50,7 @@ impl Default for Settings {
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
             preview_rows: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
+            check_for_updates: true,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -105,6 +109,7 @@ pub(crate) struct Workspace {
     /// The window's own focus, for the moments when nothing inside it can hold
     /// any. See [`Focus::Window`].
     pub(crate) focus: FocusHandle,
+    pub(crate) newer_release: Option<update::Release>,
 }
 
 impl Workspace {
@@ -145,6 +150,7 @@ impl Workspace {
             palette: None,
             opacity_input,
             focus: cx.focus_handle(),
+            newer_release: None,
         };
 
         let mut load_failure = None;
@@ -182,6 +188,8 @@ impl Workspace {
                     .preview_rows
                     .filter(|rows| explorer::ROW_LIMITS.contains(rows))
                     .unwrap_or(PREVIEW_ROW_LIMIT);
+                workspace.settings.check_for_updates =
+                    stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -250,6 +258,22 @@ impl Workspace {
         // surface a notice has.
         if let Some(message) = load_failure {
             workspace.note(message, cx);
+        }
+
+        if workspace.settings.check_for_updates {
+            let check = cx
+                .background_executor()
+                .spawn(async { update::newer_release() });
+            cx.spawn(async move |workspace, cx| {
+                let Some(release) = check.await else {
+                    return;
+                };
+                _ = workspace.update(cx, |workspace, cx| {
+                    workspace.newer_release = Some(release);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
 
         // The settings modal owns the keyboard while it is up, and an
@@ -424,6 +448,15 @@ impl Workspace {
             return;
         }
         self.settings.preview_rows = rows;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_check_for_updates(&mut self, check: bool, cx: &mut Context<Self>) {
+        if self.settings.check_for_updates == check {
+            return;
+        }
+        self.settings.check_for_updates = check;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -622,6 +655,7 @@ impl Render for Workspace {
             _ => None,
         };
         let notice = profile.session.notice.clone();
+        let newer_release = self.newer_release.clone();
         let has_pending = self.has_pending_edits(cx);
         let has_results = self.has_results(cx);
         let apply_workspace = cx.entity().downgrade();
@@ -810,6 +844,16 @@ impl Render for Workspace {
                             .flex()
                             .items_center()
                             .gap(px(layout::SPACE_SM))
+                            .children(newer_release.map(|release| {
+                                button(
+                                    "newer-release",
+                                    format!("DBDelve {} available", release.version),
+                                    Tone::Quiet,
+                                    Control::Compact,
+                                    t,
+                                )
+                                .on_click(move |_, _, cx| cx.open_url(&release.url))
+                            }))
                             .children(query_status.map(|query_status| {
                                 div()
                                     .text_color(match stale_buffer {

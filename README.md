@@ -68,8 +68,7 @@ time.
 Apple Silicon, macOS 12 or later — that's what it's built and tested on. Intel
 and older macOS aren't blocked by anything in the code, they're just untested.
 
-Homebrew is the recommended way. It handles installing and upgrading, and
-`brew upgrade` is the only thing that will ever tell you a new version exists:
+Homebrew is the recommended way. It handles installing and upgrading:
 
 ```sh
 brew install --cask ShayanAbbas1/dbdelve/dbdelve
@@ -192,8 +191,11 @@ For discussions and ideas join the DBDelve discord server: https://discord.gg/up
 
 ## Updating
 
-`brew upgrade --cask dbdelve`, if you installed it that way. Otherwise watch
-[the releases page][releases]
+`brew upgrade --cask dbdelve`, if you installed it that way. Otherwise the
+status bar links to [the latest release][releases] once there is a newer one.
+
+There is no telemetry. The only request DBDelve makes on its own is one to
+GitHub at startup to check for updates, which you can turn off in Settings.
 
 
 ## License

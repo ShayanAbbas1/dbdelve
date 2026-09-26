@@ -19,6 +19,7 @@ mod keybindings;
 mod theme;
 mod tls;
 mod ui;
+mod update;
 
 use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 
