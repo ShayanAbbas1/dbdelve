@@ -35,6 +35,10 @@ time.
   schema tree and query history, so a buffer you wrote against staging can't
   quietly end up pointed at production. Passwords go in the Keychain, never
   into a config file.
+- **SSH tunnels.** Postgres, MySQL and SQL Server profiles can connect through
+  a tunnel run by your system `ssh`, so `~/.ssh/config`, ssh-agent and
+  hardware keys work the way they do in a terminal. See
+  [docs/ssh-tunnels.md](docs/ssh-tunnels.md).
 - **Read-only, read-write and full access, per connection.** DBDelve won't send
   a statement your current mode doesn't allow, and it asks before anything
   destructive. Read-only also asks Postgres and MySQL to refuse writes on their
