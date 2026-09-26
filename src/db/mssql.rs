@@ -41,9 +41,18 @@ const RELATIONS_SQL: &str = "
 SELECT
     s.name AS schema_name,
     o.name AS relation_name,
-    CASE o.type WHEN 'U' THEN 'table' WHEN 'V' THEN 'view' END AS relation_kind
+    CASE o.type WHEN 'U' THEN 'table' WHEN 'V' THEN 'view' END AS relation_kind,
+    CASE WHEN o.type = 'U' THEN sizes.size_bytes END AS size_bytes
 FROM sys.objects AS o
 JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+-- The catalog views rather than `sys.dm_db_partition_stats`, which needs
+-- VIEW DATABASE STATE and would fail the whole catalog for a login without it.
+LEFT JOIN (
+    SELECT p.object_id, SUM(a.used_pages) * 8192 AS size_bytes
+    FROM sys.partitions AS p
+    JOIN sys.allocation_units AS a ON a.container_id = p.partition_id
+    GROUP BY p.object_id
+) AS sizes ON sizes.object_id = o.object_id
 WHERE o.type IN ('U', 'V')
     AND o.is_ms_shipped = 0
 ORDER BY s.name, o.name
@@ -2211,6 +2220,16 @@ mod tests {
         assert!(dbo.relations.iter().any(|relation| {
             relation.name == "account_overview" && relation.kind == RelationKind::View
         }));
+        assert!(
+            dbo.relations
+                .iter()
+                .any(|relation| { relation.name == "accounts" && relation.size.is_some() })
+        );
+        assert!(
+            dbo.relations
+                .iter()
+                .any(|relation| { relation.name == "account_overview" && relation.size.is_none() })
+        );
         let label = dbo
             .routines
             .iter()

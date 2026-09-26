@@ -51,6 +51,7 @@ pub enum ObjectKind {
 pub struct ExplorerLeaf {
     pub target: ExplorerTarget,
     pub kind: ObjectKind,
+    pub size: Option<u64>,
 }
 
 pub struct ExplorerTree {
@@ -119,6 +120,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                                     routine_index,
                                 },
                                 kind: ObjectKind::Routine(kind),
+                                size: None,
                             },
                         );
                         TreeItem::new(
@@ -223,6 +225,7 @@ fn relation_item(
                 relation_index,
             },
             kind: ObjectKind::Relation(relation.kind),
+            size: relation.size,
         },
     );
 
@@ -301,6 +304,7 @@ mod tests {
                         name: "events".into(),
                         kind: RelationKind::Table,
                         partition_of: None,
+                        size: None,
                     }],
                     routines: Vec::new(),
                 },
@@ -311,11 +315,13 @@ mod tests {
                             name: "active_accounts".into(),
                             kind: RelationKind::View,
                             partition_of: None,
+                            size: None,
                         },
                         Relation {
                             name: "accounts".into(),
                             kind: RelationKind::Table,
                             partition_of: None,
+                            size: None,
                         },
                     ],
                     routines: vec![
@@ -346,6 +352,7 @@ mod tests {
             name: name.into(),
             kind,
             partition_of: Some(parent.into()),
+            size: None,
         };
 
         Catalog {
@@ -356,6 +363,7 @@ mod tests {
                         name: "measurements".into(),
                         kind: RelationKind::PartitionedTable,
                         partition_of: None,
+                        size: None,
                     },
                     partition("measurements_2025", "measurements", RelationKind::Table),
                     partition(
@@ -372,6 +380,7 @@ mod tests {
                         name: "accounts".into(),
                         kind: RelationKind::Table,
                         partition_of: None,
+                        size: None,
                     },
                 ],
                 routines: Vec::new(),
@@ -426,6 +435,7 @@ mod tests {
                     relation_index: 3,
                 },
                 kind: ObjectKind::Relation(RelationKind::Table),
+                size: None,
             })
         );
     }
@@ -509,6 +519,7 @@ mod tests {
                     routine_index: 1,
                 },
                 kind: ObjectKind::Routine(RoutineKind::Function),
+                size: None,
             })
         );
     }

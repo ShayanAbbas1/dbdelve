@@ -827,6 +827,23 @@ impl Connection {
         }
     }
 
+    /// Each table's on-disk bytes, for [`Catalog::set_sizes`] to write onto
+    /// the relations already on screen.
+    ///
+    /// Apart from [`Connection::catalog`] because on Postgres and MySQL the
+    /// numbers cost locks or opened tables, and both run it on a short-lived
+    /// connection of their own rather than behind the one every query on the
+    /// profile waits for. Engines whose catalog already carries sizes (SQL
+    /// Server's catalog views, a column Snowflake returns anyway) return none
+    /// here, as does SQLite, which keeps none.
+    pub fn sizes(&self) -> Result<Sizes, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.sizes(),
+            Self::MySql(connection) => connection.sizes(),
+            Self::SqlServer(_) | Self::Sqlite(_) | Self::Snowflake(_) => Ok(Sizes::new()),
+        }
+    }
+
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         match self {
             Self::Postgres(connection) => connection.structure(schema, relation),
@@ -982,6 +999,10 @@ pub struct Relation {
     /// all, since a partition of a partitioned table is an ordinary table
     /// everywhere else it is looked at.
     pub partition_of: Option<String>,
+    /// Estimated on-disk bytes, mostly from the engine's stored statistics.
+    /// `None` for a view, on SQLite, and on Postgres and MySQL until
+    /// [`Catalog::set_sizes`] has filled it in, which it may never do.
+    pub size: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1006,6 +1027,9 @@ pub struct Schema {
     pub relations: Vec<Relation>,
     pub routines: Vec<Routine>,
 }
+
+/// On-disk bytes by schema, then relation name.
+pub type Sizes = std::collections::HashMap<String, std::collections::HashMap<String, u64>>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -1033,6 +1057,22 @@ impl Catalog {
             {
                 Some(existing) => existing.routines = schema.routines,
                 None => self.schemas.push(schema),
+            }
+        }
+    }
+
+    /// Write sizes onto the relations already here, leaving any it has no
+    /// number for alone. It touches nothing but sizes and [`Self::merge`]
+    /// nothing but routines, so the two may land in either order.
+    pub fn set_sizes(&mut self, sizes: &Sizes) {
+        for schema in &mut self.schemas {
+            let Some(sizes) = sizes.get(&schema.name) else {
+                continue;
+            };
+            for relation in &mut schema.relations {
+                if let Some(&size) = sizes.get(&relation.name) {
+                    relation.size = Some(size);
+                }
             }
         }
     }
@@ -1197,6 +1237,7 @@ pub(super) fn assemble_catalog(
             name: name.to_string(),
             kind,
             partition_of: optional_cell(&relations, row, "partition_of").map(str::to_string),
+            size: optional_cell(&relations, row, "size_bytes").and_then(|v| v.parse().ok()),
         });
     }
 
@@ -1222,6 +1263,26 @@ pub(super) fn assemble_catalog(
     Ok(Catalog {
         schemas: schemas.into_values().collect(),
     })
+}
+
+/// A row with no number (a null `DATA_LENGTH`) is left out rather than failing
+/// the rest.
+pub(super) fn assemble_sizes(result: QueryResult) -> Result<Sizes, DbError> {
+    let mut sizes = Sizes::new();
+    for row in &result.rows {
+        let Some(size) = optional_cell(&result, row, "size_bytes").and_then(|v| v.parse().ok())
+        else {
+            continue;
+        };
+        sizes
+            .entry(required_cell(&result, row, "schema_name")?.to_string())
+            .or_default()
+            .insert(
+                required_cell(&result, row, "relation_name")?.to_string(),
+                size,
+            );
+    }
+    Ok(sizes)
 }
 
 pub(super) fn assemble_structure(
@@ -1810,6 +1871,7 @@ mod tests {
                     name: (*name).to_string(),
                     kind: RelationKind::Table,
                     partition_of: None,
+                    size: None,
                 })
                 .collect(),
             routines: routines
@@ -1937,6 +1999,7 @@ mod tests {
                 "relation_name",
                 "relation_kind",
                 "partition_of",
+                "size_bytes",
             ],
             &[
                 &[
@@ -1944,15 +2007,29 @@ mod tests {
                     Some("events"),
                     Some("partitioned_table"),
                     None,
+                    None,
                 ],
                 &[
                     Some("analytics"),
                     Some("events_2026"),
                     Some("table"),
                     Some("events"),
+                    Some("8192"),
                 ],
-                &[Some("public"), Some("accounts"), Some("table"), None],
-                &[Some("public"), Some("account_overview"), Some("view"), None],
+                &[
+                    Some("public"),
+                    Some("accounts"),
+                    Some("table"),
+                    None,
+                    Some("24576000"),
+                ],
+                &[
+                    Some("public"),
+                    Some("account_overview"),
+                    Some("view"),
+                    None,
+                    Some(""),
+                ],
             ],
         );
         let routines = result(
@@ -1998,24 +2075,69 @@ mod tests {
                     name: "events".into(),
                     kind: RelationKind::PartitionedTable,
                     partition_of: None,
+                    size: None,
                 },
                 Relation {
                     name: "events_2026".into(),
                     kind: RelationKind::Table,
                     partition_of: Some("events".into()),
+                    size: Some(8192),
                 },
             ]
         );
         assert_eq!(catalog.schemas[0].routines[0].kind, RoutineKind::Procedure);
         assert_eq!(catalog.schemas[1].name, "public");
         assert_eq!(catalog.schemas[1].relations[1].kind, RelationKind::View);
+        assert_eq!(catalog.schemas[1].relations[0].size, Some(24_576_000));
+        assert_eq!(catalog.schemas[1].relations[1].size, None);
         assert_eq!(catalog.schemas[1].routines[0].result_type, "text");
+    }
+
+    #[test]
+    fn sizes_land_on_their_relations_and_nowhere_else() {
+        let mut catalog = assemble_catalog(
+            result(
+                &["schema_name", "relation_name", "relation_kind"],
+                &[
+                    &[Some("public"), Some("accounts"), Some("table")],
+                    &[Some("public"), Some("account_overview"), Some("view")],
+                    &[Some("archive"), Some("accounts"), Some("table")],
+                ],
+            ),
+            QueryResult::default(),
+        )
+        .unwrap();
+        let sizes = assemble_sizes(result(
+            &["schema_name", "relation_name", "size_bytes"],
+            &[
+                &[Some("public"), Some("accounts"), Some("8192")],
+                &[Some("archive"), Some("accounts"), None],
+                &[Some("public"), Some("dropped_since"), Some("16384")],
+            ],
+        ))
+        .unwrap();
+
+        catalog.set_sizes(&sizes);
+
+        let size = |schema: &str, name: &str| {
+            let schema = catalog.schemas.iter().find(|s| s.name == schema).unwrap();
+            schema
+                .relations
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .size
+        };
+        assert_eq!(size("public", "accounts"), Some(8192));
+        assert_eq!(size("public", "account_overview"), None);
+        assert_eq!(size("archive", "accounts"), None);
     }
 
     #[test]
     fn an_engine_that_selects_no_parent_column_assembles_anyway() {
         // What MySQL and SQLite send: neither has partitions to report, and
-        // neither should have to coalesce a placeholder to say so.
+        // neither should have to coalesce a placeholder to say so. SQLite has
+        // no sizes either.
         let relations = result(
             &["schema_name", "relation_name", "relation_kind"],
             &[&[Some("public"), Some("accounts"), Some("table")]],
@@ -2025,6 +2147,7 @@ mod tests {
         let catalog = assemble_catalog(relations, routines).unwrap();
 
         assert_eq!(catalog.schemas[0].relations[0].partition_of, None);
+        assert_eq!(catalog.schemas[0].relations[0].size, None);
     }
 
     #[test]

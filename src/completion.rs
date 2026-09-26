@@ -747,6 +747,7 @@ mod tests {
             name: name.to_string(),
             kind: RelationKind::Table,
             partition_of: None,
+            size: None,
         }
     }
 

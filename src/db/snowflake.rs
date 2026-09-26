@@ -1012,7 +1012,8 @@ SELECT TABLE_SCHEMA AS "schema_name",
            -- Temporary, transient, dynamic, event, hybrid and Iceberg tables
            -- are all browsed the way a table is.
            ELSE 'table'
-       END AS "relation_kind"
+       END AS "relation_kind",
+       BYTES AS "size_bytes"
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
 ORDER BY 1, 2"#;
@@ -1885,7 +1886,12 @@ mod tests {
     fn a_catalog_result_in_its_aliases_is_what_the_assemblers_read() {
         // The aliases in the SQL above and the names the shared assemblers look
         // up are the same strings in two places; this is what holds them together.
-        for alias in ["schema_name", "relation_name", "relation_kind"] {
+        for alias in [
+            "schema_name",
+            "relation_name",
+            "relation_kind",
+            "size_bytes",
+        ] {
             assert!(
                 RELATIONS_SQL.contains(&format!("AS \"{alias}\"")),
                 "{alias}"
@@ -2774,6 +2780,16 @@ mod tests {
             .iter()
             .find(|schema| schema.name == "SALES")
             .expect("listed");
+        let size = |name: &str| {
+            sales
+                .relations
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .size
+        };
+        assert_eq!(size("ORDER_LINES"), Some(4608));
+        assert_eq!(size("REVENUE_BY_COUNTRY"), None);
         let routines: Vec<_> = sales
             .routines
             .iter()

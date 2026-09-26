@@ -10,8 +10,9 @@ use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, QueryResult, ServerConfig, Structure,
-    assemble_catalog, assemble_foreign_keys, assemble_structure, non_utf8_error, required_cell,
+    Catalog, Cell, Column, DbError, EditTarget, QueryResult, ServerConfig, Sizes, Structure,
+    assemble_catalog, assemble_foreign_keys, assemble_sizes, assemble_structure, non_utf8_error,
+    required_cell,
 };
 
 /// The port the server listens on when the profile does not say.
@@ -50,6 +51,69 @@ WHERE class.relkind IN ('r', 'p', 'v', 'm', 'f')
     AND namespace.nspname <> 'information_schema'
     AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
 ORDER BY namespace.nspname, class.relname
+";
+
+// Apart from `RELATIONS_SQL` because `pg_total_relation_size` takes a lock on
+// each relation it measures, and a table behind an `ACCESS EXCLUSIVE` lock would
+// hold the sidebar, and every query queued behind it, until that lock is let go.
+const SIZES_SQL: &str = "
+WITH sized AS (
+    SELECT
+        class.oid,
+        class.relkind,
+        namespace.nspname,
+        class.relname,
+        -- Pages as of the last VACUUM or ANALYZE, not `pg_total_relation_size`:
+        -- that stats every file of every relation, and databases with thousands
+        -- of partitions would pay for all of them on every catalog load.
+        -- Zero pages is a table never analyzed (`reltuples < 0` from PG14,
+        -- `reltuples = 0` before it) or an empty one, and would claim 0 B for
+        -- the first. Those are measured instead: autovacuum only analyzes once
+        -- ~50 rows changed, so they are nearly always the few small tables it
+        -- never reached, and their files are cheap to stat.
+        CASE
+        WHEN class.relkind = 'p' THEN NULL
+        WHEN class.reltuples < 0 OR class.relpages = 0 THEN
+            pg_catalog.pg_total_relation_size(class.oid)
+        ELSE
+            (
+                class.relpages::bigint
+                + COALESCE((
+                    SELECT toast.relpages
+                    FROM pg_catalog.pg_class AS toast
+                    WHERE toast.oid = class.reltoastrelid
+                ), 0)
+                + COALESCE((
+                    SELECT sum(idx.relpages)
+                    FROM pg_catalog.pg_index AS i
+                    JOIN pg_catalog.pg_class AS idx ON idx.oid = i.indexrelid
+                    WHERE i.indrelid = class.oid
+                ), 0)
+            )::bigint * current_setting('block_size')::bigint
+        END AS size_bytes
+    FROM pg_catalog.pg_class AS class
+    JOIN pg_catalog.pg_namespace AS namespace
+        ON namespace.oid = class.relnamespace
+    WHERE class.relkind IN ('r', 'm', 'p')
+        AND namespace.nspname <> 'information_schema'
+        AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+)
+SELECT
+    parent.nspname AS schema_name,
+    parent.relname AS relation_name,
+    -- A partitioned table stores nothing itself, so it is the sum of every
+    -- partition under it, at any depth and in any schema. `pg_partition_tree`
+    -- is PG12+; on older servers this query fails and sizes are not shown.
+    CASE
+    WHEN parent.relkind = 'p' THEN
+        COALESCE((
+            SELECT sum(leaf.size_bytes)
+            FROM pg_catalog.pg_partition_tree(parent.oid) AS tree
+            JOIN sized AS leaf ON leaf.oid = tree.relid
+        ), 0)::bigint
+    ELSE parent.size_bytes
+    END AS size_bytes
+FROM sized AS parent
 ";
 
 const ROUTINES_SQL: &str = "
@@ -376,6 +440,11 @@ pub struct Connection {
     /// Held so ssh runs as long as any clone does. The cancel token dials the
     /// address the client connected to, so a cancel goes through it too.
     tunnel: Option<Arc<Tunnel>>,
+    /// What [`Self::sizes`] opens its own connection with. Kept for the reason
+    /// MySQL keeps its copy: the password is already held by the live client,
+    /// and nothing above `src/db/` may learn which engines want a second one
+    /// (AGENTS.md, hard rule 4).
+    server: ServerConfig,
 }
 
 impl Connection {
@@ -407,6 +476,7 @@ impl Connection {
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
+            server: server.clone(),
         })
     }
 
@@ -519,6 +589,14 @@ impl Connection {
 
     pub fn routines(&self) -> Result<Catalog, DbError> {
         assemble_catalog(QueryResult::default(), self.internal_query(ROUTINES_SQL)?)
+    }
+
+    /// On a connection of its own, opened exactly as this one was, so a size
+    /// waiting on a relation's lock never holds the mutex a user's query waits
+    /// on. The side connection is dropped on return.
+    pub fn sizes(&self) -> Result<Sizes, DbError> {
+        let side = Self::connect(&self.server, self.tunnel.clone())?;
+        assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1503,6 +1581,10 @@ mod tests {
             .query("SELECT 1 AS one")
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
+        let sizes = connection
+            .sizes()
+            .expect("sizes should load through the tunnel");
+        assert!(sizes["public"].contains_key("accounts"));
     }
 
     #[test]
@@ -1870,6 +1952,13 @@ mod tests {
         assert!(public.relations.iter().any(|relation| {
             relation.name == "account_overview" && relation.kind == RelationKind::View
         }));
+        assert!(
+            public
+                .relations
+                .iter()
+                .all(|relation| relation.size.is_none()),
+            "sizes arrive separately"
+        );
 
         assert!(
             public
@@ -1888,6 +1977,58 @@ mod tests {
                 .any(|routine| routine.name.starts_with("st_")
                     || routine.name.starts_with("_postgis")),
             "extension-owned routines must not be listed"
+        );
+
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_partitioned; \
+                 CREATE TABLE dbdelve_test_partitioned (id integer NOT NULL) \
+                     PARTITION BY RANGE (id); \
+                 CREATE TABLE dbdelve_test_partitioned_p1 \
+                     PARTITION OF dbdelve_test_partitioned FOR VALUES FROM (0) TO (500); \
+                 CREATE TABLE dbdelve_test_partitioned_p2 \
+                     PARTITION OF dbdelve_test_partitioned FOR VALUES FROM (500) TO (1000); \
+                 INSERT INTO dbdelve_test_partitioned_p1 (id) SELECT generate_series(1, 10); \
+                 INSERT INTO dbdelve_test_partitioned_p2 (id) SELECT generate_series(500, 505); \
+                 ANALYZE dbdelve_test_partitioned; \
+                 DROP TABLE IF EXISTS dbdelve_test_unanalyzed; \
+                 CREATE TABLE dbdelve_test_unanalyzed (id integer NOT NULL); \
+                 INSERT INTO dbdelve_test_unanalyzed (id) SELECT generate_series(1, 10)",
+            )
+            .expect("the fixture tables should be created");
+
+        let sizes = connection.sizes().expect("sizes should load");
+        assert!(sizes["public"].contains_key("accounts"));
+        assert!(!sizes["public"].contains_key("account_overview"));
+
+        assert!(
+            sizes["public"].contains_key("dbdelve_test_partitioned"),
+            "a partitioned table's size must be reported"
+        );
+        let partition_total = sizes["public"]["dbdelve_test_partitioned_p1"]
+            + sizes["public"]["dbdelve_test_partitioned_p2"];
+        assert_eq!(
+            sizes["public"]["dbdelve_test_partitioned"], partition_total,
+            "a partitioned table's size is the sum of its partitions"
+        );
+
+        assert!(
+            sizes["public"]["dbdelve_test_unanalyzed"] > 0,
+            "a never-analyzed table with rows must not report 0 bytes"
+        );
+
+        connection
+            .query("DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed")
+            .expect("the fixture tables should be cleaned up");
+
+        catalog.set_sizes(&sizes);
+        assert!(
+            catalog
+                .schemas
+                .iter()
+                .filter(|schema| schema.name == "public")
+                .flat_map(|schema| &schema.relations)
+                .any(|relation| relation.name == "accounts" && relation.size.is_some())
         );
     }
 

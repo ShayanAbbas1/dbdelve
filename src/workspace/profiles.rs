@@ -824,6 +824,7 @@ impl Workspace {
                     workspace.refresh_explorer(&id, cx);
                     cx.notify();
                     workspace.load_routines(&id, generation, cx);
+                    workspace.load_sizes(&id, generation, cx);
                 })
                 .ok();
         })
@@ -880,6 +881,45 @@ impl Workspace {
                         }
                     }
                     workspace.install_completions(&id, cx);
+                    workspace.refresh_explorer(&id, cx);
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Fill table sizes in behind the relations, alongside the routines and in
+    /// whichever order the two land.
+    ///
+    /// A failure is dropped without a word: a size is a nicety, and one a role
+    /// may simply lack the privilege for, so a notice would repeat on every
+    /// connect about something the user never asked for.
+    fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(connection) = self
+            .issued_to(id, generation)
+            .and_then(|profile| profile.connection())
+        else {
+            return;
+        };
+        let sizes_task = cx
+            .background_executor()
+            .spawn(async move { connection.sizes() });
+
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let Ok(sizes) = sizes_task.await else {
+                return;
+            };
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(profile) = workspace.issued_to(&id, generation) else {
+                        return;
+                    };
+                    let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+                        return;
+                    };
+                    catalog.set_sizes(&sizes);
                     workspace.refresh_explorer(&id, cx);
                     cx.notify();
                 })

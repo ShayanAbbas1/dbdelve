@@ -1391,7 +1391,17 @@ impl Workspace {
                                             .text_ellipsis()
                                             .whitespace_nowrap()
                                             .child(label),
-                                    ),
+                                    )
+                                    .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .whitespace_nowrap()
+                                                .text_color(t.text_faint)
+                                                .text_size(px(layout::TEXT_XS))
+                                                .child(human_bytes(size)),
+                                        )
+                                    }),
                             );
                         let Some(leaf) = leaf else {
                             return row;

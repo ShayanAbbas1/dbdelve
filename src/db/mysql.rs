@@ -29,9 +29,9 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, ServerConfig, SslMode,
-    Structure, assemble_catalog, assemble_foreign_keys, assemble_structure, non_utf8_error,
-    plain_error, required_cell,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, ServerConfig, Sizes, SslMode,
+    Structure, assemble_catalog, assemble_foreign_keys, assemble_sizes, assemble_structure,
+    non_utf8_error, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -70,6 +70,18 @@ FROM information_schema.TABLES
 WHERE TABLE_SCHEMA NOT IN {system}
   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
 ORDER BY TABLE_SCHEMA, TABLE_NAME
+";
+
+// Apart from `RELATIONS_SQL` because naming `DATA_LENGTH` makes the server open
+// every table for its engine's statistics, where the name and type alone come
+// from the data dictionary.
+const SIZES_SQL: &str = "
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS relation_name,
+       DATA_LENGTH + INDEX_LENGTH AS size_bytes
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA NOT IN {system}
+  AND TABLE_TYPE = 'BASE TABLE'
 ";
 
 // Every column is coalesced because the assembler refuses a null, and several of
@@ -497,6 +509,20 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         let routines = self.internal_query(&ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
         assemble_catalog(QueryResult::default(), routines)
+    }
+
+    /// On a connection of its own, as [`Self::cancel`] is, so opening every
+    /// table for its statistics never holds the mutex a user's query waits on.
+    /// The side connection is dropped on return.
+    pub fn sizes(&self) -> Result<Sizes, DbError> {
+        let connection = connect(&self.server, self.dial()?)?;
+        let side = Self {
+            connection_id: connection.connection_id(),
+            server: self.server.clone(),
+            connection: Arc::new(Mutex::new(connection)),
+            tunnel: self.tunnel.clone(),
+        };
+        assemble_sizes(side.internal_query(&SIZES_SQL.replace("{system}", SYSTEM_SCHEMAS))?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1175,10 +1201,15 @@ mod tests {
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
 
         // `KILL QUERY` needs a second connection, which has to find the
-        // server through the same tunnel.
+        // server through the same tunnel; so do the sizes, which also must not
+        // wait behind the sleep holding the mutex.
         let canceller = connection.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(500));
+            assert!(
+                canceller.sizes().expect("sizes should load")["dbdelve_dev"]
+                    .contains_key("accounts")
+            );
             canceller.cancel().expect("the KILL QUERY should send");
         });
         let started = Instant::now();
@@ -1378,6 +1409,13 @@ mod tests {
                 .any(|relation| relation.name == "account_overview"
                     && relation.kind == RelationKind::View)
         );
+        assert!(
+            schema
+                .relations
+                .iter()
+                .all(|relation| relation.size.is_none()),
+            "sizes arrive separately"
+        );
         assert!(schema.routines.iter().any(
             |routine| routine.name == "account_label" && routine.kind == RoutineKind::Function
         ));
@@ -1387,6 +1425,19 @@ mod tests {
                 .schemas
                 .iter()
                 .any(|schema| schema.name == "mysql" || schema.name == "sys")
+        );
+
+        let sizes = connection.sizes().expect("sizes should load");
+        assert!(sizes["dbdelve_dev"].contains_key("accounts"));
+        assert!(!sizes["dbdelve_dev"].contains_key("account_overview"));
+        catalog.set_sizes(&sizes);
+        assert!(
+            catalog
+                .schemas
+                .iter()
+                .filter(|schema| schema.name == "dbdelve_dev")
+                .flat_map(|schema| &schema.relations)
+                .any(|relation| relation.name == "accounts" && relation.size.is_some())
         );
     }
 
