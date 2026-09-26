@@ -832,16 +832,36 @@ impl Workspace {
         let text = export::render(format, result);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         // A copy changes nothing on screen, and a whole result set is too much
-        // to take on trust.
-        self.note(
-            format!(
-                "Copied {} {} as {}.",
-                group_thousands(rows as u64),
-                if rows == 1 { "row" } else { "rows" },
-                format.extension().to_uppercase()
-            ),
-            cx,
+        // to take on trust. Unlike a refusal, the confirmation goes by itself.
+        let message = format!(
+            "Copied {} {} as {}.",
+            group_thousands(rows as u64),
+            if rows == 1 { "row" } else { "rows" },
+            format.extension().to_uppercase()
         );
+        self.note(message.clone(), cx);
+        let Some((id, generation)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.generation))
+        else {
+            return;
+        };
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // A later notice owns the status bar now; this timer is not its
+                // to clear.
+                if let Some(profile) = workspace.issued_to(&id, generation)
+                    && profile.session.notice.as_ref() == Some(&message)
+                {
+                    profile.session.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
