@@ -15,10 +15,6 @@ assets/*.heic
 assets/*.mov
 assets/*.mp4
 
-# dev/ssh/setup.sh's output: a throwaway keypair and ssh_config, regenerated
-# per checkout.
-dev/ssh/.generated/
-
 # Private working notes live in the Claude project directory, not here.
 # See AGENTS.md. Anything matching these belongs outside the repo entirely.
 WORKLOG.md

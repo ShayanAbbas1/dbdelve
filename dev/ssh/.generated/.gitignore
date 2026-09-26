@@ -1,0 +1,6 @@
+# setup.sh's throwaway keypair and ssh_config stay out of Git, but the directory
+# itself is tracked: compose bind-mounts it, and a missing source is created by
+# the Docker daemon as root, which setup.sh then cannot write into (CI's early
+# `docker compose up` hit exactly that).
+*
+!.gitignore
