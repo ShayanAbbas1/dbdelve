@@ -288,6 +288,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         root_certificate,
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
+        ssh: None,
     })
 }
 
@@ -902,6 +903,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
         }
     }
 
@@ -920,6 +922,7 @@ mod tests {
             sslmode: SslMode::Disable,
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
         }
     }
 
@@ -1061,6 +1064,7 @@ mod tests {
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
+                ssh: None,
             }
         );
     }

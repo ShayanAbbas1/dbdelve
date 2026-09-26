@@ -1665,6 +1665,7 @@ mod tests {
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
+                ssh: None,
             }
         );
         let error = config_from_url("mssql://someone@db.example.test/db?encrypt=true").unwrap_err();

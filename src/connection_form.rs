@@ -389,6 +389,8 @@ impl ConnectionForm {
             sslmode: self.sslmode,
             root_certificate,
             statement_timeout: self.statement_timeout(cx)?,
+            // The form has no SSH tunnel section yet.
+            ssh: None,
         })
     }
 }
@@ -495,6 +497,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssh: None,
         };
         let typed = ConnectionConfig::Postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

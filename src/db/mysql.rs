@@ -877,6 +877,7 @@ mod tests {
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
+                ssh: None,
             }
         );
         assert_eq!(

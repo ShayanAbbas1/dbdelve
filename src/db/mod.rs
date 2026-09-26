@@ -527,7 +527,28 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         root_certificate,
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
+        // Same reason: a URL has nowhere to say it either.
+        ssh: None,
     })
+}
+
+/// A local port forward opened over the system `ssh` binary before the engine
+/// dials in. Nothing here is a secret: the private key stays on disk and the
+/// password, if any, stays with ssh-agent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshTunnel {
+    /// A hostname, or an alias `~/.ssh/config` resolves.
+    pub host: String,
+    /// None defers to `~/.ssh/config`, or 22.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Blank defers to `~/.ssh/config`, or the local user.
+    #[serde(default)]
+    pub user: String,
+    /// None defers to `~/.ssh/config`, or ssh-agent. No password field: v1 is
+    /// keys and agent only.
+    #[serde(default)]
+    pub identity_file: Option<String>,
 }
 
 /// What an engine needs to reach a server. SQLite has none of it.
@@ -567,6 +588,9 @@ pub struct ServerConfig {
     /// side of that: a user who runs their own `SET statement_timeout = 0`
     /// silently wins for the rest of the session, which is correct.
     pub statement_timeout: u32,
+    /// A local port forward to dial through instead of connecting to `host`
+    /// directly. None is the ordinary direct connection.
+    pub ssh: Option<SshTunnel>,
 }
 
 impl ServerConfig {
@@ -1503,6 +1527,12 @@ mod tests {
         assert!(stored.needs_reconnect(&edited(|server| server.database = "other".into())));
         assert!(stored.needs_reconnect(&edited(|server| server.user = "someone_else".into())));
         assert!(stored.needs_reconnect(&edited(|server| server.password = "typed".into())));
+        assert!(stored.needs_reconnect(&edited(|server| {
+            server.ssh = Some(SshTunnel {
+                host: "bastion".into(),
+                ..SshTunnel::default()
+            })
+        })));
         assert!(stored.needs_reconnect(&ConnectionConfig::MySql(stored.server().unwrap().clone())));
         assert!(stored.needs_reconnect(&ConnectionConfig::Sqlite {
             path: "/tmp/dbdelve.db".into(),

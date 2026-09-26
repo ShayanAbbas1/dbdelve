@@ -91,6 +91,7 @@ impl Workspace {
                     sslmode,
                     root_certificate: stored.root_certificate,
                     statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                    ssh: stored.ssh,
                 };
                 match engine {
                     Engine::MySql => ConnectionConfig::MySql(server),
@@ -749,7 +750,7 @@ impl Workspace {
                         return;
                     };
                     profile.state = match result {
-                        Ok(connection) => ProfileState::Connected(connection),
+                        Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
                     workspace.load_catalog(&id, generation, cx);

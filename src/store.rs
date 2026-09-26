@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Cell, EditTarget, RelationKind};
+use crate::db::{Cell, EditTarget, RelationKind, SshTunnel};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -32,7 +32,8 @@ const HISTORY_SLACK: usize = HISTORY_DEPTH * 4;
 pub const GRID_ROW_CAP: usize = 5_000;
 
 /// Field order is load-bearing: TOML cannot emit a scalar after a table, so
-/// every scalar has to precede the `open_queries` and `open_objects` arrays.
+/// every scalar has to precede `ssh` and the `open_queries` and `open_objects`
+/// arrays.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoredProfile {
     pub id: String,
@@ -112,6 +113,12 @@ pub struct StoredProfile {
     /// removing the field would drop it on the next save.
     #[serde(default)]
     pub open_query: Option<String>,
+    /// The SSH tunnel this profile dials through, or absent for a direct
+    /// connection -- which is every profile written before tunnels existed. A
+    /// table, so it has to come after every scalar above. Nothing secret is in
+    /// it: no password field, keys and ssh-agent only.
+    #[serde(default)]
+    pub ssh: Option<SshTunnel>,
     /// The query buffers this profile had open, in strip order.
     #[serde(default)]
     pub open_queries: Vec<StoredQueryTab>,
@@ -1080,6 +1087,7 @@ user = "shayan"
                 mode: Some("full".into()),
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
+                ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
             };
@@ -1123,6 +1131,7 @@ user = "shayan"
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
@@ -1194,6 +1203,100 @@ open_objects = []
         assert_eq!(profile.color, None);
         // No limit, which is what it was running with.
         assert_eq!(profile.statement_timeout, None);
+        // A profile predating tunnels connected directly, and still does.
+        assert_eq!(profile.ssh, None);
+    }
+
+    /// A minimal profile the SSH tunnel tests vary just the `ssh` field of.
+    fn a_stored_profile() -> StoredProfile {
+        StoredProfile {
+            id: "dev".into(),
+            name: "Dev".into(),
+            host: "127.0.0.1".into(),
+            port: Some(5432),
+            database: "dbdelve_dev".into(),
+            user: "dbdelve".into(),
+            sslmode: None,
+            root_certificate: None,
+            engine: Some("postgres".into()),
+            path: None,
+            account: None,
+            private_key: None,
+            warehouse: None,
+            role: None,
+            editor_font_size: None,
+            statement_timeout: None,
+            next_query_id: Some(0),
+            color: None,
+            mode: None,
+            confirmed: Vec::new(),
+            open_query: None,
+            ssh: None,
+            open_queries: Vec::new(),
+            open_objects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
+        let profile = StoredProfile {
+            ssh: Some(SshTunnel {
+                host: "dbdelve-bastion".into(),
+                port: Some(2222),
+                user: "tunnel".into(),
+                identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
+            }),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
+    fn an_ssh_tunnel_with_only_a_host_survives_the_round_trip_through_toml() {
+        let profile = StoredProfile {
+            ssh: Some(SshTunnel {
+                host: "dbdelve-bastion".into(),
+                port: None,
+                user: String::new(),
+                identity_file: None,
+            }),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
+    fn no_tunnel_is_not_written_as_an_empty_section() {
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            profiles: vec![a_stored_profile()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+
+        assert!(!text.contains("ssh"), "{text}");
     }
 
     #[test]
@@ -1222,6 +1325,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
                 schema: "public".into(),
@@ -1288,6 +1392,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
                 schema: "main".into(),
@@ -1340,6 +1445,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
         };
@@ -1441,6 +1547,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
                 schema: "main".into(),
@@ -1533,6 +1640,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
                 },
@@ -1558,6 +1666,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
                 },
@@ -1863,6 +1972,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssh: None,
             open_queries: vec![
                 StoredQueryTab {
                     id: 0,
@@ -2150,6 +2260,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
@@ -2248,6 +2359,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],
         };
