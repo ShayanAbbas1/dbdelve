@@ -82,6 +82,10 @@ pub(crate) struct Workspace {
     /// sidebar is a thing done for the next minute, not a preference.
     pub(crate) sidebar_hidden: bool,
     pub(crate) row_panel: views::RowPanel,
+    /// Whether the plan pane's copy button was just used, so it can show a
+    /// tick the way `row_panel.copied` does. One flag rather than a keyed
+    /// slot: only one plan pane is ever on screen at a time.
+    pub(crate) plan_copied: bool,
     pub(crate) pending_removal: Option<String>,
     /// Whether `store::load_profiles` failed outright rather than finding no
     /// file. Set once at startup and never cleared, because the file it could
@@ -134,6 +138,7 @@ impl Workspace {
                 on_screen: Default::default(),
                 copied: None,
             },
+            plan_copied: false,
             pending_removal: None,
             store_unreadable: false,
             next_generation: 0,
@@ -634,6 +639,7 @@ impl Render for Workspace {
                 profile,
                 self.settings.editor_font_size,
                 &self.row_panel,
+                self.plan_copied,
                 cx,
             ));
         // With the sidebar folded there is nothing to split, and a split with
