@@ -1,0 +1,14 @@
+Port 22
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AllowTcpForwarding yes
+AuthorizedKeysFile /keys/authorized_keys
+
+# /keys is a read-only bind mount of ./dev/ssh/.generated (setup.sh's output),
+# so sshd reads whatever key is there at each login attempt rather than a copy
+# baked in at container start; that's what makes `setup.sh` and
+# `compose up` order-independent. Its ownership/mode on the host don't match
+# what sshd's strict checks want, especially through Docker Desktop's
+# bind-mount layer, so StrictModes is off rather than fighting that.
+StrictModes no
