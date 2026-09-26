@@ -216,6 +216,16 @@ gpui_platform = { version = "=0.3.5", package = "gpui-pre-platform", features = 
     "wayland",
 ] }
 
+# The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits, however
+# it exits: Windows has no pipe-closing watchdog like the `sh` one on Unix.
+# Pinned to the version already locked, so naming it adds no copy.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]
