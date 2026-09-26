@@ -226,6 +226,11 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_System_Threading",
 ] }
 
+# The Unix side of the same: `pthread_sigmask`, so the ssh a background thread
+# starts still dies when told to. Pinned to the version already locked.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]

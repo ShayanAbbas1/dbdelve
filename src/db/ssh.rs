@@ -319,13 +319,36 @@ fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
 
 #[cfg(unix)]
 fn watched(program: &str, args: &[String]) -> io::Result<Child> {
-    Command::new("/bin/sh")
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("/bin/sh");
+    command
         .args(["-c", WATCHDOG, "sh", program])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // std hands the child the spawning thread's signal mask, and the GCD
+    // worker a background connect runs on blocks every signal: ssh would
+    // ignore the watchdog's kill and outlive DBDelve. SIGTERM's disposition
+    // too, since an ignored one survives exec just the same.
+    // SAFETY: sigemptyset, pthread_sigmask and signal are async-signal-safe,
+    // which is all a hook between fork and exec may call.
+    unsafe {
+        command.pre_exec(|| {
+            let mut empty = std::mem::MaybeUninit::uninit();
+            libc::sigemptyset(empty.as_mut_ptr());
+            match libc::pthread_sigmask(libc::SIG_SETMASK, empty.as_ptr(), std::ptr::null_mut()) {
+                0 => {}
+                error => return Err(io::Error::from_raw_os_error(error)),
+            }
+            if libc::signal(libc::SIGTERM, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
 }
 
 #[cfg(windows)]
@@ -525,6 +548,42 @@ mod tests {
         assert!(!status.success());
     }
 
+    /// Every signal blocked on the spawning thread, as on a GCD worker, which
+    /// is where the app's background executor runs a connect.
+    #[cfg(unix)]
+    fn on_a_thread_blocking_every_signal<T: Send + 'static>(
+        spawn: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        thread::spawn(|| {
+            // SAFETY: `all` is initialised by sigfillset before it is read, and
+            // the mask changes only this thread's.
+            unsafe {
+                let mut all = std::mem::MaybeUninit::uninit();
+                libc::sigfillset(all.as_mut_ptr());
+                libc::pthread_sigmask(libc::SIG_SETMASK, all.as_ptr(), std::ptr::null_mut());
+            }
+            spawn()
+        })
+        .join()
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_watchdog_started_with_every_signal_blocked_still_ends_what_it_runs() {
+        let mut child =
+            on_a_thread_blocking_every_signal(|| watched("sleep", &["30".to_owned()]).unwrap());
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("the watchdog's kill did not end what it ran");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_missing_ssh_is_named_as_missing() {
@@ -628,6 +687,26 @@ mod tests {
         drop(tunnel);
 
         assert!(TcpStream::connect(local).is_err());
+        assert!(!ssh_is_running_for(local));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
+    fn live_ssh_a_tunnel_opened_with_every_signal_blocked_still_ends_on_drop() {
+        let tunnel =
+            on_a_thread_blocking_every_signal(|| live_tunnel(&tunnel("dbdelve-bastion")).unwrap());
+        let local = tunnel.local_addr();
+
+        let (dropped, done) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(tunnel);
+            let _ = dropped.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "Drop is still waiting on ssh"
+        );
         assert!(!ssh_is_running_for(local));
     }
 }

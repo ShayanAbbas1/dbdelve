@@ -1500,6 +1500,7 @@ dependencies = [
  "icondata_core",
  "icondata_lu",
  "keyring",
+ "libc",
  "lsp-types",
  "mysql",
  "nucleo-matcher",
