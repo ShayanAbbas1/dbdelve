@@ -18,6 +18,7 @@
 //! read and nothing else here has to know how a `Catalog` is built.
 
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +27,7 @@ use ::mysql::consts::{ColumnFlags, ColumnType};
 use ::mysql::prelude::Queryable;
 use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
+use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, ServerConfig, SslMode,
     Structure, assemble_catalog, assemble_foreign_keys, assemble_structure, non_utf8_error,
@@ -226,11 +228,16 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     super::server_from_url(url, "MySQL")
 }
 
-/// The fields every connection needs, query or cancel alike.
-fn base_options(server: &ServerConfig) -> OptsBuilder {
+/// The fields every connection needs, query or cancel alike. `dial` is a
+/// tunnel's address, which replaces the server's.
+fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder {
+    let (host, port) = match dial {
+        Some(dial) => (dial.ip().to_string(), dial.port()),
+        None => (server.host.clone(), server.port.unwrap_or(DEFAULT_PORT)),
+    };
     OptsBuilder::new()
-        .ip_or_hostname(Some(server.host.clone()))
-        .tcp_port(server.port.unwrap_or(DEFAULT_PORT))
+        .ip_or_hostname(Some(host))
+        .tcp_port(port)
         .db_name(Some(server.database.clone()))
         .user(Some(server.user.clone()))
         // Offered only when there is one. An empty password is not the
@@ -257,15 +264,15 @@ fn open(server: &ServerConfig, options: impl Fn() -> OptsBuilder) -> Result<Conn
 }
 
 /// The connection a profile keeps.
-fn connect(server: &ServerConfig) -> Result<Conn, DbError> {
+fn connect(server: &ServerConfig, dial: Option<SocketAddr>) -> Result<Conn, DbError> {
     open(server, || match server.statement_timeout {
-        0 => base_options(server),
+        0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
         // what this does and does not bound. `max_execution_time` counts
         // milliseconds, and a server too old to know the variable fails the
         // connect here rather than the statement later.
-        seconds => base_options(server).init(vec![format!(
+        seconds => base_options(server, dial).init(vec![format!(
             "SET SESSION max_execution_time = {}",
             u64::from(seconds) * 1_000
         )]),
@@ -274,9 +281,9 @@ fn connect(server: &ServerConfig) -> Result<Conn, DbError> {
 
 /// The throwaway connection a cancel opens: the same fields, but bounded end
 /// to end and with no init statement it has no use for.
-fn cancel_options(server: &ServerConfig) -> OptsBuilder {
+fn cancel_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder {
     let timeout = Some(Duration::from_secs(CANCEL_TIMEOUT_SECONDS));
-    base_options(server)
+    base_options(server, dial)
         .read_timeout(timeout)
         .write_timeout(timeout)
 }
@@ -302,17 +309,30 @@ pub struct Connection {
     /// than asked for from above because nothing above `src/db/` may learn that
     /// MySQL is the engine needing a second socket (AGENTS.md, hard rule 4).
     server: ServerConfig,
+    /// What the cancel socket dials too, and held so ssh runs as long as any
+    /// clone does.
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
-        let connection = connect(server)?;
-
-        Ok(Self {
-            connection_id: connection.connection_id(),
-            server: server.clone(),
-            connection: Arc::new(Mutex::new(connection)),
+        // Before the tunnel, which may have cost a hardware-key touch.
+        if server.ssh.is_some() && server.sslmode == SslMode::VerifyFull {
+            return Err(unverifiable_through_a_tunnel(server));
+        }
+        tunnelled(server, DEFAULT_PORT, |tunnel| {
+            let connection = connect(server, tunnel.as_ref().map(|tunnel| tunnel.local_addr()))?;
+            Ok(Self {
+                connection_id: connection.connection_id(),
+                server: server.clone(),
+                connection: Arc::new(Mutex::new(connection)),
+                tunnel,
+            })
         })
+    }
+
+    fn dial(&self) -> Option<SocketAddr> {
+        self.tunnel.as_ref().map(|tunnel| tunnel.local_addr())
     }
 
     /// `KILL QUERY` over a connection of its own, because the connection being
@@ -327,7 +347,7 @@ impl Connection {
     /// only trades that for a background thread hung forever with no report.
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
-        let mut connection = open(server, || cancel_options(server))?;
+        let mut connection = open(server, || cancel_options(server, self.dial()))?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -736,6 +756,18 @@ fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
     }
 }
 
+/// The driver checks the certificate's name against the address it dials and
+/// offers no way to name another, so through a tunnel verify-full could only
+/// ever check the name against the loopback address (AGENTS.md, hard rule 7).
+fn unverifiable_through_a_tunnel(server: &ServerConfig) -> DbError {
+    plain_error(format!(
+        "sslmode=verify-full cannot be honoured through an SSH tunnel on MySQL: \
+         the driver checks the certificate against the address it dials, which is \
+         the tunnel's loopback address rather than {}.",
+        server.host
+    ))
+}
+
 fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing
@@ -826,6 +858,19 @@ mod tests {
             ..config
         })
         .expect("connection should open")
+    }
+
+    /// The compose database as the bastion sees it, by service name and the
+    /// port inside the network.
+    fn live_tunnelled() -> ServerConfig {
+        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
+        ServerConfig {
+            host: "mysql".into(),
+            port: Some(3306),
+            sslmode: SslMode::Disable,
+            ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
+            ..config_from_url(&url).expect("dbdelve_MYSQL_URL should parse")
+        }
     }
 
     fn names(result: &QueryResult) -> Vec<&str> {
@@ -1033,6 +1078,30 @@ mod tests {
     }
 
     #[test]
+    fn verify_full_through_a_tunnel_is_refused_before_ssh_starts() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            sslmode: SslMode::VerifyFull,
+            // Nothing that resolves: starting ssh at all would fail differently.
+            ssh: Some(crate::db::SshTunnel {
+                host: "dbdelve-nowhere.invalid".into(),
+                ..crate::db::SshTunnel::default()
+            }),
+            ..ServerConfig::default()
+        };
+        let Err(error) = Connection::open(&server) else {
+            panic!("verify-full through a tunnel connected");
+        };
+        assert!(
+            error.message.starts_with(
+                "sslmode=verify-full cannot be honoured through an SSH tunnel on MySQL"
+            ),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn the_cancel_connection_is_bounded_and_carries_no_init_statement() {
         // The bug this guards: a cancel that reuses the query connection's
         // options has no read/write timeout and runs an init statement it has
@@ -1041,7 +1110,7 @@ mod tests {
             statement_timeout: 5,
             ..ServerConfig::default()
         };
-        let opts: ::mysql::Opts = cancel_options(&server).into();
+        let opts: ::mysql::Opts = cancel_options(&server, None).into();
 
         let timeout = Some(Duration::from_secs(CANCEL_TIMEOUT_SECONDS));
         assert_eq!(opts.get_read_timeout(), timeout.as_ref());
@@ -1077,6 +1146,27 @@ mod tests {
     /// the optimizer answers that one from statistics without reading a row.
     const LIVE_SLOW_SELECT: &str =
         "SELECT MAX(SHA2(CONCAT(a.id, b.id), 512)) FROM measurements a JOIN measurements b";
+
+    #[test]
+    #[ignore = "requires the dev bastions and MySQL configured through dbdelve_SSH_CONFIG and dbdelve_MYSQL_URL"]
+    fn live_ssh_a_query_and_a_cancel_run_through_the_bastion() {
+        let connection = Connection::open(&live_tunnelled()).expect("connection should open");
+        let result = connection
+            .query("SELECT 1 AS one")
+            .expect("query should succeed");
+        assert_eq!(result.rows, vec![vec![Some("1".into())]]);
+
+        // `KILL QUERY` needs a second connection, which has to find the
+        // server through the same tunnel.
+        let canceller = connection.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().expect("the KILL QUERY should send");
+        });
+        let started = Instant::now();
+        let _ = connection.query("SELECT SLEEP(30)");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]

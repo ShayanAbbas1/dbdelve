@@ -25,10 +25,6 @@ mod mysql;
 mod postgres;
 mod snowflake;
 mod sqlite;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Connection::open starts using it next")
-)]
 mod ssh;
 
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};

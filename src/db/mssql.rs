@@ -16,7 +16,7 @@
 //! catalog.
 
 use std::collections::HashSet;
-use std::net::Shutdown;
+use std::net::{Shutdown, SocketAddr};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -30,6 +30,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
+use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, ServerConfig, SslMode,
     Structure, assemble_catalog, assemble_foreign_keys, assemble_structure, plain_error,
@@ -311,6 +312,9 @@ ORDER BY column_ordinal
 /// the TCP connect alone would not.
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
+/// The port the server listens on when the profile does not say.
+const DEFAULT_PORT: u16 = 1433;
+
 /// What every statement dbdelve writes assumes of the session, and what a
 /// user's `SET` can change under it: `XACT_ABORT` is what makes a bracketed
 /// batch all-or-nothing, the quoting reads differently without the next four,
@@ -496,18 +500,24 @@ pub struct Connection {
     /// credentials: nothing above `src/db/` may learn that this engine needs
     /// them again.
     server: ServerConfig,
+    /// What every login dials, reconnects included, and held so ssh runs as
+    /// long as any clone does.
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
-        let connection = Self {
-            session: Arc::new(Mutex::new(None)),
-            in_flight: Arc::new(Mutex::new(InFlight::default())),
-            server: server.clone(),
-        };
-        let session = connection.connect()?;
-        *connection.session.lock().expect("unshared until returned") = Some(session);
-        Ok(connection)
+        tunnelled(server, DEFAULT_PORT, |tunnel| {
+            let connection = Self {
+                session: Arc::new(Mutex::new(None)),
+                in_flight: Arc::new(Mutex::new(InFlight::default())),
+                server: server.clone(),
+                tunnel,
+            };
+            let session = connection.connect()?;
+            *connection.session.lock().expect("unshared until returned") = Some(session);
+            Ok(connection)
+        })
     }
 
     /// `prefer` and `disable` are the rungs that may reach less than their
@@ -519,7 +529,9 @@ impl Connection {
             .build()
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
 
-        let attempt = |encryption| guarded(|| runtime.block_on(login(&self.server, encryption)));
+        let dial = self.tunnel.as_ref().map(|tunnel| tunnel.local_addr());
+        let attempt =
+            |encryption| guarded(|| runtime.block_on(login(&self.server, dial, encryption)));
         let (client, socket) = match attempt(encryption(self.server.sslmode))? {
             Err(error)
                 if matches!(self.server.sslmode, SslMode::Prefer | SslMode::Disable)
@@ -868,9 +880,11 @@ fn guarded<T>(call: impl FnOnce() -> T) -> Result<T, DbError> {
 }
 
 /// The TCP connect and the login, both inside one bound, plus a second handle
-/// on the socket for Cancel.
+/// on the socket for Cancel. `dial` is a tunnel's address, dialled in place of
+/// the server's while TLS still verifies the server's name.
 async fn login(
     server: &ServerConfig,
+    dial: Option<SocketAddr>,
     encryption: EncryptionLevel,
 ) -> Result<(Tds, std::net::TcpStream), tiberius::error::Error> {
     let mut server = server.clone();
@@ -881,13 +895,20 @@ async fn login(
         let mut redirected = false;
         loop {
             let config = config(&server, encryption);
-            let tcp = TcpStream::connect(config.get_addr()).await?;
+            let tcp = match dial {
+                Some(dial) => TcpStream::connect(dial).await?,
+                None => TcpStream::connect(config.get_addr()).await?,
+            };
             tcp.set_nodelay(true)?;
             let tcp = tcp.into_std()?;
             let socket = tcp.try_clone()?;
             let tcp = TcpStream::from_std(tcp)?;
             let mut client = match Client::connect(config, tcp.compat_write()).await {
-                Err(tiberius::error::Error::Routing { host, port }) if !redirected => {
+                // Not through a tunnel, which reaches only the server it was
+                // opened to; the error names where the login was sent.
+                Err(tiberius::error::Error::Routing { host, port })
+                    if !redirected && dial.is_none() =>
+                {
                     redirected = true;
                     server.host = host;
                     server.port = Some(port);
@@ -1616,6 +1637,17 @@ mod tests {
         Connection::open(&live_config()).expect("connection should open")
     }
 
+    /// The compose server as the bastion sees it, by service name and the port
+    /// inside the network.
+    fn live_tunnelled() -> ServerConfig {
+        ServerConfig {
+            host: "mssql".into(),
+            port: Some(1433),
+            ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
+            ..live_config()
+        }
+    }
+
     fn names(result: &QueryResult) -> Vec<&str> {
         result
             .columns
@@ -1990,6 +2022,29 @@ mod tests {
             target.columns[2], None,
             "a computed column is never a SET target"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and SQL Server configured through dbdelve_SSH_CONFIG and dbdelve_MSSQL_URL"]
+    fn live_ssh_a_query_runs_through_the_bastion_and_after_a_reconnect() {
+        let connection = Connection::open(&live_tunnelled()).expect("connection should open");
+        let result = connection
+            .query("SELECT 1 AS one")
+            .expect("query should succeed");
+        assert_eq!(result.rows, vec![vec![Some("1".into())]]);
+
+        // Cancel closes the session, so the run reconnects: through the same
+        // tunnel, or not at all.
+        let canceller = connection.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().expect("the cancel should send");
+        });
+        let error = connection
+            .query("WAITFOR DELAY '00:00:30'")
+            .expect_err("the statement should be stopped");
+        assert!(error.message.contains("reconnected"), "{}", error.message);
+        assert!(connection.query("SELECT 1").is_ok());
     }
 
     #[test]
@@ -3315,6 +3370,7 @@ mod tests {
                 "mssql://someone@127.0.0.1:{port}/db?sslmode=require"
             ))
             .unwrap(),
+            tunnel: None,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1"));
