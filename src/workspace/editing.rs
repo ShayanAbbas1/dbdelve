@@ -840,12 +840,21 @@ impl Workspace {
             format.extension().to_uppercase()
         );
         self.note(message.clone(), cx);
-        let Some((id, generation)) = self
-            .profile()
-            .map(|profile| (profile.id.clone(), profile.generation))
-        else {
-            return;
-        };
+        if let Some(profile) = self.profile() {
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            self.clear_notice_later(id, generation, message, cx);
+        }
+    }
+
+    /// Take a confirmation down after a few seconds, the way a refusal is not:
+    /// a refusal is still true until the user acts on it, a success is news.
+    fn clear_notice_later(
+        &self,
+        id: String,
+        generation: u64,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |workspace, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(3))
@@ -1033,16 +1042,20 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
-                profile.session.notice = Some(match written {
-                    Ok((path, format)) => format!(
-                        "Exported {} {} as {} to {}.",
-                        group_thousands(rows as u64),
-                        if rows == 1 { "row" } else { "rows" },
-                        format.extension().to_uppercase(),
-                        path.display()
-                    ),
-                    Err(error) => error,
-                });
+                match written {
+                    Ok((path, format)) => {
+                        let message = format!(
+                            "Exported {} {} as {} to {}.",
+                            group_thousands(rows as u64),
+                            if rows == 1 { "row" } else { "rows" },
+                            format.extension().to_uppercase(),
+                            path.display()
+                        );
+                        profile.session.notice = Some(message.clone());
+                        workspace.clear_notice_later(id, generation, message, cx);
+                    }
+                    Err(error) => profile.session.notice = Some(error),
+                }
                 cx.notify();
             });
         })
