@@ -241,6 +241,31 @@ impl ConnectionForm {
         form
     }
 
+    /// Seeded from `profile` but never bound to it: no `editing` id, so saving
+    /// creates a new profile. Unlike `editing`, the password is prefilled,
+    /// because a duplicate has no Keychain entry of its own to fall back to.
+    pub(crate) fn duplicating(
+        profile: &Profile,
+        name: String,
+        password: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Self {
+        let mut config = profile.config.clone();
+        if let Some(password) = password
+            && let Some(server) = config.server_mut()
+        {
+            server.password = password;
+        }
+        let mut form = Self::new(Some(&config), window, cx);
+        form.color = profile.color;
+        form.mode = profile.mode;
+        form.name.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+        });
+        form
+    }
+
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let name = read(&self.name);
@@ -388,6 +413,18 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
     }
 }
 
+/// Checks display names rather than ids: `store::profile_id` already dedupes
+/// the id, but two rows with the same name in the switcher are ambiguous.
+pub(crate) fn duplicate_profile_name(name: &str, existing: &[String]) -> String {
+    (1..)
+        .map(|n| match n {
+            1 => format!("{name} copy"),
+            n => format!("{name} copy {n}"),
+        })
+        .find(|candidate| !existing.contains(candidate))
+        .expect("an unbounded range always finds a free name")
+}
+
 /// A database file's name without its directory or extension.
 pub(crate) fn file_stem(path: &str) -> &str {
     std::path::Path::new(path)
@@ -425,6 +462,27 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
 mod tests {
     use super::*;
     use crate::db::{ConnectionConfig, ServerConfig, SslMode};
+
+    #[test]
+    fn a_duplicate_name_does_not_collide_with_one_already_there() {
+        assert_eq!(duplicate_profile_name("Prod", &[]), "Prod copy");
+        assert_eq!(
+            duplicate_profile_name("Prod", &["Prod copy".to_string()]),
+            "Prod copy 2"
+        );
+        assert_eq!(
+            duplicate_profile_name(
+                "Prod",
+                &["Prod copy".to_string(), "Prod copy 2".to_string()]
+            ),
+            "Prod copy 3"
+        );
+        // Unrelated names are not what it is dodging.
+        assert_eq!(
+            duplicate_profile_name("Prod", &["Staging".to_string()]),
+            "Prod copy"
+        );
+    }
 
     #[test]
     fn the_environment_password_is_never_copied_into_the_keychain() {

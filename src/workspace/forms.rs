@@ -225,7 +225,11 @@ impl Workspace {
                             )
                             .child(self.form_field("Database", &form.database, cx))
                             .child(self.form_field("Username", &form.user, cx))
-                            .child(self.form_field("Password", &form.password, cx))
+                            .child(self.labelled_field(
+                                "Password",
+                                Input::new(&form.password).mask_toggle(),
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -330,6 +334,10 @@ impl Workspace {
         input: &Entity<InputState>,
         cx: &App,
     ) -> impl IntoElement {
+        self.labelled_field(label, Input::new(input), cx)
+    }
+
+    fn labelled_field(&self, label: &'static str, input: Input, cx: &App) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -341,7 +349,7 @@ impl Workspace {
                     .text_color(theme(cx).text_muted)
                     .child(label),
             )
-            .child(Input::new(input).w_full())
+            .child(input.w_full())
     }
 
     /// The palette, centred over everything else.
@@ -977,6 +985,7 @@ impl Workspace {
                 .map(|(index, profile)| {
                     let activate_workspace = workspace.clone();
                     let edit_workspace = workspace.clone();
+                    let duplicate_workspace = workspace.clone();
                     let remove_workspace = workspace.clone();
                     let pending = self.pending_removal.as_deref() == Some(&profile.id);
                     let active = index == self.active;
@@ -1039,6 +1048,24 @@ impl Workspace {
                                                 workspace.form = Some(form);
                                                 workspace.switcher_open = false;
                                                 cx.notify();
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    icon_button(
+                                        ("duplicate-profile", index),
+                                        icon::COPY,
+                                        Tone::Quiet,
+                                        Control::Inline,
+                                        t,
+                                    )
+                                    .tooltip("Duplicate connection")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            _ = duplicate_workspace.update(cx, |workspace, cx| {
+                                                workspace.duplicate_profile(index, window, cx);
                                             });
                                         },
                                     ),

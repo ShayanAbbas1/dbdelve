@@ -828,6 +828,36 @@ impl Workspace {
         .detach();
     }
 
+    /// The plan pane's copy button: the server's plan exactly as it arrived,
+    /// unedited by anything dbdelve draws over it. Ticks the same way
+    /// `copy_row_field` does, but with one flag rather than a keyed slot,
+    /// since only one plan pane is ever on screen at a time.
+    pub(crate) fn copy_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+        else {
+            return;
+        };
+        let Some(explained) = &tab.plan else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(explained.plan.text.clone()));
+
+        self.plan_copied = true;
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.plan_copied = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Write the result set in front of the user to a file they pick.
     ///
     /// The rows on screen and only those. A relation tab holds what its

@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 42] = [
+const ICONS: [(&str, &IconData); 43] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -52,6 +52,7 @@ const ICONS: [(&str, &IconData); 42] = [
     ("icons/table.svg", icondata_lu::LuTable),
     ("icons/layers.svg", icondata_lu::LuLayers),
     ("icons/eye.svg", icondata_lu::LuEye),
+    ("icons/eye-off.svg", icondata_lu::LuEyeOff),
     ("icons/hard-drive.svg", icondata_lu::LuHardDrive),
     ("icons/globe.svg", icondata_lu::LuGlobe),
     ("icons/list-tree.svg", icondata_lu::LuListTree),

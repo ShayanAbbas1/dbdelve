@@ -76,11 +76,12 @@ pub fn render_main_content(
     profile: &Profile,
     editor_font_size: f32,
     row_panel: &RowPanel,
+    plan_copied: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let body = match profile.session.active_object() {
         Some(tab) => render_object(tab, profile.config.engine(), row_panel, cx),
-        None => render_query_surface(profile, editor_font_size, row_panel, cx),
+        None => render_query_surface(profile, editor_font_size, row_panel, plan_copied, cx),
     };
 
     div()
@@ -173,6 +174,7 @@ fn render_query_surface(
     profile: &Profile,
     editor_font_size: f32,
     row_panel: &RowPanel,
+    plan_copied: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let Some(tab) = profile.session.active_query_tab() else {
@@ -182,7 +184,7 @@ fn render_query_surface(
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
     let bottom = match tab.showing_plan.then_some(tab.plan.as_ref()).flatten() {
-        Some(explained) => render_plan(explained, cx),
+        Some(explained) => render_plan(explained, plan_copied, cx),
         None => render_results(
             &tab.query,
             &tab.results,
@@ -225,7 +227,11 @@ const PLAN_LABEL_LIMIT: usize = 160;
 /// a column of pre-indented strings: sortable-looking, movable, resizable, and
 /// wrong in every one of those. `sql::clause_anchor` refuses to sort an
 /// explained statement for the same reason.
-fn render_plan(explained: &Explained, cx: &mut Context<Workspace>) -> AnyElement {
+fn render_plan(
+    explained: &Explained,
+    plan_copied: bool,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let t = *theme(cx);
     let code = fonts(cx).editor.clone();
     let Explained { plan, mode, sql } = explained;
@@ -410,7 +416,30 @@ fn render_plan(explained: &Explained, cx: &mut Context<Workspace>) -> AnyElement
                         .text_size(px(layout::TEXT_XS))
                         .child(div().text_color(t.text_faint).child(label.clone()))
                         .child(div().text_color(t.text).child(value.clone()))
-                })),
+                }))
+                .child(match plan_copied {
+                    true => div()
+                        .flex_shrink_0()
+                        .size(px(Control::Compact.height()))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            icon(icon::CHECK)
+                                .size(px(layout::ICON_SIZE))
+                                .text_color(t.success),
+                        )
+                        .with_animation(
+                            "copied-plan",
+                            Animation::new(std::time::Duration::from_millis(150)),
+                            |tick, delta| tick.opacity(delta),
+                        )
+                        .into_any_element(),
+                    false => icon_button("copy-plan", icon::COPY, Tone::Quiet, Control::Compact, t)
+                        .tooltip("Copy plan")
+                        .on_click(cx.listener(|workspace, _, _, cx| workspace.copy_plan(cx)))
+                        .into_any_element(),
+                }),
         )
         .child(
             div()
