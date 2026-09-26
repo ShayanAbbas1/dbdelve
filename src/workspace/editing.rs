@@ -789,6 +789,84 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
 
+    /// The active cell's row, whole values under a header, as TSV: what pastes
+    /// into a spreadsheet as cells and into a ticket as something readable.
+    pub(crate) fn copy_row(&mut self, _: &CopyRow, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+        else {
+            return;
+        };
+        let grid = results.read(cx).delegate();
+        let Some((row, _)) = grid.active() else {
+            return;
+        };
+        let result = grid.result();
+        let text = export::render_rows(Format::Tsv, &result.columns, &result.rows[row..=row]);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    pub(crate) fn copy_results(&mut self, _: &CopyResults, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_results_as(Format::Tsv, cx);
+    }
+
+    /// The export's text on the clipboard rather than in a file, under the same
+    /// rules: the rows the server returned, no pending edits, and a capped
+    /// snapshot refused rather than copied short.
+    pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
+        if self.refuse_capped_snapshot("copying", cx) {
+            return;
+        }
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+        else {
+            return;
+        };
+        let result = results.read(cx).delegate().result();
+        if result.columns.is_empty() {
+            return;
+        }
+        let rows = result.rows.len();
+        let text = export::render(format, result);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        // A copy changes nothing on screen, and a whole result set is too much
+        // to take on trust.
+        self.note(
+            format!(
+                "Copied {} {} as {}.",
+                group_thousands(rows as u64),
+                if rows == 1 { "row" } else { "rows" },
+                format.extension().to_uppercase()
+            ),
+            cx,
+        );
+    }
+
+    /// A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
+    /// result. Writing those out is quietly short of what the status bar says
+    /// the tab is showing, so this says how to get the rest instead.
+    fn refuse_capped_snapshot(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+        let capped = self.profile().and_then(|profile| {
+            let grid = profile.session.active_results()?.read(cx).delegate();
+            let showing = grid.result().rows.len();
+            (showing < grid.total_rows()).then(|| (showing, grid.total_rows()))
+        });
+        let Some((showing, total)) = capped else {
+            return false;
+        };
+        self.note(
+            format!(
+                "This tab is showing {} of {} rows from a snapshot. Refresh it before {doing}.",
+                group_thousands(showing as u64),
+                group_thousands(total as u64)
+            ),
+            cx,
+        );
+        true
+    }
+
     /// One field of the row panel, taken from the fetched cell rather than the
     /// re-indented, clipped text the panel paints. The field's button shows a
     /// tick for a moment after, since a copy otherwise changes nothing on
@@ -867,24 +945,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        // A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
-        // result. Exporting those is a file that is quietly short of what the
-        // status bar says the tab is showing, so it refuses and says how to get
-        // the rest -- rather than writing a wrong file successfully.
-        let capped = self.profile().and_then(|profile| {
-            let grid = profile.session.active_results()?.read(cx).delegate();
-            let showing = grid.result().rows.len();
-            (showing < grid.total_rows()).then(|| (showing, grid.total_rows()))
-        });
-        if let Some((showing, total)) = capped {
-            self.note(
-                format!(
-                    "This tab is showing {} of {} rows from a snapshot. Refresh it before exporting.",
-                    group_thousands(showing as u64),
-                    group_thousands(total as u64)
-                ),
-                cx,
-            );
+        if self.refuse_capped_snapshot("exporting", cx) {
             return;
         }
         let Some(profile) = self.profile() else {

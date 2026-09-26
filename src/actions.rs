@@ -110,6 +110,8 @@ actions!(
         NewRow,
         EditCell,
         CopyCell,
+        CopyRow,
+        CopyResults,
         SetNull,
         SetEmpty,
         SetDefault,

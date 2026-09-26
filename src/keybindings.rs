@@ -25,12 +25,12 @@ use gpui::{KeyBinding, Keystroke};
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
-        CommandPalette, CopyCell, CycleTheme, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
-        FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow, NextPage,
-        NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious, PreviousPage,
-        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
-        RunQuery, SaveQuery, SetDefault, SetEmpty, SetNull, ShowEditor, ToggleNextJoin,
-        ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+        CommandPalette, CopyCell, CopyResults, CopyRow, CycleTheme, DeleteRow, DiscardEdits,
+        EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery,
+        NewRow, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious,
+        PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+        ResetEditorZoom, RunQuery, SaveQuery, SetDefault, SetEmpty, SetNull, ShowEditor,
+        ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
 };
@@ -156,6 +156,8 @@ registry! {
     // active cell, so a chord put on one later must not fire from the editor.
     ("set_empty", "Set Cell to Empty", Some("DataTable"), [], SetEmpty),
     ("set_default", "Set Cell to Default", Some("DataTable"), [], SetDefault),
+    ("copy_row", "Copy Row", Some("DataTable"), [], CopyRow),
+    ("copy_results", "Copy Results", Some("DataTable"), [], CopyResults),
     ("follow_foreign_key", "Follow Foreign Key", None, [], FollowForeignKey),
     ("delete_row", "Delete Row", None, [], DeleteRow),
     ("discard_edits", "Discard Edits", None, [], DiscardEdits),

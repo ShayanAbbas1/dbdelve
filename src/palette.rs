@@ -99,6 +99,8 @@ pub enum Command {
     /// the file is written as is read back off the path the user confirmed, so
     /// these two rows are one code path — see `export::Format::for_path`.
     ExportResults(Format),
+    CopyRow,
+    CopyResults(Format),
     SwitchProfile(usize),
     NextProfile,
     PreviousProfile,
@@ -572,6 +574,27 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "",
             icon::SAVE,
             Command::ExportResults(Format::Json),
+        ));
+        items.push(Item::command(
+            "Copy results as TSV",
+            chord_hint("copy_results", overrides),
+            icon::COPY,
+            Command::CopyResults(Format::Tsv),
+        ));
+        items.push(Item::command(
+            "Copy results as CSV",
+            "",
+            icon::COPY,
+            Command::CopyResults(Format::Csv),
+        ));
+    }
+
+    if workspace.has_active_cell(cx) {
+        items.push(Item::command(
+            "Copy row",
+            chord_hint("copy_row", overrides),
+            icon::COPY,
+            Command::CopyRow,
         ));
     }
 

@@ -52,6 +52,15 @@ impl Workspace {
     /// Whether the surface in front has a result set to write out. Columns, not
     /// rows: a statement that matched nothing still has a shape, and a
     /// header-only CSV is a truthful answer to it.
+    pub(crate) fn has_active_cell(&self, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .active_results()
+                .is_some_and(|results| results.read(cx).delegate().active().is_some())
+        })
+    }
+
     pub(crate) fn has_results(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
             profile

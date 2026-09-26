@@ -227,6 +227,8 @@ impl Workspace {
             Command::ApplyEdits => self.apply_edits(&ApplyEdits, window, cx),
             Command::DiscardEdits => self.discard_edits(&DiscardEdits, window, cx),
             Command::ExportResults(format) => self.export_results(format, cx),
+            Command::CopyRow => self.copy_row(&CopyRow, window, cx),
+            Command::CopyResults(format) => self.copy_results_as(format, cx),
             Command::SwitchProfile(index) => self.activate(index, cx),
             Command::NextProfile => self.cycle_profile(1, cx),
             Command::PreviousProfile => self.cycle_profile(-1, cx),

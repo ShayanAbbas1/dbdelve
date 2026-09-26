@@ -7,11 +7,14 @@
 
 use std::{collections::HashSet, path::Path};
 
-use crate::db::QueryResult;
+use crate::db::{Cell, Column, QueryResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Csv,
+    /// CSV's quoting with a tab between fields: what a spreadsheet splits into
+    /// cells on paste, which is why the clipboard copies default to it.
+    Tsv,
     Json,
 }
 
@@ -19,6 +22,7 @@ impl Format {
     pub fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|ext| ext.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("json") => Format::Json,
+            Some(ext) if ext.eq_ignore_ascii_case("tsv") => Format::Tsv,
             _ => Format::Csv,
         }
     }
@@ -26,31 +30,39 @@ impl Format {
     pub fn extension(self) -> &'static str {
         match self {
             Format::Csv => "csv",
+            Format::Tsv => "tsv",
             Format::Json => "json",
         }
     }
 }
 
 pub fn render(format: Format, result: &QueryResult) -> String {
+    render_rows(format, &result.columns, &result.rows)
+}
+
+/// `render` over some of a result's rows, under all of its columns: a copied
+/// row carries the header an exported file would.
+pub fn render_rows(format: Format, columns: &[Column], rows: &[Vec<Cell>]) -> String {
     match format {
-        Format::Csv => render_csv(result),
-        Format::Json => render_json(result),
+        Format::Csv => render_delimited(',', columns, rows),
+        Format::Tsv => render_delimited('\t', columns, rows),
+        Format::Json => render_json(columns, rows),
     }
 }
 
-fn render_csv(result: &QueryResult) -> String {
+fn render_delimited(delimiter: char, columns: &[Column], rows: &[Vec<Cell>]) -> String {
     let mut out = String::new();
+    let separator = delimiter.to_string();
 
-    let header = result
-        .columns
+    let header = columns
         .iter()
-        .map(|column| csv_field(&column.name))
+        .map(|column| csv_field(delimiter, &column.name))
         .collect::<Vec<_>>()
-        .join(",");
+        .join(&separator);
     out.push_str(&header);
     out.push('\n');
 
-    for row in &result.rows {
+    for row in rows {
         let record = row
             .iter()
             .map(|cell| match cell {
@@ -61,10 +73,10 @@ fn render_csv(result: &QueryResult) -> String {
                 // quoting rule below would otherwise leave it bare.
                 None => String::new(),
                 Some(value) if value.is_empty() => "\"\"".to_string(),
-                Some(value) => csv_field(value),
+                Some(value) => csv_field(delimiter, value),
             })
             .collect::<Vec<_>>()
-            .join(",");
+            .join(&separator);
         out.push_str(&record);
         out.push('\n');
     }
@@ -72,8 +84,8 @@ fn render_csv(result: &QueryResult) -> String {
     out
 }
 
-fn csv_field(value: &str) -> String {
-    if value.contains(['"', ',', '\n', '\r']) {
+fn csv_field(delimiter: char, value: &str) -> String {
+    if value.contains(['"', delimiter, '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()
@@ -84,11 +96,10 @@ fn csv_field(value: &str) -> String {
 /// its `preserve_order` feature — something else in the graph turns that on, and
 /// we do not declare it. `json_key_order_matches_column_order` is what makes
 /// losing it a test failure rather than a silently re-sorted export.
-fn render_json(result: &QueryResult) -> String {
-    let keys = json_keys(result);
+fn render_json(columns: &[Column], rows: &[Vec<Cell>]) -> String {
+    let keys = json_keys(columns);
 
-    let rows = result
-        .rows
+    let rows = rows
         .iter()
         .map(|row| {
             let mut object = serde_json::Map::new();
@@ -115,16 +126,12 @@ fn render_json(result: &QueryResult) -> String {
 /// other one. Nothing is lost, so nothing is loud — the reader just gets the
 /// wrong column. Skipping the taken name costs a set and leaves a gap in the
 /// numbering, which is the honest outcome.
-fn json_keys(result: &QueryResult) -> Vec<String> {
-    let names: HashSet<&str> = result
-        .columns
-        .iter()
-        .map(|column| column.name.as_str())
-        .collect();
+fn json_keys(columns: &[Column]) -> Vec<String> {
+    let names: HashSet<&str> = columns.iter().map(|column| column.name.as_str()).collect();
     let mut used: HashSet<String> = HashSet::new();
-    let mut keys = Vec::with_capacity(result.columns.len());
+    let mut keys = Vec::with_capacity(columns.len());
 
-    for column in &result.columns {
+    for column in columns {
         let mut key = column.name.clone();
         let mut suffix = 1;
         while used.contains(&key) || (suffix > 1 && names.contains(key.as_str())) {
@@ -141,7 +148,6 @@ fn json_keys(result: &QueryResult) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Column;
 
     fn column(name: &str) -> Column {
         Column {
@@ -291,10 +297,25 @@ mod tests {
     }
 
     #[test]
+    fn tsv_quotes_a_tab_but_leaves_a_comma_bare() {
+        let result = QueryResult {
+            columns: vec![column("a"), column("b")],
+            rows: vec![vec![Some("has\ttab".into()), Some("has,comma".into())]],
+            ..QueryResult::default()
+        };
+
+        assert_eq!(
+            render(Format::Tsv, &result),
+            "a\tb\n\"has\ttab\"\thas,comma\n"
+        );
+    }
+
+    #[test]
     fn for_path_maps_extensions_case_insensitively_and_defaults_to_csv() {
         assert_eq!(Format::for_path(Path::new("out.json")), Format::Json);
         assert_eq!(Format::for_path(Path::new("out.JSON")), Format::Json);
         assert_eq!(Format::for_path(Path::new("out.csv")), Format::Csv);
+        assert_eq!(Format::for_path(Path::new("out.TSV")), Format::Tsv);
         assert_eq!(Format::for_path(Path::new("out")), Format::Csv);
     }
 }
