@@ -6,7 +6,7 @@
 use super::*;
 use gpui_component::menu::PopupMenuItem;
 
-use crate::connection_form::ConnectionTest;
+use crate::connection_form::{ConnectionTest, duplicate_profile_name};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
 use crate::theme::color::Srgb;
@@ -225,6 +225,52 @@ impl Workspace {
         }
         self.remember_profiles(cx);
         self.profiles.len() - 1
+    }
+
+    /// The Keychain is read in the background, as `begin_connect` does. A failed
+    /// read seeds no password rather than an error: the user just retypes it.
+    pub(crate) fn duplicate_profile(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        let id = profile.id.clone();
+        let name = duplicate_profile_name(
+            &profile.name,
+            &self
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        self.switcher_open = false;
+        cx.notify();
+
+        let password_task = {
+            let id = id.clone();
+            cx.background_executor()
+                .spawn(async move { store::password(&id).ok().flatten() })
+        };
+        cx.spawn_in(window, async move |workspace, cx| {
+            let password = password_task.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                // Removed from the switcher while the Keychain answered --
+                // nothing left to seed a form from.
+                let Some(profile) = workspace.profiles.iter().find(|profile| profile.id == id)
+                else {
+                    return;
+                };
+                workspace.form = Some(ConnectionForm::duplicating(
+                    profile, name, password, window, cx,
+                ));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn apply_connection_url(

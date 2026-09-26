@@ -985,6 +985,7 @@ impl Workspace {
                 .map(|(index, profile)| {
                     let activate_workspace = workspace.clone();
                     let edit_workspace = workspace.clone();
+                    let duplicate_workspace = workspace.clone();
                     let remove_workspace = workspace.clone();
                     let pending = self.pending_removal.as_deref() == Some(&profile.id);
                     let active = index == self.active;
@@ -1047,6 +1048,24 @@ impl Workspace {
                                                 workspace.form = Some(form);
                                                 workspace.switcher_open = false;
                                                 cx.notify();
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    icon_button(
+                                        ("duplicate-profile", index),
+                                        icon::COPY,
+                                        Tone::Quiet,
+                                        Control::Inline,
+                                        t,
+                                    )
+                                    .tooltip("Duplicate connection")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            _ = duplicate_workspace.update(cx, |workspace, cx| {
+                                                workspace.duplicate_profile(index, window, cx);
                                             });
                                         },
                                     ),
