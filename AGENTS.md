@@ -905,33 +905,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on
   a restored grid asks first, because its rows may be stale.
-- **A snapshot over `SNAPSHOT_WHOLE_LIMIT` (10 MiB) of cell text is written
-  cut, and a cut value is never treated as the value.** Restoring runs on the
-  frame thread, so a result of large documents (a 206 MB snapshot was 5,000
-  rows of 51 columns, values up to 1.85 M characters) froze the app for ten
-  seconds. Two things answer it. `clip` reads only the 300 characters a cell
-  shows, on the fresh-fetch path as much as the restore one. And a snapshot
-  past the limit is written with every value cut to that same 300 characters
-  plus `…`, flagged by `StoredGrid.clipped`, so the file is about 12 MB
-  rather than 206 MB. The threshold is bytes rather than chars, which
-  over-counts and so fails safe, and it is marked `ponytail:`: raise it once
-  reading and writing a snapshot move off the frame thread, which is the rest
-  of the answer and needs a loading state for a restored tab, stale-result
-  handling for a tab closed mid-restore, and a save that finishes before quit.
-- **A cut snapshot is read-only, and a copy is refused per cut cell rather
-  than per grid.** `editable()` is false and `row_key()` is `None` on a cut
-  grid, so no `UPDATE` or `DELETE` can be built from a value that is only its
-  own start — hard rule 1, and the reason hard rule 2's "a cell is editable
-  only when DBDelve can name its row by primary key" holds for a restore too.
-  A cut snapshot is also written with `edit: None`, so a build that predates
-  `clipped` and ignores the field still cannot write one. Copies need no such
-  blanket refusal: every cut value has the one shape `ResultGrid::cut_at`
-  tests for, so `refuse_clipped_snapshot` is asked about the cell (or row, or
-  grid, for an export) the action actually reads, and a wide result with one
-  long column stays copyable everywhere else. A cut cell still opens in the
-  row panel, showing the start that was kept under "Saved preview. Refresh to
-  load the full value."; a re-run or Refresh replaces the delegate with a
-  live grid and lifts every restriction.
+- **`clip` reads only the window a cell shows, not the whole value.**
+  `ResultGrid::new` clips every cell on the frame thread, for a fresh result
+  and a restored snapshot alike. It used to scan each whole value for line
+  breaks before keeping `CELL_DISPLAY_LIMIT` (300) characters, so a result of
+  large documents (5,000 rows of 51 columns, 206 MB, values up to 1.85 M
+  characters) cost 11 s in a debug build and 0.15 s in release. `clip` now
+  looks for a line break only in that window: it returns
+  `clip_to(value, 300)` unchanged if there is none, and otherwise a single
+  streaming pass reproduces the old split/trim/drop-empty/join-with-space
+  flattening and stops one character past the limit. The cost follows the
+  number of cells, not their size.
 
 ### Completion
 

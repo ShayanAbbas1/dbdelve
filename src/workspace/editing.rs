@@ -4,7 +4,6 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::result_grid::ResultGrid;
 use crate::session::{StaleEdit, StaleResume};
 
 impl Workspace {
@@ -416,12 +415,6 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
-        let tab = profile.session.active;
-        // Before the structural refusals below, which a cut snapshot fails for
-        // a reason none of them names.
-        if self.refuse_clipped_snapshot("editing", ResultGrid::clipped, cx) {
-            return;
-        }
         // The grid's own active cell, not the library's selection: its selected
         // row and column are mutually exclusive modes rather than a cell, so
         // `selected_col` is `None` after a click. Both of its selections are
@@ -429,6 +422,7 @@ impl Workspace {
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
+        let tab = profile.session.active;
         if results.read(cx).delegate().editable(row, col)
             && !self.confirm_stale(StaleResume::Open, cx)
         {
@@ -532,9 +526,6 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
-        if self.refuse_clipped_snapshot("editing", ResultGrid::clipped, cx) {
-            return;
-        }
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
@@ -715,13 +706,7 @@ impl Workspace {
             );
             return;
         }
-        if self.refuse_clipped_snapshot("deleting a row", ResultGrid::clipped, cx) {
-            return;
-        }
-        let Some(results) = self
-            .profile()
-            .and_then(|profile| profile.session.active_results())
-        else {
+        let Some(results) = profile.session.active_results() else {
             return;
         };
         let grid = results.read(cx);
@@ -787,13 +772,6 @@ impl Workspace {
     /// the grid withholds the value while an input is open, where `cmd+c`
     /// belongs to the input's own text selection.
     pub(crate) fn copy_cell(&mut self, _: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
-        let active_cut = |grid: &ResultGrid| {
-            grid.active()
-                .is_some_and(|(row, col)| grid.cut_at(row, col))
-        };
-        if self.refuse_clipped_snapshot("copying", active_cut, cx) {
-            return;
-        }
         let Some(profile) = self.profile() else {
             return;
         };
@@ -814,10 +792,6 @@ impl Workspace {
     /// The active cell's row, whole values under a header, as TSV: what pastes
     /// into a spreadsheet as cells and into a ticket as something readable.
     pub(crate) fn copy_row(&mut self, _: &CopyRow, _: &mut Window, cx: &mut Context<Self>) {
-        let row_cut = |grid: &ResultGrid| grid.active().is_some_and(|(row, _)| grid.row_cut(row));
-        if self.refuse_clipped_snapshot("copying", row_cut, cx) {
-            return;
-        }
         let Some(results) = self
             .profile()
             .and_then(|profile| profile.session.active_results())
@@ -903,9 +877,6 @@ impl Workspace {
     /// result. Writing those out is quietly short of what the status bar says
     /// the tab is showing, so this says how to get the rest instead.
     fn refuse_capped_snapshot(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
-        if self.refuse_clipped_snapshot(doing, ResultGrid::clipped, cx) {
-            return true;
-        }
         let capped = self.profile().and_then(|profile| {
             let grid = profile.session.active_results()?.read(cx).delegate();
             let showing = grid.result().rows.len();
@@ -925,41 +896,11 @@ impl Workspace {
         true
     }
 
-    /// A restored snapshot keeps only the start of a long value. Anything that
-    /// takes a cell as the value itself -- a copy, or an edit seeded or keyed by
-    /// one -- would take the cut one, so this is asked before any of them.
-    /// `cut` says which cells the action reads: a copy needs only its own to be
-    /// whole, an edit or an export needs the whole grid to be.
-    pub(super) fn refuse_clipped_snapshot(
-        &mut self,
-        doing: &str,
-        cut: impl Fn(&ResultGrid) -> bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let clipped = self
-            .profile()
-            .and_then(|profile| profile.session.active_results())
-            .is_some_and(|results| cut(results.read(cx).delegate()));
-        if clipped {
-            self.note(
-                format!(
-                    "This tab's snapshot kept only the start of long values. Refresh it before {doing}."
-                ),
-                cx,
-            );
-        }
-        clipped
-    }
-
     /// One field of the row panel, taken from the fetched cell rather than the
     /// re-indented, clipped text the panel paints. The field's button shows a
     /// tick for a moment after, since a copy otherwise changes nothing on
     /// screen.
     pub(crate) fn copy_row_field(&mut self, row_ix: usize, col_ix: usize, cx: &mut Context<Self>) {
-        let cut = |grid: &ResultGrid| grid.cut_at(row_ix, col_ix);
-        if self.refuse_clipped_snapshot("copying", cut, cx) {
-            return;
-        }
         let Some(results) = self
             .profile()
             .and_then(|profile| profile.session.active_results())

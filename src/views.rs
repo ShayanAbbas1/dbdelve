@@ -1397,12 +1397,6 @@ fn render_row_inspector(
                                             .child(result_grid::NULL_LABEL),
                                     }),
                             )
-                            .children(field.cut.then(|| {
-                                div()
-                                    .text_size(px(layout::TEXT_XS))
-                                    .text_color(t.text_muted)
-                                    .child("Saved preview. Refresh to load the full value.")
-                            }))
                     })),
             )
             .into_any_element(),
