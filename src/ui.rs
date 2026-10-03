@@ -154,6 +154,7 @@ pub(crate) const CLIENT_TITLEBAR: bool = !cfg!(target_os = "linux");
 /// belongs to the bar the compositor drew.
 pub(crate) fn titlebar(
     t: Theme,
+    tint: Option<ConnectionColor>,
     pills: Vec<AnyElement>,
     leading: Vec<AnyElement>,
     trailing: Vec<AnyElement>,
@@ -167,6 +168,7 @@ pub(crate) fn titlebar(
         .gap(px(layout::SPACE_SM))
         .border_b_1()
         .border_color(t.border)
+        .when_some(tint, |row, color| row.bg(color.band(t)))
         .pl(px(if cfg!(target_os = "macos") {
             layout::TITLEBAR_LEADING_INSET
         } else {

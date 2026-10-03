@@ -2507,6 +2507,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let font_size = workspace.settings.editor_font_size;
     let preview_rows = workspace.settings.preview_rows;
     let check_for_updates = workspace.settings.check_for_updates;
+    let color_titlebar = workspace.settings.color_titlebar;
 
     let themes: Vec<AnyElement> = Theme::all()
         .into_iter()
@@ -2726,6 +2727,31 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                              newer release exists. Nothing is sent about you \
                              or your databases.",
                         ),
+                ),
+        ))
+        .child(settings_section(
+            t,
+            "Color the titlebar",
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .child(div().flex().gap(px(layout::SPACE_XS)).children(
+                    [(true, "On"), (false, "Off")].map(|(color, label)| {
+                        settings_chip(
+                            ("color-titlebar", color as usize),
+                            label,
+                            color == color_titlebar,
+                            cx,
+                            move |workspace, _, cx| workspace.set_color_titlebar(color, cx),
+                        )
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_size(px(layout::TEXT_XS))
+                        .text_color(t.text_faint)
+                        .child("Paint the titlebar in the connection's color."),
                 ),
         ))
         .into_any_element()

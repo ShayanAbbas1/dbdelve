@@ -370,6 +370,25 @@ impl ConnectionColor {
     }
 
     pub fn swatch(self) -> Srgb {
+        self.at(SWATCH_LIGHTNESS)
+    }
+
+    /// The hue as a band under text that keeps its ordinary colour. Solid on an
+    /// opaque theme, deep on dark and pale on light, since the mid-lightness
+    /// swatch is legible under neither. Glass keeps it a tint so the frost still
+    /// reads through. See `a_coloured_titlebar_keeps_its_text_legible_in_every_theme`.
+    pub fn band(self, theme: Theme) -> Rgba {
+        if theme.is_glass {
+            return self.swatch().alpha(GLASS_BAND_ALPHA);
+        }
+        self.at(match theme.appearance {
+            Appearance::Dark => BAND_LIGHTNESS_DARK,
+            Appearance::Light => BAND_LIGHTNESS_LIGHT,
+        })
+        .opaque()
+    }
+
+    fn at(self, lightness: f32) -> Srgb {
         let (chroma, hue) = match self {
             Self::Gray => (0.012, 265.0),
             Self::Red => (0.190, 25.0),
@@ -379,7 +398,7 @@ impl ConnectionColor {
             Self::Blue => (0.140, 250.0),
             Self::Purple => (0.170, 305.0),
         };
-        Oklch::new(SWATCH_LIGHTNESS, chroma, hue).to_srgb()
+        Oklch::new(lightness, chroma, hue).to_srgb()
     }
 
     /// The swatch as something to put text on: a tint of the hue, not a block
@@ -392,6 +411,9 @@ impl ConnectionColor {
 }
 
 const SWATCH_LIGHTNESS: f32 = 0.65;
+const BAND_LIGHTNESS_DARK: f32 = 0.35;
+const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
+const GLASS_BAND_ALPHA: f32 = 0.40;
 
 /// Set from the light theme, where chrome is near-white and a tint over it is
 /// at its weakest: 0.22 is the lowest that still steps the pill clear of the
@@ -1077,6 +1099,20 @@ mod tests {
                     color.label()
                 );
                 check(t, "the pill's label", t.text, fill, AAA_TEXT);
+            }
+        }
+    }
+
+    #[test]
+    fn a_coloured_titlebar_keeps_its_text_legible_in_every_theme() {
+        for t in Theme::all() {
+            for color in ConnectionColor::ALL {
+                let band = color.band(t).flatten(t.surface);
+                check(t, "the titlebar's text", t.text, band, AA_TEXT);
+                // Muted text in the titlebar is icons and a short label, never
+                // something read at length. Holding it to body contrast leaves
+                // the light theme a band too pale to show its hue at all.
+                check(t, "the titlebar's muted text", t.text_muted, band, AA_LARGE);
             }
         }
     }

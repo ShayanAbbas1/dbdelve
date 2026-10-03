@@ -39,6 +39,9 @@ pub(crate) struct Settings {
     /// One request to GitHub at launch. Off switch because local-first users
     /// get to say no to the only request DBDelve makes on its own.
     pub(crate) check_for_updates: bool,
+    /// Some people want the connection colour on the switcher only, not a
+    /// painted band across the window.
+    pub(crate) color_titlebar: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -51,6 +54,7 @@ impl Default for Settings {
             preview_rows: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
             check_for_updates: true,
+            color_titlebar: true,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -214,6 +218,7 @@ impl Workspace {
                     .unwrap_or(PREVIEW_ROW_LIMIT);
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
+                workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -490,6 +495,15 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn set_color_titlebar(&mut self, color: bool, cx: &mut Context<Self>) {
+        if self.settings.color_titlebar == color {
+            return;
+        }
+        self.settings.color_titlebar = color;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     /// Written through for the same reason the zoom is: a font that resets on
     /// relaunch is a setting the user has to make again every morning.
     pub(crate) fn set_font(&mut self, slot: FontSlot, family: String, cx: &mut Context<Self>) {
@@ -696,7 +710,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(t, Vec::new(), Vec::new(), Vec::new()))
+                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(
                     div()
                         .flex_1()
@@ -1200,6 +1214,7 @@ impl Render for Workspace {
             .flex_col()
             .child(titlebar(
                 t,
+                profile.color.filter(|_| self.settings.color_titlebar),
                 std::iter::once({
                     let mode = profile.mode;
                     let silenced = profile
