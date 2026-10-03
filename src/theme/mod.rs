@@ -370,6 +370,25 @@ impl ConnectionColor {
     }
 
     pub fn swatch(self) -> Srgb {
+        self.at(SWATCH_LIGHTNESS)
+    }
+
+    /// The hue as a band under text that keeps its ordinary colour. Solid on an
+    /// opaque theme, deep on dark and pale on light, since the mid-lightness
+    /// swatch is legible under neither. Glass keeps it a tint so the frost still
+    /// reads through. See `a_coloured_titlebar_keeps_its_text_legible_in_every_theme`.
+    pub fn band(self, theme: Theme) -> Rgba {
+        if theme.is_glass {
+            return self.swatch().alpha(GLASS_BAND_ALPHA);
+        }
+        self.at(match theme.appearance {
+            Appearance::Dark => BAND_LIGHTNESS_DARK,
+            Appearance::Light => BAND_LIGHTNESS_LIGHT,
+        })
+        .opaque()
+    }
+
+    fn at(self, lightness: f32) -> Srgb {
         let (chroma, hue) = match self {
             Self::Gray => (0.012, 265.0),
             Self::Red => (0.190, 25.0),
@@ -379,7 +398,7 @@ impl ConnectionColor {
             Self::Blue => (0.140, 250.0),
             Self::Purple => (0.170, 305.0),
         };
-        Oklch::new(SWATCH_LIGHTNESS, chroma, hue).to_srgb()
+        Oklch::new(lightness, chroma, hue).to_srgb()
     }
 
     /// The swatch as something to put text on: a tint of the hue, not a block
@@ -389,9 +408,20 @@ impl ConnectionColor {
     pub fn fill(self) -> Rgba {
         self.swatch().alpha(PILL_ALPHA)
     }
+
+    /// `fill` on a solid base, for a pill that sits on the titlebar. The band
+    /// under it is often this same hue, and a tint shows whatever is beneath
+    /// it, so a translucent pill on its own colour all but vanishes. See
+    /// `a_titlebar_pill_stands_off_every_band`.
+    pub fn chip(self, theme: Theme) -> Srgb {
+        self.fill().flatten(theme.surface)
+    }
 }
 
 const SWATCH_LIGHTNESS: f32 = 0.65;
+const BAND_LIGHTNESS_DARK: f32 = 0.35;
+const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
+const GLASS_BAND_ALPHA: f32 = 0.40;
 
 /// Set from the light theme, where chrome is near-white and a tint over it is
 /// at its weakest: 0.22 is the lowest that still steps the pill clear of the
@@ -1067,7 +1097,7 @@ mod tests {
         let level = |c: Srgb| (c.r + c.g + c.b) / 3.0 * 255.0;
         for t in Theme::all() {
             for color in ConnectionColor::ALL {
-                let fill = color.fill().flatten(t.surface);
+                let fill = color.chip(t);
                 let step = (level(fill) - level(t.surface)).abs();
                 assert!(
                     step >= 8.0,
@@ -1077,6 +1107,52 @@ mod tests {
                     color.label()
                 );
                 check(t, "the pill's label", t.text, fill, AAA_TEXT);
+            }
+        }
+    }
+
+    #[test]
+    fn a_coloured_titlebar_keeps_its_text_legible_in_every_theme() {
+        for t in Theme::all() {
+            for color in ConnectionColor::ALL {
+                let band = color.band(t).flatten(t.surface);
+                check(t, "the titlebar's text", t.text, band, AA_TEXT);
+                // Muted text in the titlebar is icons and a short label, never
+                // something read at length. Holding it to body contrast leaves
+                // the light theme a band too pale to show its hue at all.
+                check(t, "the titlebar's muted text", t.text_muted, band, AA_LARGE);
+            }
+        }
+    }
+
+    #[test]
+    fn a_titlebar_pill_stands_off_every_band() {
+        // What sits on a band: the mode pill in its own hue, and the switcher
+        // as a plain chip, since the band is already wearing its colour. The
+        // floor is set from the weakest pair that still reads as a separate
+        // shape at a glance: a Green mode pill on a Gray band, light theme.
+        let distance = |a: Srgb, b: Srgb| {
+            let d = |x: f32, y: f32| ((x - y) * 255.0).powi(2);
+            (d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)).sqrt()
+        };
+        for t in Theme::all() {
+            for band_color in ConnectionColor::ALL {
+                let band = band_color.band(t).flatten(t.surface);
+                let pills = [
+                    ("the switcher", t.surface),
+                    ("a Green mode", ConnectionColor::Green.chip(t)),
+                    ("a Yellow mode", ConnectionColor::Yellow.chip(t)),
+                    ("a Red mode", ConnectionColor::Red.chip(t)),
+                ];
+                for (pill, chip) in pills {
+                    let step = distance(chip, band);
+                    assert!(
+                        step >= 20.0,
+                        "{}: {pill} pill on a {} band is {step:.1} off it",
+                        t.name,
+                        band_color.label()
+                    );
+                }
             }
         }
     }
