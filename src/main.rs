@@ -1,3 +1,6 @@
+// Release builds are a GUI app; debug keeps the console for `cargo run` output.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod actions;
 mod completion;
 mod connection_form;
