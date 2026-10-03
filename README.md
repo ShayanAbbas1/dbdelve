@@ -1,8 +1,9 @@
 # DBDelve
 
-A modern, performant, cross-platform database client for Postgres, MySQL,
-SQLite, Snowflake and SQL Server, on macOS, Linux and Windows. Written in Rust with GPUI. Buttery smooth,
-small memory footprint, fast navigation and stays performant on large datasets.
+A fast, native database client for Postgres, MySQL, SQLite, Snowflake and SQL
+Server, on macOS, Linux and Windows. Written in Rust with GPUI, with no
+Electron and no JVM, so it starts quickly, uses little memory and keeps
+scrolling smoothly through a million-row table.
 
 > Early days. Everything listed below works today.
 
@@ -31,34 +32,21 @@ time.
 
 ## What it does
 
-- **Separate connections that stay separate.** Each one keeps its own tabs,
-  schema tree and query history, so a buffer you wrote against staging can't
-  quietly end up pointed at production. Passwords go in the Keychain, never
-  into a config file.
-- **SSH tunnels.** Postgres, MySQL and SQL Server profiles can connect through
-  a tunnel run by your system `ssh`, so `~/.ssh/config`, ssh-agent and
-  hardware keys work the way they do in a terminal. See
-  [docs/ssh-tunnels.md](docs/ssh-tunnels.md).
-- **Read-only, read-write and full access, per connection.** DBDelve won't send
-  a statement your current mode doesn't allow, and it asks before anything
-  destructive. Read-only also asks Postgres and MySQL to refuse writes on their
-  end, as a second line. Neither replaces connecting as a role without write
-  grants, which is the only real boundary.
-- **In-line editing.** Arrow to a cell, Enter to edit it. Applying writes the
-  `UPDATE` into the editor first, so you read it before it runs. A cell is only
-  editable when DBDelve can identify its row by primary key; joins, views and
-  keyless tables stay read-only and tell you why.
-- **Sorting and filtering.** Clicking a header splices `ORDER BY` into the SQL
-  you're looking at. Filter bars build the `WHERE` for you when you'd rather
-  not type it.
-- **Completion from your own schema.** The tables, columns, views and routines
-  the connection actually has, not a generic keyword list. After `FROM` it
-  offers relations; after a table or alias and a dot, that table's columns.
-- **Export** whatever's in the grid to CSV or JSON. It writes what the tab
-  already holds, no second query.
-- **Keyboard-first.** Most actions ship with a chord and can be rebound in
-  Settings. A handful of contextual ones, mainly sorting and filters, are still
-  mouse-only.
+- **Make it yours.** A theme library with DBDelve's own Glass, Black, Dark and
+  Light alongside favorites like Catppuccin, Tokyo Night, Gruvbox and Dracula,
+  in dark, light and a translucent glass.
+- **Never mistake prod for staging.** Every connection keeps its own tabs,
+  schema tree and history, and wears its own color in the title bar. Run it
+  read-only, read-write or with full access, and DBDelve asks before anything
+  destructive.
+- **Edits you can read first.** Change a cell in place and DBDelve writes the
+  `UPDATE` into the editor for you to check before it runs.
+- **Keyboard-first.** A command palette for everything, fuzzy search across
+  your schema, and every shortcut rebindable.
+- **Your SSH, not a reimplementation.** Tunnels run through your own `ssh`, so
+  your config, agent and hardware keys just work.
+
+Free and open source, no telemetry, nothing behind a paywall.
 
 
 ## Installing
