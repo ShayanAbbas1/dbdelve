@@ -547,10 +547,12 @@ mod tests {
 
     #[test]
     fn a_key_path_is_kept_and_a_missing_item_left_to_ssh() {
+        let absolute = std::env::temp_dir().join("id_ed25519");
+        let absolute = absolute.to_str().unwrap();
         let mut asked = Vec::new();
         let report = read(
             vec![
-                over_ssh("a", "/Users/me/.ssh/id_ed25519", 2),
+                over_ssh("a", absolute, 2),
                 over_ssh("b", "~/.ssh/id_rsa", 2),
                 over_ssh("c", "id_ed25519", 2),
             ],
@@ -565,22 +567,19 @@ mod tests {
             .iter()
             .map(identity_file)
             .collect::<Vec<_>>();
-        assert_eq!(
-            identities,
-            [
-                Some("/Users/me/.ssh/id_ed25519"),
-                Some("~/.ssh/id_rsa"),
-                None
-            ]
-        );
+        assert_eq!(identities, [Some(absolute), Some("~/.ssh/id_rsa"), None]);
         assert_eq!(report.imported[2].notes, [UNLOCATED_KEY]);
         assert!(report.notes.is_empty());
     }
 
     #[test]
     fn a_written_key_reaches_ssh_from_dbdelves_directory() {
-        let path = "/Users/me/Library/Application Support/dbdelve/ssh-keys/tableplus-a";
-        assert_eq!(SshTunnel::identity_file_error(path), None);
+        let path = std::env::temp_dir()
+            .join("Application Support")
+            .join("dbdelve")
+            .join("ssh-keys")
+            .join("tableplus-a");
+        assert_eq!(SshTunnel::identity_file_error(path.to_str().unwrap()), None);
     }
 
     #[test]
