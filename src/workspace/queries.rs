@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use super::*;
-use crate::session::{PendingRun, Resume, TabKey};
+use crate::session::{Finished, PendingRun, Queue, Resume, Step, TabKey, next_step};
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -126,6 +126,10 @@ impl Workspace {
         }
         *cancelling = Some(std::time::Instant::now());
         let cancel = cancel.clone();
+        // An explicit stop ends the queue the statement was part of: the
+        // cancelled statement's error lands like any other, and nothing behind
+        // it is sent. No decision is raised -- this was the decision.
+        self.stop_queue_on(tab, cx);
         cx.notify();
         let cancel_task = cx
             .background_executor()
@@ -139,7 +143,7 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn run_query(&mut self, _: &RunQuery, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
@@ -155,27 +159,421 @@ impl Workspace {
             return;
         };
 
+        // A selection holding more than one statement runs each of them in
+        // turn, keeping every result. Anything else -- one selected statement,
+        // or the one under the cursor -- is sent the way it always was, which
+        // is verbatim, so a selection's comments and spacing still reach the
+        // server untouched.
+        let (text, selection) = {
+            let editor = editor.read(cx);
+            (editor.value().to_string(), editor.selected_range())
+        };
+        if !selection.is_empty() {
+            let engine = self.engine();
+            let statements = sql::queued_statements(engine, &text, Some(selection.clone()));
+            if statements.len() > 1 {
+                // A `GO 5` repeats its batch, and running it once is not what
+                // the selection says. Refused by name here as it is for a
+                // single batch, rather than quietly dropped.
+                if let Err(message) = sql::batch_counts(engine, &text[selection]) {
+                    self.refuse_run(tab, message, cx);
+                    return;
+                }
+                self.run_statements(tab, text, statements, window, cx);
+                return;
+            }
+        }
+
         let (start, sql) = match self.sql_to_run(&editor, cx) {
             Some(Ok(statement)) => statement,
             refused => {
                 let message = refused
                     .and_then(Result::err)
                     .unwrap_or_else(|| "There is no statement to run.".into());
-                if let Some(profile) = self.profile_mut()
-                    && let Some((state, _)) = profile.session.slot(tab)
-                {
-                    *state = QueryState::Failed(DbError {
-                        message,
-                        position: None,
-                    });
-                }
-                cx.notify();
+                self.refuse_run(tab, message, cx);
                 return;
             }
         };
 
+        // One statement is its own result, so it replaces whatever queue the
+        // tab was showing rather than appending to it. On SQL Server the
+        // submission is a whole batch, which can answer with a set per
+        // statement in it, so it gets a queue carrying nothing but the empty
+        // grids those sets will need -- `advance_queue` drops it again when
+        // only one set arrives.
+        if let Tab::Query(id) = tab {
+            let spare: Vec<_> = (1..sql::expected_sets(self.engine(), &sql))
+                .map(|_| crate::result_grid::new_grid(window, cx))
+                .collect();
+            if let Some(query) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(id))
+            {
+                query.queue = (!spare.is_empty()).then(|| Queue {
+                    sql: text.clone(),
+                    remaining: Vec::new(),
+                    done: Vec::new(),
+                    showing: 0,
+                    awaiting: true,
+                    spare,
+                });
+                // With the old queue goes the claim on the snapshots it was
+                // restored from, or the prune would keep files this tab will
+                // never show again and the next relaunch would raise a strip
+                // over one result.
+                query.queued_results = 0;
+            }
+        }
         self.sent_from(tab, start, &sql);
         self.execute_sql(sql, tab, cx);
+    }
+
+    /// Say why nothing ran, where the result would have gone. A refusal is the
+    /// tab's answer to the run, not a notice beside it.
+    fn refuse_run(&mut self, tab: Tab, message: String, cx: &mut Context<Self>) {
+        if let Some(profile) = self.profile_mut()
+            && let Some((state, _)) = profile.session.slot(tab)
+        {
+            *state = QueryState::Failed(DbError {
+                message,
+                position: None,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Run each of a selection's statements in turn, keeping every result.
+    ///
+    /// Each goes out through `execute_sql` like any other, so classify and the
+    /// mode gate answer for each of them separately. A statement the gate stops
+    /// parks a `PendingRun` and the rest wait on the tab until it is answered.
+    ///
+    /// Called only with more than one statement: one is an ordinary run, and
+    /// takes the verbatim path in `run_query` instead.
+    fn run_statements(
+        &mut self,
+        tab: Tab,
+        text: String,
+        statements: Vec<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some((first, rest)) = statements.split_first() else {
+            return;
+        };
+        // One grid per result the run can land, less the first, which the tab's
+        // own slot holds. That is one per statement on four engines; on SQL
+        // Server a batch can answer with a set per statement inside it.
+        let engine = self.engine();
+        let spares = statements
+            .iter()
+            .map(|range| sql::expected_sets(engine, &text[range.clone()]))
+            .sum::<usize>()
+            .saturating_sub(1);
+        let queue = Queue {
+            sql: text.clone(),
+            remaining: rest.to_vec(),
+            done: Vec::new(),
+            showing: 0,
+            awaiting: true,
+            spare: (0..spares)
+                .map(|_| crate::result_grid::new_grid(window, cx))
+                .collect(),
+        };
+        let sql = text[first.clone()].to_string();
+        if let Some(query) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        {
+            query.queue = Some(queue);
+        }
+        self.sent_from(tab, first.start, &sql);
+        self.execute_sql(sql, tab, cx);
+    }
+
+    /// Land the statement that just finished in the queue's history, and send
+    /// the next one — or park the decision when it failed with more to run.
+    ///
+    /// `rest` is the submission's result sets after the first, which only a
+    /// SQL Server batch ever has. They land as results of their own, so the
+    /// strip reads one chip per result set however many submissions produced
+    /// them.
+    fn advance_queue(&mut self, tab: Tab, rest: Vec<db::QueryResult>, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let engine = self.engine();
+        // Read before the session is borrowed, for the reason the completion
+        // handler reads it before `slot`.
+        let mode = self
+            .profile()
+            .map(|profile| profile.mode)
+            .unwrap_or_default();
+        let (step, extra, dropped) = {
+            let Some(profile) = self.profile_mut() else {
+                return;
+            };
+            let Some(query) = profile.session.query_tab_mut(id) else {
+                return;
+            };
+            if query.queue.is_none() {
+                return;
+            }
+            let failed = matches!(query.query, QueryState::Failed(_));
+            let state = query.query.clone();
+            let grid = query.results.clone();
+            // Always set for a statement sent from the buffer, which every
+            // statement of a queue is.
+            let (start, sent) = query.ran_from.clone().unwrap_or_default();
+            let Some(queue) = &mut query.queue else {
+                return;
+            };
+            // Only a statement the queue itself sent is one of its results.
+            if !std::mem::take(&mut queue.awaiting) {
+                return;
+            }
+            // Only follow the result that just landed if the statement in
+            // flight was what the user was watching. Someone reading an
+            // earlier result stays on it.
+            let following = queue.showing >= queue.done.len();
+            queue.done.push(Finished {
+                sql: sent,
+                start,
+                state,
+                grid,
+            });
+
+            // The grids are the ones the run reserved, because there is no
+            // `Window` here to build another with.
+            //
+            // ponytail: the reservation is one per statement in the batch,
+            // which is an upper bound for an ordinary batch and not for a
+            // procedure, a loop or a trigger; a set past the last spare is
+            // dropped and said so rather than shown. Take a window into
+            // `execute_unchecked` if a set has to be able to arrive
+            // unreserved.
+            let mut extra = Vec::new();
+            let mut dropped = 0;
+            for (offset, set) in rest.into_iter().enumerate() {
+                let Some(grid) = queue.spare.pop() else {
+                    dropped += 1;
+                    continue;
+                };
+                queue.done.push(Finished {
+                    // A set after the first has no statement of its own to be
+                    // named after: one batch produced them all, and the chip
+                    // says which of its results this is.
+                    sql: format!("Result {}", offset + 2),
+                    start,
+                    state: QueryState::Complete {
+                        rows: set.rows.len(),
+                        bytes: set.bytes,
+                        elapsed: set.elapsed,
+                        rows_affected: set.rows_affected,
+                    },
+                    grid: grid.clone(),
+                });
+                extra.push((grid, set));
+            }
+            if following {
+                queue.showing = queue.done.len() - 1;
+            }
+            (next_step(failed, &queue.remaining), extra, dropped)
+        };
+
+        for (grid, set) in extra {
+            // No sort and no layout to carry over: a header click reads the
+            // statement in the buffer, and this set is not the one the buffer
+            // names. A multi-set batch is uneditable, so there is no target.
+            grid.update(cx, |table, cx| {
+                *table.delegate_mut() = ResultGrid::new(set, mode).with_engine(engine);
+                table.refresh(cx);
+            });
+        }
+        if dropped > 0 {
+            let (sets, them) = match dropped {
+                1 => ("set", "it is"),
+                _ => ("sets", "they are"),
+            };
+            self.note(
+                format!(
+                    "The batch returned {dropped} more result {sets} than there were grids \
+                     reserved for it, and {them} not shown."
+                ),
+                cx,
+            );
+        }
+
+        match step {
+            Step::Finished => {
+                // A batch that answered with one set after all leaves a queue
+                // holding a single result, which is no queue at all: dropped,
+                // so the tab is exactly what an ordinary run leaves behind and
+                // nothing writes a second snapshot of the same grid.
+                if let Some(query) = self
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_tab_mut(id))
+                    && query
+                        .queue
+                        .as_ref()
+                        .is_some_and(|queue| queue.done.len() < 2 && queue.remaining.is_empty())
+                {
+                    query.queue = None;
+                }
+                cx.notify();
+            }
+            Step::Ask => {
+                if let Some(profile) = self.profile_mut() {
+                    profile.session.queue_failure = Some(tab);
+                }
+                cx.notify();
+            }
+            Step::Next(_) => self.send_next_statement(tab, cx),
+        }
+    }
+
+    /// Take the next statement off the queue and send it, with the empty grid
+    /// it will fill — the one the last statement produced is in `done` and is
+    /// never written to again.
+    fn send_next_statement(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(query) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        let Some(queue) = &mut query.queue else {
+            return;
+        };
+        if queue.remaining.is_empty() {
+            return;
+        }
+        let range = queue.remaining.remove(0);
+        let sql = queue.sql[range.clone()].to_string();
+        queue.awaiting = true;
+        // Follow the statement going out only for someone already on the
+        // newest result; a reader parked on an earlier one is left there.
+        if queue.showing + 1 >= queue.done.len() {
+            queue.showing = queue.done.len();
+        }
+        if let Some(grid) = queue.spare.pop() {
+            query.results = grid;
+        }
+        query.sent_from = Some((range.start, sql.clone()));
+        self.execute_sql(sql, tab, cx);
+    }
+
+    /// Show one of a queue's results. `index` is a position in `done`, or
+    /// `done.len()` for the statement still in flight.
+    ///
+    /// Nothing moves: `QueryTab::shown` reads the result out of `done`, so
+    /// selecting one is only ever an index. That is what makes this safe while
+    /// a later statement is running — the slot that run writes into is the
+    /// tab's own, and no chip but the last points at it.
+    ///
+    /// ponytail: `ran_from` stays on the statement that ran last, so a
+    /// selected failure offers no jump into the buffer (`error_span` refuses
+    /// text that is not there). Keep the statement beside its `start` in
+    /// `Finished` and read it from there if the jump is wanted.
+    pub(crate) fn show_queued_result(&mut self, tab: Tab, index: usize, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(queue) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+            .and_then(|query| query.queue.as_mut())
+        else {
+            return;
+        };
+        // The in-flight slot is only a chip while something is in it.
+        let last = queue.done.len();
+        if index > last || (index == last && !queue.awaiting) {
+            return;
+        }
+        queue.showing = index;
+        cx.notify();
+    }
+
+    /// Abandon the rest of a queue stopped by a failed statement, leaving
+    /// what has run on screen.
+    pub(crate) fn stop_queue(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(Tab::Query(id)) = profile.session.queue_failure.take() else {
+            return;
+        };
+        if let Some(query) = profile.session.query_tab_mut(id)
+            && let Some(queue) = &mut query.queue
+        {
+            queue.remaining.clear();
+        }
+        cx.notify();
+    }
+
+    /// Carry on with the statement after the one that failed.
+    pub(crate) fn continue_queue(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(tab) = profile.session.queue_failure.take() else {
+            return;
+        };
+        self.send_next_statement(tab, cx);
+    }
+
+    /// Stop whatever queue the named tab is part way through. Nothing that
+    /// has run is touched: the results already on it are still results.
+    pub(crate) fn stop_queue_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        if profile.session.queue_failure == Some(tab) {
+            profile.session.queue_failure = None;
+        }
+        if let Some(query) = profile.session.query_tab_mut(id)
+            && let Some(queue) = &mut query.queue
+        {
+            queue.remaining.clear();
+        }
+        self.release_queue(tab, cx);
+    }
+
+    /// Let go of a statement the queue sent that will never land: one the
+    /// mode gate refused, or one a cancel ended before it ran.
+    ///
+    /// Only `advance_queue` clears `awaiting` otherwise, and it runs on a
+    /// result. A statement that produces none would leave the flag set for
+    /// good, and with it the strip keeps a chip for a statement that is not
+    /// coming and holds the selection on it.
+    fn release_queue(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(queue) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+            .and_then(|query| query.queue.as_mut())
+        else {
+            return;
+        };
+        if !std::mem::take(&mut queue.awaiting) {
+            return;
+        }
+        // That chip is gone, so a selection resting on it falls back to the
+        // last result that did run.
+        queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
+        cx.notify();
     }
 
     fn sent_from(&mut self, tab: Tab, start: usize, sql: &str) {
@@ -434,7 +832,7 @@ impl Workspace {
         // is the only place a name means anything.
         match tab {
             Tab::Object(object) => {
-                self.close_object(object, cx);
+                self.close_object(object, window, cx);
                 self.open_saved_query(name.clone(), window, cx);
             }
             Tab::Query(id) => {
@@ -478,6 +876,7 @@ impl Workspace {
                 id,
                 name: None,
                 active: true,
+                queued_results: 0,
             },
             window,
             cx,
@@ -492,12 +891,12 @@ impl Workspace {
         // queries and objects regardless of when each was opened.
         profile.session.place_last(TabKey::Unsaved(id));
         self.install_completions(&profile_id, cx);
-        self.activate_tab(Tab::Query(id), cx);
+        self.activate_tab(Tab::Query(id), window, cx);
     }
 
     /// Close an unsaved buffer. Its scratch file goes with it: an unnamed
     /// buffer is its text, and closing one is discarding both.
-    pub(crate) fn close_buffer(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn close_buffer(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -514,7 +913,7 @@ impl Workspace {
         profile.session.queries.remove(position);
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
-            self.front_after_close(fallback, cx);
+            self.front_after_close(fallback, window, cx);
         }
 
         if let Err(message) = store::delete_scratch(&profile_id, id) {
@@ -540,7 +939,7 @@ impl Workspace {
             .profile()
             .and_then(|profile| profile.session.tab_holding(&name))
         {
-            self.activate_tab(Tab::Query(id), cx);
+            self.activate_tab(Tab::Query(id), window, cx);
             return;
         }
         if let Err(message) = self.persist_buffer(cx) {
@@ -578,6 +977,7 @@ impl Workspace {
                 id,
                 name: Some(name),
                 active: true,
+                queued_results: 0,
             },
             window,
             cx,
@@ -588,7 +988,7 @@ impl Workspace {
         profile.session.queries.push(tab);
         profile.session.notice = notice;
         self.install_completions(&profile_id, cx);
-        self.activate_tab(Tab::Query(id), cx);
+        self.activate_tab(Tab::Query(id), window, cx);
     }
 
     /// A statement out of the history, back in the buffer.
@@ -626,7 +1026,7 @@ impl Workspace {
             editor.set_value(appended, window, cx);
             editor.set_cursor_position(Position::new(line, 0), window, cx);
         });
-        self.activate_tab(Tab::Query(id), cx);
+        self.activate_tab(Tab::Query(id), window, cx);
     }
 
     /// The first unsaved buffer, or a new one when every open tab has a name.
@@ -643,7 +1043,7 @@ impl Workspace {
                 .map(|tab| tab.id)
         });
         match unsaved {
-            Some(id) => self.activate_tab(Tab::Query(id), cx),
+            Some(id) => self.activate_tab(Tab::Query(id), window, cx),
             None => self.new_query(&NewQuery, window, cx),
         }
     }
@@ -651,7 +1051,12 @@ impl Workspace {
     /// The chip's own delete: the first click arms it and the second one means
     /// it. Quieter than the dialog `cmd+w` raises, because the trash icon is
     /// already an unambiguous ask and the tab it belongs to is right there.
-    pub(crate) fn arm_delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn arm_delete_saved_query(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -660,10 +1065,15 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.delete_saved_query(name, cx);
+        self.delete_saved_query(name, window, cx);
     }
 
-    pub(crate) fn delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn delete_saved_query(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profile() else {
             return;
         };
@@ -702,7 +1112,7 @@ impl Workspace {
             }
         }
         if let Some(fallback) = in_front {
-            self.front_after_close(fallback, cx);
+            self.front_after_close(fallback, window, cx);
         }
         self.remember_profiles(cx);
         cx.notify();
@@ -969,7 +1379,7 @@ impl Workspace {
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
-                    let (succeeded, produced_grid, plan) = {
+                    let (succeeded, produced_grid, plan, rest) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             workspace.drop_stale_run(&id, tab, cx);
                             return;
@@ -999,9 +1409,14 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan))
+                                (true, false, Some(plan), Vec::new())
                             }
                             Ok(mut result) => {
+                                // Off the result before it reaches the grid:
+                                // the sets behind the first become results of
+                                // their own and have no business inside this
+                                // one's snapshot.
+                                let rest = std::mem::take(&mut result.rest);
                                 // An `INSERT … RETURNING` grid traces to its
                                 // table like any select, but applying an edit
                                 // re-runs the statement behind the grid to
@@ -1041,7 +1456,7 @@ impl Workspace {
                                         table.horizontal_scroll_handle.set_offset(*horizontal);
                                     }
                                 });
-                                (true, produced_grid, None)
+                                (true, produced_grid, None, rest)
                             }
                             Err(mut error) => {
                                 // Into the user's statement, not the prefix
@@ -1064,7 +1479,7 @@ impl Workspace {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None)
+                                (false, false, None, Vec::new())
                             }
                         }
                     };
@@ -1116,11 +1531,22 @@ impl Workspace {
                     }
                     cx.notify();
 
+                    let had_refresh = refresh.is_some();
                     if succeeded && let Some(refresh) = refresh {
                         match refresh {
                             Refresh::Statement(sql) => workspace.execute_sql(sql, tab, cx),
                             Refresh::Relation(id) => workspace.refresh_relation(id, cx),
                         }
+                    }
+                    // A refresh belongs to a generated edit, so the run that
+                    // carries one is never a queued statement and the two
+                    // follow-ups cannot both fire for one result. The tab may
+                    // still hold a finished queue -- its results stay
+                    // switchable -- which is why this turns on the refresh and
+                    // not on the queue's presence. `Queue::awaiting` is what
+                    // keeps the edit's own result out of `done`.
+                    if !had_refresh {
+                        workspace.advance_queue(tab, rest, cx);
                     }
                 })
                 .ok();
@@ -1189,14 +1615,21 @@ impl Workspace {
         // not on the token it was on -- a reflow moves every offset, and the
         // statement is the unit the user was working in. Map the token too if
         // the jump ever reads as losing your place.
-        let was_in = Buffer::parse(&text)
+        let buffer = Buffer::parse(&text);
+        let was_in = buffer
             .statement_at(cursor)
             .and_then(|range| {
-                statement_starts(&text)
+                buffer
+                    .statements()
                     .iter()
-                    .position(|start| *start == range.start)
+                    .position(|r| r.start == range.start)
             })
-            .and_then(|index| statement_starts(&formatted).get(index).copied());
+            .and_then(|index| {
+                Buffer::parse(&formatted)
+                    .statements()
+                    .get(index)
+                    .map(|r| r.start)
+            });
         let position = was_in.map_or(Position::new(0, 0), |offset| {
             position_at(&formatted, offset)
         });
@@ -1255,23 +1688,6 @@ impl Workspace {
                 .map(|()| (range.start, sql[range].to_string())),
         )
     }
-}
-
-/// Where each statement begins, in source order. `Buffer` keeps its ranges to
-/// itself outside its own tests, so `statement_at` is the only way in.
-///
-/// ponytail: one probe per byte, which is nothing next to the parse that
-/// precedes it. Ask `Buffer` for the ranges directly if a buffer ever gets big
-/// enough to feel it.
-fn statement_starts(sql: &str) -> Vec<usize> {
-    let buffer = Buffer::parse(sql);
-    let mut starts: Vec<usize> = Vec::new();
-    for range in (0..=sql.len()).filter_map(|offset| buffer.statement_at(offset)) {
-        if starts.last() != Some(&range.start) {
-            starts.push(range.start);
-        }
-    }
-    starts
 }
 
 fn position_at(text: &str, offset: usize) -> Position {
@@ -1338,18 +1754,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn statement_starts_finds_every_statement_in_order() {
-        let sql = "select 1;\n\n-- a comment\nselect 2;\nselect 3";
-        let starts = statement_starts(sql);
-        assert_eq!(starts.len(), 3);
-        assert!(starts.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(&sql[starts[1]..starts[1] + 8], "select 2");
-    }
-
-    #[test]
     fn a_position_lands_on_the_line_the_offset_is_on() {
         let sql = "select 1;\n  select 2;";
-        let offset = statement_starts(sql)[1];
+        let offset = Buffer::parse(sql).statements()[1].start;
         assert_eq!(position_at(sql, offset), Position::new(1, 2));
     }
 

@@ -241,7 +241,7 @@ impl Workspace {
             Command::FilterRows => self.focus_filter(window, cx),
             Command::ClearFilter => self.clear_filter(&ClearFilter, window, cx),
             Command::NewRow => self.new_row(&NewRow, window, cx),
-            Command::CloseObject(id) => self.ask_before_close(CloseTarget::Object(id), cx),
+            Command::CloseObject(id) => self.ask_before_close(CloseTarget::Object(id), window, cx),
             Command::SetNull => self.set_null(&SetNull, window, cx),
             Command::SetEmpty => self.set_empty(&SetEmpty, window, cx),
             Command::SetDefault => self.set_default(&SetDefault, window, cx),

@@ -136,6 +136,13 @@ pub struct StoredQueryTab {
     pub name: Option<String>,
     #[serde(default)]
     pub active: bool,
+    /// How many of this buffer's queued results are on disk, under
+    /// [`queued_grid_key`]. Without the count, a tab that ran five statements
+    /// and later two would restore three results it has no statements for:
+    /// the later run overwrites the first two files and nothing removes the
+    /// rest.
+    #[serde(default)]
+    pub queued_results: usize,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -728,6 +735,14 @@ pub fn remove_grid(profile_id: &str, key: &str) -> Result<(), String> {
 /// does for schema and relation names.
 pub fn query_grid_key(id: u64) -> String {
     format!("q-{id}")
+}
+
+/// One of a query tab's queued results. Two bare integers for the same reason
+/// [`query_grid_key`] is one: neither can hold the `.` that separates them, so
+/// no pair of them collides, and `q-{id}` itself has no separator to be read as
+/// a queue result of some other tab.
+pub fn queued_grid_key(id: u64, index: usize) -> String {
+    format!("q-{id}.{index}")
 }
 
 /// An object tab's grid key. A schema or relation name can hold anything --
@@ -1984,11 +1999,13 @@ open_objects = []
                     id: 0,
                     name: None,
                     active: false,
+                    queued_results: 0,
                 },
                 StoredQueryTab {
                     id: 4,
                     name: Some("daily".into()),
                     active: true,
+                    queued_results: 2,
                 },
             ],
             open_objects: vec![StoredObject {
@@ -2392,6 +2409,18 @@ name = \"accounts\"
         );
         assert_ne!(
             object_grid_key("public", "accounts", r#""id" = '42'"#),
+            object_grid_key("public", "accounts", "")
+        );
+    }
+
+    #[test]
+    fn a_queued_result_cannot_collide_with_a_tab_of_its_own() {
+        assert_ne!(queued_grid_key(1, 0), query_grid_key(1));
+        assert_ne!(queued_grid_key(1, 0), query_grid_key(10));
+        assert_ne!(queued_grid_key(1, 0), queued_grid_key(10, 0));
+        assert_ne!(queued_grid_key(1, 0), queued_grid_key(1, 1));
+        assert_ne!(
+            queued_grid_key(1, 0),
             object_grid_key("public", "accounts", "")
         );
     }

@@ -6,7 +6,7 @@
 use super::*;
 
 use crate::db::ColumnDefinition;
-use crate::session::TabKey;
+use crate::session::{Finished, Queue, TabKey};
 
 impl Workspace {
     pub(crate) fn open_explorer_target(
@@ -49,7 +49,7 @@ impl Workspace {
         if let Some(opened) = opened
             && let Some(id) = self.open_object(opened, window, cx)
         {
-            self.activate_tab(Tab::Object(id), cx);
+            self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
         }
     }
@@ -626,7 +626,7 @@ impl Workspace {
         };
 
         if let Some(id) = self.open_object(opened, window, cx) {
-            self.activate_tab(Tab::Object(id), cx);
+            self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
         }
     }
@@ -810,7 +810,7 @@ impl Workspace {
         };
 
         if let Some(id) = self.open_object(opened, window, cx) {
-            self.activate_tab(Tab::Object(id), cx);
+            self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
         }
     }
@@ -845,11 +845,12 @@ impl Workspace {
     /// once per tab; and a tab whose state is anything but `Idle` has a run of
     /// its own -- in flight, finished or failed -- so it is left alone even on
     /// that one attempt.
-    pub(crate) fn hydrate_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+    pub(crate) fn hydrate_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
         let profile_id = profile.id.clone();
+        let mut queued_results = 0;
         let key = match tab {
             Tab::Query(id) => {
                 let Some(query_tab) = profile.session.query_tab_mut(id) else {
@@ -860,6 +861,7 @@ impl Workspace {
                 {
                     return;
                 }
+                queued_results = std::mem::take(&mut query_tab.queued_results);
                 store::query_grid_key(id)
             }
             Tab::Object(id) => {
@@ -880,6 +882,13 @@ impl Workspace {
                 key
             }
         };
+
+        // Before the tab's own snapshot, and not behind it: a queue whose last
+        // statement returned no columns -- a `DELETE`, an `ALTER` -- wrote no
+        // `q-{id}` for its results to hang off.
+        if let Tab::Query(id) = tab {
+            self.restore_queue(id, queued_results, window, cx);
+        }
 
         let Some(snapshot) = store::read_grid(&profile_id, &key) else {
             return;
@@ -940,7 +949,73 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn activate_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+    /// Rebuild a query tab's result strip from the snapshots its queue left
+    /// behind, one grid per result.
+    ///
+    /// The queue comes back inert: nothing is left in `remaining` and nothing
+    /// is `awaiting`, so no statement re-runs and a later ordinary run on this
+    /// tab replaces the strip rather than being mistaken for one of its
+    /// statements. The statements themselves are not kept -- the buffer is the
+    /// user's and may say something else entirely by now -- so `Queue::sql` is
+    /// empty and each result carries its own statement, which is all a chip
+    /// needs.
+    fn restore_queue(
+        &mut self,
+        id: u64,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((profile_id, mode)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.mode))
+        else {
+            return;
+        };
+        let engine = self.engine();
+        let mut done = Vec::new();
+        for index in 0..count {
+            let key = store::queued_grid_key(id, index);
+            // A result that wrote no snapshot -- no columns, so nothing to keep
+            // -- leaves a gap rather than ending the strip: the results after
+            // it are still on disk and still worth showing.
+            let Some(snapshot) = store::read_grid(&profile_id, &key) else {
+                continue;
+            };
+            let grid = crate::result_grid::new_grid(window, cx);
+            show_snapshot(&grid, &snapshot, mode, engine, cx);
+            done.push(Finished {
+                // ponytail: a restored result has no buffer offset to point
+                // at, and `start` only feeds the line number in the failure
+                // dialog, which a restored result never raises -- it is
+                // `Complete` or nothing. Keep the offset in the snapshot if a
+                // failed one is ever restored too.
+                start: 0,
+                sql: snapshot.last_query.clone().unwrap_or_default(),
+                state: restored_state(&snapshot),
+                grid,
+            });
+        }
+        if done.is_empty() {
+            return;
+        }
+        let Some(query_tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        query_tab.queue = Some(Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            showing: done.len() - 1,
+            done,
+            awaiting: false,
+            spare: Vec::new(),
+        });
+    }
+
+    pub(crate) fn activate_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(profile) = self.profile_mut() {
             profile.session.active = tab;
             profile.session.clear_prompts();
@@ -949,7 +1024,7 @@ impl Workspace {
         // Before `load_relation`, which decides whether to re-query from the
         // state the snapshot leaves the tab in: hydrating afterwards would
         // arrive over a run already in flight and be refused.
-        self.hydrate_tab(tab, cx);
+        self.hydrate_tab(tab, window, cx);
         if let Tab::Object(id) = tab {
             self.load_relation(id, cx);
         }
@@ -961,9 +1036,14 @@ impl Workspace {
     /// `Session::fallback` named, or with none left, the window. Never
     /// nothing: the editor that had focus has just unmounted, and focus left
     /// to fall would land outside every binding the workspace listens for.
-    pub(crate) fn front_after_close(&mut self, fallback: Option<Tab>, cx: &mut Context<Self>) {
+    pub(crate) fn front_after_close(
+        &mut self,
+        fallback: Option<Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match fallback {
-            Some(next) => self.activate_tab(next, cx),
+            Some(next) => self.activate_tab(next, window, cx),
             None => {
                 if let Some(profile) = self.profile_mut() {
                     profile.session.clear_prompts();
@@ -973,7 +1053,7 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn close_object(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn close_object(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_run(Tab::Object(id), cx);
         // A count outliving its tab would hold the connection for an answer
         // nothing is left to show.
@@ -1012,7 +1092,7 @@ impl Workspace {
             }
         }
         if let Some(fallback) = in_front {
-            self.front_after_close(fallback, cx);
+            self.front_after_close(fallback, window, cx);
         }
         self.remember_profiles(cx);
         cx.notify();
@@ -1055,7 +1135,7 @@ impl Workspace {
             }
         }
         match restored_active {
-            Some(id) => self.activate_tab(Tab::Object(id), cx),
+            Some(id) => self.activate_tab(Tab::Object(id), window, cx),
             // Nothing to activate, but the pending list was drained, so what is
             // on disk has to be rewritten from the tabs that actually resolved.
             None => self.remember_profiles(cx),

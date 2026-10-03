@@ -614,7 +614,7 @@ impl Render for Workspace {
         // Gated on a flag rather than on the disk, so every later frame is a
         // bool test.
         if let Some(active @ Tab::Query(_)) = self.profile().map(|profile| profile.session.active) {
-            self.hydrate_tab(active, cx);
+            self.hydrate_tab(active, window, cx);
         }
 
         // Deferred for the same reason plus one: an element has to be mounted
@@ -1311,6 +1311,7 @@ impl Render for Workspace {
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))
+            .children(self.render_queue_failure(cx))
             .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
             .children(self.render_palette(cx))

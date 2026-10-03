@@ -772,7 +772,13 @@ impl Connection {
         let elapsed = started.elapsed();
         let mut result = match outcome {
             Ok(mut collected) => {
+                // One submission, one duration: every set of a batch carries
+                // the whole batch's time, because that is the only time the
+                // protocol reports.
                 collected.result.elapsed = elapsed;
+                for set in &mut collected.result.rest {
+                    set.elapsed = elapsed;
+                }
                 Ok(collected)
             }
             Err(error @ tiberius::error::Error::Server(_)) => Err(query_error(&error, sql)),
@@ -984,8 +990,8 @@ async fn login(
     })?
 }
 
-/// What one submission returned: the last result set, which is the one the grid
-/// shows, and how many there were.
+/// What one submission returned: its first result set, with any others behind
+/// it in `result.rest`, and how many there were.
 struct Collected {
     result: QueryResult,
     sets: usize,
@@ -1103,29 +1109,28 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
 
 async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::error::Error> {
     let mut stream = client.simple_query(sql).await?;
-    let mut result = QueryResult::default();
+    let mut collected: Vec<QueryResult> = Vec::new();
     let mut types = Vec::new();
-    let mut sets = 0;
 
     while let Some(item) = stream.try_next().await? {
         match item {
-            // Each new description starts the kept set over and the last
-            // statement wins, as on every engine.
             QueryItem::Metadata(meta) => {
                 types = meta.columns().iter().map(|c| c.column_type()).collect();
-                result.columns = meta
-                    .columns()
-                    .iter()
-                    .map(|column| Column {
-                        name: column.name().to_string(),
-                        data_type: Some(type_name(column.column_type()).to_string()),
-                    })
-                    .collect();
-                result.rows.clear();
-                result.bytes = 0;
-                sets += 1;
+                open_set(
+                    &mut collected,
+                    meta.columns()
+                        .iter()
+                        .map(|column| Column {
+                            name: column.name().to_string(),
+                            data_type: Some(type_name(column.column_type()).to_string()),
+                        })
+                        .collect(),
+                );
             }
             QueryItem::Row(row) => {
+                let Some(result) = collected.last_mut() else {
+                    continue;
+                };
                 // The wire names `datetime` and `smalldatetime` alike; the
                 // value says which.
                 for (column, (_, value)) in result.columns.iter_mut().zip(row.cells()) {
@@ -1144,12 +1149,36 @@ async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::err
         }
     }
 
-    // A query's count is the rows it returned. A write's is in the protocol's
-    // done tokens, which tiberius keeps to itself, so `execute` asks for it.
-    if sets > 0 {
-        result.rows_affected = Some(result.rows.len() as u64);
+    Ok(collected_sets(collected))
+}
+
+/// A description opens a result set of its own, where it once started the one
+/// kept set over and the last statement of a batch won. Split out of `collect`,
+/// with [`collected_sets`], because that is the decision worth a check and
+/// `QueryItem` cannot be built outside tiberius.
+fn open_set(sets: &mut Vec<QueryResult>, columns: Vec<Column>) {
+    sets.push(QueryResult {
+        columns,
+        ..QueryResult::default()
+    });
+}
+
+/// One submission's sets as the first of them carrying the rest.
+fn collected_sets(mut sets: Vec<QueryResult>) -> Collected {
+    // A query's count is the rows it returned, per set. A write's is in the
+    // protocol's done tokens, which tiberius keeps to itself, so `execute` asks
+    // for it.
+    for set in &mut sets {
+        set.rows_affected = Some(set.rows.len() as u64);
     }
-    Ok(Collected { result, sets })
+    let count = sets.len();
+    let mut sets = sets.into_iter();
+    let mut result = sets.next().unwrap_or_default();
+    result.rest = sets.collect();
+    Collected {
+        result,
+        sets: count,
+    }
 }
 
 /// The server's own name for a type, as far as the wire says it. Lengths and
@@ -1923,6 +1952,35 @@ mod tests {
     }
 
     #[test]
+    fn every_result_set_of_a_batch_is_kept_in_the_order_the_batch_returned_them() {
+        let mut sets = Vec::new();
+        open_set(&mut sets, vec![named_column("a")]);
+        sets.last_mut().unwrap().rows.push(vec![Some("1".into())]);
+        open_set(&mut sets, vec![named_column("b")]);
+        sets.last_mut().unwrap().rows.push(vec![Some("2".into())]);
+        sets.last_mut().unwrap().rows.push(vec![Some("3".into())]);
+
+        let collected = collected_sets(sets);
+        assert_eq!(collected.sets, 2);
+        assert_eq!(collected.result.columns[0].name, "a");
+        assert_eq!(collected.result.rows_affected, Some(1));
+        assert_eq!(collected.result.rest.len(), 1);
+        let second = &collected.result.rest[0];
+        assert_eq!(second.columns[0].name, "b");
+        assert_eq!(second.rows.len(), 2);
+        assert_eq!(second.rows_affected, Some(2));
+        // One level deep, never a tree.
+        assert!(second.rest.is_empty());
+    }
+
+    fn named_column(name: &str) -> Column {
+        Column {
+            name: name.into(),
+            data_type: None,
+        }
+    }
+
+    #[test]
     fn a_preview_reads_unreadable_columns_as_text_and_nothing_else_is_rewritten() {
         let described = QueryResult {
             columns: ["column_name", "system_type_id"]
@@ -2125,14 +2183,22 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
-    fn live_a_multi_statement_selection_keeps_one_result_shape() {
+    fn live_every_result_set_of_a_batch_comes_back_in_order() {
         let connection = live();
+        // The batch is the unit here, so a selection holding two statements is
+        // one submission -- and both its sets are kept, the first in the
+        // result and the rest behind it, each becoming its own chip. Splitting
+        // is what gets the other engines the same thing.
         let result = connection
             .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d")
             .expect("query should succeed");
-        assert_eq!(names(&result), vec!["d"]);
-        assert_eq!(result.rows, vec![vec![Some("4".into())]]);
-        // Two result sets, so the describe cannot say which it described.
+        assert_eq!(names(&result), vec!["a", "b"]);
+        assert_eq!(result.rows, vec![vec![Some("1".into()), Some("2".into())]]);
+        assert_eq!(result.rest.len(), 1);
+        assert_eq!(names(&result.rest[0]), vec!["d"]);
+        assert_eq!(result.rest[0].rows, vec![vec![Some("4".into())]]);
+        // More than one result set, so the describe cannot say which it
+        // described and none of this is editable.
         assert!(result.edit.is_none());
 
         let empty = connection
@@ -2140,13 +2206,16 @@ mod tests {
             .expect("query should succeed");
         assert_eq!(names(&empty), vec!["id", "label"]);
         assert!(empty.rows.is_empty());
+        assert!(empty.rest.is_empty());
 
-        // A write returns no rows, and the last statement's count.
+        // A write returns no rows, and its count. No result set, so nothing
+        // trails it either.
         let write = connection
             .query("DECLARE @t TABLE (id int); INSERT INTO @t VALUES (1)")
             .expect("query should succeed");
         assert!(write.columns.is_empty());
         assert_eq!(write.rows_affected, Some(1));
+        assert!(write.rest.is_empty());
     }
 
     #[test]

@@ -757,9 +757,37 @@ Decided, and not to be re-litigated:
 - **A SQL Server buffer is split a batch at a time** (`Buffer::for_engine`):
   `GO` lines are separators never sent, `[names]` are quoted, a routine's body
   runs to the end of its batch and a `BEGIN … END` block is never cut. A
-  selection is sent as its one batch; more than one, or `GO n`, is refused.
+  selection covering one batch is sent as that batch; one covering several runs
+  them in turn, a submission apiece (`sql::queued_batches`), because the batch
+  is the scope boundary a `DECLARE` or a temp table ends with, and splitting
+  below it would send a declaration and its reader as two batches. `GO n` is
+  still refused (`sql::batch_counts`): the count repeats its batch, and running
+  it once is not what the buffer says.
   Format Query reflows each batch alone with sqlformat's SQL Server dialect,
   which reads `[names]`, and leaves every `GO` line as written.
+- **A SQL Server batch keeps every result set it returns, not the last one.**
+  Because the unit sent there is the batch, `SELECT 1; SELECT 2;` is one
+  submission where on every other engine it is two, and a submission that kept
+  only its last set would show one result where the others show two.
+  `mssql::collect` opens a set per description (`open_set`) rather than
+  starting the kept one over, and `collected_sets` hands them back as the first
+  carrying the others in `QueryResult::rest` — one level deep, a submission's
+  sets and never a tree, and empty on the other four engines, which have no
+  second set to carry. `columns`, `rows`, `bytes`, `rows_affected` and `edit`
+  are each set's own; `elapsed` is the submission's, and every set carries it.
+  `Collected::sets` is still the count, and still decides both the
+  `SELECT @@ROWCOUNT` follow-up and the editability describe, so **a multi-set
+  batch stays uneditable**. `Workspace::advance_queue` lands each extra set in
+  the tab's queue as a `Finished` of its own, labelled `Result 2`, `Result 3`
+  and so on, since a set after the first has no statement of its own to be
+  named after. The grids those sets need are the ones the run reserved in
+  `Queue::spare`, because the completion handler has no `Window` to build one
+  with: `sql::expected_sets` reserves one per statement in the batch, which is
+  an upper bound for an ordinary batch and not for a procedure, a loop or a
+  trigger, and a set past the last spare is dropped with a notice saying so
+  rather than silently. A batch that returns one set after all leaves a queue
+  of one result, which `advance_queue` drops, so an ordinary run is exactly
+  what it always was.
 - **SQL Server edit targets come from a describe**, as Postgres's do:
   `sys.dm_exec_describe_first_result_set` in mode 2 (a view is its own source,
   and has no key), after the statement ran, only when it returned exactly one
@@ -910,6 +938,33 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A `QueryTab` owns its own editor, grid, `QueryState`, saved-query name
   (`open_query`) and `last_query`.** Do not reintroduce a single shared editor
   for anything.
+- **A selection holding more than one statement runs each of them in turn, one
+  chip per result set.** `sql::queued_statements` splits it and `Queue` on
+  the tab is the queue: `remaining` is what has not gone out, `done` holds a
+  `Finished` per result kept, and `showing` says which of them the tab's one
+  `query`/`results` pair is displaying. That is one per statement on four
+  engines, where a submission holds one statement; on SQL Server the unit is
+  the batch, so one submission can land several (see the SQL Server entry under
+  "Engine divergences"). Each statement goes out through
+  `execute_sql` separately, so `sql::classify` and `sql::gate` answer for each
+  one on its own and a statement the gate stops parks a `PendingRun` the rest
+  wait behind. Nothing else changes: one statement -- selected, or the one
+  under the cursor with no selection -- takes the old verbatim path, comments
+  and spacing intact, so this adds a case rather than rewriting the one that
+  was there. Two consequences are worth stating. The split costs the implicit
+  transaction a single Postgres `simple_query` submission used to give a
+  multi-statement selection, so a failure part way leaves the statements
+  before it committed; an explicit `BEGIN`/`COMMIT` in the selection still
+  works, since the session holds it across submissions. And a statement that
+  fails raises a Stop/Continue decision (`Session::queue_failure`) rather
+  than deciding for the user, while a Cancel ends the queue without asking,
+  because a cancel was already the decision.
+- **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
+  its results can still be switched between, and every completion on that tab
+  reaches `advance_queue`. Without the flag an ordinary Run, a header sort or
+  a grid edit on such a tab would land in `done` as another of the queue's
+  statements. A restored queue has it false and `remaining` empty for the same
+  reason: it is a strip to read, not a run to resume.
 - **`queries` can be empty.** Any buffer can be closed, the last one
   included, and a profile with no tab open shows an empty pane and relaunches
   that way. A new connection, and one written before buffers were tabs, opens
@@ -923,7 +978,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on
-  a restored grid asks first, because its rows may be stale.
+  a restored grid asks first, because its rows may be stale. A queue's results
+  are snapshotted too, one key each (`store::queued_grid_key`), each carrying
+  its own statement as the snapshot's `last_query` -- which is what a restored
+  chip is labelled from, so there is no second metadata file. How many there
+  are is `StoredQueryTab::queued_results`, without which a tab that ran five
+  statements and later two would restore three results it no longer has:
+  the later run overwrites the first two files and leaves the rest. The count
+  is also what keeps the startup prune off them. `hydrate_tab` rebuilds the
+  strip, which is why it takes a `&mut Window`: a grid per result cannot be
+  built without one.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::new` clips every cell on the frame thread, for a fresh result
   and a restored snapshot alike. It used to scan each whole value for line
