@@ -803,7 +803,7 @@ fn dbdelve_directory() -> Result<PathBuf, String> {
     Ok(data_root()?.join(variant_name()?))
 }
 
-fn data_root() -> Result<PathBuf, String> {
+pub(crate) fn data_root() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         Ok(home()?.join("Library/Application Support"))

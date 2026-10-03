@@ -13,6 +13,7 @@ use gpui_component::input::InputState;
 use crate::{
     Workspace,
     db::{ConnectionConfig, Engine, ServerConfig, SnowflakeConfig, SshTunnel, SslMode},
+    import::Source,
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -72,6 +73,9 @@ pub(crate) struct ConnectionForm {
     pub(crate) test: Option<ConnectionTest>,
     /// The id of the profile being edited, or `None` for a new connection.
     pub(crate) editing: Option<String>,
+    /// The other clients installed here, looked for once as the form opens
+    /// rather than on every frame.
+    pub(crate) importable: Vec<Source>,
 }
 
 impl ConnectionForm {
@@ -238,6 +242,10 @@ impl ConnectionForm {
             error: None,
             test: None,
             editing: None,
+            importable: Source::ALL
+                .into_iter()
+                .filter(|source| source.found())
+                .collect(),
         }
     }
 

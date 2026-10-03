@@ -128,6 +128,14 @@ ureq = { version = "=3.4.2", default-features = false, features = [
 ring = "=0.17.14"
 base64 = "=0.22.1"
 
+# Importing DBeaver's connections. It saves credentials as AES-128-CBC under a
+# key hard-coded in its own source, so reading them is a decrypt `ring` has no
+# API for. Pinned to the versions oo7 (Linux's Secret Service client) already
+# locks, so the lockfile gains no second copy; macOS and Windows build these
+# two plus `cipher` and `inout`, all small and pure Rust.
+aes = "=0.8.4"
+cbc = "=0.1.2"
+
 # SQL Server. tiberius is the only maintained TDS client, and it is
 # runtime-agnostic async rather than blocking. So it is driven the way the
 # `postgres` crate drives tokio-postgres: each connection owns a tokio

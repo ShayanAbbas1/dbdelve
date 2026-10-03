@@ -255,6 +255,7 @@ impl Workspace {
             Command::NextProfile => self.cycle_profile(1, cx),
             Command::PreviousProfile => self.cycle_profile(-1, cx),
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
+            Command::ImportConnections(source) => self.import_connections(source, window, cx),
             Command::RefreshConnection => self.reconnect(self.active, cx),
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SetTheme(theme) => self.set_theme(*theme, window, cx),

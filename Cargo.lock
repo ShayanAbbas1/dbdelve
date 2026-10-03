@@ -1489,7 +1489,9 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 name = "dbdelve"
 version = "0.2.3"
 dependencies = [
+ "aes 0.8.4",
  "base64 0.22.1",
+ "cbc 0.1.2",
  "futures-util",
  "geozero",
  "gpui-component",

@@ -7,7 +7,7 @@
 use gpui::{Action, actions};
 use serde::Deserialize;
 
-use crate::{db::ExplainMode, export::RowsAs, filter::Operator, sql::Mode};
+use crate::{db::ExplainMode, export::RowsAs, filter::Operator, import::Source, sql::Mode};
 
 /// A header click. The column is the one in the grid; which statement it
 /// belongs to is whatever surface is in front, because that is the grid the
@@ -101,6 +101,14 @@ pub(crate) struct ExplainQuery {
 #[action(namespace = dbdelve, no_json)]
 pub(crate) struct SetMode {
     pub(crate) mode: Mode,
+}
+
+/// Bring another client's connections in. One action for every source, so
+/// each gets its own row in the keybinding settings without its own handler.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct ImportConnections {
+    pub(crate) source: Source,
 }
 
 actions!(

@@ -7,6 +7,7 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 
 use crate::connection_form::{ConnectionTest, duplicate_profile_name};
+use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
 use crate::theme::color::Srgb;
@@ -685,6 +686,97 @@ impl Workspace {
         // flag left set would reappear the moment the form closes.
         self.settings_open = false;
         cx.notify();
+    }
+
+    pub(crate) fn import_from(
+        &mut self,
+        action: &ImportConnections,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_connections(action.source, window, cx);
+    }
+
+    /// The source is read in the background, since reading one can mean a
+    /// Keychain prompt. Each connection comes in Read-only whatever the other
+    /// client allowed: it is the one mode that cannot surprise anybody.
+    pub(crate) fn import_connections(
+        &mut self,
+        source: Source,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let read = cx.background_executor().spawn(async move { source.read() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let report = read.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| match report {
+                Ok(report) => workspace.add_imported(source, report, window, cx),
+                Err(message) => workspace.note(message, cx),
+            });
+        })
+        .detach();
+    }
+
+    fn add_imported(
+        &mut self,
+        source: Source,
+        report: import::Report,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let had_none = self.profiles.is_empty();
+        let mut added = import::Report {
+            skipped: report.skipped,
+            notes: report.notes,
+            ..import::Report::default()
+        };
+        for mut imported in report.imported {
+            if import::already_have(
+                self.profiles.iter().map(|profile| &profile.config),
+                &imported.config,
+            ) {
+                added.skipped.push(import::Skipped {
+                    name: imported.name,
+                    reason: "already imported".into(),
+                });
+                continue;
+            }
+            let names = self
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect::<Vec<_>>();
+            if names.contains(&imported.name) {
+                imported.name = duplicate_profile_name(&imported.name, &names);
+            }
+            self.create_profile(
+                imported.name.clone(),
+                imported.config.clone(),
+                imported.color,
+                Mode::ReadOnly,
+                Origin::Form,
+                window,
+                cx,
+            );
+            added.imported.push(imported);
+        }
+
+        if !added.imported.is_empty() {
+            if self
+                .form
+                .as_ref()
+                .is_some_and(|form| form.editing.is_none())
+            {
+                self.form = None;
+            }
+            // A first launch has nothing in front yet. Otherwise the
+            // connection in front stays there rather than a batch of new ones
+            // each connecting in turn.
+            if had_none {
+                self.activate(0, cx);
+            }
+        }
+        self.note(added.summary(source), cx);
     }
 
     pub(crate) fn connect_active(&mut self, cx: &mut Context<Self>) {

@@ -714,6 +714,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::previous_profile))
+                .on_action(cx.listener(Self::import_from))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
@@ -1198,6 +1199,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::open_connection_form))
+            .on_action(cx.listener(Self::import_from))
             .on_action(cx.listener(Self::zoom_editor_in))
             .on_action(cx.listener(Self::zoom_editor_out))
             .on_action(cx.listener(Self::reset_editor_zoom))
