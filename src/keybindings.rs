@@ -26,13 +26,15 @@ use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
         CommandPalette, CopyCell, CopyResults, CopyRow, DeleteRow, DiscardEdits, EditCell,
-        ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow,
-        NextPage, NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious, PreviousPage,
-        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
-        RunQuery, SaveQuery, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor,
-        ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+        ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection,
+        NewQuery, NewRow, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext,
+        PalettePrevious, PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection,
+        RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery, SelectTheme, SetDefault, SetEmpty,
+        SetNull, ShowEditor, ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn,
+        ZoomEditorOut,
     },
     db::ExplainMode,
+    import::Source,
 };
 
 /// One entry in the registry.
@@ -163,6 +165,8 @@ registry! {
     ("follow_foreign_key", "Follow Foreign Key", None, [], FollowForeignKey),
     ("delete_row", "Delete Row", None, [], DeleteRow),
     ("discard_edits", "Discard Edits", None, [], DiscardEdits),
+    ("import_dbeaver", "Import Connections from DBeaver", None, [], ImportConnections { source: Source::DBeaver }),
+    ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
 }
 
 /// Whether a binding scoped to `a` and one scoped to `b` could both be live

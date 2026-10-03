@@ -16,7 +16,7 @@ use super::{
 };
 
 /// The port the server listens on when the profile does not say.
-const DEFAULT_PORT: u16 = 5432;
+pub(super) const DEFAULT_PORT: u16 = 5432;
 
 const RELATIONS_SQL: &str = "
 SELECT

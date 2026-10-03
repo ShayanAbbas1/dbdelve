@@ -122,6 +122,22 @@ impl Workspace {
                                     ),
                             ),
                     )
+                    .when(!editing, |form_div| {
+                        form_div.children(form.importable.iter().map(|&source| {
+                            button(
+                                gpui::SharedString::from(format!("import-{}", source.label())),
+                                format!("Import from {}", source.label()),
+                                Tone::Quiet,
+                                Control::Standard,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                move |workspace, _, window, cx| {
+                                    workspace.import_connections(source, window, cx);
+                                },
+                            ))
+                        }))
+                    })
                     .child(
                         div()
                             .flex()

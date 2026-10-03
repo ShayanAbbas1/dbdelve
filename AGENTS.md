@@ -197,6 +197,8 @@ keyring = "4"              # passwords: Keychain, Secret Service, Credential Man
 ureq = "=3.4.2"            # Snowflake's SQL REST API; blocking. dff = false, rustls on ring
 ring = "=0.17.14"          # its key-pair tokens. Already linked as the TLS provider
 base64 = "=0.22.1"
+aes = "=0.8.4"             # DBeaver's saved credentials, for import. Locked via oo7
+cbc = "=0.1.2"
 
 tiberius = "=0.12.3"       # SQL Server (TDS). dff = false, tds73 + rustls. Async, see below
 tokio = "=1.53.1"          # tiberius's runtime, one per connection. dff = false: rt, net, time

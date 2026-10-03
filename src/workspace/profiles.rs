@@ -7,9 +7,11 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 
 use crate::connection_form::{ConnectionTest, duplicate_profile_name};
+use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
 use crate::theme::color::Srgb;
+use std::path::Path;
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
@@ -687,6 +689,132 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn import_from(
+        &mut self,
+        action: &ImportConnections,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_connections(action.source, window, cx);
+    }
+
+    /// The source is read in the background, since reading one can mean a
+    /// Keychain prompt. Each connection comes in Read-only whatever the other
+    /// client allowed: it is the one mode that cannot surprise anybody.
+    pub(crate) fn import_connections(
+        &mut self,
+        source: Source,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        let read = cx.background_executor().spawn(async move { source.read() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let report = read.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.importing = false;
+                let summary = match report {
+                    Ok(report) => workspace.add_imported(source, report, window, cx),
+                    Err(message) => message,
+                };
+                // A note on a profile is out of sight while the form covers it.
+                match &mut workspace.form {
+                    Some(form) => {
+                        form.error = Some(summary);
+                        cx.notify();
+                    }
+                    None => workspace.note(summary, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Returns the summary line.
+    fn add_imported(
+        &mut self,
+        source: Source,
+        report: import::Report,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let had_none = self.profiles.is_empty();
+        let mut added = import::Report {
+            skipped: report.skipped,
+            notes: report.notes,
+            ..import::Report::default()
+        };
+        for mut imported in report.imported {
+            if import::already_have(
+                self.profiles.iter().map(|profile| &profile.config),
+                &imported.config,
+            ) {
+                added.skipped.push(import::Skipped {
+                    name: imported.name,
+                    reason: "already imported".into(),
+                });
+                continue;
+            }
+            let names = self
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect::<Vec<_>>();
+            if names.contains(&imported.name) {
+                imported.name = duplicate_profile_name(&imported.name, &names);
+            }
+            // Saved here rather than by `create_profile`, whose failure note
+            // the summary would overwrite: a password that didn't reach the
+            // keychain is gone at the next launch, and has to be said.
+            let mut config = imported.config.clone();
+            let password = config
+                .server_mut()
+                .map(|server| std::mem::take(&mut server.password))
+                .filter(|password| !password.is_empty());
+            let index = self.create_profile(
+                imported.name.clone(),
+                config,
+                imported.color,
+                Mode::ReadOnly,
+                Origin::Form,
+                window,
+                cx,
+            );
+            if let Some(password) = password {
+                let profile = &mut self.profiles[index];
+                if let Err(message) = store::set_password(&profile.id, &password)
+                    && !added.notes.contains(&message)
+                {
+                    added.notes.push(message);
+                }
+                if let Some(server) = profile.config.server_mut() {
+                    server.password = password;
+                }
+            }
+            added.imported.push(imported);
+        }
+
+        if !added.imported.is_empty() {
+            if self
+                .form
+                .as_ref()
+                .is_some_and(|form| form.editing.is_none())
+            {
+                self.form = None;
+            }
+            // A first launch has nothing in front yet. Otherwise the
+            // connection in front stays there rather than a batch of new ones
+            // each connecting in turn.
+            if had_none {
+                self.activate(0, cx);
+            }
+        }
+        added.summary(source)
+    }
+
     pub(crate) fn connect_active(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.profile().map(|profile| &profile.state),
@@ -1115,7 +1243,19 @@ impl Workspace {
         // nothing left to count and the number is what the note reports.
         let queries = store::saved_queries(&id).len();
 
-        self.profiles.remove(index);
+        let removed = self.profiles.remove(index);
+        if let Some(key) = identity_file(&removed.config)
+            && let Ok(directory) = store::ssh_key_directory()
+            && is_unshared_imported_key(
+                key,
+                &directory,
+                self.profiles
+                    .iter()
+                    .filter_map(|profile| identity_file(&profile.config)),
+            )
+        {
+            let _ = std::fs::remove_file(key);
+        }
         store::delete_password(&id);
         let removed_queries = store::delete_queries(&id);
         let _ = store::delete_grids(&id);
@@ -1137,6 +1277,31 @@ impl Workspace {
 pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usize) -> usize {
     let shifted = if removed < active { active - 1 } else { active };
     shifted.min(remaining.saturating_sub(1))
+}
+
+fn identity_file(config: &ConnectionConfig) -> Option<&str> {
+    config.server()?.ssh.as_ref()?.identity_file.as_deref()
+}
+
+/// A key the importer wrote goes with the last profile naming it; Duplicate
+/// copies the path. Anything not directly inside `directory` is the user's own
+/// file and never touched.
+pub(crate) fn is_unshared_imported_key<'a>(
+    key: &str,
+    directory: &Path,
+    others: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let key_path = Path::new(key);
+    key_path.file_name().is_some()
+        && key_path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| {
+                directory
+                    .canonicalize()
+                    .is_ok_and(|directory| directory == parent)
+            })
+        && !others.into_iter().any(|other| other == key)
 }
 
 /// What a removal took with it. The count is named because saved queries are
@@ -1224,6 +1389,30 @@ mod tests {
         // The active profile was last, so there is nothing at its index now.
         assert_eq!(active_after_removal(2, 2, 2), 1);
         assert_eq!(active_after_removal(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn only_an_imported_key_no_other_profile_names_is_deleted() {
+        let root =
+            std::env::temp_dir().join(format!("dbdelve-profiles-key-test-{}", std::process::id()));
+        let directory = root.join("ssh-keys");
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = directory.join("tableplus-a");
+        let key = key.to_str().unwrap();
+        let outside = root.join("id_ed25519");
+        let escaping = format!("{}/../id_ed25519", directory.display());
+        let dotted = format!("{}/..", directory.display());
+
+        let verdicts = [
+            is_unshared_imported_key(key, &directory, ["/elsewhere/key"]),
+            is_unshared_imported_key(key, &directory, [key]),
+            is_unshared_imported_key(outside.to_str().unwrap(), &directory, []),
+            is_unshared_imported_key(&escaping, &directory, []),
+            is_unshared_imported_key(&dotted, &directory, []),
+            is_unshared_imported_key("~/.ssh/id_ed25519", &directory, []),
+        ];
+        _ = std::fs::remove_dir_all(&root);
+        assert_eq!(verdicts, [true, false, false, false, false, false]);
     }
 
     #[test]

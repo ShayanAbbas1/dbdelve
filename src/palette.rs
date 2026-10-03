@@ -25,6 +25,7 @@ use crate::{
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
     icons::icon,
+    import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
     ui::{chord_hint, object_icon, row_icon},
@@ -110,6 +111,7 @@ pub enum Command {
     NextProfile,
     PreviousProfile,
     NewConnection,
+    ImportConnections(Source),
     RefreshConnection,
     /// Put the palette back up over the theme list.
     SelectTheme,
@@ -725,6 +727,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         icon::PLUS,
         Command::NewConnection,
     ));
+    if Source::DBeaver.found() {
+        items.push(Item::command(
+            "Import connections from DBeaver",
+            chord_hint("import_dbeaver", overrides),
+            icon::PLUS,
+            Command::ImportConnections(Source::DBeaver),
+        ));
+    }
+    if Source::TablePlus.found() {
+        items.push(Item::command(
+            "Import connections from TablePlus",
+            chord_hint("import_tableplus", overrides),
+            icon::PLUS,
+            Command::ImportConnections(Source::TablePlus),
+        ));
+    }
     items.push(Item::command(
         "Refresh connection",
         chord_hint("refresh_connection", overrides),
