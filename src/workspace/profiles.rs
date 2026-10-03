@@ -11,6 +11,7 @@ use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
 use crate::theme::color::Srgb;
+use std::path::Path;
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
@@ -1242,7 +1243,19 @@ impl Workspace {
         // nothing left to count and the number is what the note reports.
         let queries = store::saved_queries(&id).len();
 
-        self.profiles.remove(index);
+        let removed = self.profiles.remove(index);
+        if let Some(key) = identity_file(&removed.config)
+            && let Ok(directory) = store::ssh_key_directory()
+            && is_unshared_imported_key(
+                key,
+                &directory,
+                self.profiles
+                    .iter()
+                    .filter_map(|profile| identity_file(&profile.config)),
+            )
+        {
+            let _ = std::fs::remove_file(key);
+        }
         store::delete_password(&id);
         let removed_queries = store::delete_queries(&id);
         let _ = store::delete_grids(&id);
@@ -1264,6 +1277,31 @@ impl Workspace {
 pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usize) -> usize {
     let shifted = if removed < active { active - 1 } else { active };
     shifted.min(remaining.saturating_sub(1))
+}
+
+fn identity_file(config: &ConnectionConfig) -> Option<&str> {
+    config.server()?.ssh.as_ref()?.identity_file.as_deref()
+}
+
+/// A key the importer wrote goes with the last profile naming it; Duplicate
+/// copies the path. Anything not directly inside `directory` is the user's own
+/// file and never touched.
+pub(crate) fn is_unshared_imported_key<'a>(
+    key: &str,
+    directory: &Path,
+    others: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let key_path = Path::new(key);
+    key_path.file_name().is_some()
+        && key_path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| {
+                directory
+                    .canonicalize()
+                    .is_ok_and(|directory| directory == parent)
+            })
+        && !others.into_iter().any(|other| other == key)
 }
 
 /// What a removal took with it. The count is named because saved queries are
@@ -1351,6 +1389,30 @@ mod tests {
         // The active profile was last, so there is nothing at its index now.
         assert_eq!(active_after_removal(2, 2, 2), 1);
         assert_eq!(active_after_removal(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn only_an_imported_key_no_other_profile_names_is_deleted() {
+        let root =
+            std::env::temp_dir().join(format!("dbdelve-profiles-key-test-{}", std::process::id()));
+        let directory = root.join("ssh-keys");
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = directory.join("tableplus-a");
+        let key = key.to_str().unwrap();
+        let outside = root.join("id_ed25519");
+        let escaping = format!("{}/../id_ed25519", directory.display());
+        let dotted = format!("{}/..", directory.display());
+
+        let verdicts = [
+            is_unshared_imported_key(key, &directory, ["/elsewhere/key"]),
+            is_unshared_imported_key(key, &directory, [key]),
+            is_unshared_imported_key(outside.to_str().unwrap(), &directory, []),
+            is_unshared_imported_key(&escaping, &directory, []),
+            is_unshared_imported_key(&dotted, &directory, []),
+            is_unshared_imported_key("~/.ssh/id_ed25519", &directory, []),
+        ];
+        _ = std::fs::remove_dir_all(&root);
+        assert_eq!(verdicts, [true, false, false, false, false, false]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! TablePlus keeps every connection in one `Connections.plist`, an array of
-//! dictionaries, and each saved password in the Keychain under the
-//! connection's `ID`.
+//! dictionaries, and each saved password and imported SSH key in the Keychain
+//! under the connection's `ID`.
 
 use std::{
     collections::HashSet,
@@ -8,16 +8,20 @@ use std::{
     process::Command,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Imported, Report, Skipped, port, root_certificate};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
+    store,
     theme::ConnectionColor,
 };
 
 const UNREADABLE_PASSWORDS: &str = "TablePlus's saved passwords could not be read from the Keychain, so its connections came in without them.";
+const UNLOCATED_KEY: &str = "SSH key left off: its file couldn't be located, so ssh falls back to your ssh config and agent";
+const UNREADABLE_KEY: &str = "SSH key left off: TablePlus's stored key couldn't be read, so ssh falls back to your ssh config and agent";
 
 /// The App Store / direct download build, then the Setapp one.
 #[cfg(target_os = "macos")]
@@ -48,7 +52,7 @@ pub(super) fn read() -> Result<Report, String> {
         rows.extend(plist_rows(&file)?);
     }
     let mut report = Report::default();
-    read_rows(rows, keychain_password, &mut report);
+    read_rows(rows, keychain_secret, write_key, &mut report);
     Ok(report)
 }
 
@@ -73,14 +77,54 @@ fn plist_rows(file: &Path) -> Result<Vec<Value>, String> {
 }
 
 /// Another app's item, so macOS asks the user before handing it over.
-fn keychain_password(id: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new("com.tableplus.TablePlus", &format!("{id}_database"))
+fn keychain_secret(account: &str) -> Result<Option<Vec<u8>>, String> {
+    let entry = keyring::Entry::new("com.tableplus.TablePlus", account)
         .map_err(|error| error.to_string())?;
-    match entry.get_password() {
-        Ok(password) => Ok(Some(password)),
+    match entry.get_secret() {
+        Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Returns the path the tunnel names, or the note saying why there is none.
+fn write_key(id: &str, key: &[u8]) -> Result<String, String> {
+    if let Some(reason) = store::unsafe_component(id) {
+        return Err(format!("SSH key left off: its connection ID {reason}"));
+    }
+    let path = store::ssh_key_directory()
+        .map_err(|error| format!("SSH key left off: {error}"))?
+        .join(format!("tableplus-{id}"));
+    let unwritten = |why: &dyn std::fmt::Display| {
+        format!(
+            "SSH key left off: it couldn't be written to {}: {why}",
+            path.display()
+        )
+    };
+    store::write_private_key(&path, key).map_err(|error| unwritten(&error.kind()))?;
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| unwritten(&"the path isn't valid UTF-8"))
+}
+
+/// TablePlus's encoding of the item is unverified, so both PEM text and
+/// base64 of it are taken.
+fn private_key(stored: Vec<u8>) -> Option<Vec<u8>> {
+    let is_key = |bytes: &[u8]| {
+        std::str::from_utf8(bytes)
+            .is_ok_and(|text| text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----"))
+    };
+    if is_key(&stored) {
+        return Some(stored);
+    }
+    let compact = stored
+        .into_iter()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    STANDARD
+        .decode(compact)
+        .ok()
+        .filter(|decoded| is_key(decoded))
 }
 
 #[derive(Default, Deserialize)]
@@ -130,12 +174,16 @@ struct Row {
 }
 
 /// The first row with an `ID` wins, so a connection in both the direct and the
-/// Setapp build comes in once. Passwords are looked up only after a row is
+/// Setapp build comes in once. Secrets are looked up only after a row is
 /// known to import, and not at all once the Keychain has refused one: a user
 /// who denied the first prompt should not see one per connection.
+///
+/// ssh reads a key only from a file, so a key TablePlus keeps in the Keychain
+/// is written to one of DBDelve's by `write_key`.
 fn read_rows(
     rows: Vec<Value>,
-    mut password: impl FnMut(&str) -> Result<Option<String>, String>,
+    mut secret: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
+    mut write_key: impl FnMut(&str, &[u8]) -> Result<String, String>,
     report: &mut Report,
 ) {
     let mut seen = HashSet::new();
@@ -171,16 +219,41 @@ fn read_rows(
             }
         };
         if let Some(server) = imported.config.server_mut()
-            && row.password_mode == 0
             && !row.id.is_empty()
-            && !keychain_refused
         {
-            match password(&row.id) {
-                Ok(found) => server.password = found.unwrap_or_default(),
-                Err(_) => {
-                    keychain_refused = true;
-                    report.notes.push(UNREADABLE_PASSWORDS.to_string());
+            let was_refused = keychain_refused;
+            if row.password_mode == 0 && !keychain_refused {
+                // A password that isn't text is what `get_password` refused.
+                match secret(&format!("{}_database", row.id))
+                    .map(|found| found.map(String::from_utf8))
+                {
+                    Ok(None) => {}
+                    Ok(Some(Ok(password))) => server.password = password,
+                    Ok(Some(Err(_))) | Err(_) => keychain_refused = true,
                 }
+            }
+            if let Some(tunnel) = server.ssh.as_mut()
+                && row.ssh_uses_key
+                && tunnel.identity_file.is_none()
+                && !keychain_refused
+            {
+                match secret(&format!("{}_private_key_data", row.id)) {
+                    Ok(None) => {}
+                    Ok(Some(stored)) => {
+                        let written = private_key(stored)
+                            .ok_or_else(|| UNREADABLE_KEY.to_string())
+                            .and_then(|key| write_key(&row.id, &key));
+                        imported.notes.retain(|note| note != UNLOCATED_KEY);
+                        match written {
+                            Ok(path) => tunnel.identity_file = Some(path),
+                            Err(note) => imported.notes.push(note),
+                        }
+                    }
+                    Err(_) => keychain_refused = true,
+                }
+            }
+            if keychain_refused && !was_refused {
+                report.notes.push(UNREADABLE_PASSWORDS.to_string());
             }
         }
         report.imported.push(imported);
@@ -303,15 +376,12 @@ fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
         notes.push(format!("SSH tunnel left off: {reason}"));
         None
     };
-    // TablePlus may name only a key it imported into its own store, or keep
-    // its "Import a private key..." placeholder, neither of which is a file.
+    // TablePlus may name only a key it imported into its own store, looked
+    // up by `read_rows`, or keep its "Import a private key..." placeholder.
     let identity_file = if row.ssh_uses_key {
         let located = SshTunnel::identity_file_error(&row.ssh_key).is_none();
         if !located {
-            notes.push(
-                "SSH key left off: its file couldn't be located, so ssh falls back to your ssh config and agent"
-                    .into(),
-            );
+            notes.push(UNLOCATED_KEY.into());
         }
         located.then(|| row.ssh_key.clone())
     } else if row.ssh_password_mode == 2 {
@@ -370,11 +440,147 @@ mod tests {
 
     fn read(
         rows: Vec<Value>,
-        password: impl FnMut(&str) -> Result<Option<String>, String>,
+        secret: impl FnMut(&str) -> Result<Option<Vec<u8>>, String>,
     ) -> Report {
         let mut report = Report::default();
-        read_rows(rows, password, &mut report);
+        read_rows(
+            rows,
+            secret,
+            |id, _| Ok(format!("/keys/tableplus-{id}")),
+            &mut report,
+        );
         report
+    }
+
+    const KEY: &str =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+
+    fn over_ssh(id: &str, key: &str, password_mode: i64) -> Value {
+        named(
+            id,
+            id,
+            json!({
+                "DatabasePasswordMode": password_mode, "isOverSSH": true,
+                "ServerAddress": "bastion", "isUsePrivateKey": true, "ServerPrivateKeyName": key,
+            }),
+        )
+    }
+
+    fn identity_file(imported: &Imported) -> Option<&str> {
+        server(imported).ssh.as_ref()?.identity_file.as_deref()
+    }
+
+    /// The stored item is handed over for every row, and what was written is
+    /// compared here so a failure never prints key bytes.
+    fn read_key(stored: Vec<u8>, written: &str) -> (Option<String>, Vec<String>) {
+        let mut wrote = Vec::new();
+        let mut report = Report::default();
+        read_rows(
+            vec![over_ssh("a", "id_ed25519", 1)],
+            |_| Ok(Some(stored.clone())),
+            |id, key| {
+                wrote.push((id.to_string(), key == written.as_bytes()));
+                Ok(format!("/keys/tableplus-{id}"))
+            },
+            &mut report,
+        );
+        let imported = &report.imported[0];
+        let identity = identity_file(imported).map(str::to_string);
+        assert!(
+            wrote.iter().all(|(id, matches)| id == "a" && *matches),
+            "the key written isn't the one expected"
+        );
+        assert_eq!(wrote.is_empty(), identity.is_none());
+        (identity, imported.notes.clone())
+    }
+
+    #[test]
+    fn a_key_kept_in_the_keychain_is_written_whether_pem_or_base64() {
+        assert_eq!(
+            read_key(KEY.into(), KEY),
+            (Some("/keys/tableplus-a".into()), vec![])
+        );
+        let wrapped = STANDARD.encode(KEY);
+        assert_eq!(
+            read_key(format!("{wrapped}\n").into(), KEY),
+            (Some("/keys/tableplus-a".into()), vec![])
+        );
+        let rsa = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            read_key(rsa.into(), rsa),
+            (Some("/keys/tableplus-a".into()), vec![])
+        );
+    }
+
+    #[test]
+    fn a_stored_key_that_is_not_one_is_said() {
+        for stored in [
+            b"not a key".to_vec(),
+            vec![0xff, 0xfe, 0x00],
+            STANDARD.encode("not a key either").into_bytes(),
+            b"-----BEGIN CERTIFICATE-----".to_vec(),
+        ] {
+            assert_eq!(
+                read_key(stored, ""),
+                (None, vec![UNREADABLE_KEY.to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_could_not_be_written_is_said_and_left_off() {
+        let mut report = Report::default();
+        read_rows(
+            vec![over_ssh("a", "id_ed25519", 1)],
+            |_| Ok(Some(KEY.into())),
+            |_, _| {
+                Err("SSH key left off: it couldn't be written to /keys/tableplus-a: permission denied".into())
+            },
+            &mut report,
+        );
+        assert_eq!(identity_file(&report.imported[0]), None);
+        assert_eq!(
+            report.imported[0].notes,
+            ["SSH key left off: it couldn't be written to /keys/tableplus-a: permission denied"]
+        );
+    }
+
+    #[test]
+    fn a_key_path_is_kept_and_a_missing_item_left_to_ssh() {
+        let mut asked = Vec::new();
+        let report = read(
+            vec![
+                over_ssh("a", "/Users/me/.ssh/id_ed25519", 2),
+                over_ssh("b", "~/.ssh/id_rsa", 2),
+                over_ssh("c", "id_ed25519", 2),
+            ],
+            |account| {
+                asked.push(account.to_string());
+                Ok(None)
+            },
+        );
+        assert_eq!(asked, ["c_private_key_data"]);
+        let identities = report
+            .imported
+            .iter()
+            .map(identity_file)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            [
+                Some("/Users/me/.ssh/id_ed25519"),
+                Some("~/.ssh/id_rsa"),
+                None
+            ]
+        );
+        assert_eq!(report.imported[2].notes, [UNLOCATED_KEY]);
+        assert!(report.notes.is_empty());
+    }
+
+    #[test]
+    fn a_written_key_reaches_ssh_from_dbdelves_directory() {
+        let path = "/Users/me/Library/Application Support/dbdelve/ssh-keys/tableplus-a";
+        assert_eq!(SshTunnel::identity_file_error(path), None);
     }
 
     #[test]
@@ -625,12 +831,12 @@ mod tests {
                     json!({ "Driver": "SQLite", "DatabasePath": "/a.db", "DatabasePasswordMode": 0 }),
                 ),
             ],
-            |id| {
-                asked.push(id.to_string());
-                Ok((id == "a").then(|| "s3cret".to_string()))
+            |account| {
+                asked.push(account.to_string());
+                Ok((account == "a_database").then(|| b"s3cret".to_vec()))
             },
         );
-        assert_eq!(asked, ["a", "d"]);
+        assert_eq!(asked, ["a_database", "d_database"]);
         let passwords = report
             .imported
             .iter()
@@ -663,6 +869,33 @@ mod tests {
                 .all(|imported| server(imported).password.is_empty())
         );
         assert_eq!(report.notes, [UNREADABLE_PASSWORDS]);
+    }
+
+    #[test]
+    fn a_refused_key_lookup_stops_every_lookup_after_it() {
+        for (first, expected) in [
+            (over_ssh("a", "id_ed25519", 1), "a_private_key_data"),
+            (over_ssh("a", "id_ed25519", 0), "a_database"),
+        ] {
+            let mut asked = Vec::new();
+            let report = read(
+                vec![
+                    first,
+                    over_ssh("b", "id_ed25519", 0),
+                    over_ssh("c", "id_rsa", 1),
+                ],
+                |account| {
+                    asked.push(account.to_string());
+                    Err("denied".into())
+                },
+            );
+            assert_eq!(asked, [expected]);
+            assert_eq!(report.notes, [UNREADABLE_PASSWORDS]);
+            for imported in &report.imported {
+                assert_eq!(identity_file(imported), None);
+                assert_eq!(imported.notes, [UNLOCATED_KEY]);
+            }
+        }
     }
 
     #[test]

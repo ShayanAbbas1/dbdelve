@@ -762,7 +762,7 @@ fn escape_grid_key(value: &str) -> String {
     escaped
 }
 
-fn unsafe_component(value: &str) -> Option<&'static str> {
+pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
     if value.trim().is_empty() {
         Some("is empty")
     } else if value.contains(['/', '\\']) {
@@ -896,6 +896,49 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     if written.is_err() {
         // Nothing reads a leftover temporary, and every failed write would
         // otherwise leave one behind for good.
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// Where a private key another client kept in its own store is written, since
+/// ssh reads a key only from a file.
+pub(crate) fn ssh_key_directory() -> Result<PathBuf, String> {
+    Ok(dbdelve_directory()?.join("ssh-keys"))
+}
+
+/// Replaces `path` whole, so importing again rewrites the same file. The
+/// temporary is created `0600` rather than narrowed after its first write, and
+/// `create_new` because `mode` applies only to a file being created. OpenSSH
+/// refuses a key without a final newline, so one is added.
+pub(crate) fn write_private_key(path: &Path, key: &[u8]) -> io::Result<()> {
+    let directory = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        builder.mode(0o700);
+        options.mode(0o600);
+    }
+    builder.create(directory)?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let _ = fs::remove_file(&temporary);
+    let written = options
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(key)?;
+            if !key.ends_with(b"\n") {
+                file.write_all(b"\n")?;
+            }
+            Ok(())
+        })
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     written
@@ -1842,6 +1885,47 @@ open_objects = []
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_private_key_is_rewritten_in_place_with_a_final_newline() {
+        let directory = std::env::temp_dir().join(format!(
+            "dbdelve-store-key-test-{}/ssh-keys",
+            std::process::id()
+        ));
+        let path = directory.join("tableplus-a");
+        let first = write_private_key(&path, b"first");
+        let second = write_private_key(&path, b"second\n");
+        let written = fs::read(&path);
+        let entries = fs::read_dir(&directory).map(|entries| entries.count());
+        #[cfg(unix)]
+        let modes = {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |path: &Path| fs::metadata(path).map(|meta| meta.permissions().mode() & 0o777);
+            (mode(&directory), mode(&path))
+        };
+        let _ = fs::remove_dir_all(directory.parent().unwrap());
+
+        assert!(first.is_ok() && second.is_ok());
+        assert!(
+            written.is_ok_and(|bytes| bytes == b"second\n"),
+            "not rewritten"
+        );
+        assert_eq!(entries.ok(), Some(1));
+        #[cfg(unix)]
+        assert_eq!((modes.0.ok(), modes.1.ok()), (Some(0o700), Some(0o600)));
+
+        let path = std::env::temp_dir().join(format!(
+            "dbdelve-store-newline-test-{}/key",
+            std::process::id()
+        ));
+        let written = write_private_key(&path, b"key").and_then(|()| fs::read(&path));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+        assert!(
+            written.is_ok_and(|bytes| bytes == b"key\n"),
+            "no newline added"
+        );
     }
 
     #[test]
