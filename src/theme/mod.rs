@@ -153,7 +153,7 @@ pub enum FontSlot {
 /// The three families in use.
 ///
 /// A global of its own rather than fields on [`Theme`]: a theme is a palette
-/// dbdelve ships and a font is the user's pick, so cycling one must not reset the
+/// dbdelve ships and a font is the user's pick, so switching one must not reset the
 /// other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fonts {
@@ -381,11 +381,20 @@ impl ConnectionColor {
         if theme.is_glass {
             return self.swatch().alpha(GLASS_BAND_ALPHA);
         }
-        self.at(match theme.appearance {
-            Appearance::Dark => BAND_LIGHTNESS_DARK,
-            Appearance::Light => BAND_LIGHTNESS_LIGHT,
-        })
-        .opaque()
+        let (fixed, away) = match theme.appearance {
+            Appearance::Dark => (BAND_LIGHTNESS_DARK, 1.0),
+            Appearance::Light => (BAND_LIGHTNESS_LIGHT, -1.0),
+        };
+        // The fixed lightness is tuned for dbdelve's own chrome. A palette
+        // whose chrome sits near it would get a band that barely shows, so the
+        // band steps away from the chrome instead.
+        let chrome = Oklch::from_srgb(theme.surface).l;
+        let lightness = if (fixed - chrome).abs() < BAND_CHROME_GAP {
+            chrome + away * BAND_CHROME_GAP
+        } else {
+            fixed
+        };
+        self.at(lightness).opaque()
     }
 
     fn at(self, lightness: f32) -> Srgb {
@@ -422,6 +431,15 @@ const SWATCH_LIGHTNESS: f32 = 0.65;
 const BAND_LIGHTNESS_DARK: f32 = 0.35;
 const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
 const GLASS_BAND_ALPHA: f32 = 0.40;
+
+/// Below dbdelve Light's 0.06 and Tokyo Night Day's 0.043, so neither band
+/// moves.
+const BAND_CHROME_GAP: f32 = 0.04;
+
+/// The editor palettes' washes. Their upstream yellows are far brighter than
+/// dark's amber, so the edited wash is thinner to keep text AAA over it.
+const PALETTE_SELECTION_ALPHA: f32 = 0.28;
+const PALETTE_EDITED_ALPHA: f32 = 0.14;
 
 /// Set from the light theme, where chrome is near-white and a tint over it is
 /// at its weakest: 0.22 is the lowest that still steps the pill clear of the
@@ -505,22 +523,33 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Every theme dbdelve ships, in the order the switcher cycles them. The
+    /// Every theme dbdelve ships, in the order the theme picker lists them. The
     /// first is the default.
-    pub fn all() -> [Self; 4] {
-        [Self::glass(), Self::black(), Self::dark(), Self::light()]
-    }
-
-    /// The theme after this one, by name. Falls back to the default, so a theme
-    /// deleted from `all` cannot strand the app on a name that no longer exists.
-    pub fn next(self) -> Self {
-        let themes = Self::all();
-        let index = themes
-            .iter()
-            .position(|theme| theme.name == self.name)
-            .map(|index| (index + 1) % themes.len())
-            .unwrap_or(0);
-        themes[index]
+    pub fn all() -> [Self; 22] {
+        [
+            Self::glass(),
+            Self::black(),
+            Self::dark(),
+            Self::light(),
+            Self::gruvbox_dark(),
+            Self::gruvbox_light(),
+            Self::glassed(Self::gruvbox_dark(), "Gruvbox Glass"),
+            Self::catppuccin_mocha(),
+            Self::catppuccin_latte(),
+            Self::glassed(Self::catppuccin_mocha(), "Catppuccin Glass"),
+            Self::github_dark(),
+            Self::github_light(),
+            Self::glassed(Self::github_dark(), "GitHub Glass"),
+            Self::tokyo_night(),
+            Self::tokyo_night_day(),
+            Self::glassed(Self::tokyo_night(), "Tokyo Night Glass"),
+            Self::dracula(),
+            Self::dracula_light(),
+            Self::glassed(Self::dracula(), "Dracula Glass"),
+            Self::one_dark(),
+            Self::one_light(),
+            Self::glassed(Self::one_dark(), "One Dark Glass"),
+        ]
     }
 
     pub fn with_opacity(mut self, opacity: f32) -> Self {
@@ -795,10 +824,20 @@ impl Theme {
     /// opaque page reads as patchiness on a transparent one. What separates the
     /// planes here is mostly how much they let through — see [`OPACITY_DEFAULT`].
     pub fn glass() -> Self {
+        Self::glassed(Self::dark(), "DBDelve Glass")
+    }
+
+    /// `dark` re-toned as glass: each plane keeps its own hue and chroma and
+    /// takes the lightness the glass planes need, so a family's glass stays in
+    /// its family. Everything else carries over untouched.
+    fn glassed(dark: Self, name: &'static str) -> Self {
+        let tone = |plane: Srgb, lightness: f32| {
+            let own = Oklch::from_srgb(plane);
+            Oklch::new(lightness, own.c, own.h).to_srgb()
+        };
         Self {
-            name: "DBDelve Glass",
+            name,
             is_glass: true,
-            opacity: OPACITY_DEFAULT,
 
             // Chrome goes near-black and stays there — it is the plane with
             // nothing to read on it, so it can afford to be mostly desktop.
@@ -806,18 +845,18 @@ impl Theme {
             // frost's own composite reads as a hole punched in the window: the
             // frost carries the desktop's light, and a tint darker than that
             // subtracts it.
-            bg: neutral(0.275),
-            panel: neutral(0.215),
-            surface: neutral(0.130),
+            bg: tone(dark.bg, 0.275),
+            panel: tone(dark.panel, 0.215),
+            surface: tone(dark.surface, 0.130),
             // Below every plane it covers rather than above them: a modal is
             // the one surface that is not part of the window's stack, and the
             // way it says so here is by going darker than the chrome it
             // floats over instead of lighter.
-            overlay: neutral(0.165),
+            overlay: tone(dark.overlay, 0.165),
 
-            control: neutral(0.340),
+            control: tone(dark.control, 0.340),
 
-            ..Self::dark()
+            ..dark
         }
     }
 
@@ -944,6 +983,507 @@ impl Theme {
             syntax_type: Oklch::new(0.44, 0.12, 205.0).to_srgb(),
             syntax_variable: neutral(0.28),
             syntax_operator: neutral(0.40),
+        }
+    }
+
+    // The editor palettes below are their upstream hex. Where an upstream
+    // colour misses a contrast floor in `tests`, it is moved in Oklch
+    // lightness only (lifted on a dark theme, darkened on a light one), and
+    // the line says from what.
+
+    pub fn gruvbox_dark() -> Self {
+        Self {
+            name: "Gruvbox Dark",
+
+            bg: Srgb::from_hex(0x32302f),
+            panel: Srgb::from_hex(0x282828),
+            surface: Srgb::from_hex(0x1d2021),
+            overlay: Srgb::from_hex(0x3c3836),
+            control: Srgb::from_hex(0x504945),
+
+            text: Srgb::from_hex(0xfbf1c7),
+            text_muted: Srgb::from_hex(0xd5c4a1),
+            text_faint: Srgb::from_hex(0x928374),
+
+            accent: Srgb::from_hex(0x83a598),
+            on_accent: Srgb::from_hex(0x1d2021),
+            selection: Srgb::from_hex(0x83a598).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0xebdbb2),
+            edited: Srgb::from_hex(0xfabd2f).alpha(PALETTE_EDITED_ALPHA),
+
+            // Lifted from #fb4934, as is the keyword.
+            danger: Srgb::from_hex(0xff674f),
+            success: Srgb::from_hex(0xb8bb26),
+
+            // Lifted from #928374.
+            syntax_comment: Srgb::from_hex(0x9c8d7d),
+            syntax_keyword: Srgb::from_hex(0xff513b),
+            syntax_string: Srgb::from_hex(0xb8bb26),
+            syntax_number: Srgb::from_hex(0xd3869b),
+            syntax_function: Srgb::from_hex(0xb8bb26),
+            syntax_type: Srgb::from_hex(0xfabd2f),
+            syntax_variable: Srgb::from_hex(0xebdbb2),
+            syntax_operator: Srgb::from_hex(0xfe8019),
+
+            ..Self::dark()
+        }
+    }
+
+    pub fn gruvbox_light() -> Self {
+        Self {
+            name: "Gruvbox Light",
+
+            bg: Srgb::from_hex(0xfbf1c7),
+            panel: Srgb::from_hex(0xf2e5bc),
+            surface: Srgb::from_hex(0xebdbb2),
+            overlay: Srgb::from_hex(0xf9f5d7),
+            control: Srgb::from_hex(0xd5c4a1),
+
+            text: Srgb::from_hex(0x282828),
+            text_muted: Srgb::from_hex(0x504945),
+            text_faint: Srgb::from_hex(0x928374),
+
+            accent: Srgb::from_hex(0x076678),
+            on_accent: Srgb::from_hex(0xf9f5d7),
+            selection: Srgb::from_hex(0x076678).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x3c3836),
+            edited: Srgb::from_hex(0xb57614).alpha(PALETTE_EDITED_ALPHA),
+
+            danger: Srgb::from_hex(0x9d0006),
+            success: Srgb::from_hex(0x79740e),
+
+            // Darkened from #928374.
+            syntax_comment: Srgb::from_hex(0x726456),
+            syntax_keyword: Srgb::from_hex(0x9d0006),
+            // Darkened from #79740e, as is the function.
+            syntax_string: Srgb::from_hex(0x6f6900),
+            syntax_number: Srgb::from_hex(0x8f3f71),
+            syntax_function: Srgb::from_hex(0x6f6900),
+            // Darkened from #b57614.
+            syntax_type: Srgb::from_hex(0x955800),
+            syntax_variable: Srgb::from_hex(0x3c3836),
+            syntax_operator: Srgb::from_hex(0xaf3a03),
+
+            ..Self::light()
+        }
+    }
+
+    pub fn catppuccin_mocha() -> Self {
+        Self {
+            name: "Catppuccin Mocha",
+
+            // Base and crust nudged from #1e1e2e and #11111b: upstream they sit
+            // 7 and 8 levels off mantle, under or on the 8-level plane floor.
+            bg: Srgb::from_hex(0x1f1f30),
+            panel: Srgb::from_hex(0x181825),
+            surface: Srgb::from_hex(0x10101a),
+            overlay: Srgb::from_hex(0x313244),
+            control: Srgb::from_hex(0x45475a),
+
+            text: Srgb::from_hex(0xcdd6f4),
+            text_muted: Srgb::from_hex(0xbac2de),
+            text_faint: Srgb::from_hex(0x9399b2),
+
+            accent: Srgb::from_hex(0xb4befe),
+            on_accent: Srgb::from_hex(0x11111b),
+            selection: Srgb::from_hex(0xb4befe).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0xf5e0dc),
+            edited: Srgb::from_hex(0xf9e2af).alpha(PALETTE_EDITED_ALPHA),
+
+            danger: Srgb::from_hex(0xf38ba8),
+            success: Srgb::from_hex(0xa6e3a1),
+
+            syntax_comment: Srgb::from_hex(0x9399b2),
+            syntax_keyword: Srgb::from_hex(0xcba6f7),
+            syntax_string: Srgb::from_hex(0xa6e3a1),
+            syntax_number: Srgb::from_hex(0xfab387),
+            syntax_function: Srgb::from_hex(0x89b4fa),
+            syntax_type: Srgb::from_hex(0xf9e2af),
+            syntax_variable: Srgb::from_hex(0xcdd6f4),
+            syntax_operator: Srgb::from_hex(0x89dceb),
+
+            ..Self::dark()
+        }
+    }
+
+    pub fn catppuccin_latte() -> Self {
+        Self {
+            name: "Catppuccin Latte",
+
+            // Base nudged from #eff1f5, 7.7 levels off mantle.
+            bg: Srgb::from_hex(0xf0f2f6),
+            panel: Srgb::from_hex(0xe6e9ef),
+            surface: Srgb::from_hex(0xdce0e8),
+            overlay: Srgb::from_hex(0xf0f2f6),
+            control: Srgb::from_hex(0xbcc0cc),
+
+            // Darkened from #4c4f69, which `themes_are_comparable_not_mirrored`
+            // finds too soft; the editor's identifiers keep it.
+            text: Srgb::from_hex(0x34364f),
+            text_muted: Srgb::from_hex(0x5c5f77),
+            text_faint: Srgb::from_hex(0x7c7f93),
+
+            // Darkened from #7287fd.
+            accent: Srgb::from_hex(0x6174e8),
+            on_accent: Srgb::from_hex(0xdce0e8),
+            selection: Srgb::from_hex(0x7287fd).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0xdc8a78),
+            edited: Srgb::from_hex(0xdf8e1d).alpha(PALETTE_EDITED_ALPHA),
+
+            // Darkened from #d20f39 and #40a02b.
+            danger: Srgb::from_hex(0xd10d38),
+            success: Srgb::from_hex(0x319218),
+
+            // Darkened from #7c7f93.
+            syntax_comment: Srgb::from_hex(0x65687c),
+            // Darkened from #8839ef.
+            syntax_keyword: Srgb::from_hex(0x8738ee),
+            // Darkened from #40a02b.
+            syntax_string: Srgb::from_hex(0x0e7a00),
+            // Darkened from #fe640b.
+            syntax_number: Srgb::from_hex(0xc72d00),
+            // Darkened from #1e66f5.
+            syntax_function: Srgb::from_hex(0x155dec),
+            // Darkened from #df8e1d.
+            syntax_type: Srgb::from_hex(0xa15500),
+            syntax_variable: Srgb::from_hex(0x4c4f69),
+            // Darkened from #04a5e5.
+            syntax_operator: Srgb::from_hex(0x006eab),
+
+            ..Self::light()
+        }
+    }
+
+    pub fn github_dark() -> Self {
+        Self {
+            name: "GitHub Dark",
+
+            bg: Srgb::from_hex(0x161b22),
+            panel: Srgb::from_hex(0x0d1117),
+            surface: Srgb::from_hex(0x010409),
+            overlay: Srgb::from_hex(0x161b22),
+            control: Srgb::from_hex(0x21262d),
+
+            text: Srgb::from_hex(0xe6edf3),
+            text_muted: Srgb::from_hex(0x9198a1),
+            text_faint: Srgb::from_hex(0x6e7681),
+
+            accent: Srgb::from_hex(0x4493f8),
+            on_accent: WHITE,
+            selection: Srgb::from_hex(0x4493f8).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x4493f8),
+            edited: Srgb::from_hex(0xd29922).alpha(PALETTE_EDITED_ALPHA),
+
+            // Lifted from #f85149, which falls under 4.5 on the glass chrome.
+            danger: Srgb::from_hex(0xfa534b),
+            success: Srgb::from_hex(0x3fb950),
+
+            syntax_comment: Srgb::from_hex(0x8b949e),
+            syntax_keyword: Srgb::from_hex(0xff7b72),
+            syntax_string: Srgb::from_hex(0xa5d6ff),
+            syntax_number: Srgb::from_hex(0x79c0ff),
+            syntax_function: Srgb::from_hex(0xd2a8ff),
+            syntax_type: Srgb::from_hex(0xffa657),
+            syntax_variable: Srgb::from_hex(0xe6edf3),
+            syntax_operator: Srgb::from_hex(0xff7b72),
+
+            ..Self::dark()
+        }
+    }
+
+    pub fn github_light() -> Self {
+        Self {
+            name: "GitHub Light",
+
+            bg: WHITE,
+            // Nudged from #f6f8fa, 7 levels off the canvas.
+            panel: Srgb::from_hex(0xf4f6f8),
+            surface: Srgb::from_hex(0xe6eaef),
+            overlay: WHITE,
+            control: Srgb::from_hex(0xf6f8fa),
+
+            text: Srgb::from_hex(0x1f2328),
+            text_muted: Srgb::from_hex(0x59636e),
+            text_faint: Srgb::from_hex(0x818b98),
+
+            accent: Srgb::from_hex(0x0969da),
+            on_accent: WHITE,
+            selection: Srgb::from_hex(0x0969da).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x0969da),
+            edited: Srgb::from_hex(0x9a6700).alpha(PALETTE_EDITED_ALPHA),
+
+            danger: Srgb::from_hex(0xd1242f),
+            success: Srgb::from_hex(0x1a7f37),
+
+            syntax_comment: Srgb::from_hex(0x59636e),
+            syntax_keyword: Srgb::from_hex(0xcf222e),
+            syntax_string: Srgb::from_hex(0x0a3069),
+            syntax_number: Srgb::from_hex(0x0550ae),
+            syntax_function: Srgb::from_hex(0x6639ba),
+            syntax_type: Srgb::from_hex(0x953800),
+            syntax_variable: Srgb::from_hex(0x1f2328),
+            syntax_operator: Srgb::from_hex(0xcf222e),
+
+            ..Self::light()
+        }
+    }
+
+    pub fn tokyo_night() -> Self {
+        Self {
+            name: "Tokyo Night",
+
+            bg: Srgb::from_hex(0x1f2335),
+            panel: Srgb::from_hex(0x1a1b26),
+            surface: Srgb::from_hex(0x0c0e14),
+            overlay: Srgb::from_hex(0x292e42),
+            control: Srgb::from_hex(0x3b4261),
+
+            // Lifted from #c0caf5, which `themes_are_comparable_not_mirrored`
+            // finds too soft, in glass most of all; the editor's identifiers
+            // keep it.
+            text: Srgb::from_hex(0xc7d2fd),
+            text_muted: Srgb::from_hex(0xa9b1d6),
+            text_faint: Srgb::from_hex(0x737aa2),
+
+            accent: Srgb::from_hex(0x7aa2f7),
+            on_accent: Srgb::from_hex(0x1a1b26),
+            selection: Srgb::from_hex(0x7aa2f7).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0xc0caf5),
+            edited: Srgb::from_hex(0xe0af68).alpha(PALETTE_EDITED_ALPHA),
+
+            danger: Srgb::from_hex(0xf7768e),
+            success: Srgb::from_hex(0x9ece6a),
+
+            // Lifted from #565f89.
+            syntax_comment: Srgb::from_hex(0x7882ae),
+            syntax_keyword: Srgb::from_hex(0xbb9af7),
+            syntax_string: Srgb::from_hex(0x9ece6a),
+            syntax_number: Srgb::from_hex(0xff9e64),
+            syntax_function: Srgb::from_hex(0x7aa2f7),
+            syntax_type: Srgb::from_hex(0x2ac3de),
+            syntax_variable: Srgb::from_hex(0xc0caf5),
+            syntax_operator: Srgb::from_hex(0x89ddff),
+
+            ..Self::dark()
+        }
+    }
+
+    pub fn tokyo_night_day() -> Self {
+        Self {
+            name: "Tokyo Night Day",
+
+            bg: Srgb::from_hex(0xe1e2e7),
+            panel: Srgb::from_hex(0xd0d5e3),
+            surface: Srgb::from_hex(0xc1c9df),
+            overlay: Srgb::from_hex(0xe1e2e7),
+            control: Srgb::from_hex(0xa8aecb),
+
+            // Darkened from #3760bf, which `themes_are_comparable_not_mirrored`
+            // finds far too soft on this page.
+            text: Srgb::from_hex(0x031f7b),
+            // Darkened from #6172b0.
+            text_muted: Srgb::from_hex(0x42518c),
+            text_faint: Srgb::from_hex(0x68709a),
+
+            // Darkened from #2e7de9.
+            accent: Srgb::from_hex(0x2272dd),
+            on_accent: Srgb::from_hex(0xe1e2e7),
+            selection: Srgb::from_hex(0x2e7de9).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x3760bf),
+            edited: Srgb::from_hex(0x8c6c3e).alpha(PALETTE_EDITED_ALPHA),
+
+            // Darkened from #f52a65.
+            danger: Srgb::from_hex(0xbb003a),
+            success: Srgb::from_hex(0x587539),
+
+            // Darkened from #848cb5.
+            syntax_comment: Srgb::from_hex(0x535a80),
+            // Darkened from #9854f1.
+            syntax_keyword: Srgb::from_hex(0x7b30ce),
+            // Darkened from #587539.
+            syntax_string: Srgb::from_hex(0x496529),
+            // Darkened from #b15c00.
+            syntax_number: Srgb::from_hex(0x974500),
+            // Darkened from #2e7de9.
+            syntax_function: Srgb::from_hex(0x0058c1),
+            // Darkened from #188092.
+            syntax_type: Srgb::from_hex(0x006678),
+            // Darkened from #3760bf.
+            syntax_variable: Srgb::from_hex(0x2f57b6),
+            // Darkened from #006a83.
+            syntax_operator: Srgb::from_hex(0x00657e),
+
+            ..Self::light()
+        }
+    }
+
+    pub fn dracula() -> Self {
+        Self {
+            name: "Dracula",
+
+            bg: Srgb::from_hex(0x343746),
+            panel: Srgb::from_hex(0x282a36),
+            // Darkened from #21222c.
+            surface: Srgb::from_hex(0x1f202a),
+            // Not current-line #44475a: the purple accent misses 3:1 on a
+            // selected suggestion over it.
+            overlay: Srgb::from_hex(0x343746),
+            control: Srgb::from_hex(0x44475a),
+
+            // Dracula has no secondary text, so the two lower tiers are its
+            // comment (#6272a4) lifted until each clears its floor.
+            text: Srgb::from_hex(0xf8f8f2),
+            text_muted: Srgb::from_hex(0x8ea0d5),
+            text_faint: Srgb::from_hex(0x7f91c5),
+
+            accent: Srgb::from_hex(0xbd93f9),
+            on_accent: Srgb::from_hex(0x282a36),
+            selection: Srgb::from_hex(0xbd93f9).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0xf8f8f2),
+            edited: Srgb::from_hex(0xf1fa8c).alpha(PALETTE_EDITED_ALPHA),
+
+            // Lifted from #ff5555.
+            danger: Srgb::from_hex(0xff7773),
+            success: Srgb::from_hex(0x50fa7b),
+
+            syntax_comment: Srgb::from_hex(0x7f91c5),
+            syntax_keyword: Srgb::from_hex(0xff79c6),
+            syntax_string: Srgb::from_hex(0xf1fa8c),
+            syntax_number: Srgb::from_hex(0xbd93f9),
+            syntax_function: Srgb::from_hex(0x50fa7b),
+            syntax_type: Srgb::from_hex(0x8be9fd),
+            syntax_variable: Srgb::from_hex(0xf8f8f2),
+            syntax_operator: Srgb::from_hex(0xff79c6),
+
+            ..Self::dark()
+        }
+    }
+
+    /// Alucard, Dracula's official light variant.
+    pub fn dracula_light() -> Self {
+        Self {
+            name: "Dracula Light",
+
+            bg: Srgb::from_hex(0xfffbeb),
+            panel: Srgb::from_hex(0xece9df),
+            surface: Srgb::from_hex(0xdedccf),
+            overlay: Srgb::from_hex(0xfffbeb),
+            control: Srgb::from_hex(0xcfcfde),
+
+            // Alucard has no secondary text either: both lower tiers are its
+            // comment, the muted one darkened from #6c664b.
+            text: Srgb::from_hex(0x1f1f1f),
+            text_muted: Srgb::from_hex(0x676147),
+            text_faint: Srgb::from_hex(0x6c664b),
+
+            accent: Srgb::from_hex(0x644ac9),
+            on_accent: Srgb::from_hex(0xfffbeb),
+            selection: Srgb::from_hex(0x644ac9).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x1f1f1f),
+            edited: Srgb::from_hex(0x846e15).alpha(PALETTE_EDITED_ALPHA),
+
+            // Darkened from #cb3a2a.
+            danger: Srgb::from_hex(0xc33223),
+            success: Srgb::from_hex(0x14710a),
+
+            syntax_comment: Srgb::from_hex(0x6c664b),
+            syntax_keyword: Srgb::from_hex(0xa3144d),
+            // Darkened from #846e15.
+            syntax_string: Srgb::from_hex(0x7d6707),
+            syntax_number: Srgb::from_hex(0x644ac9),
+            syntax_function: Srgb::from_hex(0x14710a),
+            syntax_type: Srgb::from_hex(0x036a96),
+            syntax_variable: Srgb::from_hex(0x1f1f1f),
+            syntax_operator: Srgb::from_hex(0xa3144d),
+
+            ..Self::light()
+        }
+    }
+
+    pub fn one_dark() -> Self {
+        Self {
+            name: "One Dark",
+
+            bg: Srgb::from_hex(0x282c34),
+            // Nudged from #21252b, 7.7 levels off the editor's page.
+            panel: Srgb::from_hex(0x20242a),
+            surface: Srgb::from_hex(0x181a1f),
+            overlay: Srgb::from_hex(0x2c313a),
+            control: Srgb::from_hex(0x3e4451),
+
+            // One Dark's highlighted UI text, not its #abb2bf foreground,
+            // which `themes_are_comparable_not_mirrored` finds too soft. The
+            // foreground stays the editor's identifiers and the muted tier.
+            text: Srgb::from_hex(0xd7dae0),
+            text_muted: Srgb::from_hex(0xabb2bf),
+            text_faint: Srgb::from_hex(0x7f848e),
+
+            accent: Srgb::from_hex(0x61afef),
+            on_accent: Srgb::from_hex(0x282c34),
+            selection: Srgb::from_hex(0x61afef).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x528bff),
+            edited: Srgb::from_hex(0xe5c07b).alpha(PALETTE_EDITED_ALPHA),
+
+            // Lifted from #e06c75.
+            danger: Srgb::from_hex(0xe46f78),
+            success: Srgb::from_hex(0x98c379),
+
+            // Lifted from #7f848e.
+            syntax_comment: Srgb::from_hex(0x868b95),
+            syntax_keyword: Srgb::from_hex(0xc678dd),
+            syntax_string: Srgb::from_hex(0x98c379),
+            syntax_number: Srgb::from_hex(0xd19a66),
+            syntax_function: Srgb::from_hex(0x61afef),
+            syntax_type: Srgb::from_hex(0xe5c07b),
+            syntax_variable: Srgb::from_hex(0xabb2bf),
+            syntax_operator: Srgb::from_hex(0x56b6c2),
+
+            ..Self::dark()
+        }
+    }
+
+    pub fn one_light() -> Self {
+        Self {
+            name: "One Light",
+
+            bg: Srgb::from_hex(0xfafafa),
+            panel: Srgb::from_hex(0xeaeaeb),
+            surface: Srgb::from_hex(0xdbdbdc),
+            overlay: Srgb::from_hex(0xfafafa),
+            control: Srgb::from_hex(0xe5e5e6),
+
+            // Darkened from #383a42, #696c77 and #a0a1a7; the editor's
+            // identifiers keep the first.
+            text: Srgb::from_hex(0x33353d),
+            text_muted: Srgb::from_hex(0x5d606b),
+            text_faint: Srgb::from_hex(0x909197),
+
+            accent: Srgb::from_hex(0x4078f2),
+            on_accent: Srgb::from_hex(0xfafafa),
+            selection: Srgb::from_hex(0x4078f2).alpha(PALETTE_SELECTION_ALPHA),
+            cursor: Srgb::from_hex(0x526fff),
+            edited: Srgb::from_hex(0xc18401).alpha(PALETTE_EDITED_ALPHA),
+
+            // Darkened from #e45649 and #50a14f.
+            danger: Srgb::from_hex(0xc2352c),
+            success: Srgb::from_hex(0x3b8c3b),
+
+            // Darkened from #a0a1a7.
+            syntax_comment: Srgb::from_hex(0x68696f),
+            syntax_keyword: Srgb::from_hex(0xa626a4),
+            // Darkened from #50a14f.
+            syntax_string: Srgb::from_hex(0x257927),
+            // Darkened from #986801.
+            syntax_number: Srgb::from_hex(0x906000),
+            // Darkened from #4078f2.
+            syntax_function: Srgb::from_hex(0x2d62da),
+            // Darkened from #c18401.
+            syntax_type: Srgb::from_hex(0x975d00),
+            syntax_variable: Srgb::from_hex(0x383a42),
+            // Darkened from #0184bc.
+            syntax_operator: Srgb::from_hex(0x0070a7),
+
+            ..Self::light()
         }
     }
 }
@@ -1158,6 +1698,25 @@ mod tests {
     }
 
     #[test]
+    fn dbdelves_own_bands_keep_their_fixed_lightness() {
+        for t in [
+            Theme::glass(),
+            Theme::black(),
+            Theme::dark(),
+            Theme::light(),
+        ] {
+            for color in ConnectionColor::ALL {
+                let fixed = match (t.is_glass, t.appearance) {
+                    (true, _) => color.swatch().alpha(GLASS_BAND_ALPHA),
+                    (false, Appearance::Dark) => color.at(BAND_LIGHTNESS_DARK).opaque(),
+                    (false, Appearance::Light) => color.at(BAND_LIGHTNESS_LIGHT).opaque(),
+                };
+                assert_eq!(color.band(t), fixed, "{} {}", t.name, color.label());
+            }
+        }
+    }
+
+    #[test]
     fn themes_are_comparable_not_mirrored() {
         // Every theme should land in the same contrast neighbourhood, so
         // switching does not make one of them feel washed out next to another.
@@ -1295,15 +1854,20 @@ mod tests {
     }
 
     #[test]
-    fn the_switcher_visits_every_theme_and_comes_back() {
-        let mut theme = Theme::default();
-        let mut seen = vec![theme.name];
-        for _ in 1..Theme::all().len() {
-            theme = theme.next();
-            assert!(!seen.contains(&theme.name), "{} repeated", theme.name);
-            seen.push(theme.name);
+    fn glass_is_dark_toned_onto_the_glass_planes() {
+        let glass = Theme::glass();
+        for (plane, lightness) in [
+            (glass.bg, 0.275),
+            (glass.panel, 0.215),
+            (glass.surface, 0.130),
+            (glass.overlay, 0.165),
+            (glass.control, 0.340),
+        ] {
+            let want = neutral(lightness);
+            for (got, want) in [(plane.r, want.r), (plane.g, want.g), (plane.b, want.b)] {
+                assert!((got - want).abs() < 1e-3, "{got} vs {want}");
+            }
         }
-        assert_eq!(theme.next().name, Theme::default().name);
     }
 
     #[test]

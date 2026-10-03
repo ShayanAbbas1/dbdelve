@@ -92,6 +92,23 @@ impl Oklch {
             -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
         ]
     }
+
+    /// The inverse of [`Oklch::to_srgb`].
+    pub fn from_srgb(c: Srgb) -> Self {
+        let (r, g, b) = (gamma_decode(c.r), gamma_decode(c.g), gamma_decode(c.b));
+        let l = (0.412_221_46 * r + 0.536_332_54 * g + 0.051_445_995 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+
+        let lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
+        let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+        let b = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+        Self {
+            l: lightness,
+            c: a.hypot(b),
+            h: b.atan2(a).to_degrees().rem_euclid(360.0),
+        }
+    }
 }
 
 impl Srgb {
@@ -217,6 +234,19 @@ mod tests {
 
         let black = Oklch::new(0.0, 0.0, 0.0).to_srgb();
         assert!(approx(black.r, 0.0, 0.01) && approx(black.g, 0.0, 0.01));
+    }
+
+    #[test]
+    fn srgb_survives_the_trip_through_oklch() {
+        for hex in [0x000000, 0xffffff, 0x808080, 0xd65d0e, 0x89b4fa, 0x1e1e2e] {
+            let c = Srgb::from_hex(hex);
+            let back = Oklch::from_srgb(c).to_srgb();
+            assert!(
+                approx(c.r, back.r, 1e-3) && approx(c.g, back.g, 1e-3) && approx(c.b, back.b, 1e-3),
+                "{hex:06x} came back as {}",
+                back.hex()
+            );
+        }
     }
 
     #[test]

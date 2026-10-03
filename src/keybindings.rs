@@ -25,11 +25,11 @@ use gpui::{KeyBinding, Keystroke};
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
-        CommandPalette, CopyCell, CopyResults, CopyRow, CycleTheme, DeleteRow, DiscardEdits,
-        EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery,
-        NewRow, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious,
-        PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-        ResetEditorZoom, RunQuery, SaveQuery, SetDefault, SetEmpty, SetNull, ShowEditor,
+        CommandPalette, CopyCell, CopyResults, CopyRow, DeleteRow, DiscardEdits, EditCell,
+        ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow,
+        NextPage, NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious, PreviousPage,
+        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
+        RunQuery, SaveQuery, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor,
         ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
@@ -123,7 +123,9 @@ registry! {
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),
     ("previous_profile", "Previous Connection", None, ["ctrl-shift-`"], PreviousProfile),
     ("show_editor", "Back / Dismiss", None, ["escape"], ShowEditor),
-    ("cycle_theme", "Cycle Theme", None, ["secondary-k t"], CycleTheme),
+    // Still keyed by the id of the cycle this replaced, so an override saved
+    // against it keeps working.
+    ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),
     ("open_settings", "Open Settings", None, ["secondary-,"], OpenSettings),
     ("fuzzy_open", "Fuzzy Schema Search", None, ["secondary-p"], FuzzyOpen),
     ("command_palette", "Command Palette", None, ["secondary-shift-p"], CommandPalette),

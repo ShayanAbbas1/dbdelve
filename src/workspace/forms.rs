@@ -467,9 +467,9 @@ impl Workspace {
                                 .search_placeholder(placeholder)
                                 .max_h(px(layout::PALETTE_MAX_HEIGHT)),
                         )
-                        .on_mouse_down_out(move |_, _, cx| {
+                        .on_mouse_down_out(move |_, window, cx| {
                             _ = workspace.update(cx, |workspace, cx| {
-                                workspace.close_palette(cx);
+                                workspace.close_palette(window, cx);
                             });
                         }),
                 )

@@ -26,7 +26,7 @@ use crate::{
     export::Format,
     icons::icon,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
-    theme::{FontSlot, fonts, layout, theme},
+    theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
     ui::{chord_hint, object_icon, row_icon},
 };
 
@@ -42,6 +42,9 @@ pub enum Mode {
     /// with the slot in it rather than three: the list is the same list, and
     /// only the row's destination differs.
     Font(FontSlot),
+    /// Every shipped theme. The highlighted row is installed as it moves, and
+    /// only a confirmed one is kept.
+    Theme,
 }
 
 /// What a row does when it is confirmed.
@@ -108,7 +111,9 @@ pub enum Command {
     PreviousProfile,
     NewConnection,
     RefreshConnection,
-    CycleTheme,
+    /// Put the palette back up over the theme list.
+    SelectTheme,
+    SetTheme(Box<Theme>),
     /// Put the palette back up over the font list for this slot, the way
     /// [`Command::QueryHistory`] does for the history.
     PickFont(FontSlot),
@@ -153,24 +158,27 @@ pub struct Palette {
     /// order on screen is the matcher's order.
     matched: Vec<usize>,
     matcher: Matcher,
+    /// The theme in force when the theme list opened, for a filter that
+    /// matches nothing to fall back to.
+    unpreviewed: Option<Theme>,
 }
 
 impl Palette {
     pub fn new(mode: Mode, workspace: &Workspace, cx: &App) -> Self {
-        let items = match workspace.profile() {
-            Some(profile) => match mode {
-                Mode::Jump => jump_items(profile),
-                Mode::Commands => command_items(workspace, profile, cx),
-                Mode::History => history_items(profile),
-                Mode::Font(slot) => font_items(slot, cx),
-            },
-            None => Vec::new(),
+        let items = match (mode, workspace.profile()) {
+            (Mode::Theme, _) => theme_items(cx),
+            (Mode::Jump, Some(profile)) => jump_items(profile),
+            (Mode::Commands, Some(profile)) => command_items(workspace, profile, cx),
+            (Mode::History, Some(profile)) => history_items(profile),
+            (Mode::Font(slot), Some(_)) => font_items(slot, cx),
+            (_, None) => Vec::new(),
         };
         Self {
             mode,
             matched: (0..items.len()).collect(),
             items,
             matcher: Matcher::new(Config::DEFAULT),
+            unpreviewed: (mode == Mode::Theme).then(|| *theme(cx)),
         }
     }
 
@@ -193,6 +201,7 @@ impl Palette {
             Mode::Commands => "Run a command…",
             Mode::History => "Recall a statement you have run…",
             Mode::Font(_) => "Pick a font…",
+            Mode::Theme => "Pick a theme…",
         }
     }
 }
@@ -268,12 +277,22 @@ impl ListDelegate for Palette {
             .child("No matches.")
     }
 
+    /// The live preview. Nothing here is saved, and nothing here undoes it:
+    /// `Workspace::end_theme_preview` does that on the way out.
     fn set_selected_index(
         &mut self,
-        _: Option<IndexPath>,
-        _: &mut Window,
-        _: &mut Context<ListState<Self>>,
+        ix: Option<IndexPath>,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
     ) {
+        let previewed = match ix.and_then(|ix| self.command(ix.row)) {
+            Some(Command::SetTheme(candidate)) => Some(**candidate),
+            _ => self.unpreviewed,
+        };
+        if let Some(previewed) = previewed {
+            install_theme(previewed.with_opacity(theme(cx).opacity), window, cx);
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -385,6 +404,26 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
             icon: icon::FONT,
             command: Command::SetFont(slot, name.clone()),
             label: name,
+        })
+        .collect()
+}
+
+/// Every theme dbdelve ships, in [`Theme::all`] order, the one in force marked
+/// the way the font list marks its family.
+fn theme_items(cx: &App) -> Vec<Item> {
+    let current = theme(cx).name;
+    Theme::all()
+        .into_iter()
+        .map(|candidate| Item {
+            label: candidate.name.to_string(),
+            hint: if candidate.name == current {
+                "current"
+            } else {
+                ""
+            }
+            .into(),
+            icon: icon::THEME,
+            command: Command::SetTheme(Box::new(candidate)),
         })
         .collect()
 }
@@ -693,10 +732,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         Command::RefreshConnection,
     ));
     items.push(Item::command(
-        "Cycle theme",
+        "Select theme",
         chord_hint("cycle_theme", overrides),
-        icon::SWITCHER,
-        Command::CycleTheme,
+        icon::THEME,
+        Command::SelectTheme,
     ));
     for (label, slot) in [
         ("Chrome font", FontSlot::Chrome),
