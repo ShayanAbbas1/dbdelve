@@ -1257,12 +1257,20 @@ impl Workspace {
                 .map(|(index, profile)| {
                     let activate_workspace = workspace.clone();
                     let leave_workspace = workspace.clone();
+                    let assign_workspace = workspace.clone();
+                    let orphan = !in_project
+                        && !self.projects.is_empty()
+                        && !self
+                            .projects
+                            .iter()
+                            .any(|project| project.connections.contains(&profile.id));
+                    let assigning = self.assigning_project.as_deref() == Some(&profile.id);
                     let edit_workspace = workspace.clone();
                     let duplicate_workspace = workspace.clone();
                     let remove_workspace = workspace.clone();
                     let pending = self.pending_removal.as_deref() == Some(&profile.id);
                     let active = index == self.active;
-                    div()
+                    let row = div()
                         .id(("profile", index))
                         .group(format!("profile-row-{index}"))
                         .h(px(30.))
@@ -1294,6 +1302,29 @@ impl Workspace {
                                         .group_hover(format!("profile-row-{index}"), |style| {
                                             style.opacity(1.)
                                         })
+                                })
+                                .when(orphan, |actions| {
+                                    let id = profile.id.clone();
+                                    actions.child(
+                                        icon_button(
+                                            ("assign-project", index),
+                                            icon::ADD_TO_PROJECT,
+                                            Tone::Quiet,
+                                            Control::Inline,
+                                            t,
+                                        )
+                                        .tooltip("Add to a project")
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                _ = assign_workspace.update(cx, |workspace, cx| {
+                                                    workspace.assigning_project =
+                                                        (!assigning).then(|| id.clone());
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    )
                                 })
                                 .when(in_project, |actions| {
                                     actions.child(
@@ -1408,7 +1439,40 @@ impl Workspace {
                             _ = activate_workspace.update(cx, |workspace, cx| {
                                 workspace.activate(index, cx);
                             });
-                        })
+                        });
+                    let choices = assigning.then(|| {
+                        self.projects
+                            .iter()
+                            .enumerate()
+                            .map(|(choice, project)| {
+                                let join_workspace = workspace.clone();
+                                let name = project.name.clone();
+                                switcher_row(("assign-to", choice), t)
+                                    .pl(px(layout::SPACE_LG))
+                                    .text_color(t.text_muted)
+                                    .child(row_icon(t, icon::PROJECT))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(project.name.clone()),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        _ = join_workspace.update(cx, |workspace, cx| {
+                                            workspace.join_project(index, &name, cx);
+                                        });
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(row)
+                        .children(choices.into_iter().flatten())
                         .into_any_element()
                 })
                 .collect::<Vec<_>>();
@@ -1498,6 +1562,7 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
+        let project_name = self.open_project().map(|project| project.name.clone());
         let toggle_workspace = workspace.clone();
 
         div()
@@ -1520,6 +1585,19 @@ impl Workspace {
                     .text_size(px(layout::TEXT_SM))
                     .text_color(t.text_faint)
                     .hover(|style| style.bg(t.element_hover).text_color(t.text))
+                    .when_some(project_name, |trigger, name| {
+                        trigger
+                            .child(row_icon(t, icon::PROJECT))
+                            .child(
+                                div()
+                                    .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(name),
+                            )
+                            .child("/")
+                    })
                     .child(row_icon_tinted(t, icon::DATABASE, active_color))
                     .child(
                         div()
@@ -1556,6 +1634,7 @@ impl Workspace {
                                 workspace.pending_removal = None;
                                 workspace.project_name = None;
                                 workspace.renaming_project = None;
+                                workspace.assigning_project = None;
                                 cx.notify();
                             });
                         })

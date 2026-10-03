@@ -152,6 +152,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Adds a connection to a named project without opening it: the switcher
+    /// stays where it was, under All connections.
+    pub(crate) fn join_project(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
+            return;
+        };
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.name == name)
+            && !project.connections.contains(&id)
+        {
+            project.connections.push(id);
+        }
+        self.assigning_project = None;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     pub(crate) fn add_to_project(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;

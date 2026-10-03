@@ -86,6 +86,9 @@ pub(crate) struct Workspace {
     /// Whether the open project's group is folded in the switcher. Only the
     /// open group is ever expanded, so this is the one flag it needs.
     pub(crate) project_collapsed: bool,
+    /// The connection whose "Add to a project" choices are unfolded in the
+    /// switcher, by id.
+    pub(crate) assigning_project: Option<String>,
     /// Whether the settings modal is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
@@ -177,6 +180,7 @@ impl Workspace {
             renaming_project: None,
             project_name_needs_focus: false,
             project_collapsed: false,
+            assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             rebinding: None,
