@@ -110,10 +110,22 @@ impl Workspace {
     }
 
     pub(crate) fn cancel_pending_run(&mut self, cx: &mut Context<Self>) {
-        if let Some(profile) = self.profile_mut() {
-            profile.session.pending_run = None;
+        let Some(profile) = self.profile_mut() else {
+            cx.notify();
+            return;
+        };
+        let stopped = profile.session.pending_run.take();
+        // Declining a statement ends the queue it was part of: nothing after
+        // a statement the user refused was asked for either. The refused
+        // statement never reaches a result, so the queue has to be let go of
+        // here or its switcher stays frozen on a statement that never ran.
+        let refused = stopped
+            .and_then(|pending| pending.resume)
+            .map(|run| run.tab);
+        match refused {
+            Some(tab) => self.stop_queue_on(tab, cx),
+            None => cx.notify(),
         }
-        cx.notify();
     }
 
     pub(crate) fn toggle_dont_ask(&mut self, cx: &mut Context<Self>) {

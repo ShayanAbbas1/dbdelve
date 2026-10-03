@@ -65,7 +65,6 @@ impl Buffer {
 
     /// Byte ranges of each statement, in source order, trimmed of surrounding
     /// whitespace. Empty if the buffer holds no statements.
-    #[cfg(test)]
     pub fn statements(&self) -> &[Range<usize>] {
         &self.statements
     }
@@ -105,6 +104,65 @@ impl Buffer {
             .or_else(|| self.statements.first())
             .cloned()
     }
+}
+
+/// What a selection of several statements runs as, one submission apiece:
+/// every unit in `sql`, or, with a non-empty `selection`, only the ones it
+/// touches -- a unit partly selected still counts.
+///
+/// **The unit is the batch on SQL Server and the statement everywhere else.**
+/// A `GO` line is a scope boundary there: a variable, a temp table and a
+/// routine's body all end with the batch that declared them, so splitting
+/// below one would send `DECLARE @x int` and the `SELECT @x` that reads it as
+/// two batches, and the second would not know the first. The other four
+/// engines have no such boundary -- a session carries variables, temp tables
+/// and an open transaction across every submission -- so there the statement
+/// is the unit and a semicolon is where it ends.
+///
+/// A counted `GO` is not refused here: this answers what the units are, not
+/// whether they may run. `batch_counts` is the refusal.
+pub(crate) fn queued_statements(
+    engine: Engine,
+    sql: &str,
+    selection: Option<Range<usize>>,
+) -> Vec<Range<usize>> {
+    let units = match engine {
+        Engine::SqlServer => queued_batches(sql),
+        _ => Buffer::for_engine(engine, sql).statements().to_vec(),
+    };
+    let Some(selection) = selection.filter(|sel| !sel.is_empty()) else {
+        return units;
+    };
+    units
+        .into_iter()
+        .filter(|range| range.start < selection.end && selection.start < range.end)
+        .collect()
+}
+
+/// How many result sets one submission of `sql` is expected to return: the
+/// statements inside it on SQL Server, where the unit submitted is the batch,
+/// and one everywhere else, where the unit submitted is the statement.
+///
+/// An expectation, not a promise. A statement returns at most one set and
+/// usually none, so this is an upper bound for the ordinary batch -- but a
+/// procedure call, a loop or a trigger can return more sets than the batch has
+/// statements, and there is no reading that off the text.
+pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
+    match engine {
+        Engine::SqlServer => tsql_statements(sql, 0..sql.len()).len().max(1),
+        _ => 1,
+    }
+}
+
+/// One range per `GO`-separated batch, trimmed, skipping any that holds no
+/// statement -- a batch of nothing but comments is not a batch to send, the
+/// same judgement `one_batch` makes.
+fn queued_batches(sql: &str) -> Vec<Range<usize>> {
+    batches(sql)
+        .into_iter()
+        .filter(|batch| !tsql_statements(sql, batch.clone()).is_empty())
+        .filter_map(|batch| trim_range(sql, batch))
+        .collect()
 }
 
 /// One key of an `ORDER BY`, as dbdelve reads and writes it.
@@ -1209,9 +1267,7 @@ pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
     if engine != Engine::SqlServer {
         return Ok(sql);
     }
-    for (_, count) in go_lines(sql) {
-        count.map_or(Ok(()), repeats)?;
-    }
+    batch_counts(engine, sql)?;
     // A batch of nothing but comments is not a second batch.
     let mut batches = batches(sql)
         .into_iter()
@@ -1223,6 +1279,19 @@ pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
             .into()),
         (batch, None) => Ok(batch.map_or("", |batch| &sql[batch])),
     }
+}
+
+/// Refused when any `GO` in `sql` carries a count. The count repeats its
+/// batch, and running it once is not what the buffer says; a selection run a
+/// batch at a time has to refuse it for the reason a single one does.
+pub(crate) fn batch_counts(engine: Engine, sql: &str) -> Result<(), String> {
+    if engine != Engine::SqlServer {
+        return Ok(());
+    }
+    for (_, count) in go_lines(sql) {
+        count.map_or(Ok(()), repeats)?;
+    }
+    Ok(())
 }
 
 /// Refused when the `GO` that ends the batch holding `offset` carries a count:
@@ -2259,6 +2328,91 @@ mod tests {
     #[test]
     fn unterminated_final_statement_is_still_found() {
         assert_eq!(texts("SELECT 1;\nSELECT 2"), vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    fn queued_texts<'a>(sql: &'a str, ranges: &[Range<usize>]) -> Vec<&'a str> {
+        ranges.iter().map(|r| &sql[r.clone()]).collect()
+    }
+
+    #[test]
+    fn a_queue_is_every_statement_with_no_selection() {
+        let sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+        let ranges = queued_statements(Engine::Postgres, sql, None);
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 1", "SELECT 2", "SELECT 3"]
+        );
+    }
+
+    #[test]
+    fn a_queue_includes_a_final_statement_with_no_trailing_semicolon() {
+        let sql = "SELECT 1;\nSELECT 2";
+        let ranges = queued_statements(Engine::Postgres, sql, None);
+        assert_eq!(queued_texts(sql, &ranges), vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn a_queue_keeps_only_statements_the_selection_overlaps() {
+        let sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+        let second = sql.find("SELECT 2").unwrap();
+        let third = sql.find("SELECT 3").unwrap();
+        // Spans all of statement 2 and part of statement 3.
+        let selection = second..third + "SELECT 3".len() / 2;
+        let ranges = queued_statements(Engine::Postgres, sql, Some(selection));
+        assert_eq!(queued_texts(sql, &ranges), vec!["SELECT 2", "SELECT 3"]);
+    }
+
+    #[test]
+    fn an_empty_selection_behaves_like_none() {
+        let sql = "SELECT 1;\nSELECT 2;";
+        let empty = 3..3;
+        assert_eq!(
+            queued_statements(Engine::Postgres, sql, Some(empty)),
+            queued_statements(Engine::Postgres, sql, None)
+        );
+    }
+
+    #[test]
+    fn a_queue_on_sql_server_never_runs_the_go_line() {
+        let sql = "SELECT 1;\nGO\nSELECT 2;";
+        let ranges = queued_statements(Engine::SqlServer, sql, None);
+        assert_eq!(queued_texts(sql, &ranges), vec!["SELECT 1;", "SELECT 2;"]);
+    }
+
+    /// A `GO` is a scope boundary and a semicolon is not, so cutting at the
+    /// semicolon would send the `DECLARE` and the `SELECT` that reads it as
+    /// two batches, and the second would not know the variable.
+    #[test]
+    fn a_sql_server_selection_runs_a_batch_at_a_time_not_a_statement() {
+        let sql = "DECLARE @x int = 1;\nSELECT @x;";
+        let ranges = queued_statements(Engine::SqlServer, sql, None);
+        assert_eq!(queued_texts(sql, &ranges), vec![sql]);
+
+        // The same text is two statements on an engine whose session carries
+        // the declaration across submissions.
+        assert_eq!(queued_statements(Engine::Postgres, sql, None).len(), 2);
+    }
+
+    /// A batch is what SQL Server is sent, so a grid is reserved per statement
+    /// inside it; everywhere else a submission is one statement and answers
+    /// with at most one set.
+    #[test]
+    fn a_sql_server_batch_expects_a_result_set_per_statement_in_it() {
+        let sql = "SELECT 1; SELECT 2;";
+        assert_eq!(expected_sets(Engine::SqlServer, sql), 2);
+        assert_eq!(expected_sets(Engine::Postgres, sql), 1);
+        assert_eq!(expected_sets(Engine::SqlServer, "SELECT 1"), 1);
+        assert_eq!(expected_sets(Engine::SqlServer, ""), 1);
+    }
+
+    #[test]
+    fn a_counted_go_is_refused_rather_than_run_once() {
+        let sql = "SELECT 1;\nGO 5\nSELECT 2;";
+        assert!(batch_counts(Engine::SqlServer, sql).is_err());
+        // A plain `GO` is a separator, not a repeat, and still runs.
+        assert!(batch_counts(Engine::SqlServer, "SELECT 1;\nGO\nSELECT 2;").is_ok());
+        // Nowhere else is `GO` anything but a name.
+        assert!(batch_counts(Engine::Postgres, sql).is_ok());
     }
 
     #[test]

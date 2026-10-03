@@ -42,7 +42,7 @@ use crate::{
     scroller::{SmoothScrollable, smooth, smooth_for, smooth_scoped},
     session::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, QueryState, QueryTab,
-        StructureState, Tab, result_pane_is_expanded,
+        StructureState, Tab, query_label, result_pane_is_expanded,
     },
     tab_drag::{DragTab, TabStrip},
     theme::{
@@ -210,11 +210,12 @@ fn render_query_surface(
     // The plan stands in for the rows rather than beside them: the pane is one
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
+    let (shown_state, shown_grid) = tab.shown();
     let bottom = match tab.showing_plan.then_some(tab.plan.as_ref()).flatten() {
         Some(explained) => render_plan(explained, plan_copied, &scope, cx),
         None => render_results(
-            &tab.query,
-            &tab.results,
+            shown_state,
+            shown_grid,
             Some(tab),
             tab.row_panel_folded,
             &tab.row_panel_split,
@@ -1300,11 +1301,130 @@ fn render_results(
         ),
     };
 
+    let pane = div().size_full().min_h_0().bg(t.data_glass());
+    match query_tab.and_then(|tab| result_switcher(tab, cx)) {
+        None => pane.child(content),
+        Some(switcher) => pane
+            .flex()
+            .flex_col()
+            .child(switcher)
+            .child(div().flex_1().min_h_0().child(content)),
+    }
+    .into_any_element()
+}
+
+/// One chip per statement a queue has run, and one for the statement still
+/// running, above the result the selected chip is showing.
+///
+/// Only from the second result: one chip is nothing to switch between, and an
+/// ordinary run has no queue at all.
+fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let queue = tab.queue.as_ref()?;
+    if queue.done.len() < 2 {
+        return None;
+    }
+    // The statement in flight is the tab's own slot, not one of `done`, so it
+    // is the chip one past the end. Selecting it is what following the run
+    // means; any other chip reads a result while that one keeps going.
+    let running = queue.awaiting.then(|| {
+        let label = tab
+            .ran_from
+            .as_ref()
+            .map(|(_, sql)| query_label(sql))
+            .unwrap_or_default();
+        let index = queue.done.len();
+        result_chip(
+            tab.id,
+            index,
+            &label,
+            &tab.query,
+            index == queue.showing,
+            cx,
+        )
+    });
+    let chips: Vec<AnyElement> = queue
+        .done
+        .iter()
+        .enumerate()
+        .map(|(index, finished)| {
+            result_chip(
+                tab.id,
+                index,
+                &query_label(&finished.sql),
+                &finished.state,
+                index == queue.showing,
+                cx,
+            )
+        })
+        .chain(running)
+        .collect();
+
+    Some(
+        div()
+            .id("query-results")
+            .h(px(layout::TAB_HEIGHT))
+            .flex_shrink_0()
+            .px(px(layout::SPACE_SM))
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .border_b_1()
+            .border_color(t.border)
+            // A long queue is scrolled through rather than allowed to push
+            // the grid it labels off the pane.
+            .overflow_x_scroll()
+            .children(chips)
+            .into_any_element(),
+    )
+}
+
+/// One statement of a queue, in the row-limit chips' clothes: its place in the
+/// queue, what it was, and what it came back with.
+fn result_chip(
+    id: u64,
+    index: usize,
+    label: &str,
+    state: &QueryState,
+    selected: bool,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let t = *theme(cx);
+    let (readout, tint) = match state {
+        QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
+        QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
+        QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
+        _ => (None, t.text_faint),
+    };
     div()
-        .size_full()
-        .min_h_0()
-        .bg(t.data_glass())
-        .child(content)
+        .id(("queued-result", index))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .h(px(24.))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .text_size(px(layout::TEXT_SM))
+        .whitespace_nowrap()
+        .map(|chip| {
+            if selected {
+                chip.bg(t.element_active).text_color(t.text)
+            } else {
+                chip.text_color(t.text_muted)
+                    .hover(|style| style.bg(t.element_hover))
+            }
+        })
+        .child(
+            div()
+                .text_color(t.text_faint)
+                .child(format!("{}.", index + 1)),
+        )
+        .child(label.to_string())
+        .children(readout.map(|readout| div().text_color(tint).child(readout)))
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            workspace.show_queued_result(Tab::Query(id), index, cx);
+        }))
         .into_any_element()
 }
 
@@ -1891,12 +2011,12 @@ fn render_tab_strip(
     // rather than deleted by a stray wheel press.
     let close_on_middle_click = |chip: Stateful<Div>, target: CloseTarget| {
         let workspace = workspace.clone();
-        chip.on_aux_click(move |event, _, cx| {
+        chip.on_aux_click(move |event, window, cx| {
             if !event.is_middle_click() {
                 return;
             }
             _ = workspace.update(cx, |workspace, cx| {
-                workspace.ask_before_close(target.clone(), cx);
+                workspace.ask_before_close(target.clone(), window, cx);
             });
         })
     };
@@ -1982,19 +2102,19 @@ fn render_tab_strip(
                                 t,
                             )
                             .tooltip("Close tab")
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 // Or the chip underneath activates the tab
                                 // this just closed, in the same click.
                                 cx.stop_propagation();
                                 _ = close_workspace.update(cx, |workspace, cx| {
-                                    workspace.ask_before_close(CloseTarget::Buffer(id), cx);
+                                    workspace.ask_before_close(CloseTarget::Buffer(id), window, cx);
                                 });
                             }),
                         ),
                 )
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     _ = open_workspace.update(cx, |workspace, cx| {
-                        workspace.activate_tab(Tab::Query(id), cx);
+                        workspace.activate_tab(Tab::Query(id), window, cx);
                     });
                 })
                 .map(|chip| {
@@ -2058,13 +2178,17 @@ fn render_tab_strip(
                                     ))
                                 })
                                 .tooltip("Delete query")
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     // Or the chip underneath opens the query in
                                     // the same click, and the confirmation this
                                     // arms is cleared before it can be seen.
                                     cx.stop_propagation();
                                     _ = delete_workspace.update(cx, |workspace, cx| {
-                                        workspace.arm_delete_saved_query(delete_name.clone(), cx);
+                                        workspace.arm_delete_saved_query(
+                                            delete_name.clone(),
+                                            window,
+                                            cx,
+                                        );
                                     });
                                 }),
                             ),
@@ -2130,19 +2254,19 @@ fn render_tab_strip(
                             t,
                         )
                         .tooltip("Close tab")
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             // Or the chip underneath activates the tab
                             // this just closed, in the same click.
                             cx.stop_propagation();
                             _ = close_workspace.update(cx, |workspace, cx| {
-                                workspace.ask_before_close(CloseTarget::Object(id), cx);
+                                workspace.ask_before_close(CloseTarget::Object(id), window, cx);
                             });
                         }),
                     ),
             )
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 _ = open_workspace.update(cx, |workspace, cx| {
-                    workspace.activate_tab(Tab::Object(id), cx);
+                    workspace.activate_tab(Tab::Object(id), window, cx);
                 });
             })
             .map(|chip| {

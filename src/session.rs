@@ -9,7 +9,7 @@
 //! These were plain types at the crate root. They moved out whole; nothing
 //! changed but their visibility.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{App, AppContext, Context, Entity, Window};
 use gpui_component::{
@@ -240,6 +240,10 @@ pub(crate) struct Session {
     pub(crate) insert_form: Option<InsertForm>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
+    /// The query tab whose queue stopped on a failed statement, held until
+    /// the user says whether the rest of it still runs. Nothing after the
+    /// failure is sent from here without an explicit Continue.
+    pub(crate) queue_failure: Option<Tab>,
     /// The edit held until the user accepts that a restored grid's rows may
     /// be stale.
     pub(crate) stale_edit: Option<StaleEdit>,
@@ -446,6 +450,7 @@ impl Session {
             apply_review: None,
             insert_form: None,
             pending_run: None,
+            queue_failure: None,
             stale_edit: None,
             structure_requests: HashMap::new(),
         }
@@ -553,7 +558,7 @@ impl Session {
     /// runs nothing — a routine is read, never executed by being opened.
     pub(crate) fn active_query(&self) -> Option<&QueryState> {
         match self.active_object() {
-            None => self.active_query_tab().map(|tab| &tab.query),
+            None => self.active_query_tab().map(|tab| tab.shown().0),
             Some(tab) => match &tab.body {
                 ObjectBody::Relation { query, .. } => Some(query),
                 ObjectBody::Routine(_) => None,
@@ -563,9 +568,14 @@ impl Session {
 
     /// The grid the visible surface is showing. A routine's tab has none: it is
     /// read, not run.
+    ///
+    /// A queue's selected result, not the tab's own slot, because this is what
+    /// copying, exporting and editing act on and all three mean the grid in
+    /// front of the user. `slot` is the other half of that split: it is where a
+    /// run's rows land, which stays the tab's slot whatever is being read.
     pub(crate) fn active_results(&self) -> Option<&Entity<TableState<ResultGrid>>> {
         match self.active_object() {
-            None => self.active_query_tab().map(|tab| &tab.results),
+            None => self.active_query_tab().map(|tab| tab.shown().1),
             Some(tab) => match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_) => None,
@@ -598,10 +608,19 @@ impl Session {
     /// and `slot` reach one grid by tab; this reaches all of them, for a
     /// setting that belongs to the connection rather than to a run --
     /// `Workspace::set_mode` is the caller.
+    /// A queue's finished results are in here too: they stay on screen through
+    /// the switcher, so a mode that did not reach them would leave an older
+    /// result editable after the connection stopped allowing it.
     pub(crate) fn grids(&self) -> impl Iterator<Item = &Entity<TableState<ResultGrid>>> {
         self.queries
             .iter()
-            .map(|tab| &tab.results)
+            .flat_map(|tab| {
+                std::iter::once(&tab.results).chain(
+                    tab.queue
+                        .iter()
+                        .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
+                )
+            })
             .chain(self.objects.iter().filter_map(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_) => None,
@@ -824,6 +843,16 @@ pub(crate) struct QueryTab {
     /// from `plan.is_some()`: a plan that has been read and flipped away from
     /// is still worth keeping to flip back to.
     pub(crate) showing_plan: bool,
+    /// The multi-statement run this tab is part way through, or `None` for an
+    /// ordinary single-statement run. `query` and `results` stay what they
+    /// always were -- the slot being run or shown right now -- and the
+    /// statements already finished are in `queue.done`.
+    pub(crate) queue: Option<Queue>,
+    /// How many queued results this tab was written with, until it is
+    /// hydrated and `queue` holds them. Taken by `hydrate_tab`, so a tab the
+    /// user never looks at still reports what is on disk and keeps the prune
+    /// off its files.
+    pub(crate) queued_results: usize,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
@@ -844,7 +873,106 @@ pub(crate) struct Explained {
     pub(crate) sql: String,
 }
 
+/// The statements a selection covers, run one at a time, and what each has
+/// produced so far.
+///
+/// The buffer text is held rather than read back when a statement is sent:
+/// the user is free to keep typing while the queue runs, and every range in
+/// `remaining` is an offset into the text as it was when Run was
+/// pressed.
+pub(crate) struct Queue {
+    pub(crate) sql: String,
+    /// Statements not yet sent, in order.
+    pub(crate) remaining: Vec<Range<usize>>,
+    /// One per statement already run, in order.
+    pub(crate) done: Vec<Finished>,
+    /// Which of `done` is the result on screen, or `done.len()` for the
+    /// statement still in flight, whose result is in the tab's own slot.
+    ///
+    /// A queue's results are read from `done` rather than swapped into the
+    /// tab's `query`/`results`, so the slot a run writes to is never the slot
+    /// the user is looking at. That is the whole reason an earlier result can
+    /// be read while a later statement is still running.
+    pub(crate) showing: usize,
+    /// Whether a statement this queue sent is still out.
+    ///
+    /// Load-bearing: a finished queue stays on the tab so its results can be
+    /// switched between, and every completion on that tab reaches the queue.
+    /// Without this an ordinary Run, a header sort or a grid edit on such a
+    /// tab would land in `done` as another of the queue's statements.
+    pub(crate) awaiting: bool,
+    /// One empty grid per statement still to run, built when the run started.
+    ///
+    /// Every statement needs its own, or the result stored in `done` is
+    /// overwritten by the statement after it -- and the completion that lands
+    /// a result runs on the executor, where there is no `Window` to build one
+    /// with. ponytail: the whole queue's grids are allocated up front, which
+    /// is the same count they reach anyway; take a window into
+    /// `execute_unchecked` if one ever needs to be built later than this.
+    pub(crate) spare: Vec<Entity<TableState<ResultGrid>>>,
+}
+
+/// One statement of a queue that has run, with the result it produced.
+pub(crate) struct Finished {
+    /// The statement that produced this result, which is both what the chip is
+    /// labelled from and what the snapshot carries. Held rather than sliced out
+    /// of [`Queue::sql`] on demand because a queue restored from disk has no
+    /// text to slice: the statements are gone and the results are not.
+    pub(crate) sql: String,
+    /// Where the statement begins in [`Queue::sql`].
+    pub(crate) start: usize,
+    pub(crate) state: QueryState,
+    pub(crate) grid: Entity<TableState<ResultGrid>>,
+}
+
+const QUERY_LABEL_LIMIT: usize = 32;
+
+/// A statement as a switcher chip reads it: whitespace collapsed, clipped to
+/// what a chip can hold.
+pub(crate) fn query_label(statement: &str) -> String {
+    let flat = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(QUERY_LABEL_LIMIT) {
+        Some((end, _)) => format!("{}…", &flat[..end]),
+        None => flat,
+    }
+}
+
+/// What a finished statement leaves a queue to do.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Next(Range<usize>),
+    /// The statement failed with more to run, so the user decides whether the
+    /// rest still runs.
+    Ask,
+    Finished,
+}
+
+/// Split out of the completion handler so the one branch the queue turns on is
+/// checkable without a window.
+pub(crate) fn next_step(failed: bool, remaining: &[Range<usize>]) -> Step {
+    match remaining.first() {
+        // Nothing follows the failure, so there is nothing to decide.
+        None => Step::Finished,
+        Some(_) if failed => Step::Ask,
+        Some(next) => Step::Next(next.clone()),
+    }
+}
+
 impl QueryTab {
+    /// The result on screen: whichever of a queue's finished statements the
+    /// switcher has selected, else the tab's own slot, which is what a run
+    /// writes into.
+    pub(crate) fn shown(&self) -> (&QueryState, &Entity<TableState<ResultGrid>>) {
+        match self
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.done.get(queue.showing))
+        {
+            Some(finished) => (&finished.state, &finished.grid),
+            None => (&self.query, &self.results),
+        }
+    }
+
     /// Read one stored buffer back off disk.
     ///
     /// Returns the message rather than reporting it: several tabs are restored
@@ -884,6 +1012,11 @@ impl QueryTab {
             ran_from: None,
             hydrated: false,
             plan: None,
+            // A restored queue is rebuilt in `hydrate_tab`, which has the
+            // window its grids need; it is never part way through, since
+            // nothing of a run in flight is kept.
+            queue: None,
+            queued_results: stored.queued_results,
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),
@@ -896,6 +1029,12 @@ impl QueryTab {
             id: self.id,
             name: self.open_query.clone(),
             active,
+            // The live queue is the truth once there is one; until the tab is
+            // hydrated, what was written last time is.
+            queued_results: self
+                .queue
+                .as_ref()
+                .map_or(self.queued_results, |queue| queue.done.len()),
         }
     }
 }
@@ -1257,6 +1396,10 @@ pub(crate) enum Refresh {
     Relation(u64),
 }
 
+/// `Clone` because a queue keeps the state of every statement it has run
+/// beside the one on screen; the clone is a finished slot, never a `Running`
+/// one.
+#[derive(Clone)]
 pub(crate) enum QueryState {
     Idle,
     /// `cancelling` says when a cancel was *sent* for this slot, and nothing
@@ -1318,8 +1461,31 @@ pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
 /// and writing one would replace a good snapshot with nothing. Failures are
 /// dropped rather than reported, unlike the buffers this runs beside -- a cache
 /// that did not land costs a re-run, not somebody's unsaved work.
+///
+/// A queue's results are written one per key beside the tab's own, each
+/// carrying its statement as `last_query`, which is what a restored chip is
+/// labelled from. They do not wait on the tab's own state: a statement that
+/// finished is a result whether or not the one after it is still running.
 pub(crate) fn write_grids(profile: &Profile, cx: &App) {
     for tab in &profile.session.queries {
+        for (index, finished) in tab
+            .queue
+            .iter()
+            .flat_map(|queue| queue.done.iter().enumerate())
+        {
+            let grid = finished.grid.read(cx).delegate().stored();
+            if grid.columns.is_empty() {
+                continue;
+            }
+            let _ = store::write_grid(
+                &profile.id,
+                &store::queued_grid_key(tab.id, index),
+                &store::StoredGrid {
+                    last_query: Some(finished.sql.clone()),
+                    ..grid
+                },
+            );
+        }
         if !matches!(tab.query, QueryState::Complete { .. }) {
             continue;
         }
@@ -1420,6 +1586,24 @@ mod tests {
         assert_eq!(
             Tab::Query(1).scroll_scope("a"),
             Tab::Query(1).scroll_scope("a")
+        );
+    }
+
+    #[test]
+    fn a_queue_asks_after_a_failure_only_when_something_is_left_to_run() {
+        let remaining = [10..18, 20..27];
+        assert_eq!(next_step(false, &remaining), Step::Next(10..18));
+        assert_eq!(next_step(true, &remaining), Step::Ask);
+        assert_eq!(next_step(true, &[]), Step::Finished);
+        assert_eq!(next_step(false, &[]), Step::Finished);
+    }
+
+    #[test]
+    fn a_query_label_is_one_clipped_line() {
+        assert_eq!(query_label("SELECT\n  1"), "SELECT 1");
+        assert_eq!(
+            query_label("SELECT a, b, c, d, e, f, g, h FROM accounts"),
+            "SELECT a, b, c, d, e, f, g, h FR…"
         );
     }
 
@@ -1697,6 +1881,7 @@ mod tests {
                     id: *id,
                     name: None,
                     active: false,
+                    queued_results: 0,
                 })
                 .collect::<Vec<_>>()
         };

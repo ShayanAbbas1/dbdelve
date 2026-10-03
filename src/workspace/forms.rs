@@ -630,9 +630,9 @@ impl Workspace {
                                         t,
                                     )
                                     .on_click(
-                                        move |_, _, cx| {
+                                        move |_, window, cx| {
                                             _ = discard_workspace.update(cx, |workspace, cx| {
-                                                workspace.confirm_discard_close(cx);
+                                                workspace.confirm_discard_close(window, cx);
                                             });
                                         },
                                     ),
@@ -703,9 +703,13 @@ impl Workspace {
                                         t,
                                     )
                                     .on_click(
-                                        move |_, _, cx| {
+                                        move |_, window, cx| {
                                             _ = delete_workspace.update(cx, |workspace, cx| {
-                                                workspace.delete_saved_query(deleted.clone(), cx);
+                                                workspace.delete_saved_query(
+                                                    deleted.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                             });
                                         },
                                     ),
@@ -869,6 +873,99 @@ impl Workspace {
                                         move |_, _, cx| {
                                             _ = approve.update(cx, |workspace, cx| {
                                                 workspace.approve_pending_run(cx);
+                                            });
+                                        },
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A queue's statement failed with more of the queue left to run, so the
+    /// rest waits here until the user says whether it still runs.
+    pub(crate) fn render_queue_failure(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let profile = self.profile()?;
+        let Tab::Query(id) = profile.session.queue_failure? else {
+            return None;
+        };
+        let queue = profile.session.query_tab(id)?.queue.as_ref()?;
+        let failed = queue.done.last()?;
+        let QueryState::Failed(error) = &failed.state else {
+            return None;
+        };
+        // The buffer may have been typed in since the run started, so this
+        // is the line the statement ran from, in the text it ran from.
+        let line = queue.sql.get(..failed.start)?.matches('\n').count() + 1;
+        let message = format!(
+            "Statement {} of the selection, at line {line}, {}, failed: {} {} {} not run.",
+            queue.done.len(),
+            crate::session::query_label(&failed.sql),
+            error.message,
+            queue.remaining.len(),
+            match queue.remaining.len() {
+                1 => "statement after it has",
+                _ => "statements after it have",
+            },
+        );
+
+        let stop = cx.entity().downgrade();
+        let carry_on = stop.clone();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "Run stopped"))
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child(message),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "Stop leaves the results so far on screen and sends none of \
+                                     the rest. Continue sends the statement after the one that \
+                                     failed.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    button("stop-queue", "Stop", Tone::Quiet, Control::Standard, t)
+                                        .on_click(move |_, _, cx| {
+                                            _ = stop.update(cx, |workspace, cx| {
+                                                workspace.stop_queue(cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    button(
+                                        "continue-queue",
+                                        "Continue",
+                                        Tone::Primary,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = carry_on.update(cx, |workspace, cx| {
+                                                workspace.continue_queue(cx);
                                             });
                                         },
                                     ),

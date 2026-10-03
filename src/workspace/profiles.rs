@@ -128,10 +128,17 @@ impl Workspace {
         );
         // Snapshots whose tab is gone -- a renamed table strands its file
         // under the old name, and nothing else will ever remove it.
+        // A buffer's queued results are live too, and the count is what says
+        // how many: a tab that ran fewer statements the second time leaves the
+        // rest behind, and they are orphans the moment it does.
         let live_grids =
             stored_queries
                 .iter()
-                .map(|tab| store::query_grid_key(tab.id))
+                .flat_map(|tab| {
+                    std::iter::once(store::query_grid_key(tab.id)).chain(
+                        (0..tab.queued_results).map(|index| store::queued_grid_key(tab.id, index)),
+                    )
+                })
                 .chain(stored.open_objects.iter().map(|object| {
                     store::object_grid_key(&object.schema, &object.name, &object.filter)
                 }))
@@ -1328,6 +1335,7 @@ fn first_buffer(name: Option<String>) -> Vec<store::StoredQueryTab> {
         id: 0,
         name,
         active: true,
+        queued_results: 0,
     }]
 }
 
@@ -1356,6 +1364,7 @@ mod tests {
             id: 0,
             name: None,
             active: true,
+            queued_results: 0,
         };
         // A connection just made.
         assert_eq!(first_buffer(None), std::slice::from_ref(&blank));
@@ -1377,6 +1386,7 @@ mod tests {
             id: 2,
             name: None,
             active: false,
+            queued_results: 0,
         }];
         assert_eq!(stored_buffers(open.clone(), Some(3), None), open);
     }

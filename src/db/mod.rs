@@ -1268,6 +1268,18 @@ pub struct QueryResult {
     /// `None` is the answer for every result set dbdelve cannot address a single
     /// row of, and it is not an error — see [`Connection::edit_target`].
     pub edit: Option<EditTarget>,
+    /// The submission's result sets after this one, in order.
+    ///
+    /// One level deep and never a tree: a nested `rest` is always empty,
+    /// because these are the sets of one submission and a set has no
+    /// submission of its own.
+    ///
+    /// Empty on every engine but SQL Server. Everywhere else a submission
+    /// holds one statement — that is the unit `sql::queued_statements` splits
+    /// those engines on — so there is never a second set to carry. SQL Server
+    /// is split on the `GO`-separated batch instead, because a batch is a
+    /// scope boundary, and one batch readily returns several.
+    pub rest: Vec<QueryResult>,
 }
 
 /// The table a result set's rows can be written back to, already resolved to

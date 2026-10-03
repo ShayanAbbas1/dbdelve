@@ -53,7 +53,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+    pub(crate) fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.profile().map(|profile| &profile.session) else {
             return;
         };
@@ -67,7 +67,7 @@ impl Workspace {
             return;
         };
         let next = tabs[(index as isize + step).rem_euclid(tabs.len() as isize) as usize];
-        self.activate_tab(next, cx);
+        self.activate_tab(next, window, cx);
     }
 
     /// A chip has been picked up. The chips are what the strip last drew, so
@@ -128,12 +128,17 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(1, cx);
+    pub(crate) fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, window, cx);
     }
 
-    pub(crate) fn previous_tab(&mut self, _: &PreviousTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(-1, cx);
+    pub(crate) fn previous_tab(
+        &mut self,
+        _: &PreviousTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_tab(-1, window, cx);
     }
 
     pub(crate) fn select_theme(
@@ -330,7 +335,7 @@ impl Workspace {
     /// closing its tab is deleting that file — the strip has no room for a
     /// query that exists but is not listed — so that one asks first. The
     /// scratch buffer has no closed state at all and is left alone.
-    pub(crate) fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // The palette is over the tab and holds the keyboard: a stroke that
         // reached here through it would close a tab nobody was looking at.
         if self.palette.is_some() {
@@ -344,7 +349,7 @@ impl Workspace {
             return;
         }
         let target = close_target(session.active, session.open_query());
-        self.ask_before_close(target, cx);
+        self.ask_before_close(target, window, cx);
     }
 
     /// Close a tab, asking first if it holds cell edits nobody has applied.
@@ -353,7 +358,12 @@ impl Workspace {
     /// chip's own close button, the palette -- because the edits are lost the
     /// same way whichever one it was, and a guard on one path is a guard on
     /// none.
-    pub(crate) fn ask_before_close(&mut self, target: CloseTarget, cx: &mut Context<Self>) {
+    pub(crate) fn ask_before_close(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let unapplied = self.profile().is_some_and(|profile| {
             target
                 .tab(&profile.session)
@@ -361,7 +371,7 @@ impl Workspace {
                 .is_some_and(|results| results.read(cx).delegate().has_pending())
         });
         if !unapplied {
-            self.close_now(target, cx);
+            self.close_now(target, window, cx);
             return;
         }
         if let Some(profile) = self.profile_mut() {
@@ -375,10 +385,15 @@ impl Workspace {
     ///
     /// Nothing is stopped here: each close stops its tab's statement as the
     /// tab goes, and a saved query's goes only once its delete is confirmed.
-    pub(crate) fn close_now(&mut self, target: CloseTarget, cx: &mut Context<Self>) {
+    pub(crate) fn close_now(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match target {
-            CloseTarget::Object(id) => self.close_object(id, cx),
-            CloseTarget::Buffer(id) => self.close_buffer(id, cx),
+            CloseTarget::Object(id) => self.close_object(id, window, cx),
+            CloseTarget::Buffer(id) => self.close_buffer(id, window, cx),
             CloseTarget::SavedQuery(name) => {
                 if let Some(profile) = self.profile_mut() {
                     profile.session.pending_close = Some(name);
@@ -417,14 +432,14 @@ impl Workspace {
     }
 
     /// Close the tab the discard prompt was raised over, edits and all.
-    pub(crate) fn confirm_discard_close(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .profile_mut()
             .and_then(|profile| profile.session.pending_discard.take())
         else {
             return;
         };
-        self.close_now(target, cx);
+        self.close_now(target, window, cx);
     }
 
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {
