@@ -352,7 +352,7 @@ ORDER BY column_ordinal
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 /// The port the server listens on when the profile does not say.
-const DEFAULT_PORT: u16 = 1433;
+pub(super) const DEFAULT_PORT: u16 = 1433;
 
 /// What every statement dbdelve writes assumes of the session, and what a
 /// user's `SET` can change under it: `XACT_ABORT` is what makes a bracketed

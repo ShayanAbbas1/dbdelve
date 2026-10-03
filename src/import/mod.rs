@@ -2,7 +2,7 @@
 //!
 //! Each source reads its own files into a [`Report`] and never touches the
 //! workspace: what is already here, what the names collide with, and where the
-//! passwords go are decided by `Workspace::import_connections`, once, for
+//! passwords go are decided by `Workspace::add_imported`, once, for
 //! every source.
 
 mod dbeaver;
@@ -10,7 +10,10 @@ mod tableplus;
 
 use serde::Deserialize;
 
-use crate::{db::ConnectionConfig, theme::ConnectionColor};
+use crate::{
+    db::{ConnectionConfig, SslMode},
+    theme::ConnectionColor,
+};
 
 /// A connection this build can open, with whatever it could not carry over.
 #[derive(Debug, PartialEq)]
@@ -87,21 +90,42 @@ pub(super) fn port(label: &str, value: Option<String>, notes: &mut Vec<String>) 
 }
 
 /// Whether `candidate` points where an existing profile already does, so that
-/// running an import twice adds nothing the second time.
+/// running an import twice adds nothing the second time. A blank port is the
+/// default one, since DBeaver writes 5432 where the form leaves it blank.
 pub(crate) fn already_have<'a>(
     existing: impl IntoIterator<Item = &'a ConnectionConfig>,
     candidate: &ConnectionConfig,
 ) -> bool {
+    let engine = candidate.engine();
     existing.into_iter().any(|config| {
-        config.engine() == candidate.engine()
+        config.engine() == engine
             && match (config.server(), candidate.server()) {
                 (Some(a), Some(b)) => {
-                    (&a.host, a.port, &a.database, &a.user)
-                        == (&b.host, b.port, &b.database, &b.user)
+                    a.host.eq_ignore_ascii_case(&b.host)
+                        && a.port.or(engine.default_port()) == b.port.or(engine.default_port())
+                        && (&a.database, &a.user) == (&b.database, &b.user)
                 }
                 _ => config.endpoint() == candidate.endpoint(),
             }
     })
+}
+
+/// Kept only where the mode consults it, as the form does, and said where it
+/// isn't: libpq reads a CA file under `require` as asking for verify-ca.
+pub(super) fn root_certificate(
+    sslmode: SslMode,
+    path: Option<String>,
+    notes: &mut Vec<String>,
+) -> Option<String> {
+    let path = path?;
+    if sslmode.checks_certificate() {
+        return Some(path);
+    }
+    notes.push(format!(
+        "CA certificate left off: SSL mode {} doesn't check one",
+        sslmode.as_str()
+    ));
+    None
 }
 
 impl Report {
@@ -175,6 +199,18 @@ mod tests {
             server.password = "secret".into();
         }
         assert!(already_have(&existing, &different_password));
+        assert!(already_have(
+            &existing,
+            &postgres("DB.example.com", None, "app", "alice")
+        ));
+        assert!(already_have(
+            &[postgres("db.example.com", None, "app", "alice")],
+            &postgres("db.example.com", Some(5432), "app", "alice")
+        ));
+        assert!(!already_have(
+            &[postgres("db.example.com", None, "app", "alice")],
+            &postgres("db.example.com", Some(5433), "app", "alice")
+        ));
         assert!(already_have(
             &existing,
             &ConnectionConfig::Sqlite {

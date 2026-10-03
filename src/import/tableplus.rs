@@ -11,7 +11,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Imported, Report, Skipped, port};
+use super::{Imported, Report, Skipped, port, root_certificate};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
     theme::ConnectionColor,
@@ -188,7 +188,7 @@ fn read_rows(
 }
 
 /// The engine, and what each index of TablePlus's TLS dropdown for the driver
-/// means. Empty where the driver has no dropdown DBDelve knows of.
+/// means.
 enum Target {
     Server(fn(ServerConfig) -> ConnectionConfig, &'static [SslMode]),
     File,
@@ -224,9 +224,12 @@ fn target(driver: &str) -> Result<Target, String> {
         "mariadb" => Ok(Target::Server(ConnectionConfig::MySql, MARIADB_TLS)),
         "sqlite" => Ok(Target::File),
         "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
-        _ if lowered.contains("sqlserver") || lowered.contains("sql server") => {
-            Ok(Target::Server(ConnectionConfig::SqlServer, &[]))
-        }
+        // Only the first entry of its dropdown is known, so any other comes in
+        // as verify-full rather than as something it may be stronger than.
+        _ if lowered.contains("sqlserver") || lowered.contains("sql server") => Ok(Target::Server(
+            ConnectionConfig::SqlServer,
+            &[SslMode::Prefer],
+        )),
         _ => Err(format!("{driver} isn't supported")),
     }
 }
@@ -246,15 +249,14 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
             if row.host.is_empty() {
                 return Err("it has no host".into());
             }
-            let (sslmode, root_certificate) = ssl(row, tls, &mut notes);
+            let (sslmode, ca) = ssl(row, tls, &mut notes);
             engine(ServerConfig {
                 host: row.host.clone(),
                 port: port("port", filled(&row.port), &mut notes),
                 database: row.database.clone(),
                 user: row.user.clone(),
                 sslmode,
-                // As the form does: kept only where the mode consults it.
-                root_certificate: root_certificate.filter(|_| sslmode.checks_certificate()),
+                root_certificate: root_certificate(sslmode, ca, &mut notes),
                 ssh: ssh(row, &mut notes),
                 ..ServerConfig::default()
             })
@@ -276,9 +278,6 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
 }
 
 fn ssl(row: &Row, tls: &[SslMode], notes: &mut Vec<String>) -> (SslMode, Option<String>) {
-    if tls.is_empty() {
-        return (SslMode::default(), None);
-    }
     let sslmode = usize::try_from(row.tls_mode)
         .ok()
         .and_then(|index| tls.get(index).copied())
@@ -448,13 +447,17 @@ mod tests {
             [Prefer, Disable, Require, VerifyCa, VerifyFull]
         );
         assert_eq!(modes("MariaDB", 3), [Prefer, Require, VerifyFull]);
-        assert_eq!(modes("MicrosoftSQLServer", 6), [SslMode::default(); 6]);
+        assert_eq!(
+            modes("MicrosoftSQLServer", 2),
+            [SslMode::default(), VerifyFull]
+        );
 
         for (driver, index) in [
             ("PostgreSQL", 6),
             ("MySQL", 5),
             ("MariaDB", 3),
             ("MySQL", -1),
+            ("MicrosoftSQLServer", 1),
         ] {
             let imported = imported(driver, json!({ "tLSMode": index })).unwrap();
             assert_eq!(server(&imported).sslmode, VerifyFull, "{driver} {index}");
@@ -481,7 +484,13 @@ mod tests {
             ssl(5, ["", "", "/certs/ca.pem"]),
             (Some("/certs/ca.pem".into()), vec![])
         );
-        assert_eq!(ssl(2, ["", "", "/certs/ca.pem"]), (None, vec![]));
+        assert_eq!(
+            ssl(2, ["", "", "/certs/ca.pem"]),
+            (
+                None,
+                vec!["CA certificate left off: SSL mode require doesn't check one".to_string()]
+            )
+        );
         let client = vec!["client certificate left off: DBDelve doesn't send one".to_string()];
         assert_eq!(ssl(4, ["/k.pem", "", ""]), (None, client.clone()));
         assert_eq!(ssl(4, ["", "/c.pem", ""]), (None, client));

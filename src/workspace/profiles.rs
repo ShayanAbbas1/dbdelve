@@ -706,24 +706,40 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
         let read = cx.background_executor().spawn(async move { source.read() });
         cx.spawn_in(window, async move |workspace, cx| {
             let report = read.await;
-            _ = workspace.update_in(cx, |workspace, window, cx| match report {
-                Ok(report) => workspace.add_imported(source, report, window, cx),
-                Err(message) => workspace.note(message, cx),
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.importing = false;
+                let summary = match report {
+                    Ok(report) => workspace.add_imported(source, report, window, cx),
+                    Err(message) => message,
+                };
+                // A note on a profile is out of sight while the form covers it.
+                match &mut workspace.form {
+                    Some(form) => {
+                        form.error = Some(summary);
+                        cx.notify();
+                    }
+                    None => workspace.note(summary, cx),
+                }
             });
         })
         .detach();
     }
 
+    /// Returns the summary line.
     fn add_imported(
         &mut self,
         source: Source,
         report: import::Report,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> String {
         let had_none = self.profiles.is_empty();
         let mut added = import::Report {
             skipped: report.skipped,
@@ -749,15 +765,34 @@ impl Workspace {
             if names.contains(&imported.name) {
                 imported.name = duplicate_profile_name(&imported.name, &names);
             }
-            self.create_profile(
+            // Saved here rather than by `create_profile`, whose failure note
+            // the summary would overwrite: a password that didn't reach the
+            // keychain is gone at the next launch, and has to be said.
+            let mut config = imported.config.clone();
+            let password = config
+                .server_mut()
+                .map(|server| std::mem::take(&mut server.password))
+                .filter(|password| !password.is_empty());
+            let index = self.create_profile(
                 imported.name.clone(),
-                imported.config.clone(),
+                config,
                 imported.color,
                 Mode::ReadOnly,
                 Origin::Form,
                 window,
                 cx,
             );
+            if let Some(password) = password {
+                let profile = &mut self.profiles[index];
+                if let Err(message) = store::set_password(&profile.id, &password)
+                    && !added.notes.contains(&message)
+                {
+                    added.notes.push(message);
+                }
+                if let Some(server) = profile.config.server_mut() {
+                    server.password = password;
+                }
+            }
             added.imported.push(imported);
         }
 
@@ -776,7 +811,7 @@ impl Workspace {
                 self.activate(0, cx);
             }
         }
-        self.note(added.summary(source), cx);
+        added.summary(source)
     }
 
     pub(crate) fn connect_active(&mut self, cx: &mut Context<Self>) {

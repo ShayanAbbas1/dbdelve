@@ -157,6 +157,16 @@ impl Engine {
         }
     }
 
+    /// The port a blank one means, where the engine has one.
+    pub fn default_port(self) -> Option<u16> {
+        match self {
+            Self::Postgres => Some(postgres::DEFAULT_PORT),
+            Self::MySql => Some(mysql::DEFAULT_PORT),
+            Self::SqlServer => Some(mssql::DEFAULT_PORT),
+            Self::Sqlite | Self::Snowflake => None,
+        }
+    }
+
     /// Which set of fields makes a connection to this engine, which is what
     /// the form asks before drawing any. A server's host, credentials and TLS
     /// are absent for a file, and an account has a key where a server has a

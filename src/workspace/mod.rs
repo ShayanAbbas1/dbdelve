@@ -112,6 +112,9 @@ pub(crate) struct Workspace {
     /// slot: only one plan pane is ever on screen at a time.
     pub(crate) plan_copied: bool,
     pub(crate) pending_removal: Option<String>,
+    /// An import's read is still out, so a second click doesn't start another
+    /// round of Keychain prompts whose summary would say all were duplicates.
+    pub(crate) importing: bool,
     /// Whether `store::load_profiles` failed outright rather than finding no
     /// file. Set once at startup and never cleared, because the file it could
     /// not read is still sitting there -- and a session that never saw it must
@@ -176,6 +179,7 @@ impl Workspace {
             },
             plan_copied: false,
             pending_removal: None,
+            importing: false,
             store_unreadable: false,
             next_generation: 0,
             palette: None,

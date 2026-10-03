@@ -11,7 +11,7 @@ use std::{
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use serde_json::Value;
 
-use super::{Imported, Report, Skipped, port};
+use super::{Imported, Report, Skipped, port, root_certificate};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
     store,
@@ -191,10 +191,8 @@ fn import(
             .or_else(|| text(connection.get(key)))
             .unwrap_or_default()
     };
-    let target = target(
-        &named("original-provider", "provider"),
-        &named("original-driver", "driver"),
-    )?;
+    let driver = named("original-driver", "driver");
+    let target = target(&named("original-provider", "provider"), &driver)?;
     let configuration = &connection["configuration"];
     let field = |key: &str| text(configuration.get(key));
     let url = field("url");
@@ -233,16 +231,19 @@ fn import(
                     ..ServerConfig::default()
                 })
             };
+            let microsoft = matches!(config, ConnectionConfig::SqlServer(_))
+                && !driver.to_ascii_lowercase().contains("jtds");
             if let Some(server) = config.server_mut() {
-                let handlers = &configuration["handlers"];
                 let ssh_login =
                     credentials.and_then(|credentials| credentials.get("network/ssh_tunnel"));
-                server.ssh = ssh(&handlers["ssh_tunnel"], ssh_login, &mut notes);
-                if let Some((sslmode, root_certificate)) = ssl(handlers, &mut notes) {
+                server.ssh = ssh(
+                    &configuration["handlers"]["ssh_tunnel"],
+                    ssh_login,
+                    &mut notes,
+                );
+                if let Some((sslmode, ca)) = ssl(configuration, microsoft, &mut notes) {
                     server.sslmode = sslmode;
-                    // As the form does: kept only where the mode consults it.
-                    server.root_certificate =
-                        root_certificate.filter(|_| sslmode.checks_certificate());
+                    server.root_certificate = root_certificate(sslmode, ca, &mut notes);
                 }
             }
             config
@@ -276,13 +277,24 @@ fn from_jdbc(url: &str, user: &str, password: &str) -> Result<ConnectionConfig, 
         _ => return Err(UNREADABLE.into()),
     };
     let mut url = url::Url::parse(&url).map_err(|error| error.to_string())?;
-    if url.username().is_empty() && !user.is_empty() {
-        _ = url.set_username(user);
+    // Set on the config rather than in the URL: `set_password` leaves a `%`
+    // as it is, so the URL would decode a password like `p%41ss` as `pAss`.
+    // The username goes in only so the URL parses; the config's is replaced.
+    let fill_user = url.username().is_empty() && !user.is_empty();
+    let fill_password = url.password().is_none() && !password.is_empty();
+    if fill_user {
+        _ = url.set_username("user");
     }
-    if url.password().is_none() && !password.is_empty() {
-        _ = url.set_password(Some(password));
+    let mut config = ConnectionConfig::from_url(url.as_str())?;
+    if let Some(server) = config.server_mut() {
+        if fill_user {
+            server.user = user.to_string();
+        }
+        if fill_password {
+            server.password = password.to_string();
+        }
     }
-    ConnectionConfig::from_url(url.as_str())
+    Ok(config)
 }
 
 fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Option<SshTunnel> {
@@ -329,34 +341,105 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
     })
 }
 
-/// Postgres's handler says `sslMode`; MySQL's says only whether to require
-/// TLS and whether to check the certificate's authority, which is what
-/// verify-ca checks.
-fn ssl(handlers: &Value, notes: &mut Vec<String>) -> Option<(SslMode, Option<String>)> {
-    let (_, handler) = handlers
-        .as_object()?
-        .iter()
-        .find(|(id, handler)| id.ends_with("_ssl") && enabled(handler))?;
-    let properties = &handler["properties"];
-    let property = |key: &str| text(properties.get(key));
-    if property("ssl.client.cert").is_some() || property("ssl.client.key").is_some() {
+/// The SSL tab first, then the driver properties, then what Microsoft's driver
+/// does unasked; `None` where nothing says, leaving a URL's own `sslmode`.
+/// Postgres's tab says `sslMode`; MySQL's says only whether to require TLS and
+/// whether to check the certificate's authority, which is what verify-ca
+/// checks. A driver property about TLS that isn't read here is said, since it
+/// may have asked for more than the mode it comes in with.
+fn ssl(
+    configuration: &Value,
+    microsoft: bool,
+    notes: &mut Vec<String>,
+) -> Option<(SslMode, Option<String>)> {
+    let handler = configuration["handlers"].as_object().and_then(|handlers| {
+        handlers
+            .iter()
+            .find(|(id, handler)| id.ends_with("_ssl") && enabled(handler))
+            .map(|(_, handler)| &handler["properties"])
+    });
+    let tab = |key: &str| handler.and_then(|properties| text(properties.get(key)));
+    let properties = configuration["properties"].as_object();
+    let driver = |key: &str| {
+        properties?
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .and_then(|(_, value)| text(Some(value)))
+    };
+
+    if tab("ssl.client.cert").is_some() || tab("ssl.client.key").is_some() {
         notes.push("client certificate left off: DBDelve doesn't send one".into());
     }
-    let sslmode = match property("sslMode") {
-        // libpq's `allow` tries plaintext first, which the driver cannot (see
-        // `SslMode::parse`). `prefer` tries TLS first: never less than asked.
-        Some(mode) if mode.eq_ignore_ascii_case("allow") => SslMode::Prefer,
-        Some(mode) => SslMode::parse(&mode).unwrap_or_else(|_| {
+    let read: &[&str] = if microsoft {
+        &[
+            "sslmode",
+            "sslrootcert",
+            "encrypt",
+            "trustservercertificate",
+        ]
+    } else {
+        &["sslmode", "sslrootcert"]
+    };
+    for name in properties
+        .into_iter()
+        .flat_map(|properties| properties.keys())
+    {
+        let lowered = name.to_ascii_lowercase();
+        if ["ssl", "tls", "encrypt", "certificate"]
+            .iter()
+            .any(|word| lowered.contains(word))
+            && !read.contains(&lowered.as_str())
+        {
+            notes.push(format!("driver property {name} left off"));
+        }
+    }
+
+    let is = |value: Option<String>, expected: &str| {
+        value.is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    };
+    let sslmode = if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode")) {
+        named_mode(&mode).unwrap_or_else(|| {
             notes.push(format!(
                 "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
             ));
             SslMode::VerifyFull
-        }),
-        None if property("ssl.verify.server").as_deref() == Some("true") => SslMode::VerifyCa,
-        None if property("ssl.require").as_deref() == Some("true") => SslMode::Require,
-        None => SslMode::Prefer,
+        })
+    } else if is(tab("ssl.verify.server"), "true") {
+        SslMode::VerifyCa
+    } else if is(tab("ssl.require"), "true") {
+        SslMode::Require
+    } else if microsoft {
+        // mssql-jdbc has encrypted and checked the certificate unless told
+        // otherwise since 10.2, so silence is verify-full, not prefer.
+        if is(driver("encrypt"), "false") || is(driver("encrypt"), "optional") {
+            SslMode::Disable
+        } else if is(driver("trustServerCertificate"), "true") {
+            SslMode::Require
+        } else {
+            SslMode::VerifyFull
+        }
+    } else if handler.is_some() {
+        SslMode::Prefer
+    } else {
+        return None;
     };
-    Some((sslmode, property("ssl.ca.cert")))
+    Some((
+        sslmode,
+        tab("ssl.ca.cert").or_else(|| driver("sslrootcert")),
+    ))
+}
+
+/// libpq's spellings, and Connector/J's for MySQL.
+fn named_mode(mode: &str) -> Option<SslMode> {
+    match mode.to_ascii_lowercase().replace('_', "-").as_str() {
+        // libpq's `allow` tries plaintext first, which the driver cannot (see
+        // `SslMode::parse`). `prefer` tries TLS first: never less than asked.
+        "allow" | "preferred" => Some(SslMode::Prefer),
+        "disabled" => Some(SslMode::Disable),
+        "required" => Some(SslMode::Require),
+        "verify-identity" => Some(SslMode::VerifyFull),
+        other => SslMode::parse(other).ok(),
+    }
 }
 
 fn enabled(handler: &Value) -> bool {
@@ -563,6 +646,22 @@ mod tests {
             (mysql.user.as_str(), mysql.database.as_str()),
             ("a@b", "app")
         );
+        let encoded = imported(
+            connection(
+                "postgresql",
+                "d",
+                json!({ "url": "jdbc:postgresql://h/app", "configurationType": "URL" }),
+            ),
+            Some(login("a%40b", "p%41ss")),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                server(&encoded).user.as_str(),
+                server(&encoded).password.as_str()
+            ),
+            ("a%40b", "p%41ss")
+        );
         assert!(matches!(
             by_url("mysql", "jdbc:mariadb://h/app"),
             Ok(ConnectionConfig::MySql(_))
@@ -683,7 +782,11 @@ mod tests {
         assert_eq!(ssl(json!({ "sslMode": "allow" })).0, SslMode::Prefer);
         assert_eq!(
             ssl(json!({ "sslMode": "require", "ssl.ca.cert": "/certs/ca.pem" })),
-            (SslMode::Require, None, vec![])
+            (
+                SslMode::Require,
+                None,
+                vec!["CA certificate left off: SSL mode require doesn't check one".to_string()]
+            )
         );
         assert_eq!(
             ssl(
@@ -706,6 +809,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(server(&disabled).sslmode, SslMode::default());
+    }
+
+    #[test]
+    fn driver_properties_and_sql_servers_default_never_ask_for_less() {
+        let ssl = |provider: &str, driver: &str, properties: Value| {
+            let mut configuration = manual("db.example.com", "1433", "app");
+            configuration["properties"] = properties;
+            let imported = imported(connection(provider, driver, configuration), None).unwrap();
+            (server(&imported).sslmode, imported.notes)
+        };
+        use SslMode::*;
+
+        assert_eq!(
+            ssl(
+                "postgresql",
+                "postgres-jdbc",
+                json!({ "sslmode": "verify-full" })
+            ),
+            (VerifyFull, vec![])
+        );
+        assert_eq!(
+            ssl("mysql", "mysql8", json!({ "sslMode": "VERIFY_IDENTITY" })),
+            (VerifyFull, vec![])
+        );
+        assert_eq!(
+            ssl(
+                "mysql",
+                "mysql8",
+                json!({ "useSSL": "true", "requireSSL": "true" })
+            ),
+            (
+                Prefer,
+                vec![
+                    "driver property useSSL left off".to_string(),
+                    "driver property requireSSL left off".to_string(),
+                ]
+            )
+        );
+        assert_eq!(
+            ssl("postgresql", "postgres-jdbc", json!({})),
+            (Prefer, vec![])
+        );
+
+        assert_eq!(
+            ssl("sqlserver", "microsoft", json!({})),
+            (VerifyFull, vec![])
+        );
+        assert_eq!(
+            ssl(
+                "sqlserver",
+                "microsoft",
+                json!({ "trustServerCertificate": "true" })
+            ),
+            (Require, vec![])
+        );
+        assert_eq!(
+            ssl("sqlserver", "microsoft", json!({ "encrypt": "false" })),
+            (Disable, vec![])
+        );
+        assert_eq!(
+            ssl("mssql", "jtds_sqlserver", json!({ "ssl": "require" })),
+            (Prefer, vec!["driver property ssl left off".to_string()])
+        );
     }
 
     #[test]

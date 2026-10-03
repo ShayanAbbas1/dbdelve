@@ -40,7 +40,7 @@ use super::{
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 /// The port the server listens on when the profile does not say.
-const DEFAULT_PORT: u16 = 3306;
+pub(super) const DEFAULT_PORT: u16 = 3306;
 
 /// Bounds the cancel connection's own handshake and its `KILL QUERY` round
 /// trip, neither of which `CONNECT_TIMEOUT_SECONDS` reaches -- that one only
