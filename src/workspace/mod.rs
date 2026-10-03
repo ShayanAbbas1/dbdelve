@@ -78,9 +78,14 @@ pub(crate) struct Workspace {
     pub(crate) form: Option<ConnectionForm>,
     pub(crate) switcher_open: bool,
     pub(crate) projects: Vec<store::StoredProject>,
-    /// The switcher's "New project" field, while one is being named.
+    /// The switcher's project name field, while a project is being named.
     pub(crate) project_name: Option<Entity<InputState>>,
+    /// The project that field renames; `None` while it names a new one.
+    pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
+    /// Whether the open project's group is folded in the switcher. Only the
+    /// open group is ever expanded, so this is the one flag it needs.
+    pub(crate) project_collapsed: bool,
     /// Whether the settings modal is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
@@ -169,7 +174,9 @@ impl Workspace {
             switcher_open: false,
             projects: Vec::new(),
             project_name: None,
+            renaming_project: None,
             project_name_needs_focus: false,
+            project_collapsed: false,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             rebinding: None,
