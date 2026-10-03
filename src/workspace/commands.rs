@@ -37,17 +37,35 @@ impl Workspace {
             .palette
             .as_ref()
             .map(|list| list.read(cx).delegate().mode());
-        if showing == Some(mode) || self.profile().is_none() {
-            self.close_palette(cx);
+        // Swapping straight to another list skips `close_palette`, and a
+        // theme being previewed must not outlive the list that previews it.
+        self.end_theme_preview(window, cx);
+        // The theme picker is the one list reachable before any connection
+        // exists: the connection form is where a first launch lands.
+        if showing == Some(mode) || (self.profile().is_none() && mode != PaletteMode::Theme) {
+            self.close_palette(window, cx);
             return;
         }
 
+        // The theme list opens on the theme in force, so the preview it starts
+        // with is no change at all.
+        let first = match mode {
+            PaletteMode::Theme => {
+                self.theme_before_preview = Some(*theme(cx));
+                Theme::all()
+                    .iter()
+                    .position(|candidate| candidate.name == theme(cx).name)
+                    .unwrap_or_default()
+            }
+            _ => 0,
+        };
         let palette = Palette::new(mode, self, cx);
         let list = cx.new(|cx| ListState::new(palette, window, cx).searchable(true));
         // Nothing is selected on a fresh list, and `enter` on nothing selected
-        // does nothing -- so the first row is chosen before it is ever drawn.
+        // does nothing -- so a row is chosen before it is ever drawn.
         list.update(cx, |list, cx| {
-            list.set_selected_index(Some(IndexPath::default()), window, cx);
+            list.set_selected_index(Some(IndexPath::new(first)), window, cx);
+            list.scroll_to_selected_item(window, cx);
         });
         cx.subscribe_in(&list, window, Self::on_palette_event)
             .detach();
@@ -70,7 +88,7 @@ impl Workspace {
             ListEvent::Cancel => None,
             ListEvent::Confirm(index) => list.read(cx).delegate().command(index.row).cloned(),
         };
-        self.close_palette(cx);
+        self.close_palette(window, cx);
         if let Some(command) = command {
             self.run_command(command, window, cx);
         }
@@ -85,11 +103,14 @@ impl Workspace {
     ///
     /// Every way out routes through here for that reason: `escape`, the same
     /// stroke again, a click outside, and confirming a row.
-    pub(crate) fn close_palette(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.palette.take().is_none() {
             return false;
         }
-        if let Some(profile) = self.profile_mut() {
+        self.end_theme_preview(window, cx);
+        if let Some(form) = self.form.as_mut() {
+            form.needs_focus = Some(form.url.clone());
+        } else if let Some(profile) = self.profile_mut() {
             profile.session.editor_needs_focus = true;
         }
         cx.notify();
@@ -235,7 +256,8 @@ impl Workspace {
             Command::PreviousProfile => self.cycle_profile(-1, cx),
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
             Command::RefreshConnection => self.reconnect(self.active, cx),
-            Command::CycleTheme => self.cycle_theme(&CycleTheme, window, cx),
+            Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
+            Command::SetTheme(theme) => self.set_theme(*theme, window, cx),
             Command::PickFont(slot) => self.open_palette(PaletteMode::Font(slot), window, cx),
             Command::SetFont(slot, family) => self.set_font(slot, family, cx),
             Command::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),

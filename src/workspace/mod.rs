@@ -123,6 +123,9 @@ pub(crate) struct Workspace {
     /// can move underneath it — so it is thrown away on the way out rather
     /// than kept and refreshed.
     pub(crate) palette: Option<Entity<ListState<Palette>>>,
+    /// The theme in force when the theme picker opened, while it is open. The
+    /// installed one is only a preview until a row is confirmed.
+    pub(crate) theme_before_preview: Option<Theme>,
     /// The opacity field in the settings modal. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -176,6 +179,7 @@ impl Workspace {
             store_unreadable: false,
             next_generation: 0,
             palette: None,
+            theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
             newer_release: None,
@@ -704,8 +708,10 @@ impl Render for Workspace {
                 .text_size(px(layout::TEXT_MD))
                 .flex()
                 .flex_col()
-                .on_action(cx.listener(Self::cycle_theme))
+                .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
+                .on_action(cx.listener(Self::palette_next))
+                .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
@@ -716,7 +722,8 @@ impl Render for Workspace {
                         .flex_1()
                         .min_h_0()
                         .child(self.render_connection_form(cx)),
-                );
+                )
+                .children(self.render_palette(cx));
         }
         let Some(profile) = self.profile() else {
             unreachable!("the connection form is open when there are no profiles");
@@ -1183,7 +1190,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_next_join))
             .on_action(cx.listener(Self::new_row))
             .on_action(cx.listener(Self::show_editor))
-            .on_action(cx.listener(Self::cycle_theme))
+            .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::save_query))
             .on_action(cx.listener(Self::new_query))
             .on_action(cx.listener(Self::next_profile))

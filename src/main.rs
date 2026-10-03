@@ -47,11 +47,11 @@ use gpui_component::{
 
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
-    CopyCell, CopyResults, CopyRow, CopyRows, CycleTheme, DeleteRow, DiscardEdits, EditCell,
-    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow,
-    NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
-    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+    CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
+    FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow, NextPage,
+    NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious, PreviousPage,
+    PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, RemoveFilter,
+    RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SelectTheme,
     SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull,
     SetRowLimit, ShowEditor, ShowReferences, SortColumn, ToggleFilterJoin, ToggleNextJoin,
     ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
@@ -313,7 +313,7 @@ fn main() {
                         MenuItem::action("Zoom Out", ZoomEditorOut),
                         MenuItem::action("Reset Zoom", ResetEditorZoom),
                         MenuItem::separator(),
-                        MenuItem::action("Cycle Theme", CycleTheme),
+                        MenuItem::action("Select Theme…", SelectTheme),
                     ],
                 },
             ]);

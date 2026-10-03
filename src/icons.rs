@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 46] = [
+const ICONS: [(&str, &IconData); 47] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -69,6 +69,7 @@ const ICONS: [(&str, &IconData); 46] = [
     ("icons/arrow-down-right.svg", icondata_lu::LuArrowDownRight),
     ("icons/key.svg", icondata_lu::LuKey),
     ("icons/settings.svg", icondata_lu::LuSettings),
+    ("icons/palette.svg", icondata_lu::LuPalette),
     ("icons/shield-alert.svg", icondata_lu::LuShieldAlert),
     ("icons/replace.svg", icondata_lu::LuReplace),
     ("icons/case-sensitive.svg", icondata_lu::LuCaseSensitive),
@@ -126,6 +127,7 @@ pub mod icon {
     /// flows down into the fields below it.
     pub const FILL_DOWN: &str = "icons/arrow-down.svg";
     pub const FONT: &str = "icons/type.svg";
+    pub const THEME: &str = "icons/palette.svg";
     /// A cell whose column carries a foreign key: the arrow leaves this row for
     /// the one it references.
     pub const FOLLOW_KEY: &str = "icons/arrow-up-right.svg";

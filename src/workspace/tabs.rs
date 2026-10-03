@@ -136,16 +136,24 @@ impl Workspace {
         self.cycle_tab(-1, cx);
     }
 
-    /// Swap to the next registered theme. Every colour dbdelve paints is read
-    /// from the global at render time, so repainting is the whole change — and
-    /// side-by-side comparison is the only honest way to pick between palettes.
-    pub(crate) fn cycle_theme(
+    pub(crate) fn select_theme(
         &mut self,
-        _: &CycleTheme,
+        _: &SelectTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_theme(theme(cx).next(), window, cx);
+        self.open_palette(PaletteMode::Theme, window, cx);
+    }
+
+    /// Put back the theme the picker opened over. Every way out of the palette
+    /// comes through here, confirming included: the row's theme is then
+    /// installed again by `set_theme`, which is the one path that saves it.
+    pub(crate) fn end_theme_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The snapshot predates any opacity change made while previewing.
+        if let Some(theme) = self.theme_before_preview.take() {
+            install_theme(theme.with_opacity(self.settings.opacity), window, cx);
+            cx.refresh_windows();
+        }
     }
 
     /// Written through to disk, so the palette a person picked is the one the
@@ -218,6 +226,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_palette(window, cx) {
+            return;
+        }
         if self.form.is_some() && !self.profiles.is_empty() {
             self.form = None;
             cx.notify();
@@ -231,9 +242,6 @@ impl Workspace {
         // backs out of them in that order, one at a time. The palette stays
         // first so that picking a font from inside settings closes the font
         // list and leaves the modal it was opened from standing.
-        if self.close_palette(cx) {
-            return;
-        }
         if self.close_settings(window, cx) {
             return;
         }

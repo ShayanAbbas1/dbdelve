@@ -2509,19 +2509,11 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
 
-    let themes: Vec<AnyElement> = Theme::all()
-        .into_iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            settings_chip(
-                ("theme", index),
-                candidate.name,
-                candidate.name == t.name,
-                cx,
-                move |workspace, window, cx| workspace.set_theme(candidate, window, cx),
-            )
-        })
-        .collect();
+    // Like the font rows below: the palette lists the themes, and moving
+    // through it previews each one on this card.
+    let theme_picker = settings_chip("theme", t.name, true, cx, |workspace, window, cx| {
+        workspace.open_palette(PaletteMode::Theme, window, cx);
+    });
 
     // Disabled at the ends rather than clamped again here: `adjust_editor_zoom`
     // already refuses to go past them, and a button that looks live and does
@@ -2663,7 +2655,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         .child(settings_section(
             t,
             "Theme",
-            div().flex().gap(px(layout::SPACE_XS)).children(themes),
+            div().flex().child(theme_picker),
         ))
         .child(settings_section(
             t,

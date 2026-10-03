@@ -110,7 +110,7 @@ actions!(
         CancelQuery,
         FormatQuery,
         ShowEditor,
-        CycleTheme,
+        SelectTheme,
         SaveQuery,
         NewQuery,
         NextProfile,

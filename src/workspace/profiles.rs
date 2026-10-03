@@ -34,7 +34,13 @@ impl Workspace {
             grid: Some(picked.grid.to_string()),
         };
         let settings = store::StoredSettings {
-            theme: Some(theme(cx).name.to_string()),
+            // Mid-preview, the installed theme is only being tried on.
+            theme: Some(
+                self.theme_before_preview
+                    .unwrap_or(*theme(cx))
+                    .name
+                    .to_string(),
+            ),
             editor_font_size: Some(self.settings.editor_font_size),
             preview_rows: Some(self.settings.preview_rows),
             opacity: Some(self.settings.opacity),
