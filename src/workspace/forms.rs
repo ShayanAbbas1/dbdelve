@@ -1370,16 +1370,19 @@ impl Workspace {
                             .child(active_name),
                     )
                     .child(row_icon(t, icon::CHEVRON_DOWN))
-                    // With a colour the name is the one thing in the titlebar
-                    // wearing it, so it stops being a subtitle and becomes the
-                    // label of a pill filled with its own hue. The fill and the
-                    // icon carry the colour; the text does not, because the
-                    // same hue at text size on a tint of itself is the one
-                    // arrangement nobody can read.
+                    // With a colour the name becomes the label of a pill: in
+                    // its own hue, or a plain chip when the band behind it is
+                    // already wearing that hue. The text keeps the normal
+                    // colour, because the hue at text size on a tint of itself
+                    // is the one arrangement nobody can read.
                     .when_some(active_color, |pill, color| {
-                        pill.bg(color.fill())
-                            .text_color(t.text)
-                            .font_weight(FontWeight::MEDIUM)
+                        pill.bg(if self.settings.color_titlebar {
+                            t.surface
+                        } else {
+                            color.chip(t)
+                        })
+                        .text_color(t.text)
+                        .font_weight(FontWeight::MEDIUM)
                     })
                     // While the panel is open its `on_mouse_down_out` already
                     // owns closing, and it fires on the press. Carrying a click

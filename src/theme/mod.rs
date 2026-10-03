@@ -408,6 +408,14 @@ impl ConnectionColor {
     pub fn fill(self) -> Rgba {
         self.swatch().alpha(PILL_ALPHA)
     }
+
+    /// `fill` on a solid base, for a pill that sits on the titlebar. The band
+    /// under it is often this same hue, and a tint shows whatever is beneath
+    /// it, so a translucent pill on its own colour all but vanishes. See
+    /// `a_titlebar_pill_stands_off_every_band`.
+    pub fn chip(self, theme: Theme) -> Srgb {
+        self.fill().flatten(theme.surface)
+    }
 }
 
 const SWATCH_LIGHTNESS: f32 = 0.65;
@@ -1089,7 +1097,7 @@ mod tests {
         let level = |c: Srgb| (c.r + c.g + c.b) / 3.0 * 255.0;
         for t in Theme::all() {
             for color in ConnectionColor::ALL {
-                let fill = color.fill().flatten(t.surface);
+                let fill = color.chip(t);
                 let step = (level(fill) - level(t.surface)).abs();
                 assert!(
                     step >= 8.0,
@@ -1113,6 +1121,38 @@ mod tests {
                 // something read at length. Holding it to body contrast leaves
                 // the light theme a band too pale to show its hue at all.
                 check(t, "the titlebar's muted text", t.text_muted, band, AA_LARGE);
+            }
+        }
+    }
+
+    #[test]
+    fn a_titlebar_pill_stands_off_every_band() {
+        // What sits on a band: the mode pill in its own hue, and the switcher
+        // as a plain chip, since the band is already wearing its colour. The
+        // floor is set from the weakest pair that still reads as a separate
+        // shape at a glance: a Green mode pill on a Gray band, light theme.
+        let distance = |a: Srgb, b: Srgb| {
+            let d = |x: f32, y: f32| ((x - y) * 255.0).powi(2);
+            (d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)).sqrt()
+        };
+        for t in Theme::all() {
+            for band_color in ConnectionColor::ALL {
+                let band = band_color.band(t).flatten(t.surface);
+                let pills = [
+                    ("the switcher", t.surface),
+                    ("a Green mode", ConnectionColor::Green.chip(t)),
+                    ("a Yellow mode", ConnectionColor::Yellow.chip(t)),
+                    ("a Red mode", ConnectionColor::Red.chip(t)),
+                ];
+                for (pill, chip) in pills {
+                    let step = distance(chip, band);
+                    assert!(
+                        step >= 20.0,
+                        "{}: {pill} pill on a {} band is {step:.1} off it",
+                        t.name,
+                        band_color.label()
+                    );
+                }
             }
         }
     }

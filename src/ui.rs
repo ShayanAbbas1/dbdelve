@@ -100,7 +100,7 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
     control("connection-mode", Tone::Quiet, Control::Compact)
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
-        .bg(color.fill())
+        .bg(color.chip(t))
         .child(
             div()
                 .flex()
