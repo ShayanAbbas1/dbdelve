@@ -735,6 +735,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             Command::ImportConnections(Source::DBeaver),
         ));
     }
+    if Source::TablePlus.found() {
+        items.push(Item::command(
+            "Import connections from TablePlus",
+            chord_hint("import_tableplus", overrides),
+            icon::PLUS,
+            Command::ImportConnections(Source::TablePlus),
+        ));
+    }
     items.push(Item::command(
         "Refresh connection",
         chord_hint("refresh_connection", overrides),

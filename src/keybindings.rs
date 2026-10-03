@@ -166,6 +166,7 @@ registry! {
     ("delete_row", "Delete Row", None, [], DeleteRow),
     ("discard_edits", "Discard Edits", None, [], DiscardEdits),
     ("import_dbeaver", "Import Connections from DBeaver", None, [], ImportConnections { source: Source::DBeaver }),
+    ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
 }
 
 /// Whether a binding scoped to `a` and one scoped to `b` could both be live

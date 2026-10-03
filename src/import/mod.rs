@@ -6,6 +6,7 @@
 //! every source.
 
 mod dbeaver;
+mod tableplus;
 
 use serde::Deserialize;
 
@@ -40,14 +41,16 @@ pub(crate) struct Report {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) enum Source {
     DBeaver,
+    TablePlus,
 }
 
 impl Source {
-    pub(crate) const ALL: [Self; 1] = [Self::DBeaver];
+    pub(crate) const ALL: [Self; 2] = [Self::DBeaver, Self::TablePlus];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::DBeaver => "DBeaver",
+            Self::TablePlus => "TablePlus",
         }
     }
 
@@ -55,6 +58,7 @@ impl Source {
     pub(crate) fn found(self) -> bool {
         match self {
             Self::DBeaver => dbeaver::workspaces().iter().any(|root| root.is_dir()),
+            Self::TablePlus => tableplus::files().iter().any(|file| file.is_file()),
         }
     }
 
@@ -62,7 +66,23 @@ impl Source {
     pub(crate) fn read(self) -> Result<Report, String> {
         match self {
             Self::DBeaver => dbeaver::read(),
+            Self::TablePlus => tableplus::read(),
         }
+    }
+}
+
+/// Blank is the default port. Anything else that isn't one is left blank too,
+/// and said.
+pub(super) fn port(label: &str, value: Option<String>, notes: &mut Vec<String>) -> Option<u16> {
+    let value = value?;
+    match value.parse() {
+        Ok(0) | Err(_) => {
+            notes.push(format!(
+                "{label} {value} isn't a port number, so it was left blank"
+            ));
+            None
+        }
+        Ok(port) => Some(port),
     }
 }
 

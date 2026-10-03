@@ -11,7 +11,7 @@ use std::{
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use serde_json::Value;
 
-use super::{Imported, Report, Skipped};
+use super::{Imported, Report, Skipped, port};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
     store,
@@ -357,21 +357,6 @@ fn ssl(handlers: &Value, notes: &mut Vec<String>) -> Option<(SslMode, Option<Str
         None => SslMode::Prefer,
     };
     Some((sslmode, property("ssl.ca.cert")))
-}
-
-/// Blank is the default port. Anything else that isn't one is left blank too,
-/// and said.
-fn port(label: &str, value: Option<String>, notes: &mut Vec<String>) -> Option<u16> {
-    let value = value?;
-    match value.parse() {
-        Ok(0) | Err(_) => {
-            notes.push(format!(
-                "{label} {value} isn't a port number, so it was left blank"
-            ));
-            None
-        }
-        Ok(port) => Some(port),
-    }
 }
 
 fn enabled(handler: &Value) -> bool {
