@@ -381,11 +381,20 @@ impl ConnectionColor {
         if theme.is_glass {
             return self.swatch().alpha(GLASS_BAND_ALPHA);
         }
-        self.at(match theme.appearance {
-            Appearance::Dark => BAND_LIGHTNESS_DARK,
-            Appearance::Light => BAND_LIGHTNESS_LIGHT,
-        })
-        .opaque()
+        let (fixed, away) = match theme.appearance {
+            Appearance::Dark => (BAND_LIGHTNESS_DARK, 1.0),
+            Appearance::Light => (BAND_LIGHTNESS_LIGHT, -1.0),
+        };
+        // The fixed lightness is tuned for dbdelve's own chrome. A palette
+        // whose chrome sits near it would get a band that barely shows, so the
+        // band steps away from the chrome instead.
+        let chrome = Oklch::from_srgb(theme.surface).l;
+        let lightness = if (fixed - chrome).abs() < BAND_CHROME_GAP {
+            chrome + away * BAND_CHROME_GAP
+        } else {
+            fixed
+        };
+        self.at(lightness).opaque()
     }
 
     fn at(self, lightness: f32) -> Srgb {
@@ -422,6 +431,10 @@ const SWATCH_LIGHTNESS: f32 = 0.65;
 const BAND_LIGHTNESS_DARK: f32 = 0.35;
 const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
 const GLASS_BAND_ALPHA: f32 = 0.40;
+
+/// Below dbdelve Light's 0.06 and Tokyo Night Day's 0.043, so neither band
+/// moves.
+const BAND_CHROME_GAP: f32 = 0.04;
 
 /// The editor palettes' washes. Their upstream yellows are far brighter than
 /// dark's amber, so the edited wash is thinner to keep text AAA over it.
@@ -1310,7 +1323,8 @@ impl Theme {
 
             bg: Srgb::from_hex(0x343746),
             panel: Srgb::from_hex(0x282a36),
-            surface: Srgb::from_hex(0x21222c),
+            // Darkened from #21222c.
+            surface: Srgb::from_hex(0x1f202a),
             // Not current-line #44475a: the purple accent misses 3:1 on a
             // selected suggestion over it.
             overlay: Srgb::from_hex(0x343746),
@@ -1679,6 +1693,25 @@ mod tests {
                         band_color.label()
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn dbdelves_own_bands_keep_their_fixed_lightness() {
+        for t in [
+            Theme::glass(),
+            Theme::black(),
+            Theme::dark(),
+            Theme::light(),
+        ] {
+            for color in ConnectionColor::ALL {
+                let fixed = match (t.is_glass, t.appearance) {
+                    (true, _) => color.swatch().alpha(GLASS_BAND_ALPHA),
+                    (false, Appearance::Dark) => color.at(BAND_LIGHTNESS_DARK).opaque(),
+                    (false, Appearance::Light) => color.at(BAND_LIGHTNESS_LIGHT).opaque(),
+                };
+                assert_eq!(color.band(t), fixed, "{} {}", t.name, color.label());
             }
         }
     }
