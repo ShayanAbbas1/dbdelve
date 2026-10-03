@@ -42,10 +42,39 @@ impl Oklch {
         Self { l, c, h }
     }
 
-    /// Convert to sRGB, clipping any channel that falls outside the display
-    /// gamut. Clipping distorts hue on saturated colours; the palette stays in
-    /// gamut deliberately so this never fires in practice.
+    /// Convert to sRGB. A colour the display cannot show keeps its lightness
+    /// and hue and gives up chroma until it fits: clipping each channel instead
+    /// skews the hue, which turns a deep orange red.
     pub fn to_srgb(self) -> Srgb {
+        let fits = |c: f32| {
+            Self { c, ..self }
+                .linear()
+                .iter()
+                .all(|v| (-1e-4..=1.0 + 1e-4).contains(v))
+        };
+        let c = if fits(self.c) {
+            self.c
+        } else {
+            let (mut inside, mut outside) = (0.0, self.c);
+            for _ in 0..20 {
+                let mid = (inside + outside) / 2.0;
+                if fits(mid) {
+                    inside = mid
+                } else {
+                    outside = mid
+                }
+            }
+            inside
+        };
+        let [r, g, b] = Self { c, ..self }.linear();
+        Srgb {
+            r: gamma_encode(r),
+            g: gamma_encode(g),
+            b: gamma_encode(b),
+        }
+    }
+
+    fn linear(self) -> [f32; 3] {
         let (sin_h, cos_h) = self.h.to_radians().sin_cos();
         let a = self.c * cos_h;
         let b = self.c * sin_h;
@@ -57,11 +86,11 @@ impl Oklch {
 
         let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
 
-        Srgb {
-            r: gamma_encode(4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s),
-            g: gamma_encode(-1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s),
-            b: gamma_encode(-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s),
-        }
+        [
+            4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+            -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+            -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+        ]
     }
 }
 
@@ -169,6 +198,16 @@ mod tests {
 
     fn approx(a: f32, b: f32, tol: f32) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn a_colour_past_the_gamut_keeps_its_hue() {
+        // A deep orange the display cannot show. Clipped per channel it loses
+        // nearly all its green and lands on a red; trading chroma keeps it
+        // orange.
+        let orange = Oklch::new(0.35, 0.15, 55.0).to_srgb();
+        assert!(orange.g / orange.r > 0.4, "{}", orange.hex());
+        assert!(approx(orange.b, 0.0, 0.02), "{}", orange.hex());
     }
 
     #[test]
