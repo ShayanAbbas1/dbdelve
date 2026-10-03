@@ -524,8 +524,8 @@ mod tests {
         ];
 
         assert_eq!(
-            tunnel(true, "/Users/me/.ssh/id_ed25519", 0),
-            (with_key(Some("/Users/me/.ssh/id_ed25519")), vec![])
+            tunnel(true, "~/.ssh/id_ed25519", 0),
+            (with_key(Some("~/.ssh/id_ed25519")), vec![])
         );
         assert_eq!(
             tunnel(true, "~/.ssh/id_rsa", 0),

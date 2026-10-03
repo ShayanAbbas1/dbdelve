@@ -30,20 +30,22 @@ const UNREADABLE_CREDENTIALS: &str =
 /// Every place an install keeps its workspace. Linux's Flatpak and Snap builds
 /// keep theirs inside their sandboxes.
 pub(super) fn workspaces() -> Vec<PathBuf> {
-    let Ok(home) = store::home() else {
-        return Vec::new();
-    };
     #[cfg(target_os = "macos")]
-    let roots = vec![home.join("Library")];
+    let roots = store::home()
+        .map(|home| home.join("Library"))
+        .into_iter()
+        .collect::<Vec<_>>();
     #[cfg(target_os = "windows")]
     let roots = store::data_root().into_iter().collect::<Vec<_>>();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let roots = store::data_root()
         .into_iter()
-        .chain([
-            home.join(".var/app/io.dbeaver.DBeaverCommunity/data"),
-            home.join("snap/dbeaver-ce/current/.local/share"),
-        ])
+        .chain(store::home().into_iter().flat_map(|home| {
+            [
+                home.join(".var/app/io.dbeaver.DBeaverCommunity/data"),
+                home.join("snap/dbeaver-ce/current/.local/share"),
+            ]
+        }))
         .collect::<Vec<_>>();
     roots
         .into_iter()
