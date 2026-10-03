@@ -50,8 +50,13 @@ impl Workspace {
             color_titlebar: Some(self.settings.color_titlebar),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
         };
-        if let Err(message) = store::save_profiles(&profiles, active.as_deref(), &fonts, &settings)
-        {
+        if let Err(message) = store::save_profiles(
+            &profiles,
+            active.as_deref(),
+            &fonts,
+            &settings,
+            &self.projects,
+        ) {
             self.note(message, cx);
         }
     }
@@ -230,6 +235,9 @@ impl Workspace {
             catalog: CatalogState::Loading,
             session,
         });
+        if let Some(project) = self.projects.iter_mut().find(|project| project.open) {
+            project.connections.push(id.clone());
+        }
         if let Some(password) = password
             && let Err(message) = store::set_password(&id, &password)
         {
@@ -1202,12 +1210,16 @@ impl Workspace {
     }
 
     pub(crate) fn cycle_profile(&mut self, step: isize, cx: &mut Context<Self>) {
-        if self.profiles.len() < 2 || self.form.is_some() {
+        let members = self.project_members();
+        if members.len() < 2 || self.form.is_some() {
             return;
         }
-        let count = self.profiles.len() as isize;
-        let index = (self.active as isize + step).rem_euclid(count) as usize;
-        self.activate(index, cx);
+        let position = members
+            .iter()
+            .position(|index| *index == self.active)
+            .unwrap_or(0) as isize;
+        let next = (position + step).rem_euclid(members.len() as isize) as usize;
+        self.activate(members[next], cx);
     }
 
     pub(crate) fn next_profile(&mut self, _: &NextProfile, _: &mut Window, cx: &mut Context<Self>) {
@@ -1267,6 +1279,9 @@ impl Workspace {
         let removed_queries = store::delete_queries(&id);
         let _ = store::delete_grids(&id);
         self.pending_removal = None;
+        for project in &mut self.projects {
+            project.connections.retain(|member| member != &id);
+        }
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
         if self.profiles.is_empty() {

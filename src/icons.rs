@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 47] = [
+const ICONS: [(&str, &IconData); 49] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -73,6 +73,8 @@ const ICONS: [(&str, &IconData); 47] = [
     ("icons/shield-alert.svg", icondata_lu::LuShieldAlert),
     ("icons/replace.svg", icondata_lu::LuReplace),
     ("icons/case-sensitive.svg", icondata_lu::LuCaseSensitive),
+    ("icons/folder.svg", icondata_lu::LuFolder),
+    ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
@@ -103,6 +105,8 @@ pub mod icon {
     pub const DELETE: &str = "icons/trash.svg";
     pub const SEARCH: &str = "icons/search.svg";
     pub const DATABASE: &str = "icons/database.svg";
+    pub const PROJECT: &str = "icons/folder.svg";
+    pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const TABLE: &str = "icons/table.svg";
     pub const PARTITIONED_TABLE: &str = "icons/layers.svg";
     pub const VIEW: &str = "icons/eye.svg";

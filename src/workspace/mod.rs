@@ -11,6 +11,7 @@ mod forms;
 mod modes;
 mod objects;
 mod profiles;
+mod projects;
 mod queries;
 mod tabs;
 
@@ -76,6 +77,10 @@ pub(crate) struct Workspace {
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
     pub(crate) switcher_open: bool,
+    pub(crate) projects: Vec<store::StoredProject>,
+    /// The switcher's "New project" field, while one is being named.
+    pub(crate) project_name: Option<Entity<InputState>>,
+    pub(crate) project_name_needs_focus: bool,
     /// Whether the settings modal is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
@@ -162,6 +167,9 @@ impl Workspace {
             active: 0,
             form: None,
             switcher_open: false,
+            projects: Vec::new(),
+            project_name: None,
+            project_name_needs_focus: false,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             rebinding: None,
@@ -191,7 +199,7 @@ impl Workspace {
 
         let mut load_failure = None;
         match store::load_profiles() {
-            Ok((profiles, active, stored_fonts, stored_settings)) => {
+            Ok((profiles, active, stored_fonts, stored_settings, projects)) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let available = cx.text_system().all_font_names();
@@ -242,6 +250,12 @@ impl Workspace {
                         .profiles
                         .iter()
                         .position(|profile| profile.id == id)
+                {
+                    workspace.active = index;
+                }
+                workspace.projects = projects;
+                if !workspace.in_project(workspace.active)
+                    && let Some(&index) = workspace.project_members().first()
                 {
                     workspace.active = index;
                 }
@@ -678,6 +692,11 @@ impl Render for Workspace {
         // its own, and a field it just unmounted took the window's only
         // dispatch path with it.
         if let Some(input) = self.form.as_mut().and_then(|form| form.needs_focus.take()) {
+            input.focus_handle(cx).focus(window, cx);
+        }
+        if std::mem::take(&mut self.project_name_needs_focus)
+            && let Some(input) = &self.project_name
+        {
             input.focus_handle(cx).focus(window, cx);
         }
 
