@@ -11,12 +11,18 @@ use crate::tls;
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, QueryResult, Reference, ServerConfig, Sizes,
-    Structure, assemble_catalog, assemble_foreign_keys, assemble_references, assemble_sizes,
-    assemble_structure, non_utf8_error, required_cell,
+    Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_sizes, assemble_structure, non_utf8_error, required_cell,
 };
 
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 5432;
+
+const DATABASES_SQL: &str = "
+SELECT datname AS name, datname = current_database() AS is_current
+FROM pg_database
+WHERE datallowconn AND NOT datistemplate
+ORDER BY datname";
 
 const RELATIONS_SQL: &str = "
 SELECT
@@ -375,11 +381,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         [Host::Unix(_)] => return Err("Connection URL contains a Unix socket host.".into()),
         _ => return Err("Connection URL contains more than one host.".into()),
     };
-    let database = parsed
-        .get_dbname()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Connection URL does not contain a database.".to_string())?
-        .to_string();
+    let database = parsed.get_dbname().unwrap_or_default().to_string();
     let user = parsed
         .get_user()
         .filter(|value| !value.is_empty())
@@ -420,9 +422,16 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 /// that a username containing `@` or a password containing a space is
 /// passed through intact instead of truncating the string.
 fn connection_string(server: &ServerConfig) -> String {
+    // An empty `dbname` would have the server pick the user's name, often a
+    // database that does not exist; `postgres` is what createdb connects to.
+    let dbname = if server.database.is_empty() {
+        "postgres"
+    } else {
+        &server.database
+    };
     let mut parts = vec![
         format!("host={}", quote(&server.host)),
-        format!("dbname={}", quote(&server.database)),
+        format!("dbname={}", quote(dbname)),
         format!("user={}", quote(&server.user)),
     ];
     if let Some(port) = server.port {
@@ -634,6 +643,10 @@ impl Connection {
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
         resolve_edit_target(probed, &keyed_table(&catalog)?)
+    }
+
+    pub fn databases(&self) -> Result<super::Databases, DbError> {
+        assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
@@ -1177,6 +1190,18 @@ mod tests {
         // would work -- but a profile that never asked for one should connect
         // with exactly the string it connected with before the field existed.
         assert!(!connection_string(&config()).contains("options"));
+    }
+
+    #[test]
+    fn connection_string_connects_a_blank_database_to_postgres() {
+        let config = ServerConfig {
+            database: String::new(),
+            ..config()
+        };
+        assert!(connection_string(&config).contains("dbname='postgres'"));
+        assert!(
+            tunnelled_string(&config, "127.0.0.1:1".parse().unwrap()).contains("dbname='postgres'")
+        );
     }
 
     #[test]
@@ -1732,6 +1757,32 @@ mod tests {
         );
         assert_eq!(result.bytes, 7);
         assert_eq!(result.rows_affected, Some(2));
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_the_databases_list_flags_the_one_connected_to() {
+        let databases = Connection::open(&live_config())
+            .expect("connection should open")
+            .databases()
+            .expect("databases should list");
+
+        assert!(databases.names.contains(&"dbdelve_dev".to_string()));
+        assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_blank_database_lands_on_the_maintenance_database() {
+        let databases = Connection::open(&ServerConfig {
+            database: String::new(),
+            ..live_config()
+        })
+        .expect("a blank database should connect")
+        .databases()
+        .expect("databases should list");
+
+        assert_eq!(databases.current.as_deref(), Some("postgres"));
     }
 
     #[test]

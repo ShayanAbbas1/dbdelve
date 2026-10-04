@@ -46,6 +46,8 @@ pub enum Mode {
     /// Every shipped theme. The highlighted row is installed as it moves, and
     /// only a confirmed one is kept.
     Theme,
+    /// The databases on the active profile's server, as last fetched.
+    Database,
 }
 
 /// What a row does when it is confirmed.
@@ -116,6 +118,9 @@ pub enum Command {
     /// Put the palette back up over the theme list.
     SelectTheme,
     SetTheme(Box<Theme>),
+    /// Fetch the server's databases and put the palette back up over them.
+    SelectDatabase,
+    SetDatabase(String),
     /// Put the palette back up over the font list for this slot, the way
     /// [`Command::QueryHistory`] does for the history.
     PickFont(FontSlot),
@@ -173,6 +178,7 @@ impl Palette {
             (Mode::Commands, Some(profile)) => command_items(workspace, profile, cx),
             (Mode::History, Some(profile)) => history_items(profile),
             (Mode::Font(slot), Some(_)) => font_items(slot, cx),
+            (Mode::Database, Some(profile)) => database_items(profile),
             (_, None) => Vec::new(),
         };
         Self {
@@ -204,6 +210,7 @@ impl Palette {
             Mode::History => "Recall a statement you have run…",
             Mode::Font(_) => "Pick a font…",
             Mode::Theme => "Pick a theme…",
+            Mode::Database => "Switch database…",
         }
     }
 }
@@ -426,6 +433,27 @@ fn theme_items(cx: &App) -> Vec<Item> {
             .into(),
             icon: icon::THEME,
             command: Command::SetTheme(Box::new(candidate)),
+        })
+        .collect()
+}
+
+/// The server's databases in the order it listed them, the one this
+/// connection is in marked the way the theme list marks its theme.
+fn database_items(profile: &Profile) -> Vec<Item> {
+    let databases = &profile.databases;
+    databases
+        .names
+        .iter()
+        .map(|name| Item {
+            label: name.clone(),
+            hint: if databases.current.as_ref() == Some(name) {
+                "current"
+            } else {
+                ""
+            }
+            .into(),
+            icon: icon::DATABASE,
+            command: Command::SetDatabase(name.clone()),
         })
         .collect()
 }
@@ -749,6 +777,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         icon::DATABASE,
         Command::RefreshConnection,
     ));
+    if profile.config.engine().switches_database() {
+        items.push(Item::command(
+            "Select database",
+            chord_hint("select_database", overrides),
+            icon::DATABASE,
+            Command::SelectDatabase,
+        ));
+    }
     items.push(Item::command(
         "Select theme",
         chord_hint("cycle_theme", overrides),

@@ -57,6 +57,16 @@ impl Workspace {
                     .position(|candidate| candidate.name == theme(cx).name)
                     .unwrap_or_default()
             }
+            PaletteMode::Database => self
+                .profile()
+                .and_then(|profile| {
+                    let databases = &profile.databases;
+                    databases
+                        .names
+                        .iter()
+                        .position(|name| Some(name) == databases.current.as_ref())
+                })
+                .unwrap_or_default(),
             _ => 0,
         };
         let palette = Palette::new(mode, self, cx);
@@ -258,6 +268,8 @@ impl Workspace {
             Command::ImportConnections(source) => self.import_connections(source, window, cx),
             Command::RefreshConnection => self.reconnect(self.active, cx),
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
+            Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
+            Command::SetDatabase(name) => self.set_database(name, window, cx),
             Command::SetTheme(theme) => self.set_theme(*theme, window, cx),
             Command::PickFont(slot) => self.open_palette(PaletteMode::Font(slot), window, cx),
             Command::SetFont(slot, family) => self.set_font(slot, family, cx),

@@ -22,8 +22,8 @@ use gpui_component::{
 use crate::{
     Workspace, completion,
     db::{
-        CancelToken, Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, Relation,
-        RelationKind, Routine, Structure,
+        CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
+        ExplainMode, Relation, RelationKind, Routine, Structure,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -59,6 +59,8 @@ pub(crate) struct Profile {
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
     pub(crate) catalog: CatalogState,
+    /// What the server listed the last time Select Database asked.
+    pub(crate) databases: Databases,
     pub(crate) session: Session,
 }
 

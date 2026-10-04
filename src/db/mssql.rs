@@ -33,9 +33,15 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, ServerConfig,
-    SslMode, Structure, assemble_catalog, assemble_foreign_keys, assemble_references,
-    assemble_structure, plain_error, required_cell,
+    SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
+    assemble_references, assemble_structure, plain_error, required_cell,
 };
+
+const DATABASES_SQL: &str = "
+SELECT name, CASE WHEN name = DB_NAME() THEN 1 ELSE 0 END AS is_current
+FROM sys.databases
+WHERE HAS_DBACCESS(name) = 1
+ORDER BY name";
 
 const RELATIONS_SQL: &str = "
 SELECT
@@ -419,7 +425,9 @@ fn config(server: &ServerConfig, encryption: EncryptionLevel) -> Config {
     if let Some(port) = server.port {
         config.port(port);
     }
-    config.database(&server.database);
+    if !server.database.is_empty() {
+        config.database(&server.database);
+    }
     config.application_name("DBDelve");
     // Sent as typed, blank included: cloud IAM issues a token or nothing.
     config.authentication(AuthMethod::sql_server(&server.user, &server.password));
@@ -547,13 +555,27 @@ pub struct Connection {
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
         tunnelled(server, DEFAULT_PORT, |tunnel| {
-            let connection = Self {
+            let mut connection = Self {
                 session: Arc::new(Mutex::new(None)),
                 in_flight: Arc::new(Mutex::new(InFlight::default())),
                 server: server.clone(),
                 tunnel,
             };
-            let session = connection.connect()?;
+            let mut session = connection.connect()?;
+            if connection.server.database.is_empty() {
+                // The login's default database, named so that `held_to_database`
+                // and a reconnect return to it rather than to "".
+                connection.server.database = current_database(&mut session).map_err(|error| {
+                    match error.message.is_empty() {
+                        true => plain_error(
+                            "The connection closed while asking which database the login landed \
+                             in."
+                            .into(),
+                        ),
+                        false => error,
+                    }
+                })?;
+            }
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
@@ -878,6 +900,11 @@ impl Connection {
             .collect::<Result<Vec<_>, _>>()
             .ok()?;
         resolve_edit_target(probed, &schema, &table, &key)
+    }
+
+    pub fn databases(&self) -> Result<super::Databases, DbError> {
+        let listed = self.internal_query(DATABASES_SQL)?;
+        assemble_databases(&listed)
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
@@ -1587,22 +1614,29 @@ fn mentions_use(sql: &str) -> bool {
         .any(|word| word.eq_ignore_ascii_case("use"))
 }
 
-fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
-    let mut ask = |statement: &str| match session.trip(statement) {
+fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
+    match session.trip(statement) {
         Some(result) => result.map_err(|error| plain_error(describe(&error))),
         // The session is lost, which `run` reports in place of this.
         None => Err(plain_error(String::new())),
-    };
-    let current = ask("SELECT DB_NAME()")?
+    }
+}
+
+fn current_database(session: &mut Session) -> Result<String, DbError> {
+    Ok(ask(session, "SELECT DB_NAME()")?
         .result
         .rows
         .first()
         .and_then(|row| row.first()?.clone())
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
+    let current = current_database(session)?;
     if current.eq_ignore_ascii_case(database) {
         return Ok(());
     }
-    ask(&format!("USE [{}]", database.replace(']', "]]")))?;
+    ask(session, &format!("USE [{}]", database.replace(']', "]]")))?;
     Err(plain_error(format!(
         "The statement moved the session to database {current}, and dbdelve moved it back to \
          {database}: this connection's explorer, and every statement dbdelve writes, name \
@@ -2159,6 +2193,42 @@ mod tests {
             .query("SELECT count(*) AS rows_seeded FROM measurements")
             .expect("query should succeed");
         assert_eq!(first(&result), vec![Some("5000")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_databases_list_flags_the_one_connected_to() {
+        let databases = live().databases().expect("databases should list");
+
+        assert!(databases.names.contains(&"dbdelve_dev".to_string()));
+        assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_blank_database_holds_a_use_to_where_the_login_landed() {
+        let connection = Connection::open(&ServerConfig {
+            database: String::new(),
+            ..live_config()
+        })
+        .expect("a blank database should connect");
+        let landed = connection
+            .databases()
+            .unwrap()
+            .current
+            .expect("a login lands somewhere");
+
+        let elsewhere = if landed == "master" {
+            "tempdb"
+        } else {
+            "master"
+        };
+        let error = connection
+            .query(&format!("USE {elsewhere}; SELECT 1"))
+            .expect_err("leaving the database the login landed in is reported");
+        assert!(error.message.contains("moved it back"), "{}", error.message);
+        let here = connection.query("SELECT DB_NAME()").unwrap();
+        assert_eq!(first(&here), vec![Some(landed.as_str())]);
     }
 
     #[test]

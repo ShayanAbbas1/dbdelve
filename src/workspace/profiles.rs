@@ -197,6 +197,7 @@ impl Workspace {
             generation: 0,
             state: ProfileState::Idle,
             catalog: CatalogState::Loading,
+            databases: Databases::default(),
             session,
         });
     }
@@ -233,6 +234,7 @@ impl Workspace {
             generation: 0,
             state: ProfileState::Idle,
             catalog: CatalogState::Loading,
+            databases: Databases::default(),
             session,
         });
         if let Some(password) = password
@@ -322,7 +324,7 @@ impl Workspace {
             ConnectionConfig::Postgres(server)
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::SqlServer(server) => vec![
-                (&form.name, server.database.clone()),
+                (&form.name, default_profile_name(&config)),
                 (&form.host, server.host.clone()),
                 (
                     &form.port,
@@ -689,6 +691,170 @@ impl Workspace {
     ) {
         self.clear_notice();
         self.reconnect(self.active, cx);
+    }
+
+    /// Ask the server which databases it holds, then offer them in the palette.
+    pub(crate) fn select_database(
+        &mut self,
+        _: &SelectDatabase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let engine = profile.config.engine();
+        if !engine.switches_database() {
+            self.note(
+                format!(
+                    "A {} connection has no other database to switch to.",
+                    engine.label()
+                ),
+                cx,
+            );
+            return;
+        }
+        let Some(connection) = profile.connection() else {
+            self.note("The connection is not open.".into(), cx);
+            return;
+        };
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let fetch = cx
+            .background_executor()
+            .spawn(async move { connection.databases() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = fetch.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                match result {
+                    Ok(databases) => profile.databases = databases,
+                    Err(error) => {
+                        profile.session.notice = Some(error.message);
+                        cx.notify();
+                        return;
+                    }
+                }
+                // Moved to another connection while the list was coming: the
+                // palette would open over that one's databases. And
+                // `open_palette` toggles, so one already up -- a second press,
+                // another list -- is left as it is, as is the form.
+                if workspace.profile().is_some_and(|profile| profile.id == id)
+                    && workspace.palette.is_none()
+                    && workspace.form.is_none()
+                {
+                    workspace.open_palette(PaletteMode::Database, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Move the profile in front onto another database on its server.
+    ///
+    /// Object tabs go, and their grid snapshots with them: both are keyed by
+    /// schema and name within the profile, with no database in the key, so
+    /// one left open would name a relation that may not exist here and a
+    /// relation of the same name would read the old one's rows back. Query
+    /// tabs keep their SQL, which is the user's to run wherever they like, but
+    /// drop their results: those rows belong to the database left behind, and
+    /// an edit staged on them would be applied to this one.
+    pub(crate) fn set_database(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(server) = profile.config.server() else {
+            return;
+        };
+        if already_on(
+            &server.database,
+            profile.databases.current.as_deref(),
+            &name,
+        ) {
+            return;
+        }
+        let session = &profile.session;
+        let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
+            results.read(cx).delegate().has_pending()
+        };
+        if session.grids().any(unapplied) {
+            let edited = session
+                .objects
+                .iter()
+                .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
+            let message = match edited {
+                Some(tab) => format!(
+                    "{}.{} has cell edits that have not been applied, so the database was not \
+                     switched.",
+                    tab.schema, tab.name
+                ),
+                None => "A query tab has cell edits that have not been applied, so the database \
+                         was not switched."
+                    .into(),
+            };
+            self.note(message, cx);
+            return;
+        }
+
+        let active = session.active;
+        let mut closing = session.objects.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        // The tab in front closes last, so the one it hands the front to is a
+        // query tab that stays rather than a sibling about to close too.
+        closing.sort_by_key(|id| Tab::Object(*id) == active);
+        let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        for id in closing {
+            self.close_object(id, window, cx);
+        }
+        // Before the reconnect: the cancel goes out over the old connection.
+        for id in queries {
+            self.stop_queue_on(Tab::Query(id), cx);
+            self.stop_run(Tab::Query(id), cx);
+        }
+
+        let index = self.active;
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        for object in profile.session.pending_objects.drain(..) {
+            let key = store::object_grid_key(&object.schema, &object.name, &object.filter);
+            let _ = store::remove_grid(&profile.id, &key);
+        }
+        for tab in &mut profile.session.queries {
+            let _ = store::remove_grid(&profile.id, &store::query_grid_key(tab.id));
+            for queued in 0..tab.stored(false).queued_results {
+                let _ = store::remove_grid(&profile.id, &store::queued_grid_key(tab.id, queued));
+            }
+            tab.results = crate::result_grid::new_grid(window, cx);
+            // A cancelled run stays `Running` until its result comes back and
+            // `drop_stale_run` idles it, which keeps a second run off the tab
+            // meanwhile.
+            if !matches!(tab.query, QueryState::Running { .. }) {
+                tab.query = QueryState::Idle;
+            }
+            tab.queue = None;
+            tab.queued_results = 0;
+            tab.last_query = None;
+            tab.sent_from = None;
+            tab.ran_from = None;
+            tab.plan = None;
+            tab.showing_plan = false;
+        }
+        profile.session.clear_prompts();
+        profile.session.apply_review = None;
+        profile.databases = Databases::default();
+        if let Some(server) = profile.config.server_mut() {
+            server.database = name;
+        }
+        self.remember_profiles(cx);
+        self.reconnect(index, cx);
     }
 
     pub(crate) fn open_connection_form(
@@ -1297,6 +1463,14 @@ impl Workspace {
     }
 }
 
+/// Whether picking `name` would leave the profile where it is. A blank
+/// database is the login's default, which only the server can name, so that is
+/// read off the list it sent; otherwise the configured name is the truth -- on
+/// MySQL a `USE` moves the session, and with it the list's current one.
+fn already_on(configured: &str, listed_current: Option<&str>, name: &str) -> bool {
+    name == configured || (configured.is_empty() && listed_current == Some(name))
+}
+
 /// Removing an entry below the active one shifts the vector under the index,
 /// so clamping to the new length alone silently activates the wrong profile.
 pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usize) -> usize {
@@ -1375,6 +1549,18 @@ fn stored_buffers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_database_switch_is_a_no_op_only_onto_the_configured_one() {
+        assert!(already_on("prod", Some("prod"), "prod"));
+        // A `USE` moved the session, but the profile is still configured for
+        // `prod`, so `scratch` is a real switch and `prod` is not.
+        assert!(!already_on("prod", Some("scratch"), "scratch"));
+        assert!(already_on("prod", Some("scratch"), "prod"));
+        // Blank is wherever the login landed, which the listing names.
+        assert!(already_on("", Some("master"), "master"));
+        assert!(!already_on("", Some("master"), "tempdb"));
+    }
 
     #[test]
     fn a_connection_with_nothing_to_restore_opens_on_one_empty_buffer() {
