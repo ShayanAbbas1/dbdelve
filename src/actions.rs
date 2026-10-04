@@ -119,6 +119,7 @@ actions!(
         FormatQuery,
         ShowEditor,
         SelectTheme,
+        SelectDatabase,
         SaveQuery,
         NewQuery,
         NextProfile,

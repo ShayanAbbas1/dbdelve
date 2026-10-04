@@ -389,11 +389,9 @@ impl ConnectionForm {
         let user = read(&self.user);
         let port = read(&self.port);
 
-        for (label, value) in [
-            ("Host", &host),
-            ("Database", &database),
-            ("Username", &user),
-        ] {
+        // Blank database is the one the server signs the login into, which is
+        // what a profile that moves between databases starts on.
+        for (label, value) in [("Host", &host), ("Username", &user)] {
             if value.is_empty() {
                 return Err(format!("{label} is required."));
             }
@@ -492,12 +490,18 @@ pub(crate) enum ConnectionTest {
 }
 
 /// What a profile is called when nobody has named it: the database for an
-/// engine that has one, and the file for an engine that is one.
+/// engine that has one, the host when the database was left to the server, and
+/// the file for an engine that is one.
 pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
     match config {
         ConnectionConfig::Postgres(server)
         | ConnectionConfig::MySql(server)
-        | ConnectionConfig::SqlServer(server) => server.database.clone(),
+        | ConnectionConfig::SqlServer(server) => if server.database.is_empty() {
+            &server.host
+        } else {
+            &server.database
+        }
+        .clone(),
         ConnectionConfig::Sqlite { path, .. } => file_stem(path).to_string(),
         ConnectionConfig::Snowflake(account) => account.database.clone(),
     }
@@ -671,5 +675,23 @@ mod tests {
         });
         assert_eq!(password_to_persist(&account, Origin::Form), None);
         assert_eq!(default_profile_name(&account), "ANALYTICS");
+    }
+
+    #[test]
+    fn a_server_left_to_pick_the_database_is_named_after_its_host() {
+        let mut server = ServerConfig {
+            host: "db.example".to_string(),
+            database: "app".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            default_profile_name(&ConnectionConfig::Postgres(server.clone())),
+            "app"
+        );
+        server.database.clear();
+        assert_eq!(
+            default_profile_name(&ConnectionConfig::SqlServer(server)),
+            "db.example"
+        );
     }
 }

@@ -29,9 +29,9 @@ use crate::{
         ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection,
         NewQuery, NewRow, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext,
         PalettePrevious, PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection,
-        RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery, SelectTheme, SetDefault, SetEmpty,
-        SetNull, ShowEditor, ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn,
-        ZoomEditorOut,
+        RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme,
+        SetDefault, SetEmpty, SetNull, ShowEditor, ToggleNextJoin, ToggleRowPanel, ToggleSidebar,
+        ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -128,6 +128,7 @@ registry! {
     // Still keyed by the id of the cycle this replaced, so an override saved
     // against it keeps working.
     ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),
+    ("select_database", "Select Database", None, ["secondary-k d"], SelectDatabase),
     ("open_settings", "Open Settings", None, ["secondary-,"], OpenSettings),
     ("fuzzy_open", "Fuzzy Schema Search", None, ["secondary-p"], FuzzyOpen),
     ("command_palette", "Command Palette", None, ["secondary-shift-p"], CommandPalette),

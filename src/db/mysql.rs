@@ -30,8 +30,9 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, ServerConfig,
-    Sizes, SslMode, Structure, assemble_catalog, assemble_foreign_keys, assemble_references,
-    assemble_sizes, assemble_structure, non_utf8_error, plain_error, required_cell,
+    Sizes, SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
+    assemble_references, assemble_sizes, assemble_structure, non_utf8_error, plain_error,
+    required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -58,6 +59,11 @@ const BINARY_COLLATION: u16 = 63;
 /// The four schemas the server owns. Nobody wrote them and nobody wants them in
 /// a sidebar listing what they wrote.
 const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schema', 'sys')";
+
+const DATABASES_SQL: &str = "
+SELECT SCHEMA_NAME AS name, SCHEMA_NAME = DATABASE() AS is_current
+FROM information_schema.SCHEMATA
+ORDER BY SCHEMA_NAME";
 
 const RELATIONS_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
@@ -269,7 +275,7 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         // for its socket path and reconnect to that path here, on this
         // machine: past the tunnel, to whatever server is listening locally.
         .prefer_socket(dial.is_none())
-        .db_name(Some(server.database.clone()))
+        .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
         // Offered only when there is one. An empty password is not the
         // same as no password, and IAM auth relies on the latter.
@@ -514,6 +520,10 @@ impl Connection {
         let key = column_of(&key, "column_name").ok()?;
 
         resolve_edit_target(probed, &schema, &table, &key)
+    }
+
+    pub fn databases(&self) -> Result<super::Databases, DbError> {
+        assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
@@ -1004,7 +1014,6 @@ mod tests {
     fn a_url_missing_a_part_or_carrying_an_unknown_one_says_which() {
         for (url, expected) in [
             ("mysql://db.example.test/dbdelve_test", "username"),
-            ("mysql://someone@db.example.test/", "database"),
             (
                 "mysql://someone@db.example.test/dbdelve_test?charset=utf8",
                 "charset",
@@ -1017,6 +1026,12 @@ mod tests {
             let error = config_from_url(url).unwrap_err();
             assert!(error.contains(expected), "{url} said: {error}");
         }
+    }
+
+    #[test]
+    fn a_url_without_a_database_leaves_it_blank() {
+        let config = config_from_url("mysql://someone@db.example.test/").unwrap();
+        assert_eq!(config.database, "");
     }
 
     #[test]
@@ -1343,6 +1358,33 @@ mod tests {
             .expect("query should succeed");
 
         assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
+    fn live_the_databases_list_flags_the_one_connected_to() {
+        let databases = live().databases().expect("databases should list");
+
+        assert!(databases.names.contains(&"dbdelve_dev".to_string()));
+        assert!(databases.names.contains(&"information_schema".to_string()));
+        assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
+    fn live_a_blank_database_connects_to_none() {
+        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
+        let databases = Connection::open(&ServerConfig {
+            database: String::new(),
+            sslmode: SslMode::Disable,
+            ..config_from_url(&url).expect("dbdelve_MYSQL_URL should parse")
+        })
+        .expect("a blank database should connect")
+        .databases()
+        .expect("databases should list");
+
+        assert_eq!(databases.current, None);
+        assert!(databases.names.contains(&"dbdelve_dev".to_string()));
     }
 
     #[test]

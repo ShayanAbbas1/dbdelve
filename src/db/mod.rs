@@ -288,6 +288,12 @@ impl Engine {
         read_only_statement(self, true).is_some()
     }
 
+    /// Whether one server holds several databases a profile can be moved
+    /// between, which [`Connection::databases`] lists.
+    pub fn switches_database(self) -> bool {
+        matches!(self, Self::Postgres | Self::MySql | Self::SqlServer)
+    }
+
     /// Postgres and SQLite take the standard's double quote. MySQL takes a
     /// backtick, which it accepts whether or not `ANSI_QUOTES` is set — a double
     /// quote there is a *string literal*, so quoting a MySQL identifier the
@@ -517,9 +523,6 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         .ok_or_else(|| "Connection URL does not contain a host.".to_string())?
         .to_string();
     let database = parsed.path().trim_start_matches('/').to_string();
-    if database.is_empty() {
-        return Err("Connection URL does not contain a database.".into());
-    }
     let user = percent_decoded(parsed.username())?;
     if user.is_empty() {
         return Err("Connection URL does not contain a username.".into());
@@ -889,6 +892,17 @@ impl Connection {
         }
     }
 
+    /// The databases on the server, for a profile to be moved onto one. Empty
+    /// where [`Engine::switches_database`] is false.
+    pub fn databases(&self) -> Result<Databases, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.databases(),
+            Self::MySql(connection) => connection.databases(),
+            Self::SqlServer(connection) => connection.databases(),
+            Self::Sqlite(_) | Self::Snowflake(_) => Ok(Databases::default()),
+        }
+    }
+
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         match self {
             Self::Postgres(connection) => connection.structure(schema, relation),
@@ -1079,6 +1093,13 @@ pub struct Schema {
 }
 
 /// On-disk bytes and row estimates by schema, then relation name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Databases {
+    pub names: Vec<String>,
+    /// The one this connection is in. MySQL can be in none.
+    pub current: Option<String>,
+}
+
 pub type Sizes = std::collections::HashMap<String, std::collections::HashMap<String, Statistics>>;
 
 /// What the engine's statistics say about one relation. Either half can be
@@ -1491,6 +1512,24 @@ fn schema<'a>(
         relations: Vec::new(),
         routines: Vec::new(),
     })
+}
+
+/// A `name, is_current` listing as each engine's databases query returns it.
+/// The flag is whatever the engine calls true; NULL, as MySQL answers with no
+/// database selected, is not current.
+pub(super) fn assemble_databases(result: &QueryResult) -> Result<Databases, DbError> {
+    let mut databases = Databases::default();
+    for row in &result.rows {
+        let name = required_cell(result, row, "name")?.to_string();
+        if matches!(
+            required_cell(result, row, "is_current"),
+            Ok("1" | "t" | "true")
+        ) {
+            databases.current = Some(name.clone());
+        }
+        databases.names.push(name);
+    }
+    Ok(databases)
 }
 
 pub(super) fn required_cell<'a>(

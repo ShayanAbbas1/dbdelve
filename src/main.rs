@@ -53,15 +53,15 @@ use actions::{
     NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
     PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
     RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SelectTheme, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode,
-    SetNull, SetRowLimit, ShowEditor, ShowReferences, SortColumn, ToggleFilterJoin, ToggleNextJoin,
-    ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+    SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator,
+    SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor, ShowReferences, SortColumn,
+    ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
 use db::{
-    CancelToken, Catalog, Connection, ConnectionConfig, DbError, Engine, ExplainMode, Fields,
-    RelationKind, ServerConfig, SnowflakeConfig, SslMode,
+    CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine, ExplainMode,
+    Fields, RelationKind, ServerConfig, SnowflakeConfig, SslMode,
 };
 use explorer::{ExplorerTarget, ObjectKind, PREVIEW_ROW_LIMIT, tree as build_explorer_tree};
 use export::Format;
@@ -314,6 +314,7 @@ fn main() {
                         MenuItem::action("Zoom Out", ZoomEditorOut),
                         MenuItem::action("Reset Zoom", ResetEditorZoom),
                         MenuItem::separator(),
+                        MenuItem::action("Select Database…", SelectDatabase),
                         MenuItem::action("Select Theme…", SelectTheme),
                     ],
                 },

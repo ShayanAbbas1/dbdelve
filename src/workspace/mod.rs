@@ -784,7 +784,12 @@ impl Render for Workspace {
             // other one is news, and news beats where the connection points.
             // Its name is already on the switcher in the titlebar.
             ProfileState::Connected(_) => (
-                profile.config.endpoint(),
+                match profile.config.server().map(|server| &server.database) {
+                    Some(database) if !database.is_empty() => {
+                        format!("{} / {database}", profile.config.endpoint())
+                    }
+                    _ => profile.config.endpoint(),
+                },
                 profile.color.map_or(t.success, ConnectionColor::swatch),
             ),
             ProfileState::Failed(message) => (message.clone(), t.danger),
@@ -1236,6 +1241,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_row))
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
+            .on_action(cx.listener(Self::select_database))
             .on_action(cx.listener(Self::save_query))
             .on_action(cx.listener(Self::new_query))
             .on_action(cx.listener(Self::next_profile))

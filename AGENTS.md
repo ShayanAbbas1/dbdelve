@@ -944,6 +944,18 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.
+- **A profile's database is the one it opens, and Select Database moves it.**
+  On an engine where `Engine::switches_database`, `Workspace::set_database`
+  writes the picked name into the profile's config, persists it and
+  reconnects, so the next launch opens there too; blank is the server's
+  login default. It closes every object tab first, and their grid snapshots
+  and `pending_objects` with them, because those are keyed by schema and name
+  within the profile, not by database, and would name relations of the
+  database left behind. Query tabs keep their SQL but drop their results,
+  queued ones and snapshots included, because those rows belong to the old
+  database and an edit staged on them would be applied to the new one. A
+  switch with unapplied cell edits on any grid is refused rather than
+  discarding them.
 - **Both kinds are addressed by id, never by index.** A result comes back
   carrying the `Tab` it was issued for, and an id that no longer resolves drops
   the result rather than landing it somewhere. Indexing would put a slow query's
