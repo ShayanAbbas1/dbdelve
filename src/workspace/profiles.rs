@@ -1353,6 +1353,7 @@ impl Workspace {
         };
         let provider = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
+                profile.config.engine().syntax(),
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 cx.weak_entity(),

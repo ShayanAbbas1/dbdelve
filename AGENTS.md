@@ -1096,6 +1096,13 @@ must offer nothing inside a string literal or a comment**, which a token scan
 cannot do by itself and is the one place accepting a row rewrites data rather
 than a query.
 
+A MongoDB buffer (`Engine::syntax`) is read by `mql::completing` instead, a
+scan of the same kind: collections and database methods after `db.`, the
+collection methods `mql.rs` reads after `db.<collection>.`, cursor methods
+after `find(…).` or `aggregate(…).`, and inside a document the `$` operators
+with the collection's sampled field names, which arrive through the same
+column cache.
+
 The provider is a snapshot, replaced whole when the catalog reloads
 (`Workspace::install_completions`), and installed on every buffer rather than
 the visible one.

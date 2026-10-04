@@ -157,7 +157,7 @@ pub(crate) enum Method {
 }
 
 impl Method {
-    const ALL: [Method; 23] = [
+    pub(crate) const ALL: [Method; 23] = [
         Method::Find,
         Method::FindOne,
         Method::Aggregate,
@@ -260,7 +260,7 @@ pub(crate) enum DbMethod {
 }
 
 impl DbMethod {
-    const ALL: [DbMethod; 7] = [
+    pub(crate) const ALL: [DbMethod; 7] = [
         DbMethod::RunCommand,
         DbMethod::AdminCommand,
         DbMethod::GetCollectionNames,
@@ -310,7 +310,7 @@ pub(crate) enum CursorMethod {
 }
 
 impl CursorMethod {
-    const ALL: [CursorMethod; 11] = [
+    pub(crate) const ALL: [CursorMethod; 11] = [
         CursorMethod::Sort,
         CursorMethod::Limit,
         CursorMethod::Skip,
@@ -2605,6 +2605,286 @@ fn unspanned(target: &Target) -> Target {
             call: call(method),
             cursor: cursor.iter().map(call).collect(),
         },
+    }
+}
+
+/// What the word being typed at `at` completes, read off a half-typed buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Completing {
+    /// After `db.`: a collection, or a method of the database.
+    Database,
+    /// After `db.<collection>.`: one of the methods this module reads.
+    Collection,
+    /// After `find(…).` or `aggregate(…).`: a cursor method.
+    Cursor,
+    /// Inside a document or array: an operator, or a field of the collection
+    /// the call is on, when it names one.
+    Document { collection: Option<String> },
+}
+
+/// The `$` operators worth completing: query, update, and the aggregation
+/// stages and expressions people type most. Not the whole manual -- a popup
+/// is a menu, not a reference.
+pub(crate) const OPERATORS: &[&str] = &[
+    "$eq",
+    "$ne",
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$in",
+    "$nin",
+    "$and",
+    "$or",
+    "$nor",
+    "$not",
+    "$exists",
+    "$type",
+    "$regex",
+    "$options",
+    "$expr",
+    "$elemMatch",
+    "$size",
+    "$all",
+    "$text",
+    "$search",
+    "$set",
+    "$unset",
+    "$inc",
+    "$mul",
+    "$min",
+    "$max",
+    "$rename",
+    "$push",
+    "$pull",
+    "$addToSet",
+    "$pop",
+    "$each",
+    "$currentDate",
+    "$setOnInsert",
+    "$match",
+    "$group",
+    "$project",
+    "$sort",
+    "$limit",
+    "$skip",
+    "$unwind",
+    "$lookup",
+    "$addFields",
+    "$count",
+    "$facet",
+    "$replaceRoot",
+    "$sample",
+    "$out",
+    "$merge",
+    "$sum",
+    "$avg",
+    "$first",
+    "$last",
+    "$cond",
+    "$ifNull",
+    "$concat",
+    "$toString",
+    "$dateToString",
+];
+
+/// What the word starting at `at` completes, or `None` where nothing should
+/// be offered: inside a string, comment or regex, or where no name belongs.
+///
+/// A scan rather than the tree: the text being typed is unfinished by
+/// definition, and `db.users.find({na` is an error to the grammar.
+pub(crate) fn completing(text: &str, at: usize) -> Option<Completing> {
+    let start = statements(text)
+        .into_iter()
+        .map(|span| span.start)
+        .rfind(|&start| start <= at)
+        .unwrap_or(0);
+    let bytes = text.as_bytes();
+    let mut open = Vec::new();
+    let mut calls = Vec::new();
+    // The last byte that was not blank, which tells a regex's `/` from a
+    // division's.
+    let mut last = b'(';
+    let mut i = start;
+    while i < at {
+        let byte = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                i += 1;
+                while i < at && bytes[i] != byte {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                if i >= at {
+                    return None;
+                }
+            }
+            b'/' if next == Some(b'/') => {
+                i = text[i..].find('\n').map_or(text.len(), |end| i + end);
+                if i >= at {
+                    return None;
+                }
+                continue;
+            }
+            b'/' if next == Some(b'*') => {
+                i = text[i + 2..]
+                    .find("*/")
+                    .map_or(text.len(), |end| i + 2 + end + 2);
+                if i > at {
+                    return None;
+                }
+                continue;
+            }
+            b'/' if b"(,:[{!&|?;=".contains(&last) => {
+                let mut class = false;
+                i += 1;
+                while i < at && (class || bytes[i] != b'/') && bytes[i] != b'\n' {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'[' => class = true,
+                        b']' => class = false,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                if i >= at {
+                    return None;
+                }
+            }
+            b'(' | b'[' | b'{' => open.push(i),
+            b')' | b']' | b'}' => {
+                if let Some(opened) = open.pop()
+                    && byte == b')'
+                {
+                    calls.push((opened, i));
+                }
+            }
+            _ => {}
+        }
+        if !byte.is_ascii_whitespace() {
+            last = byte;
+        }
+        i += 1;
+    }
+
+    if at > start && bytes[at - 1] == b'.' {
+        return match receiver(&chain(text, at - 1, &calls, start))? {
+            Receiver::Database => Some(Completing::Database),
+            Receiver::Collection(_) => Some(Completing::Collection),
+            Receiver::Cursor(_) => Some(Completing::Cursor),
+        };
+    }
+    let &inner = open.last()?;
+    if bytes[inner] == b'(' {
+        return None;
+    }
+    let collection = open
+        .iter()
+        .rev()
+        .find(|&&opened| bytes[opened] == b'(')
+        .and_then(|&paren| {
+            let mut links = chain(text, paren, &calls, start);
+            links.pop();
+            match receiver(&links)? {
+                Receiver::Database => None,
+                Receiver::Collection(name) | Receiver::Cursor(name) => Some(name),
+            }
+        });
+    Some(Completing::Document { collection })
+}
+
+enum Piece<'t> {
+    Name(&'t str),
+    Call(&'t str, &'t str),
+}
+
+enum Receiver {
+    Database,
+    Collection(String),
+    Cursor(String),
+}
+
+/// The member chain ending at `end`, root first: `db`, `users`, `find(…)`.
+/// Empty when anything in it is not a name or a call.
+fn chain<'t>(
+    text: &'t str,
+    mut end: usize,
+    calls: &[(usize, usize)],
+    floor: usize,
+) -> Vec<Piece<'t>> {
+    let name_start = |end: usize| {
+        let name = text[floor..end]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'$' || byte == b'_' || byte.is_ascii_alphanumeric())
+            .count();
+        end - name
+    };
+    let mut pieces = Vec::new();
+    loop {
+        end = floor + text[floor..end].trim_end().len();
+        let call = (end > floor && text.as_bytes()[end - 1] == b')')
+            .then(|| calls.iter().find(|(_, closed)| *closed == end - 1))
+            .flatten();
+        let name_end = match call {
+            Some(&(opened, _)) => floor + text[floor..opened].trim_end().len(),
+            None => end,
+        };
+        let piece_start = name_start(name_end);
+        let name = &text[piece_start..name_end];
+        if name.is_empty() {
+            return Vec::new();
+        }
+        pieces.push(match call {
+            Some(&(opened, _)) => Piece::Call(name, &text[opened + 1..end - 1]),
+            None => Piece::Name(name),
+        });
+        let before = text[floor..piece_start].trim_end();
+        match before.strip_suffix('.') {
+            Some(rest) => end = floor + rest.len(),
+            None => break,
+        }
+    }
+    pieces.reverse();
+    pieces
+}
+
+/// What a chain from `db` reaches.
+fn receiver(pieces: &[Piece]) -> Option<Receiver> {
+    let mut pieces = pieces.iter().peekable();
+    if !matches!(pieces.next(), Some(Piece::Name("db"))) {
+        return None;
+    }
+    if matches!(pieces.peek(), Some(Piece::Call("getSiblingDB", _))) {
+        pieces.next();
+    }
+    let collection = match pieces.next() {
+        None => return Some(Receiver::Database),
+        Some(Piece::Call("getCollection", name)) => {
+            let name = name.trim();
+            let quoted = name.len() >= 2
+                && (name.starts_with('"') && name.ends_with('"')
+                    || name.starts_with('\'') && name.ends_with('\''));
+            quoted.then(|| name[1..name.len() - 1].to_string())?
+        }
+        Some(Piece::Name(first)) => {
+            let mut name = first.to_string();
+            while let Some(Piece::Name(more)) = pieces.peek() {
+                name = format!("{name}.{more}");
+                pieces.next();
+            }
+            name
+        }
+        Some(Piece::Call(..)) => return None,
+    };
+    match pieces.next() {
+        None => Some(Receiver::Collection(collection)),
+        Some(Piece::Call("find" | "aggregate", _))
+            if pieces.all(|piece| matches!(piece, Piece::Call(..))) =>
+        {
+            Some(Receiver::Cursor(collection))
+        }
+        Some(_) => None,
     }
 }
 

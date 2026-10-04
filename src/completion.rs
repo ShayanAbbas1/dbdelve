@@ -36,7 +36,8 @@ use nucleo_matcher::{
 
 use crate::{
     Workspace,
-    db::{Catalog, RelationKind},
+    db::{Catalog, RelationKind, Syntax},
+    mql::{self, Completing},
     sql,
 };
 
@@ -179,6 +180,7 @@ impl Candidate {
 /// Holds a snapshot rather than a live handle. The catalog is replaced whole
 /// when it reloads, and so is this — see `Workspace::install_completions`.
 pub struct SchemaCompletions {
+    syntax: Syntax,
     catalog: Arc<Catalog>,
     columns: ColumnCache,
     /// Who to ask when a relation's columns are wanted and not yet held.
@@ -193,11 +195,13 @@ pub struct SchemaCompletions {
 
 impl SchemaCompletions {
     pub fn new(
+        syntax: Syntax,
         catalog: Arc<Catalog>,
         columns: ColumnCache,
         workspace: WeakEntity<Workspace>,
     ) -> Self {
         Self {
+            syntax,
             catalog,
             columns,
             workspace: Some(workspace),
@@ -375,6 +379,45 @@ impl SchemaCompletions {
         candidates
     }
 
+    /// [`Self::candidates`] for a MongoDB buffer: what `mql::completing` says
+    /// the word is, from the catalog and the field names sampled for the
+    /// collection's structure.
+    fn mongo_candidates(
+        &self,
+        text: &str,
+        word: Range<usize>,
+        wanted: &mut Wanted,
+    ) -> Vec<Candidate> {
+        fn methods(names: impl Iterator<Item = &'static str>) -> Vec<Candidate> {
+            names
+                .map(|name| Candidate::new(name, None, CompletionItemKind::METHOD))
+                .collect()
+        }
+        match mql::completing(text, word.start) {
+            None => Vec::new(),
+            Some(Completing::Database) => {
+                let mut candidates = self.all_relations();
+                candidates.extend(methods(mql::DbMethod::ALL.iter().map(|m| m.name())));
+                candidates
+            }
+            Some(Completing::Collection) => methods(mql::Method::ALL.iter().map(|m| m.name())),
+            Some(Completing::Cursor) => methods(mql::CursorMethod::ALL.iter().map(|m| m.name())),
+            // As in SQL, nothing typed is not a question.
+            Some(Completing::Document { .. }) if word.is_empty() => Vec::new(),
+            Some(Completing::Document { collection }) => {
+                let mut candidates = collection
+                    .map(|collection| self.columns_of(&collection, wanted))
+                    .unwrap_or_default();
+                candidates.extend(
+                    mql::OPERATORS.iter().map(|operator| {
+                        Candidate::new(*operator, None, CompletionItemKind::OPERATOR)
+                    }),
+                );
+                candidates
+            }
+        }
+    }
+
     /// The whole decision, from buffer text to the rows the popup shows.
     ///
     /// Separate from [`CompletionProvider::completions`] and taking `&str`
@@ -390,6 +433,21 @@ impl SchemaCompletions {
         }
 
         let word = word_before(sql, offset);
+        match self.syntax {
+            Syntax::Sql => {}
+            Syntax::Mongo => {
+                let candidates = self.mongo_candidates(sql, word.clone(), &mut wanted);
+                let ranked = rank(
+                    candidates,
+                    &sql[word.clone()],
+                    &mut self.matcher.borrow_mut(),
+                )
+                .into_iter()
+                .map(|candidate| (word.clone(), candidate))
+                .collect();
+                return (ranked, wanted);
+            }
+        }
         if suppressed(sql, word.start) {
             return (Vec::new(), wanted);
         }
@@ -735,6 +793,7 @@ mod tests {
             })
             .collect();
         SchemaCompletions {
+            syntax: Syntax::Sql,
             catalog: Arc::new(catalog),
             columns: Rc::new(RefCell::new(held)),
             workspace: None,
@@ -1039,6 +1098,107 @@ mod tests {
         let sql = "SELECT e FROM audit.events";
         let (_, wanted) = completions.items(sql, sql.find(" FROM").unwrap());
         assert_eq!(wanted, vec![("audit".to_string(), "events".to_string())]);
+    }
+
+    /// The labels offered in a MongoDB buffer for a caret at `|`, over a
+    /// catalog holding `users` (sampled: `_id`, `name`, `email`) and `orders`.
+    fn mongo_labels(text: &str) -> Vec<String> {
+        let offset = text.find('|').expect("the test must mark the caret");
+        let text = text.replace('|', "");
+        let mut completions = detached(
+            Catalog {
+                schemas: vec![Schema {
+                    name: "shop".to_string(),
+                    relations: vec![relation("users"), relation("orders")],
+                    routines: Vec::new(),
+                }],
+            },
+            &[("shop", "users", &["_id", "name", "email"])],
+        );
+        completions.syntax = Syntax::Mongo;
+        completions
+            .items(&text, offset)
+            .0
+            .into_iter()
+            .map(|(_, candidate)| candidate.label)
+            .collect()
+    }
+
+    #[test]
+    fn after_db_a_mongo_buffer_offers_collections_then_database_methods() {
+        let offered = mongo_labels("db.|");
+        assert_eq!(&offered[..2], ["users", "orders"]);
+        assert!(offered.contains(&"runCommand".to_string()), "{offered:?}");
+        assert_eq!(mongo_labels("db.ord|"), vec!["orders"]);
+    }
+
+    #[test]
+    fn after_a_collection_its_methods_are_offered() {
+        for text in [
+            "db.users.|",
+            "db.getCollection(\"users\").|",
+            "db.getSiblingDB('other').users.|",
+        ] {
+            let offered = mongo_labels(text);
+            assert!(
+                offered.contains(&"insertOne".to_string()),
+                "{text}: {offered:?}"
+            );
+            assert!(
+                !offered.contains(&"limit".to_string()),
+                "{text}: {offered:?}"
+            );
+        }
+        assert_eq!(mongo_labels("db.users.countD|"), vec!["countDocuments"]);
+    }
+
+    #[test]
+    fn after_find_the_cursor_methods_are_offered() {
+        for text in [
+            "db.users.find({ a: \")\" }).|",
+            "db.users.find({}).sort({ name: 1 })\n  .|",
+            "db.users.aggregate([]).|",
+        ] {
+            let offered = mongo_labels(text);
+            assert!(
+                offered.contains(&"limit".to_string()),
+                "{text}: {offered:?}"
+            );
+            assert!(
+                !offered.contains(&"insertOne".to_string()),
+                "{text}: {offered:?}"
+            );
+        }
+        // A cursor method is not offered after a method that returns none.
+        assert!(mongo_labels("db.users.countDocuments({}).|").is_empty());
+    }
+
+    #[test]
+    fn inside_a_document_fields_come_before_operators() {
+        let offered = mongo_labels("db.users.find({ na|");
+        assert_eq!(offered.first().map(String::as_str), Some("name"));
+        assert!(mongo_labels("db.users.find({ age: { $g| } })").contains(&"$gte".to_string()));
+        assert!(
+            mongo_labels("db.getCollection('users').aggregate([{ $match: { em| } }])")
+                .contains(&"email".to_string())
+        );
+        // No collection named, still operators.
+        assert!(mongo_labels("db.runCommand({ $or| })").contains(&"$or".to_string()));
+    }
+
+    #[test]
+    fn a_mongo_string_comment_or_regex_offers_nothing() {
+        for text in [
+            "db.users.find({ name: \"na|\" })",
+            "db.users.find({ name: 'it\\'s na|' })",
+            "// db.|",
+            "db.users.find({ /* na| */ })",
+            "db.users.find({ name: /na|/ })",
+        ] {
+            assert!(mongo_labels(text).is_empty(), "{text}");
+        }
+        assert!(!mongo_labels("db.users.find({ name: /x/ }).|").is_empty());
+        assert!(!mongo_labels("// a note\ndb.|").is_empty());
     }
 
     #[test]
