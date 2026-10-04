@@ -136,9 +136,11 @@ impl Operator {
     /// Whether this engine can express the operator at all. Only the regex
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
-    /// SQL Server has none before 2025.
+    /// SQL Server has none before 2025. MongoDB's `$regex` arrives with its
+    /// filter bar.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
+        self != Self::Regex
+            || !matches!(engine, Engine::Sqlite | Engine::SqlServer | Engine::MongoDb)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -453,6 +455,9 @@ pub(crate) fn filter_predicate(
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
             Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
+            // ponytail: no SQL predicate reaches MongoDB; its filter bar
+            // writes MQL once browsing arrives, `$regex` included.
+            Engine::MongoDb => None,
         },
     }
 }

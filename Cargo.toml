@@ -193,6 +193,10 @@ mongodb = { version = "=3.9.1", default-features = false, features = [
     "rustls-tls",
     "dns-resolver",
 ] }
+# A MongoDB profile's user, password and database, escaped into the connection
+# string the driver reads its options from. Already in the graph through `url`;
+# pinned to the locked version so naming it links no second copy.
+percent-encoding = "=2.3.2"
 
 # The palette's scorer. gpui-component ships the list, the virtualized scroll
 # and the search field, but no fuzzy matching at all -- and ranking that reads

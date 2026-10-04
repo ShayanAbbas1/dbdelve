@@ -1574,6 +1574,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::Sqlite => Box::new(SQLiteDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
+        Engine::MongoDb => return crate::mql::classify(sql),
     };
 
     if engine == Engine::MariaDb

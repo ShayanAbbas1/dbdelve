@@ -1608,6 +1608,7 @@ dependencies = [
  "mongodb",
  "mysql",
  "nucleo-matcher",
+ "percent-encoding",
  "postgres",
  "ring",
  "rusqlite",

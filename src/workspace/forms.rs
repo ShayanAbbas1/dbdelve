@@ -248,12 +248,30 @@ impl Workspace {
                                             .flex_1()
                                             .child(self.form_field("Host", &form.host, cx)),
                                     )
-                                    .child(
-                                        div()
-                                            .w(px(96.))
-                                            .child(self.form_field("Port", &form.port, cx)),
-                                    ),
+                                    // An SRV name takes no port: its records
+                                    // name each server's own.
+                                    .children((!(form.srv && form.engine.resolves_srv())).then(
+                                        || {
+                                            div()
+                                                .w(px(96.))
+                                                .child(self.form_field("Port", &form.port, cx))
+                                        },
+                                    )),
                             )
+                            .children(form.engine.resolves_srv().then(|| {
+                                Checkbox::new("srv-host")
+                                    .text_size(px(layout::TEXT_SM))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .label("Host is an SRV name (mongodb+srv)")
+                                    .checked(form.srv)
+                                    .on_click(cx.listener(|workspace, on: &bool, _, cx| {
+                                        if let Some(form) = &mut workspace.form {
+                                            form.srv = *on;
+                                            form.test = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                            }))
                             .child(self.form_field("Database", &form.database, cx))
                             .child(self.form_field("Username", &form.user, cx))
                             .child(self.labelled_field(
@@ -261,6 +279,11 @@ impl Workspace {
                                 Input::new(&form.password).mask_toggle(),
                                 cx,
                             ))
+                            .children(
+                                form.engine
+                                    .takes_options()
+                                    .then(|| self.form_field("Options", &form.options, cx)),
+                            )
                             .child(
                                 div()
                                     .flex()

@@ -95,7 +95,11 @@ impl Workspace {
                 path: stored.path.unwrap_or_default(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
-            Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::SqlServer => {
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::SqlServer
+            | Engine::MongoDb => {
                 let server = ServerConfig {
                     host: stored.host,
                     port: stored.port,
@@ -112,6 +116,11 @@ impl Workspace {
                     Engine::MySql => ConnectionConfig::MySql(server),
                     Engine::MariaDb => ConnectionConfig::MariaDb(server),
                     Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                    Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
+                        server,
+                        srv: stored.srv.unwrap_or_default(),
+                        options: stored.options.unwrap_or_default(),
+                    }),
                     _ => ConnectionConfig::Postgres(server),
                 }
             }
@@ -325,7 +334,8 @@ impl Workspace {
             ConnectionConfig::Postgres(server)
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
-            | ConnectionConfig::SqlServer(server) => vec![
+            | ConnectionConfig::SqlServer(server)
+            | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.host, server.host.clone()),
                 (
@@ -343,6 +353,13 @@ impl Workspace {
             // `from_url` refuses the scheme, so no URL arrives as one.
             ConnectionConfig::Snowflake(_) => Vec::new(),
         };
+        let mongo = match &config {
+            ConnectionConfig::MongoDb(mongo) => Some(mongo),
+            _ => None,
+        };
+        let filled = filled
+            .into_iter()
+            .chain(mongo.map(|mongo| (&form.options, mongo.options.clone())));
         for (input, value) in filled {
             let input = input.clone();
             input.update(cx, |input, cx| input.set_value(value, window, cx));
@@ -350,8 +367,10 @@ impl Workspace {
 
         let engine = config.engine();
         let sslmode = config.server().map(|server| server.sslmode);
+        let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
             form.engine = engine;
+            form.srv = srv;
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
                 // cannot land in a form still set to `prefer`.

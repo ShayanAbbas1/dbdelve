@@ -100,6 +100,10 @@ impl Profile {
             ConnectionConfig::Snowflake(account) => Some(account),
             _ => None,
         };
+        let mongo = match &self.config {
+            ConnectionConfig::MongoDb(mongo) => Some(mongo),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -127,6 +131,8 @@ impl Profile {
             private_key: snowflake.map(|account| account.private_key.clone()),
             warehouse: snowflake.and_then(|account| account.warehouse.clone()),
             role: snowflake.and_then(|account| account.role.clone()),
+            srv: mongo.map(|mongo| mongo.srv),
+            options: mongo.map(|mongo| mongo.options.clone()),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.
