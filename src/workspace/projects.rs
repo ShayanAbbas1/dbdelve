@@ -105,8 +105,7 @@ impl Workspace {
         if let Some(project) = self.projects.iter_mut().find(|project| project.name == old) {
             project.name = name;
         }
-        self.project_name = None;
-        self.renaming_project = None;
+        self.drop_project_name();
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -115,7 +114,7 @@ impl Workspace {
         if name.is_empty() || self.name_taken(&name, cx) {
             return;
         }
-        self.project_name = None;
+        self.drop_project_name();
         self.expanded_groups.push(Some(name.clone()));
         self.projects.push(store::StoredProject {
             name,
@@ -125,8 +124,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The project goes; its connections stay, under No project.
+    /// Puts the name field away. It held focus while open, and a field
+    /// unmounted with focus in it takes every keybinding with it, so focus
+    /// goes back to whatever is in front.
+    pub(crate) fn drop_project_name(&mut self) {
+        self.renaming_project = None;
+        if self.project_name.take().is_some()
+            && let Some(profile) = self.profile_mut()
+        {
+            profile.session.editor_needs_focus = true;
+        }
+    }
+
+    /// The project goes; its connections stay, under No project. The first
+    /// click only arms it, as removing a connection does: a project's
+    /// membership is not something to lose to a click aimed at its header.
     pub(crate) fn delete_project(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.pending_project_deletion.as_deref() != Some(name) {
+            self.pending_project_deletion = Some(name.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_project_deletion = None;
         self.projects.retain(|project| project.name != name);
         self.remember_profiles(cx);
         cx.notify();
@@ -152,5 +171,53 @@ impl Workspace {
         self.assigning_project = None;
         self.remember_profiles(cx);
         cx.notify();
+    }
+}
+
+/// Projects as read from disk, held to what the switcher assumes: every id
+/// names a live connection, and each connection is in one project at most,
+/// the first that lists it. A hand-edited file, or one an earlier build wrote,
+/// can break either, and a stale id would quietly claim the next connection
+/// given the same name.
+pub(crate) fn normalized_projects(
+    mut projects: Vec<store::StoredProject>,
+    live: &[&str],
+) -> Vec<store::StoredProject> {
+    let mut seen = std::collections::HashSet::new();
+    for project in &mut projects {
+        project
+            .connections
+            .retain(|id| live.contains(&id.as_str()) && seen.insert(id.clone()));
+    }
+    projects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str, connections: &[&str]) -> store::StoredProject {
+        store::StoredProject {
+            name: name.into(),
+            connections: connections.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_loaded_project_keeps_only_live_connections_each_in_its_first_project() {
+        let projects = normalized_projects(
+            vec![
+                project("Billing", &["dev", "gone", "prod"]),
+                project("Analytics", &["prod", "warehouse"]),
+            ],
+            &["dev", "prod", "warehouse"],
+        );
+        assert_eq!(
+            projects,
+            vec![
+                project("Billing", &["dev", "prod"]),
+                project("Analytics", &["warehouse"]),
+            ]
+        );
     }
 }

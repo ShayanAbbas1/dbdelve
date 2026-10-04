@@ -1608,8 +1608,7 @@ impl Workspace {
                             _ = toggle_workspace.update(cx, |workspace, cx| {
                                 workspace.switcher_open = true;
                                 workspace.pending_removal = None;
-                                workspace.project_name = None;
-                                workspace.renaming_project = None;
+                                workspace.pending_project_deletion = None;
                                 workspace.assigning_project = None;
                                 workspace.expanded_groups =
                                     vec![workspace.current_group().map(str::to_string)];
@@ -1732,6 +1731,7 @@ impl Workspace {
         let name = project.name.clone();
         let rename_name = project.name.clone();
         let delete_name = project.name.clone();
+        let pending = self.pending_project_deletion.as_deref() == Some(project.name.as_str());
         group_header(("project", index), selected, expanded, t)
             .group(format!("project-row-{index}"))
             .child(row_icon(t, icon::PROJECT))
@@ -1749,8 +1749,11 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_XS))
-                    .opacity(0.)
-                    .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
+                    .when(!pending, |actions| {
+                        actions
+                            .opacity(0.)
+                            .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
+                    })
                     .child(
                         icon_button(
                             ("rename-project", index),
@@ -1775,10 +1778,18 @@ impl Workspace {
                         icon_button(
                             ("delete-project", index),
                             icon::DELETE,
-                            Tone::Quiet,
+                            if pending { Tone::Danger } else { Tone::Quiet },
                             Control::Inline,
                             t,
                         )
+                        .when(pending, |armed| {
+                            armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
+                                "Delete?",
+                                Tone::Danger,
+                                Control::Inline,
+                                t,
+                            ))
+                        })
                         .tooltip("Delete project (its connections are kept)")
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
