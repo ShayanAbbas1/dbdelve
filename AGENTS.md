@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, Snowflake and SQL Server.
+speaking Postgres, MySQL, MariaDB, SQLite, Snowflake, SQL Server and MongoDB.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -70,6 +70,18 @@ require it, stop and raise it instead.
    spliced into DBDelve's statement: exactly one query, nothing destructive
    under it, no delete at all. It admits no write and is not a way around the
    first gate. Do not add a path that bypasses either.
+
+   MongoDB has its own pair, reached through the same two entry points
+   (`sql::is_generated_write_on` and `sql::is_generated_select` dispatch on the
+   engine): `mql::is_generated_write` admits `updateOne`s whose filter is
+   exactly `{_id: <literal>}` and whose update is exactly a `$set` of literals,
+   one `insertOne` of a literal document, and one `deleteOne` by `_id`; and
+   `mql::browse::is_generated_read` admits only the preview's own
+   `find(filter).sort().skip().limit()` and the status bar's `countDocuments`,
+   each written again from its parts and compared with the text,
+   with a filter that is one document running no server-side JavaScript
+   (`$where`, `$function`, `$accumulator`). Both read the tree-sitter parse, not
+   the builder's word, for the reason above.
 
    **The `DELETE`'s shape is verified from the parse tree, not trusted because
    `sql::delete_row` produced it.** A gate that trusts its caller is a comment;
@@ -234,9 +246,15 @@ crate is a one-off snapshot nobody republishes, and gpui-component depends on
 `gpui-pre` under the name `gpui`, so taking it keeps one copy of the framework
 in the graph.
 
+Where the MongoDB code lives: `src/mql.rs` parses and classifies mongosh
+statements, formats them and splices a sort into one; `src/mql/browse.rs`
+writes the object tab's preview, count and filter and holds the read gate;
+`src/db/mongo.rs` is the driver, its catalog, its sampled structure and its
+rendering of BSON.
+
 **The three tree-sitter pins are correctness, not formatting.** The grammar
 decides where every statement boundary falls, which statements `sql.rs` and
-`mql.rs` will splice an `ORDER BY` into, and what the gates accept. A bump changes what
+`mql.rs` will splice a `.sort()` into, and what the gates accept. A bump changes what
 DBDelve sends to the server. Treat them like the driver pins.
 
 **`gpui_platform`'s features are load-bearing.** Without `font-kit` the macOS
@@ -881,6 +899,41 @@ Decided, and not to be re-litigated:
   grid, never special-cased into a JSON type. Its catalog also
   reports what MySQL 8 no longer does, `bigint(20)`'s display width and a
   nullable column's default as the text `NULL`, and both are shown as they come.
+- **MongoDB is a statement language of its own, and the classifier is the only
+  Read-only boundary.** The server has no read-only hold to ask for
+  (`holds_read_only` is false), so `mql::classify` is all that stands between a
+  Read-only profile and a write. It fails closed: anything it cannot parse whole
+  is `Unreadable`, a `$out` or `$merge` at any depth of any argument counts, and
+  a `runCommand` is a read only when its name is on a whitelist.
+- **`$out` is a `Drop`.** It replaces the target collection whole, as
+  `CREATE OR REPLACE TABLE … AS SELECT` does, which `sql::classify` also calls a
+  `Drop`, so it asks for confirmation the same way. `$merge` is a write. An
+  unfiltered `deleteMany` is an `UnfilteredDelete`; `updateMany({})` is a plain
+  write, as an unqualified `UPDATE` is.
+- **There are no transactions to bracket a batch with** (`transaction_start` is
+  `None`). A multi-row edit applies in order, and when one fails the error says
+  which row did and that the rows before it applied. Nothing is rolled back.
+- **A missing field is not a null.** A document may lack a field another has, and
+  the grid says so: a missing cell renders empty with no `NULL` label, a null
+  renders `NULL`, and a snapshot keeps the difference.
+- **Types are per cell, not per column.** A field's type varies from document to
+  document, so `QueryResult` carries a type tag for each cell (`$type` aliases,
+  plus `missing`) beside the SQL engines' empty one. `Column::data_type` is the
+  shared type when the present, non-null cells agree and `mixed` otherwise. An
+  edit is coerced back to its cell's tag; text that does not coerce is an error
+  before the review, never a quiet string.
+- **Cancel goes by session, not by comment.** Every run is sent in a driver
+  session of its own with the statement untouched (a user's `comment` is theirs
+  and is never rewritten to carry a tag). `cancel` takes `&self`, finds the run's
+  operations through `$currentOp` on that session's `lsid` and `killOp`s them.
+  The connection survives.
+- **`login_database` is the database a profile logs in to, kept apart from the
+  one it is on.** Select Database moves the profile to another database, and a
+  user is defined in one database: the driver authenticates against the
+  connection string's database unless `options` names an `authSource`. So the
+  first switch records the original in `login_database` and the string keeps
+  naming it, rather than rewriting the options. The form does not show it and
+  saves it as it was.
 
 ### SSH tunnels
 

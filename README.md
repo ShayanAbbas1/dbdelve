@@ -26,6 +26,10 @@ I wanted something which is performant, modern and consumes little ram. The exis
   enforce primary keys. See [docs/snowflake.md](docs/snowflake.md) for setup.
 - **SQL Server:** supported, 2017 or later, without Explain. See
   [docs/mssql.md](docs/mssql.md) for what differs.
+- **MongoDB:** supported, queried with mongosh statements like
+  `db.accounts.find({ status: "active" })`. Browse, filter, sort, edit by `_id`,
+  Explain and Format Query work as on the SQL engines. There are no
+  transactions, so a batch of edits applies in order.
 
 Support for other database engines is planned, and more will be added over
 time.

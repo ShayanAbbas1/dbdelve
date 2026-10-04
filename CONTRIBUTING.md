@@ -47,6 +47,10 @@ mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 ```
 
+The MongoDB service is `mongo` in `compose.yaml`, on port 57017; its seed is
+`dev/mongo/init/001-dbdelve-demo.js`, which `mongod` runs only on an empty data
+volume. After editing it, `docker compose down -v` to apply it.
+
 SQLite has no server to start â€” build the file once and point the form at its
 absolute path:
 
@@ -65,7 +69,7 @@ cargo test
 Most of the engine code is exercised by database-backed tests named
 `live_*`, marked `#[ignore]` so a checkout with no databases running still
 passes. To run those too, bring the containers up, seed SQLite, and point the
-tests at all three, exactly as CI does it (`.github/workflows/ci.yml`):
+tests at all of them, exactly as CI does it (`.github/workflows/ci.yml`):
 
 ```sh
 docker compose up -d --wait
@@ -88,6 +92,13 @@ A MySQL or MariaDB container reporting healthy does not mean its seed applied â€
 `mysqladmin ping` doesn't check that. If the live tests fail oddly, check
 `live_the_development_database_is_fully_seeded` first rather than assuming
 your change broke something.
+
+The MongoDB live tests are in `src/db/mongo.rs` and read `dbdelve_MONGO_URL`;
+run them alone with:
+
+```sh
+cargo test db::mongo -- --include-ignored
+```
 
 The SSH tunnel's own tests (`live_ssh_*`, in `ssh.rs` and each engine module)
 need the dev bastions `docker compose up` already started, plus the config
