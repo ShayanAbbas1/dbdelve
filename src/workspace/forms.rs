@@ -1248,13 +1248,16 @@ impl Workspace {
         let panel = self.switcher_open.then(|| {
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
-            let in_project = self.open_project().is_some();
+            let expanded = self.expanded_group.as_ref().map(Option::as_deref);
             let profile_rows = self
                 .profiles
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| self.in_project(*index))
+                .filter(|(_, profile)| {
+                    self.projects.is_empty() || expanded == Some(self.group_of(&profile.id))
+                })
                 .map(|(index, profile)| {
+                    let in_project = self.group_of(&profile.id).is_some();
                     let activate_workspace = workspace.clone();
                     let leave_workspace = workspace.clone();
                     let assign_workspace = workspace.clone();
@@ -1337,11 +1340,10 @@ impl Workspace {
                                         )
                                         .tooltip("Remove from project")
                                         .on_click(
-                                            move |_, window, cx| {
+                                            move |_, _, cx| {
                                                 cx.stop_propagation();
                                                 _ = leave_workspace.update(cx, |workspace, cx| {
-                                                    workspace
-                                                        .move_to_project(index, None, window, cx);
+                                                    workspace.move_to_project(index, None, cx);
                                                 });
                                             },
                                         ),
@@ -1459,14 +1461,9 @@ impl Workspace {
                                             .whitespace_nowrap()
                                             .child(project.name.clone()),
                                     )
-                                    .on_click(move |_, window, cx| {
+                                    .on_click(move |_, _, cx| {
                                         _ = join_workspace.update(cx, |workspace, cx| {
-                                            workspace.move_to_project(
-                                                index,
-                                                Some(&name),
-                                                window,
-                                                cx,
-                                            );
+                                            workspace.move_to_project(index, Some(&name), cx);
                                         });
                                     })
                             })
@@ -1526,7 +1523,12 @@ impl Workspace {
                         .child("Add connection")
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
-                                workspace.form = Some(ConnectionForm::new(None, window, cx));
+                                let mut form = ConnectionForm::new(None, window, cx);
+                                form.project = match &workspace.expanded_group {
+                                    Some(group) => group.clone(),
+                                    None => workspace.current_group().map(str::to_string),
+                                };
+                                workspace.form = Some(form);
                                 workspace.switcher_open = false;
                                 cx.notify();
                             });
@@ -1538,7 +1540,7 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
-        let project_name = self.open_project().map(|project| project.name.clone());
+        let project_name = self.current_group().map(str::to_string);
         let toggle_workspace = workspace.clone();
 
         div()
@@ -1611,6 +1613,8 @@ impl Workspace {
                                 workspace.project_name = None;
                                 workspace.renaming_project = None;
                                 workspace.assigning_project = None;
+                                workspace.expanded_group =
+                                    Some(workspace.current_group().map(str::to_string));
                                 cx.notify();
                             });
                         })
@@ -1619,9 +1623,10 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// No project, then each project, as groups only one of which is
-    /// expanded: the one open, holding `members`. With no projects there is
-    /// nothing to group, and the members are listed bare.
+    /// No project, then each project, as groups at most one of which is
+    /// expanded, holding `members`. The group of the connection in front is
+    /// marked, but looking inside another switches nothing. With no projects
+    /// there is nothing to group, and the members are listed bare.
     fn render_project_groups(
         &self,
         members: Vec<AnyElement>,
@@ -1629,8 +1634,7 @@ impl Workspace {
     ) -> Vec<AnyElement> {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
-        let open = self.open_project().map(|project| project.name.clone());
-        let expanded = !self.project_collapsed;
+        let current = self.current_group().map(str::to_string);
         let mut rows = Vec::new();
         if self.projects.is_empty() {
             rows.push(
@@ -1643,51 +1647,59 @@ impl Workspace {
             rows.extend(members);
         } else {
             let mut members = Some(members);
-            let group_body = |members: Vec<AnyElement>| {
+            let mut group_body = || {
+                let members = members.take().unwrap_or_default();
                 div()
                     .pl(px(layout::SPACE_MD))
                     .flex()
                     .flex_col()
+                    .when(members.is_empty(), |body| {
+                        body.child(
+                            switcher_row("empty-group", t)
+                                .text_color(t.text_faint)
+                                .child("No connections yet"),
+                        )
+                    })
                     .children(members)
                     .into_any_element()
             };
 
-            let selected = open.is_none();
-            // An empty No project group has nothing to open, and selecting it
-            // would only ask for a new connection.
+            let expanded = self.expanded_group == Some(None);
             let ungrouped = self
                 .profiles
                 .iter()
-                .any(|profile| self.project_of(&profile.id).is_none());
-            if selected || ungrouped {
+                .any(|profile| self.group_of(&profile.id).is_none());
+            if ungrouped {
                 let all_workspace = workspace.clone();
                 rows.push(
-                    group_header("no-project", selected, expanded, t)
+                    group_header("no-project", current.is_none(), expanded, t)
                         .child(row_icon(t, icon::DATABASE))
                         .child(div().flex_1().child("No project"))
-                        .on_click(move |_, window, cx| {
+                        .on_click(move |_, _, cx| {
                             _ = all_workspace.update(cx, |workspace, cx| {
-                                workspace.select_group(None, window, cx);
+                                workspace.toggle_group(None, cx);
                             });
                         })
                         .into_any_element(),
                 );
-            }
-            if selected && expanded {
-                rows.push(group_body(members.take().unwrap_or_default()));
+                if expanded {
+                    rows.push(group_body());
+                }
             }
 
             for (index, project) in self.projects.iter().enumerate() {
-                let selected = open.as_deref() == Some(project.name.as_str());
+                let expanded = self.expanded_group.as_ref().map(Option::as_deref)
+                    == Some(Some(project.name.as_str()));
+                let is_current = current.as_deref() == Some(project.name.as_str());
                 if self.renaming_project.as_deref() == Some(project.name.as_str())
                     && let Some(input) = &self.project_name
                 {
                     rows.push(name_field(input));
                 } else {
-                    rows.push(self.project_header(index, project, selected, expanded, cx));
+                    rows.push(self.project_header(index, project, is_current, expanded, cx));
                 }
-                if selected && expanded {
-                    rows.push(group_body(members.take().unwrap_or_default()));
+                if expanded {
+                    rows.push(group_body());
                 }
             }
         }
@@ -1778,9 +1790,9 @@ impl Workspace {
                         }),
                     ),
             )
-            .on_click(move |_, window, cx| {
+            .on_click(move |_, _, cx| {
                 _ = open_workspace.update(cx, |workspace, cx| {
-                    workspace.select_group(Some(&name), window, cx);
+                    workspace.toggle_group(Some(name.clone()), cx);
                 });
             })
             .into_any_element()
@@ -1961,20 +1973,20 @@ fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui
         .hover(|style| style.bg(t.element_hover))
 }
 
-/// A group's header: a chevron saying whether it is expanded, which only the
-/// selected group ever is.
+/// A group's header: a chevron saying whether it is expanded, and weight
+/// saying whether it holds the connection in front.
 fn group_header(
     id: impl Into<gpui::ElementId>,
-    selected: bool,
+    current: bool,
     expanded: bool,
     t: Theme,
 ) -> gpui::Stateful<gpui::Div> {
     switcher_row(id, t)
-        .text_color(if selected { t.text } else { t.text_muted })
-        .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
+        .text_color(if current { t.text } else { t.text_muted })
+        .when(current, |row| row.font_weight(FontWeight::MEDIUM))
         .child(row_icon(
             t,
-            if selected && expanded {
+            if expanded {
                 icon::CHEVRON_DOWN
             } else {
                 icon::CHEVRON_RIGHT

@@ -312,9 +312,6 @@ pub struct StoredSettings {
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredProject {
     pub name: String,
-    /// Whether this is the project that was open. At most one is.
-    #[serde(default)]
-    pub open: bool,
     /// Profile ids, in the order they were added.
     #[serde(default)]
     pub connections: Vec<String>,
@@ -1721,12 +1718,10 @@ open_objects = []
             projects: vec![
                 StoredProject {
                     name: "Billing".into(),
-                    open: true,
                     connections: vec!["dev".into(), "local".into()],
                 },
                 StoredProject {
                     name: "Empty".into(),
-                    open: false,
                     connections: Vec::new(),
                 },
             ],

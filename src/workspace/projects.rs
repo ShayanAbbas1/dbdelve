@@ -1,89 +1,48 @@
 //! Projects: named collections of connections. A connection is in at most one
-//! project, and the ones in none form the No project group. Opening a group
-//! narrows the switcher, the palette and next/previous connection to its
-//! members; nothing about a connection itself changes, so its tabs, saved
-//! queries and history come back exactly as they were.
+//! project, and the ones in none form the No project group. The group of the
+//! connection in front is the one the titlebar names and the palette and
+//! next/previous connection keep to; nothing about a connection itself
+//! changes, so its tabs, saved queries and history come back as they were.
 
 use super::*;
 
 impl Workspace {
-    pub(crate) fn open_project(&self) -> Option<&store::StoredProject> {
-        self.projects.iter().find(|project| project.open)
-    }
-
-    /// Whether the profile at `index` is in the open group: the open project,
-    /// or with none open, no project at all.
-    pub(crate) fn in_project(&self, index: usize) -> bool {
-        let Some(profile) = self.profiles.get(index) else {
-            return false;
-        };
-        match self.open_project() {
-            Some(project) => project.connections.contains(&profile.id),
-            None => self.project_of(&profile.id).is_none(),
-        }
-    }
-
-    pub(crate) fn project_of(&self, id: &str) -> Option<&store::StoredProject> {
+    /// The project a connection is in, by name, or `None` for No project.
+    pub(crate) fn group_of(&self, id: &str) -> Option<&str> {
         self.projects
             .iter()
             .find(|project| project.connections.iter().any(|member| member == id))
+            .map(|project| project.name.as_str())
     }
 
-    pub(crate) fn project_members(&self) -> Vec<usize> {
+    /// The group of the connection in front.
+    pub(crate) fn current_group(&self) -> Option<&str> {
+        self.profile()
+            .and_then(|profile| self.group_of(&profile.id))
+    }
+
+    pub(crate) fn in_current_group(&self, index: usize) -> bool {
+        self.profiles
+            .get(index)
+            .is_some_and(|profile| self.group_of(&profile.id) == self.current_group())
+    }
+
+    pub(crate) fn current_group_members(&self) -> Vec<usize> {
         (0..self.profiles.len())
-            .filter(|index| self.in_project(*index))
+            .filter(|index| self.in_current_group(*index))
             .collect()
     }
 
-    /// `None` closes whatever project is open, opening the No project group.
-    pub(crate) fn switch_project(
-        &mut self,
-        name: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        for project in &mut self.projects {
-            project.open = Some(project.name.as_str()) == name;
-        }
-        self.project_collapsed = false;
-        self.pending_removal = None;
-        self.remember_profiles(cx);
-        self.settle_project(window, cx);
-        cx.notify();
-    }
-
-    /// A click on a group's header: the selected group folds or unfolds,
-    /// any other is selected, which expands it and folds the rest.
-    pub(crate) fn select_group(
-        &mut self,
-        name: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.open_project().map(|project| project.name.as_str()) == name {
-            self.project_collapsed = !self.project_collapsed;
-            cx.notify();
+    /// A click on a group's header in the switcher: expands it to look
+    /// inside, folding whichever was expanded, or folds it if it already was.
+    /// Nothing is switched to; that takes a click on a connection.
+    pub(crate) fn toggle_group(&mut self, group: Option<String>, cx: &mut Context<Self>) {
+        self.expanded_group = if self.expanded_group.as_ref() == Some(&group) {
+            None
         } else {
-            self.switch_project(name, window, cx);
-        }
-    }
-
-    /// Puts a member of the open project in front if the one there is not.
-    /// An empty project has nothing to put there, so it asks for its first
-    /// connection, which `create_profile` adds to it.
-    // ponytail: cancelling that form shows the previous connection again,
-    // outside the project; an empty pane would need `active` to become optional.
-    fn settle_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.in_project(self.active) {
-            return;
-        }
-        match self.project_members().first() {
-            Some(&index) => self.activate(index, cx),
-            None => {
-                self.switcher_open = false;
-                self.form = Some(ConnectionForm::new(None, window, cx));
-            }
-        }
+            Some(group)
+        };
+        cx.notify();
     }
 
     /// Opens the name field: for a new project with `renaming` empty, or in
@@ -103,12 +62,12 @@ impl Workspace {
         cx.subscribe_in(
             &input,
             window,
-            |workspace, input, event: &InputEvent, window, cx| {
+            |workspace, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let name = input.read(cx).value().trim().to_string();
                     match workspace.renaming_project.clone() {
                         Some(old) => workspace.rename_project(&old, name, cx),
-                        None => workspace.create_project(name, window, cx),
+                        None => workspace.create_project(name, cx),
                     }
                 }
             },
@@ -132,6 +91,9 @@ impl Workspace {
         if name.is_empty() || (name != old && self.name_taken(&name, cx)) {
             return;
         }
+        if self.expanded_group == Some(Some(old.to_string())) {
+            self.expanded_group = Some(Some(name.clone()));
+        }
         if let Some(project) = self.projects.iter_mut().find(|project| project.name == old) {
             project.name = name;
         }
@@ -141,16 +103,18 @@ impl Workspace {
         cx.notify();
     }
 
-    fn create_project(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
         if name.is_empty() || self.name_taken(&name, cx) {
             return;
         }
         self.project_name = None;
+        self.expanded_group = Some(Some(name.clone()));
         self.projects.push(store::StoredProject {
-            name: name.clone(),
+            name,
             ..Default::default()
         });
-        self.switch_project(Some(&name), window, cx);
+        self.remember_profiles(cx);
+        cx.notify();
     }
 
     /// The project goes; its connections stay, under No project.
@@ -161,13 +125,11 @@ impl Workspace {
     }
 
     /// Moves a connection into `project`, or with `None` out of every project
-    /// and into No project. The connection in front is followed into its new
-    /// group rather than left in front of a group that no longer lists it.
+    /// and into No project.
     pub(crate) fn move_to_project(
         &mut self,
         index: usize,
         project: Option<&str>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
@@ -180,11 +142,7 @@ impl Workspace {
             }
         }
         self.assigning_project = None;
-        if index == self.active {
-            self.switch_project(project, window, cx);
-        } else {
-            self.remember_profiles(cx);
-            cx.notify();
-        }
+        self.remember_profiles(cx);
+        cx.notify();
     }
 }

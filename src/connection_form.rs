@@ -73,6 +73,8 @@ pub(crate) struct ConnectionForm {
     pub(crate) test: Option<ConnectionTest>,
     /// The id of the profile being edited, or `None` for a new connection.
     pub(crate) editing: Option<String>,
+    /// The project a new connection joins, or `None` for No project.
+    pub(crate) project: Option<String>,
     /// The other clients installed here, looked for once as the form opens
     /// rather than on every frame.
     pub(crate) importable: Vec<Source>,
@@ -242,6 +244,7 @@ impl ConnectionForm {
             error: None,
             test: None,
             editing: None,
+            project: None,
             importable: Source::ALL
                 .into_iter()
                 .filter(|source| source.found())

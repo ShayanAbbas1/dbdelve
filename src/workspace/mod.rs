@@ -83,9 +83,10 @@ pub(crate) struct Workspace {
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
-    /// Whether the open project's group is folded in the switcher. Only the
-    /// open group is ever expanded, so this is the one flag it needs.
-    pub(crate) project_collapsed: bool,
+    /// The group expanded in the switcher -- `Some(None)` is No project --
+    /// or `None` with every group folded. Looking inside a group switches
+    /// nothing, so this is apart from the group of the connection in front.
+    pub(crate) expanded_group: Option<Option<String>>,
     /// The connection whose "Add to a project" choices are unfolded in the
     /// switcher, by id.
     pub(crate) assigning_project: Option<String>,
@@ -179,7 +180,7 @@ impl Workspace {
             project_name: None,
             renaming_project: None,
             project_name_needs_focus: false,
-            project_collapsed: false,
+            expanded_group: None,
             assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
@@ -265,11 +266,6 @@ impl Workspace {
                     workspace.active = index;
                 }
                 workspace.projects = projects;
-                if !workspace.in_project(workspace.active)
-                    && let Some(&index) = workspace.project_members().first()
-                {
-                    workspace.active = index;
-                }
             }
             Err(message) => {
                 workspace.store_unreadable = true;

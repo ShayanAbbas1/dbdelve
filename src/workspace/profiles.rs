@@ -235,9 +235,6 @@ impl Workspace {
             catalog: CatalogState::Loading,
             session,
         });
-        if let Some(project) = self.projects.iter_mut().find(|project| project.open) {
-            project.connections.push(id.clone());
-        }
         if let Some(password) = password
             && let Err(message) = store::set_password(&id, &password)
         {
@@ -284,9 +281,9 @@ impl Workspace {
                 else {
                     return;
                 };
-                workspace.form = Some(ConnectionForm::duplicating(
-                    profile, name, password, window, cx,
-                ));
+                let mut form = ConnectionForm::duplicating(profile, name, password, window, cx);
+                form.project = workspace.group_of(&id).map(str::to_string);
+                workspace.form = Some(form);
                 cx.notify();
             });
         })
@@ -533,6 +530,7 @@ impl Workspace {
         let color = form.color;
         let mode = form.mode;
         let editing = form.editing.clone();
+        let project = form.project.clone();
         let (name, config) = match form.config(cx) {
             Ok(profile) => profile,
             Err(error) => {
@@ -550,6 +548,9 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
+                if project.is_some() {
+                    self.move_to_project(index, project.as_deref(), cx);
+                }
                 self.activate(index, cx);
             }
         }
@@ -696,7 +697,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.form = Some(ConnectionForm::new(None, window, cx));
+        let mut form = ConnectionForm::new(None, window, cx);
+        form.project = self.current_group().map(str::to_string);
+        self.form = Some(form);
         self.switcher_open = false;
         // The form branch of `Render` returns before painting the modal, so a
         // flag left set would reappear the moment the form closes.
@@ -1210,7 +1213,7 @@ impl Workspace {
     }
 
     pub(crate) fn cycle_profile(&mut self, step: isize, cx: &mut Context<Self>) {
-        let members = self.project_members();
+        let members = self.current_group_members();
         if members.len() < 2 || self.form.is_some() {
             return;
         }
