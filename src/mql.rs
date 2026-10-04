@@ -1543,11 +1543,7 @@ fn statement_verdict(target: &Target) -> Option<Verdict> {
         Target::Show(Show::Databases | Show::Collections) => Verdict::READ,
         Target::Database { call, .. } => match call.method {
             DbMethod::RunCommand | DbMethod::AdminCommand => {
-                return call
-                    .args
-                    .first()
-                    .is_some_and(|command| command_reads(&command.value))
-                    .then_some(Verdict::READ);
+                return command_verdict(&call.args.first()?.value);
             }
             DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
             DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
@@ -1559,12 +1555,7 @@ fn statement_verdict(target: &Target) -> Option<Verdict> {
 }
 
 fn collection_verdict(call: &Call<Method>) -> Verdict {
-    // Only a filter holding at least one condition narrows anything. A missing
-    // or non-document filter is not one, and is read the conservative way.
-    let unfiltered = !matches!(
-        call.args.first().map(|arg| &arg.value),
-        Some(Value::Document(fields)) if !fields.is_empty()
-    );
+    let unfiltered = !narrows(call.args.first().map(|arg| &arg.value));
     match call.method {
         Method::Find
         | Method::FindOne
@@ -1603,6 +1594,68 @@ fn collection_verdict(call: &Call<Method>) -> Verdict {
             Some(_) => Verdict::destroys(Destructive::Drop),
         },
     }
+}
+
+/// Whether a filter names any condition. A missing or non-document filter
+/// does not, and neither does a `$comment`, which only labels the operation.
+fn narrows(filter: Option<&Value>) -> bool {
+    matches!(
+        filter,
+        Some(Value::Document(fields)) if fields.iter().any(|(key, _)| key != "$comment")
+    )
+}
+
+/// What a `runCommand` or `adminCommand` does, by its name. A command that has
+/// a helper here classifies as its helper does, so spelling it as a command is
+/// never a way past the gate the helper meets. `None` for every other command:
+/// off the read list, it is unreadable, as unparseable SQL is.
+fn command_verdict(command: &Value) -> Option<Verdict> {
+    let (name, fields): (&str, &[(String, Value)]) = match command {
+        Value::String(name) => (name, &[]),
+        Value::Document(fields) => (fields.first()?.0.as_str(), fields),
+        _ => return None,
+    };
+    let field = |key: &str| {
+        fields
+            .iter()
+            .find(|(field, _)| field == key)
+            .map(|(_, value)| value)
+    };
+    let verdict = match name {
+        "drop"
+        | "dropDatabase"
+        | "dropIndexes"
+        | "deleteIndexes"
+        | "dropUser"
+        | "dropAllUsersFromDatabase"
+        | "dropRole"
+        | "dropAllRolesFromDatabase"
+        | "shutdown" => Verdict::destroys(Destructive::Drop),
+        // `limit: 0` deletes every match, so an entry with no condition and no
+        // limit of one is `deleteMany({})`.
+        "delete" => {
+            let deletes_all = |entry: &Value| match entry {
+                Value::Document(entry) => {
+                    let get = |key: &str| entry.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                    !narrows(get("q")) && get("limit").and_then(integer) != Some(1)
+                }
+                _ => false,
+            };
+            match field("deletes") {
+                Some(Value::Array(entries)) if entries.iter().any(deletes_all) => {
+                    Verdict::destroys(Destructive::UnfilteredDelete)
+                }
+                _ => Verdict::WRITE,
+            }
+        }
+        "renameCollection" => match field("dropTarget") {
+            None | Some(Value::Bool(false)) => Verdict::WRITE,
+            Some(_) => Verdict::destroys(Destructive::Drop),
+        },
+        "insert" | "update" | "findAndModify" | "createIndexes" | "create" => Verdict::WRITE,
+        _ => return command_reads(command).then_some(Verdict::READ),
+    };
+    Some(verdict)
 }
 
 /// The commands `runCommand` may run in Read-only: each reads and nothing
@@ -2575,15 +2628,9 @@ mod tests {
             Verdict::READ
         );
         for text in [
-            "db.runCommand({drop: 'c'})",
-            "db.runCommand({dropDatabase: 1})",
-            "db.runCommand({delete: 'c', deletes: [{q: {}, limit: 0}]})",
-            "db.runCommand({insert: 'c', documents: [{}]})",
             "db.runCommand({killOp: 1, op: 5})",
             "db.runCommand({eval: 'db.c.drop()'})",
-            "db.runCommand({shutdown: 1})",
             "db.adminCommand({setParameter: 1, x: 1})",
-            "db.adminCommand('shutdown')",
             "db.runCommand({Ping: 1})",
             "db.runCommand({})",
             "db.runCommand(null)",
@@ -2595,10 +2642,72 @@ mod tests {
             "db.runCommand({explain: 'drop'})",
             "db.runCommand({explain: {explain: {drop: 'c'}}})",
             "db.runCommand({explain: {aggregate: 'c', pipeline: [{$out: 'd'}]}})",
-            "db.runCommand({find: 'c'}); db.runCommand({drop: 'c'})",
         ] {
             assert_eq!(classify(text), unreadable(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_command_with_a_helper_classifies_as_its_helper_does() {
+        for command in [
+            "{drop: 'c'}",
+            "{dropDatabase: 1}",
+            "{dropIndexes: 'c', index: '*'}",
+            "{deleteIndexes: 'c', index: 'a_1'}",
+            "{dropUser: 'u'}",
+            "{dropAllUsersFromDatabase: 1}",
+            "{dropRole: 'r'}",
+            "{dropAllRolesFromDatabase: 1}",
+            "'shutdown'",
+            "{renameCollection: 'd.a', to: 'd.b', dropTarget: true}",
+            "{find: 'c'}); db.runCommand({drop: 'c'}",
+        ] {
+            assert_eq!(
+                classify(&format!("db.adminCommand({command})")),
+                destroys(Destructive::Drop),
+                "{command}"
+            );
+        }
+        for command in [
+            "{delete: 'c', deletes: [{q: {}, limit: 0}]}",
+            "{delete: 'c', deletes: [{q: {a: 1}, limit: 1}, {q: {$comment: 'x'}, limit: 0}]}",
+            "{delete: 'c', deletes: [{limit: 0}]}",
+        ] {
+            assert_eq!(
+                classify(&format!("db.runCommand({command})")),
+                destroys(Destructive::UnfilteredDelete),
+                "{command}"
+            );
+        }
+        for command in [
+            "{delete: 'c', deletes: [{q: {a: 1}, limit: 0}]}",
+            "{delete: 'c', deletes: [{q: {}, limit: 1}]}",
+            "{insert: 'c', documents: [{}]}",
+            "{update: 'c', updates: [{q: {}, u: {$set: {a: 1}}, multi: true}]}",
+            "{findAndModify: 'c', query: {}, remove: true}",
+            "{createIndexes: 'c', indexes: []}",
+            "{create: 'c'}",
+            "{renameCollection: 'd.a', to: 'd.b'}",
+            "{renameCollection: 'd.a', to: 'd.b', dropTarget: false}",
+        ] {
+            assert_eq!(
+                classify(&format!("db.runCommand({command})")),
+                Verdict::WRITE,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_is_no_filter() {
+        assert_eq!(
+            classify("db.c.deleteMany({$comment: 'cleanup'})"),
+            destroys(Destructive::UnfilteredDelete)
+        );
+        assert_eq!(
+            classify("db.c.deleteMany({$comment: 'cleanup', a: 1})"),
+            Verdict::WRITE
+        );
     }
 
     #[test]
