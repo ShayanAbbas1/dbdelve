@@ -344,11 +344,18 @@ impl ConnectionForm {
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
-            Engine::MongoDb => ConnectionConfig::MongoDb(MongoConfig {
-                server: self.server_requiring(&[], cx)?,
-                srv: self.srv,
-                options: read(&self.options),
-            }),
+            Engine::MongoDb => {
+                let mut server = self.server_requiring(&[], cx)?;
+                // Hidden while SRV is on, so whatever it held is not asked for.
+                if self.srv {
+                    server.port = None;
+                }
+                ConnectionConfig::MongoDb(MongoConfig {
+                    server,
+                    srv: self.srv,
+                    options: read(&self.options),
+                })
+            }
         };
 
         Ok((name, config))

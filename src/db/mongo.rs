@@ -228,7 +228,8 @@ fn connection_string(config: &MongoConfig) -> Result<String, DbError> {
         }
         (true, None) => host.to_string(),
         (false, port) => {
-            let host = match host.contains(':') && !host.starts_with('[') {
+            // An IPv6 address, which a URI brackets; one colon is a port.
+            let host = match host.matches(':').count() > 1 && !host.starts_with('[') {
                 true => format!("[{host}]"),
                 false => host.to_string(),
             };
@@ -1052,6 +1053,10 @@ mod tests {
         assert_eq!(
             connection_string(&config).unwrap(),
             "mongodb://u@[::1]:27017/?"
+        );
+        assert_eq!(
+            connection_string(&mongo("localhost:27017", None)).unwrap(),
+            "mongodb://localhost:27017/?"
         );
         assert_eq!(
             connection_string(&mongo("h1:1,h2:2", None)).unwrap(),
