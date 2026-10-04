@@ -1248,10 +1248,20 @@ impl Workspace {
         let panel = self.switcher_open.then(|| {
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
+            let searched = self.searched_connections(cx);
+            let selected = self.selected_connection(cx);
             let mut profile_rows = HashMap::<Option<String>, Vec<AnyElement>>::new();
-            for (index, profile) in self.profiles.iter().enumerate().filter(|(_, profile)| {
-                self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
-            }) {
+            for (index, profile) in
+                self.profiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, profile)| match &searched {
+                        Some(matches) => matches.contains(index),
+                        None => {
+                            self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
+                        }
+                    })
+            {
                 let group = self.group_of(&profile.id).map(str::to_string);
                 let row = {
                     let in_project = self.group_of(&profile.id).is_some();
@@ -1281,6 +1291,7 @@ impl Workspace {
                         .px(px(layout::SPACE_SM))
                         .rounded(px(layout::RADIUS_CONTROL))
                         .hover(|style| style.bg(t.element_hover))
+                        .when(selected == Some(index), |row| row.bg(t.element_active))
                         .child(row_icon_tinted(t, icon::DATABASE, profile.color))
                         .child(
                             div()
@@ -1475,7 +1486,7 @@ impl Workspace {
                 };
                 profile_rows.entry(group).or_default().push(row);
             }
-            let groups = self.render_project_groups(profile_rows, cx);
+            let groups = self.render_project_groups(profile_rows, searched.is_some(), cx);
 
             div()
                 .absolute()
@@ -1503,6 +1514,28 @@ impl Workspace {
                 .shadow_lg()
                 .flex()
                 .flex_col()
+                .children(self.connection_search.as_ref().map(|input| {
+                    let up_workspace = workspace.clone();
+                    let down_workspace = workspace.clone();
+                    // Captured: a single-line input swallows `up` and `down`
+                    // without doing anything with them.
+                    div()
+                        .capture_action(move |_: &gpui_component::input::MoveUp, _, cx| {
+                            _ = up_workspace.update(cx, |workspace, cx| {
+                                workspace.step_search_selection(-1, cx);
+                            });
+                        })
+                        .capture_action(move |_: &gpui_component::input::MoveDown, _, cx| {
+                            _ = down_workspace.update(cx, |workspace, cx| {
+                                workspace.step_search_selection(1, cx);
+                            });
+                        })
+                        .px(px(layout::SPACE_XS))
+                        .py(px(layout::SPACE_XS))
+                        .child(gpui_component::Sizable::small(
+                            Input::new(input).prefix(row_icon(t, icon::SEARCH)),
+                        ))
+                }))
                 .children(groups)
                 .child(div().my(px(layout::SPACE_XS)).h(px(1.)).bg(t.border))
                 .child(
@@ -1604,15 +1637,9 @@ impl Workspace {
                     // panel leaves the trigger without one: no handler, no
                     // click recorded, no reopen.
                     .when(!self.switcher_open, |trigger| {
-                        trigger.on_click(move |_, _, cx| {
+                        trigger.on_click(move |_, window, cx| {
                             _ = toggle_workspace.update(cx, |workspace, cx| {
-                                workspace.switcher_open = true;
-                                workspace.pending_removal = None;
-                                workspace.pending_project_deletion = None;
-                                workspace.assigning_project = None;
-                                workspace.expanded_groups =
-                                    vec![workspace.current_group().map(str::to_string)];
-                                cx.notify();
+                                workspace.open_switcher(window, cx);
                             });
                         })
                     }),
@@ -1623,16 +1650,28 @@ impl Workspace {
     /// No project, then each project, as groups any of which may be
     /// expanded, each holding its `members`. The group of the connection in front is
     /// marked, but looking inside another switches nothing. With no projects
-    /// there is nothing to group, and the members are listed bare.
+    /// there is nothing to group, and the members are listed bare. While
+    /// `searching`, `members` holds only the matches: a group with one is
+    /// shown open, and one without is not shown.
     fn render_project_groups(
         &self,
         mut members: HashMap<Option<String>, Vec<AnyElement>>,
+        searching: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let current = self.current_group().map(str::to_string);
         let mut rows = Vec::new();
+        if searching && members.is_empty() {
+            rows.push(
+                switcher_row("no-match", t)
+                    .text_color(t.text_faint)
+                    .child("No matching connections")
+                    .into_any_element(),
+            );
+            return rows;
+        }
         if self.projects.is_empty() {
             rows.push(
                 div()
@@ -1643,6 +1682,10 @@ impl Workspace {
             );
             rows.extend(members.remove(&None).unwrap_or_default());
         } else {
+            let matched = members
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
             let mut group_body = |group: Option<&str>, id: usize| {
                 let members = members
                     .remove(&group.map(str::to_string))
@@ -1662,11 +1705,14 @@ impl Workspace {
                     .into_any_element()
             };
 
-            let expanded = self.is_expanded(None);
-            let ungrouped = self
-                .profiles
-                .iter()
-                .any(|profile| self.group_of(&profile.id).is_none());
+            let expanded = searching || self.is_expanded(None);
+            let ungrouped = if searching {
+                matched.contains(&None)
+            } else {
+                self.profiles
+                    .iter()
+                    .any(|profile| self.group_of(&profile.id).is_none())
+            };
             if ungrouped {
                 let all_workspace = workspace.clone();
                 rows.push(
@@ -1686,7 +1732,10 @@ impl Workspace {
             }
 
             for (index, project) in self.projects.iter().enumerate() {
-                let expanded = self.is_expanded(Some(&project.name));
+                if searching && !matched.contains(&Some(project.name.clone())) {
+                    continue;
+                }
+                let expanded = searching || self.is_expanded(Some(&project.name));
                 let is_current = current.as_deref() == Some(project.name.as_str());
                 if self.renaming_project.as_deref() == Some(project.name.as_str())
                     && let Some(input) = &self.project_name
@@ -1699,6 +1748,9 @@ impl Workspace {
                     rows.push(group_body(Some(&project.name), index));
                 }
             }
+        }
+        if searching {
+            return rows;
         }
         rows.push(match &self.project_name {
             Some(input) if self.renaming_project.is_none() => name_field(input),

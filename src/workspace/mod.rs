@@ -77,6 +77,12 @@ pub(crate) struct Workspace {
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
     pub(crate) switcher_open: bool,
+    /// The switcher's search field, there while the switcher is open.
+    pub(crate) connection_search: Option<Entity<InputState>>,
+    pub(crate) connection_search_needs_focus: bool,
+    /// Which of the search's matches up and down have moved to, and Enter
+    /// opens.
+    pub(crate) search_selection: usize,
     pub(crate) projects: Vec<store::StoredProject>,
     /// The switcher's project name field, while a project is being named.
     pub(crate) project_name: Option<Entity<InputState>>,
@@ -179,6 +185,9 @@ impl Workspace {
             active: 0,
             form: None,
             switcher_open: false,
+            connection_search: None,
+            connection_search_needs_focus: false,
+            search_selection: 0,
             projects: Vec::new(),
             project_name: None,
             renaming_project: None,
@@ -631,6 +640,7 @@ impl Render for Workspace {
         // its name field is put away -- before the focus handoff below.
         if !self.switcher_open {
             self.drop_project_name();
+            self.drop_connection_search();
         }
         // Deferred to render for the `&mut Window` a background task does not
         // have: the catalog that names these tabs resolves off-thread, and a
@@ -717,6 +727,11 @@ impl Render for Workspace {
         }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
+        {
+            input.focus_handle(cx).focus(window, cx);
+        }
+        if std::mem::take(&mut self.connection_search_needs_focus)
+            && let Some(input) = &self.connection_search
         {
             input.focus_handle(cx).focus(window, cx);
         }
