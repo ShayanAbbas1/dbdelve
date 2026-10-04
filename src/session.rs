@@ -1074,6 +1074,11 @@ pub(crate) struct ObjectTab {
 }
 
 impl ObjectTab {
+    /// Whether New row is offered here: on a relation the engine inserts into.
+    pub(crate) fn takes_inserts(&self, engine: Engine) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_inserts(kind))
+    }
+
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
     /// and for an unfiltered relation -- which is what makes an unfiltered tab
     /// dedupe exactly as it did before the filter joined the key.

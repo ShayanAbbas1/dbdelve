@@ -619,7 +619,9 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                         Command::ClearFilter,
                     ));
                 }
-                items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+                if tab.takes_inserts(profile.config.engine()) {
+                    items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+                }
                 // Only on a row dbdelve can name by its primary key -- the same
                 // condition that makes a cell of it editable.
                 if workspace.has_nameable_row(cx) {

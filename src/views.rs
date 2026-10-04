@@ -2396,18 +2396,18 @@ fn render_tab_strip(
 
     // On every relation tab, the structure view included: there it takes you
     // back to the data before opening the form.
-    let is_relation = session
+    let new_row = session
         .active_object()
-        .is_some_and(|tab| matches!(tab.body, ObjectBody::Relation { .. }));
-    let new_row = is_relation.then(|| {
-        div().flex_shrink_0().child(
-            button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
-                |_, window, cx| {
-                    window.dispatch_action(Box::new(NewRow), cx);
-                },
-            ),
-        )
-    });
+        .is_some_and(|tab| tab.takes_inserts(engine))
+        .then(|| {
+            div().flex_shrink_0().child(
+                button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
+                    |_, window, cx| {
+                        window.dispatch_action(Box::new(NewRow), cx);
+                    },
+                ),
+            )
+        });
 
     let zoom = editor_zoom_percent(editor_font_size);
     let named = on_query_tab && session.open_query().is_some();

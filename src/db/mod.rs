@@ -348,6 +348,21 @@ impl Engine {
         }
     }
 
+    /// Whether New row may insert into a relation of `kind`. A SQL view can
+    /// take an insert (an updatable view, or a trigger behind it), so the
+    /// server is left to say; a MongoDB view never does.
+    pub fn takes_inserts(self, kind: RelationKind) -> bool {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => true,
+            Self::MongoDb => kind != RelationKind::View,
+        }
+    }
+
     /// Whether a preview page is ordered by the relation's key when nothing
     /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
     /// one that orders nothing lets a parallel plan repeat or skip rows from
@@ -1908,6 +1923,18 @@ mod tests {
         }
         assert_eq!(Engine::MongoDb.syntax(), Syntax::Mongo);
         assert_eq!(Engine::SqlServer.syntax(), Syntax::Sql);
+    }
+
+    #[test]
+    fn new_row_is_withheld_only_from_a_mongo_view() {
+        for engine in Engine::ALL {
+            assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
+            assert_eq!(
+                engine.takes_inserts(RelationKind::View),
+                engine != Engine::MongoDb,
+                "{engine:?}"
+            );
+        }
     }
 
     #[test]

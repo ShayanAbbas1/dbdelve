@@ -42,6 +42,10 @@ impl Workspace {
         let ObjectBody::Relation { structure, .. } = &tab.body else {
             return;
         };
+        if !tab.takes_inserts(self.engine()) {
+            self.note("This view takes no inserts.".into(), cx);
+            return;
+        }
         // The columns are the form: without them there is nothing to draw, and
         // guessing at them would be inventing a table. Checked before
         // `show_structure` flips the tab, so a refused New row leaves
