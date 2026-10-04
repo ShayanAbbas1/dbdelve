@@ -789,25 +789,55 @@ impl Render for Workspace {
             unreachable!("the connection form is open when there are no profiles");
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
-        let (status, status_color) = match &profile.state {
-            ProfileState::Idle => ("Connection is idle.".to_string(), t.text_muted),
-            ProfileState::Connecting => (
-                format!("Connecting to {}…", profile.config.endpoint()),
-                t.text_muted,
+        // Above the pane rather than in the status bar's red text alone: a run
+        // on a dead session otherwise reads as one more query error, and
+        // nothing else on screen offers the way back.
+        let connection_banner = match &profile.state {
+            ProfileState::Failed(message) => Some(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .px(px(layout::SPACE_MD))
+                    .py(px(layout::SPACE_XS))
+                    .border_b_1()
+                    .border_color(t.border)
+                    .text_size(px(layout::TEXT_SM))
+                    .child(ui::status_dot(t, &profile.state, profile.color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.danger)
+                            .child(message.clone()),
+                    )
+                    .child(
+                        button("reconnect", "Reconnect", Tone::Quiet, Control::Compact, t)
+                            .on_click(cx.listener(|workspace, _, _, cx| {
+                                workspace.clear_notice();
+                                workspace.reconnect(workspace.active, cx);
+                            })),
+                    ),
             ),
+            _ => None,
+        };
+        let status = match &profile.state {
+            ProfileState::Idle => "Connection is idle.".to_string(),
+            ProfileState::Connecting => format!("Connecting to {}…", profile.config.endpoint()),
             // Connected is the one state worth spending on decoration: every
             // other one is news, and news beats where the connection points.
             // Its name is already on the switcher in the titlebar.
-            ProfileState::Connected(_) => (
+            ProfileState::Connected(_) => {
                 match profile.config.server().map(|server| &server.database) {
                     Some(database) if !database.is_empty() => {
                         format!("{} / {database}", profile.config.endpoint())
                     }
                     _ => profile.config.endpoint(),
-                },
-                profile.color.map_or(t.success, ConnectionColor::swatch),
-            ),
-            ProfileState::Failed(message) => (message.clone(), t.danger),
+                }
+            }
+            ProfileState::Failed(message) => message.clone(),
         };
 
         // The rows the grid actually holds, which is fewer than the result had
@@ -973,13 +1003,7 @@ impl Render for Workspace {
             .items_center()
             .gap(px(layout::SPACE_SM))
             .min_w_0()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .size(px(layout::SPACE_XS + 2.))
-                    .rounded_full()
-                    .bg(status_color),
-            )
+            .child(ui::status_dot(t, &profile.state, profile.color))
             .child(
                 div()
                     .min_w_0()
@@ -1376,6 +1400,7 @@ impl Render for Workspace {
                     .into_any_element(),
                 ],
             ))
+            .children(connection_banner)
             .child(div().flex_1().min_h_0().child(main_pane))
             .children(self.render_apply_review(cx))
             .children(self.render_close_confirmation(cx))

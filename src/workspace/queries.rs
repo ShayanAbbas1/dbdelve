@@ -1374,14 +1374,16 @@ impl Workspace {
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
         let query_task = cx.background_executor().spawn(async move {
-            match generated {
+            let result = match generated {
                 true => connection.generated(&sql, &cancel),
                 false => connection.query(&sql, &cancel),
-            }
+            };
+            let lost = result.is_err() && connection.is_lost();
+            (result, lost)
         });
 
         cx.spawn(async move |workspace, cx| {
-            let result = query_task.await;
+            let (result, lost) = query_task.await;
             workspace
                 .update(cx, |workspace, cx| {
                     // The plan is carried out of this block rather than stored
@@ -1492,6 +1494,12 @@ impl Workspace {
                         }
                     };
 
+                    if lost && let Some(profile) = workspace.issued_to(&id, generation) {
+                        profile.state = ProfileState::Failed(format!(
+                            "Connection to {} was lost.",
+                            profile.config.endpoint()
+                        ));
+                    }
                     if keep_rows
                         && let Some(profile) = workspace.issued_to(&id, generation)
                         && profile.session.notice.as_deref() == Some(Self::REFRESHING)

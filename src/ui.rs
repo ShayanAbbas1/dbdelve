@@ -7,8 +7,8 @@
 //! up looking like two different applications.
 
 use gpui::{
-    AnyElement, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled, div,
-    prelude::FluentBuilder, px,
+    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled,
+    div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     InteractiveElementExt,
@@ -23,6 +23,7 @@ use crate::{
     explorer::ObjectKind,
     icons::icon,
     keybindings,
+    session::ProfileState,
     sql::Mode,
     theme::{self, ConnectionColor, Theme, layout},
 };
@@ -76,6 +77,23 @@ pub(crate) fn row_icon_tinted(
     icon(path)
         .size(px(layout::ICON_SIZE))
         .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
+}
+
+/// A connection's state as one dot, the same in the status bar and the
+/// switcher: faint idle, muted while connecting, its own colour (or green)
+/// connected, red failed or lost.
+pub(crate) fn status_dot(t: Theme, state: &ProfileState, color: Option<ConnectionColor>) -> Div {
+    let fill = match state {
+        ProfileState::Idle => t.text_faint,
+        ProfileState::Connecting => t.text_muted,
+        ProfileState::Connected(_) => color.map_or(t.success, ConnectionColor::swatch),
+        ProfileState::Failed(_) => t.danger,
+    };
+    div()
+        .flex_shrink_0()
+        .size(px(layout::SPACE_XS + 2.))
+        .rounded_full()
+        .bg(fill)
 }
 
 /// What this connection is allowed to do, drawn beside its name because "which
