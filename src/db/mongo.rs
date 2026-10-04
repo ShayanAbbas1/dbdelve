@@ -32,7 +32,7 @@ use mongodb::bson::{Binary, Bson, DateTime, Document, Regex, Timestamp, Uuid, do
 use mongodb::error::{Error, ErrorKind};
 use mongodb::event::{EventHandler, sdam::SdamEvent};
 use mongodb::options::{ClientOptions, ConnectionString, HostInfo, ServerAddress, Tls, TlsOptions};
-use mongodb::{Client, Database};
+use mongodb::{Client, ClientSession, Database};
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use time::OffsetDateTime;
 use time::format_description::BorrowedFormatItem;
@@ -422,6 +422,8 @@ impl Drop for Driver {
     }
 }
 
+type Stops = HashMap<String, (Bson, oneshot::Sender<()>)>;
+
 /// A live connection. Cloneable so a background task can take one without
 /// borrowing the view.
 #[derive(Clone)]
@@ -433,9 +435,10 @@ pub struct Connection {
     /// The profile's statement timeout in seconds, or 0: the client-side bound
     /// [`Connection::call`] puts on every round trip.
     timeout: u32,
-    /// Each user statement in flight, by the comment it carries, with the
-    /// sender that drops it here once Cancel has asked the server to stop it.
-    stops: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    /// Each user statement in flight, by its handle on the [`CancelToken`],
+    /// with the id of the server session it runs in and the sender that drops
+    /// it here once Cancel has asked the server to stop it.
+    stops: Arc<Mutex<Stops>>,
 }
 
 impl Connection {
@@ -589,7 +592,7 @@ impl Connection {
     /// way there has nothing to kill yet. The client's pool is untouched, so
     /// the session carries on.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
-        let comments = cancel
+        let handles = cancel
             .0
             .lock()
             .map(|mut running| {
@@ -597,11 +600,11 @@ impl Connection {
                 running.handles.clone()
             })
             .unwrap_or_default();
-        comments
+        handles
             .iter()
-            .map(|comment| {
-                let killed = self.kill(comment);
-                if let Some(stop) = lock(&self.stops).remove(comment) {
+            .map(|handle| {
+                let killed = self.kill(handle);
+                if let Some((_, stop)) = lock(&self.stops).remove(handle) {
                     let _ = stop.send(());
                 }
                 killed
@@ -609,22 +612,29 @@ impl Connection {
             .fold(Ok(()), Result::and)
     }
 
-    /// End the server's operations carrying `comment`. A user may list and
-    /// kill their own operations without the privilege to see anyone else's.
-    fn kill(&self, comment: &str) -> Result<(), DbError> {
-        let admin = self.client().database("admin");
-        let carrying = doc! {
-            "$or": [
-                { "command.comment": comment },
-                { "cursor.originatingCommand.comment": comment },
-            ]
+    /// End the server's operations in the session of the run `handle` names.
+    /// A user may list and kill their own operations without the privilege to
+    /// see anyone else's.
+    fn kill(&self, handle: &str) -> Result<(), DbError> {
+        let Some(session) = lock(&self.stops).get(handle).map(|(id, _)| id.clone()) else {
+            return Ok(());
         };
+        let admin = self.client().database("admin");
         self.call(async {
             let operations: Vec<Document> = admin
-                .aggregate([doc! { "$currentOp": {} }, doc! { "$match": carrying }])
+                .aggregate([
+                    doc! { "$currentOp": {} },
+                    doc! { "$match": { "lsid.id": session } },
+                ])
                 .await?
                 .try_collect()
                 .await?;
+            // A run's server session goes back to the driver's pool when the
+            // run ends, and the next run may draw it. While this run is still
+            // listed it still holds the session, so what was listed is its own.
+            if !lock(&self.stops).contains_key(handle) {
+                return Ok(());
+            }
             for operation in operations {
                 if let Some(id) = operation.get("opid") {
                     admin
@@ -695,14 +705,14 @@ impl Connection {
 
     fn database_call(
         &self,
-        run: Run,
+        mut run: Run,
         database: Option<&str>,
         call: &Call<DbMethod>,
     ) -> Result<QueryResult, DbError> {
         let args = Args::of(call.method.name(), &call.args);
         match call.method {
             DbMethod::RunCommand | DbMethod::AdminCommand => {
-                let mut sent = match args.bson(0)? {
+                let sent = match args.bson(0)? {
                     Some(Bson::String(name)) => doc! { name: 1 },
                     Some(Bson::Document(sent)) => sent,
                     _ => return Err(args.not(0, "a command document")),
@@ -717,13 +727,12 @@ impl Connection {
                     DbMethod::AdminCommand => self.client().database("admin"),
                     _ => self.named(database)?,
                 };
-                // The user's command goes as written but for the comment Cancel
-                // finds it by: no `maxTimeMS` is added, since the command is
-                // theirs to bound, and the client-side bound still holds.
-                if !sent.contains_key("comment") {
-                    sent.insert("comment", run.comment.as_str());
-                }
-                Ok(reply(run.execute(target.run_command(sent))?))
+                // The user's command goes as written: no `maxTimeMS` is added,
+                // since the command is theirs to bound, and the client-side
+                // bound still holds.
+                Ok(reply(run.execute(|session| {
+                    target.run_command(sent).session(session)
+                })?))
             }
             DbMethod::GetCollectionNames => collection_names(run, &self.named(database)?),
             DbMethod::Stats => {
@@ -1626,28 +1635,33 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// One user statement's claim on Cancel, given back however the statement
-/// ends. Its comment is what `$currentOp` lists the server's operation under,
-/// which is how a cancel from another thread finds it there.
+/// ends. It runs in a session of its own, whose id is what `$currentOp` lists
+/// the server's operation under, which is how a cancel from another thread
+/// finds it there. Not by a comment: the statement may set its own.
 struct Run<'a> {
     connection: &'a Connection,
     token: &'a CancelToken,
-    comment: String,
+    handle: String,
+    session: ClientSession,
     stopped: oneshot::Receiver<()>,
 }
 
 impl<'a> Run<'a> {
     fn start(connection: &'a Connection, token: &'a CancelToken) -> Result<Self, DbError> {
-        let comment = format!("dbdelve:{}", Uuid::new());
+        let session = connection.call(connection.client().start_session())?;
+        let id = session.id().get("id").cloned().unwrap_or(Bson::Null);
+        let handle = format!("dbdelve:{}", Uuid::new());
         let (stop, stopped) = oneshot::channel();
-        lock(&connection.stops).insert(comment.clone(), stop);
+        lock(&connection.stops).insert(handle.clone(), (id, stop));
         let asked = token.0.lock().is_ok_and(|mut running| {
-            running.handles.push(comment.clone());
+            running.handles.push(handle.clone());
             running.asked
         });
         let run = Self {
             connection,
             token,
-            comment,
+            handle,
+            session,
             stopped,
         };
         match asked {
@@ -1657,12 +1671,9 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// `sent` labelled with this run's comment and bounded on the server by
-    /// the statement timeout, unless the statement set either itself.
+    /// `sent` bounded on the server by the statement timeout, unless the
+    /// statement set its own.
     fn tagged(&self, mut sent: Document) -> Document {
-        if !sent.contains_key("comment") {
-            sent.insert("comment", self.comment.as_str());
-        }
         if self.connection.timeout > 0 && !sent.contains_key("maxTimeMS") {
             sent.insert("maxTimeMS", i64::from(self.connection.timeout) * 1000);
         }
@@ -1671,13 +1682,21 @@ impl<'a> Run<'a> {
 
     /// The statement's one operation, its cursor's `getMore`s included: bounded
     /// here by the statement timeout too, and dropped when Cancel says so.
-    fn execute<T>(
-        mut self,
-        operation: impl IntoFuture<Output = mongodb::error::Result<T>>,
-    ) -> Result<T, DbError> {
-        let connection = self.connection;
+    fn execute<'s, T, F>(
+        &'s mut self,
+        operation: impl FnOnce(&'s mut ClientSession) -> F,
+    ) -> Result<T, DbError>
+    where
+        F: IntoFuture<Output = mongodb::error::Result<T>> + 's,
+    {
+        let Self {
+            connection,
+            handle,
+            session,
+            stopped,
+            ..
+        } = self;
         let timeout = connection.timeout;
-        let stopped = &mut self.stopped;
         let outcome = guarded(|| {
             connection.driver.runtime.block_on(async {
                 let bound = async {
@@ -1689,7 +1708,7 @@ impl<'a> Run<'a> {
                     }
                 };
                 tokio::select! {
-                    outcome = operation.into_future() => {
+                    outcome = operation(session).into_future() => {
                         Some(outcome.map_err(|error| plain_error(error.kind.to_string())))
                     }
                     Ok(()) = stopped => Some(Err(plain_error("Cancelled.".into()))),
@@ -1700,7 +1719,7 @@ impl<'a> Run<'a> {
         outcome.unwrap_or_else(|| {
             // What the server's own bound did not stop, or a command that
             // carries none, is stopped the way Cancel stops it.
-            let _ = connection.kill(&self.comment);
+            let _ = connection.kill(handle);
             Err(plain_error(format!(
                 "Stopped after the statement timeout of {timeout} seconds."
             )))
@@ -1710,31 +1729,31 @@ impl<'a> Run<'a> {
 
 impl Drop for Run<'_> {
     fn drop(&mut self) {
-        lock(&self.connection.stops).remove(&self.comment);
+        lock(&self.connection.stops).remove(&self.handle);
         if let Ok(mut running) = self.token.0.lock() {
-            running.handles.retain(|handle| *handle != self.comment);
+            running.handles.retain(|handle| *handle != self.handle);
         }
     }
 }
 
 /// One command and its reply.
-fn command(run: Run, database: &Database, sent: Document) -> Result<Document, DbError> {
+fn command(mut run: Run, database: &Database, sent: Document) -> Result<Document, DbError> {
     let sent = run.tagged(sent);
-    run.execute(database.run_command(sent))
+    run.execute(|session| database.run_command(sent).session(session))
 }
 
 /// Every document a cursor command returns, through as many `getMore`s as it
 /// takes. Nothing is limited here: the statement's own `limit` is the only one
 /// (hard rule 1), and the whole result is held, as the SQL engines hold theirs.
-fn fetch(run: Run, database: &Database, sent: Document) -> Result<Vec<Document>, DbError> {
+fn fetch(mut run: Run, database: &Database, sent: Document) -> Result<Vec<Document>, DbError> {
     let sent = run.tagged(sent);
     let comment = sent.get("comment").cloned();
-    run.execute(async {
-        let mut action = database.run_cursor_command(sent);
+    run.execute(|session| async move {
+        let mut action = database.run_cursor_command(sent).session(&mut *session);
         if let Some(comment) = comment {
             action = action.comment(comment);
         }
-        action.await?.try_collect().await
+        action.await?.stream(session).try_collect().await
     })
 }
 
@@ -1854,7 +1873,7 @@ fn returns_whole_documents(sent: &Document) -> bool {
 /// `.explain(verbosity)`: the command wrapped in an `explain`, which takes the
 /// comment and the time bound itself rather than inside what it explains.
 fn explained(
-    run: Run,
+    mut run: Run,
     database: &Database,
     sent: Document,
     verbosity: Bson,
@@ -1870,7 +1889,9 @@ fn explained(
             .into_iter()
             .map(|(field, value)| (field.to_string(), value)),
     );
-    Ok(reply(run.execute(database.run_command(explain))?))
+    Ok(reply(run.execute(|session| {
+        database.run_command(explain).session(session)
+    })?))
 }
 
 /// mongosh refuses an update that would replace the document, and a
@@ -3649,18 +3670,20 @@ mod tests {
     fn live_a_cancel_stops_the_statement_on_the_server_and_the_session_carries_on() {
         let connection = live();
         let run = CancelToken::default();
+        // The statement's own comment, which is not what Cancel finds it by.
+        let comments = [format!("dbdelve-test-{}", ObjectId::new())];
         let slow = std::thread::spawn({
             let (connection, run) = (connection.clone(), run.clone());
-            move || connection.query(SLOW, &run)
+            let statement = format!("{SLOW}.comment('{}')", comments[0]);
+            move || connection.query(&statement, &run)
         });
-        let comments = (0..100)
-            .find_map(|_| {
-                let comments = run.0.lock().unwrap().handles.clone();
-                if comments.is_empty() || still_running(&connection, &comments).is_empty() {
+        (0..100)
+            .find(|_| {
+                let running = !still_running(&connection, &comments).is_empty();
+                if !running {
                     std::thread::sleep(Duration::from_millis(50));
-                    return None;
                 }
-                Some(comments)
+                running
             })
             .expect("the statement should reach the server");
 
@@ -3708,6 +3731,27 @@ mod tests {
             error.message.contains("time limit") || error.message.contains("statement timeout"),
             "{}",
             error.message
+        );
+
+        // A command is the user's to bound, so only the client-side bound
+        // stops this one, and it stops it on the server too.
+        let comments = [format!("dbdelve-test-{}", ObjectId::new())];
+        let command = format!(
+            "db.runCommand({{ find: 'events', filter: {{ $where: 'sleep(1000) || false' }}, \
+             comment: '{}', maxTimeMS: 60000 }})",
+            comments[0]
+        );
+        let error = connection
+            .query(&command, &run)
+            .expect_err("the timeout should stop it");
+        assert!(
+            error.message.contains("statement timeout"),
+            "{}",
+            error.message
+        );
+        assert!(
+            gone(&connection, &comments),
+            "the server is still running it"
         );
         assert_eq!(count(&connection, "accounts"), 5);
     }
