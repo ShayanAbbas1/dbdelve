@@ -138,7 +138,12 @@ pub(crate) fn queued_statements(
 ) -> Vec<Range<usize>> {
     let units = match engine {
         Engine::SqlServer => queued_batches(sql),
-        _ => Buffer::for_engine(engine, sql).statements().to_vec(),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::MongoDb => Buffer::for_engine(engine, sql).statements().to_vec(),
     };
     let Some(selection) = selection.filter(|sel| !sel.is_empty()) else {
         return units;
@@ -160,7 +165,12 @@ pub(crate) fn queued_statements(
 pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
     match engine {
         Engine::SqlServer => tsql_statements(sql, 0..sql.len()).len().max(1),
-        _ => 1,
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::MongoDb => 1,
     }
 }
 
