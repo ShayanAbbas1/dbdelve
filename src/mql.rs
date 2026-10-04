@@ -1686,20 +1686,36 @@ pub(crate) fn explainable(text: &str) -> Result<(), String> {
 
 /// `None` for a statement whose effect cannot be read off it: a command not
 /// on the whitelist.
+///
+/// A `$out` or `$merge` counts in every argument, options and chained calls
+/// included, not only where a method takes a pipeline: one where the executor
+/// is expected to ignore it would be trusting the executor.
 fn statement_verdict(target: &Target) -> Option<Verdict> {
-    let verdict = match target {
-        Target::Show(Show::Databases | Show::Collections) => Verdict::READ,
-        Target::Database { call, .. } => match call.method {
-            DbMethod::RunCommand | DbMethod::AdminCommand => {
-                return command_verdict(&call.args.first()?.value);
-            }
-            DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
-            DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
-            DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
-        },
-        Target::Collection { call, .. } => collection_verdict(call),
+    let (verdict, args): (Verdict, Vec<&Arg>) = match target {
+        Target::Show(Show::Databases | Show::Collections) => (Verdict::READ, Vec::new()),
+        Target::Database { call, .. } => {
+            let verdict = match call.method {
+                DbMethod::RunCommand | DbMethod::AdminCommand => {
+                    command_verdict(&call.args.first()?.value)?
+                }
+                DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
+                DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
+                DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
+            };
+            (verdict, call.args.iter().collect())
+        }
+        Target::Collection { call, cursor, .. } => (
+            collection_verdict(call),
+            call.args
+                .iter()
+                .chain(cursor.iter().flat_map(|chained| &chained.args))
+                .collect(),
+        ),
     };
-    Some(verdict)
+    Some(
+        args.into_iter()
+            .fold(verdict, |verdict, arg| verdict.max(out_verdict(&arg.value))),
+    )
 }
 
 fn collection_verdict(call: &Call<Method>) -> Verdict {
@@ -1707,14 +1723,11 @@ fn collection_verdict(call: &Call<Method>) -> Verdict {
     match call.method {
         Method::Find
         | Method::FindOne
+        | Method::Aggregate
         | Method::CountDocuments
         | Method::EstimatedDocumentCount
         | Method::Distinct
         | Method::GetIndexes => Verdict::READ,
-        Method::Aggregate => match call.args.iter().any(|arg| writes_out(&arg.value)) {
-            true => Verdict::WRITE,
-            false => Verdict::READ,
-        },
         Method::InsertOne
         | Method::InsertMany
         | Method::UpdateOne
@@ -1849,6 +1862,14 @@ fn command_reads(command: &Value) -> bool {
         ("explain", Some(inner @ Value::Document(_))) => command_reads(inner),
         ("explain", _) => false,
         _ => true,
+    }
+}
+
+/// What a `$out` or `$merge` anywhere in `value` writes.
+fn out_verdict(value: &Value) -> Verdict {
+    match writes_out(value) {
+        true => Verdict::WRITE,
+        false => Verdict::READ,
     }
 }
 
@@ -3790,7 +3811,6 @@ mod tests {
             "db.c.getIndexes()",
             "db.c.aggregate([], {}, )",
             "db.getSiblingDB('other').c.find()",
-            "db.c.find({$out: {$exists: true}}).limit(1)",
             "",
             "// nothing but a comment",
         ] {
@@ -3904,6 +3924,28 @@ mod tests {
             "db.runCommand({explain: {aggregate: 'c', pipeline: [{$out: 'd'}]}})",
         ] {
             assert_eq!(classify(text), unreadable(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_out_in_any_argument_is_classified() {
+        for text in [
+            "db.accounts.countDocuments({}, { pipeline: [{ $match: { _id: null } }, { $out: \"accounts\" }] })",
+            "db.c.find({$out: {$exists: true}}).limit(1)",
+            "db.c.find({}, null, {pipeline: [{$out: 'd'}]})",
+            "db.c.findOne({}, {}, {x: {$out: 'd'}})",
+            "db.c.find().hint({$out: 'd'})",
+            "db.c.aggregate([]).comment({$out: 'd'})",
+            "db.c.distinct('a', {}, {x: [{$out: 'd'}]})",
+            "db.c.estimatedDocumentCount({x: {$out: 'd'}})",
+            "db.stats({x: {$out: 'd'}})",
+        ] {
+            let verdict = classify(text);
+            assert_eq!(verdict, Verdict::WRITE, "{text}");
+            assert!(
+                crate::sql::gate(&verdict, Mode::ReadOnly, &[]).is_some(),
+                "{text}"
+            );
         }
     }
 
