@@ -53,14 +53,22 @@ impl Buffer {
     /// `BEGIN … END` block is one statement however many `;`s it holds. Sending
     /// the second `DELETE` of an `IF … BEGIN … END` alone runs it outside its
     /// `IF`.
+    ///
+    /// A MongoDB buffer is mongosh statements, not SQL, and `mql` reads its
+    /// boundaries: a newline ends a statement there unless a `.` continues it.
     pub fn for_engine(engine: Engine, sql: &str) -> Self {
-        if engine != Engine::SqlServer {
-            return Self::parse(sql);
-        }
-        let statements = batches(sql)
-            .into_iter()
-            .flat_map(|batch| tsql_statements(sql, batch))
-            .collect();
+        let statements = match engine {
+            Engine::SqlServer => batches(sql)
+                .into_iter()
+                .flat_map(|batch| tsql_statements(sql, batch))
+                .collect(),
+            Engine::MongoDb => crate::mql::statements(sql),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::Sqlite
+            | Engine::Snowflake => statements_in(sql),
+        };
 
         Self { statements }
     }
@@ -2636,13 +2644,54 @@ mod tests {
             "BEGIN SELECT 1; SELECT 2; END",
             "SELECT 1\nGO\nSELECT 2",
         ] {
-            for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+            for engine in Engine::ALL
+                .into_iter()
+                .filter(|e| !matches!(e, Engine::SqlServer | Engine::MongoDb))
+            {
                 assert_eq!(
                     Buffer::for_engine(engine, sql).statements(),
                     Buffer::parse(sql).statements(),
                     "{engine:?}: {sql}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_mongodb_buffer_runs_by_mongosh_statements_and_read_only_fails_closed() {
+        let buffer =
+            "db.accounts.find({ plan: 'free' })\n  .sort({ name: 1 })\ndb.accounts.deleteMany({})";
+        let statements = queued_statements(Engine::MongoDb, buffer, None);
+        assert_eq!(
+            statements
+                .iter()
+                .map(|range| &buffer[range.clone()])
+                .collect::<Vec<_>>(),
+            [
+                "db.accounts.find({ plan: 'free' })\n  .sort({ name: 1 })",
+                "db.accounts.deleteMany({})"
+            ]
+        );
+
+        let stopped =
+            |statement: &str| gate(&classify(Engine::MongoDb, statement), Mode::ReadOnly, &[]);
+        assert_eq!(stopped("db.accounts.find({ plan: 'free' })"), None);
+        assert_eq!(
+            stopped("db.accounts.insertOne({})"),
+            Some(Stop::Upgrade(Mode::ReadWrite))
+        );
+        // Nothing on the server holds a Mongo session to reads, so what the
+        // classifier cannot read is never run once in Read-only.
+        for unreadable in [
+            "db.accounts.find(",
+            "db.runCommand({ eval: 'x' })",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                stopped(unreadable),
+                Some(Stop::Upgrade(Mode::ReadWrite)),
+                "{unreadable}"
+            );
         }
     }
 
