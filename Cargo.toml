@@ -163,15 +163,36 @@ tiberius = { version = "=0.12.3", default-features = false, features = [
 ] }
 # The runtime tiberius is driven on, and the adapter from tokio's socket to the
 # `futures` I/O traits tiberius speaks. Pinned to the versions already locked,
-# so naming them adds no copy.
+# so naming them adds no copy. `rt-multi-thread`, `sync` and `macros` are for
+# MongoDB's runtime, below, which already enables all three itself.
 tokio = { version = "=1.53.1", default-features = false, features = [
     "rt",
+    "rt-multi-thread",
     "net",
     "time",
+    "sync",
+    "macros",
 ] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["compat"] }
 # `try_next` over tiberius's result stream. Already linked through tiberius.
 futures-util = { version = "=0.3.34", default-features = false }
+
+# MongoDB. The official driver, async on tokio like tiberius and driven the
+# same way: each connection owns a runtime and every call is a `block_on` on
+# the background thread it already runs on. A multi-thread runtime of one
+# worker rather than tiberius's current-thread one, because this driver spawns
+# server monitors and pool maintenance that have to keep running between calls.
+#
+# `default-features = false` states what its defaults happen to be, as on
+# `ureq`: named so a release that changes them cannot bring aws-lc-rs in.
+# `rustls-tls` is rustls 0.23 *on ring* with webpki-roots, the copies already in
+# the graph; `dns-resolver` is what resolves `mongodb+srv`; `compat-3-0-0` is
+# the 3.x API, which the crate makes every user name.
+mongodb = { version = "=3.9.1", default-features = false, features = [
+    "compat-3-0-0",
+    "rustls-tls",
+    "dns-resolver",
+] }
 
 # The palette's scorer. gpui-component ships the list, the virtualized scroll
 # and the search field, but no fuzzy matching at all -- and ranking that reads
