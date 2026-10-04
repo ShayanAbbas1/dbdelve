@@ -59,6 +59,9 @@ const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 /// declared columns, so its shape is whatever this many of them say.
 const SAMPLE_SIZE: i32 = 1000;
 
+/// The server's code for a collection or database that does not exist.
+const NAMESPACE_NOT_FOUND: i32 = 26;
+
 /// The order a field's types are joined in. Null last, so a field that is
 /// sometimes null reads as `string | null`.
 const TYPE_ORDER: [&str; 21] = [
@@ -1235,11 +1238,23 @@ impl Connection {
             };
             let collection = database.collection::<Document>(&relation.name);
             let reports: Vec<Document> = self.call(async {
-                collection
-                    .aggregate([doc! { "$collStats": { "storageStats": {} } }])
-                    .await?
-                    .try_collect()
-                    .await
+                let stats = async {
+                    collection
+                        .aggregate([doc! { "$collStats": { "storageStats": {} } }])
+                        .await?
+                        .try_collect()
+                        .await
+                };
+                match stats.await {
+                    // Dropped since it was listed: it has no size to show, and
+                    // the rest still do.
+                    Err(error)
+                        if matches!(&*error.kind, ErrorKind::Command(failed) if failed.code == NAMESPACE_NOT_FOUND) =>
+                    {
+                        Ok(Vec::new())
+                    }
+                    other => other,
+                }
             })?;
             let statistics = statistics(&reports);
             if statistics != Statistics::default() {
