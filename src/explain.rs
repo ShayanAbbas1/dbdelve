@@ -76,7 +76,7 @@ impl Actual {
 
 /// Parse the rows an EXPLAIN returned into a plan.
 pub fn parse(columns: &[String], rows: &[Vec<Option<String>>]) -> Plan {
-    if let Some(plan) = parse_linked(columns, rows) {
+    if let Some(plan) = parse_linked(columns, rows).or_else(|| parse_document(columns, rows)) {
         return plan;
     }
 
@@ -136,6 +136,191 @@ fn parse_linked(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan
         text,
         ..Plan::default()
     })
+}
+
+/// MongoDB's `explain`, which is one document: each column of the one row is a
+/// top-level field, rendered as Relaxed Extended JSON. The tree is in
+/// `inputStage`/`inputStages` nesting, and an aggregate's pipeline in `stages`.
+fn parse_document(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan> {
+    use mongodb::bson::{Bson, Document};
+
+    let [row] = rows else {
+        return None;
+    };
+    let reply: Document = columns
+        .iter()
+        .zip(row)
+        .filter_map(|(name, cell)| {
+            let cell = cell.as_deref()?;
+            // Only a document or an array is JSON; a scalar's cell is bare text.
+            let value = match cell.starts_with(['{', '[']) {
+                true => serde_json::from_str(cell).ok(),
+                false => None,
+            };
+            Some((
+                name.clone(),
+                value.unwrap_or_else(|| Bson::String(cell.into())),
+            ))
+        })
+        .collect();
+    if !reply.contains_key("queryPlanner") && !reply.contains_key("stages") {
+        return None;
+    }
+
+    let mut plan = Plan::default();
+    match reply.get_array("stages") {
+        Ok(stages) => {
+            let documents: Vec<&Document> = stages.iter().filter_map(Bson::as_document).collect();
+            for (at, stage) in documents.iter().enumerate().rev() {
+                let depth = documents.len() - 1 - at;
+                // The leading `$cursor` is the query the pipeline reads from,
+                // and holds a plan of its own beneath it.
+                let cursor = stage.get_document("$cursor").ok();
+                let name = stage.keys().next().map_or("stage", String::as_str);
+                plan.nodes.push(PlanNode {
+                    depth,
+                    label: name.to_string(),
+                    detail: match cursor {
+                        Some(_) => Vec::new(),
+                        None => stage.values().next().map(shown).into_iter().collect(),
+                    },
+                    actual: actual_of(stage),
+                    ..PlanNode::default()
+                });
+                if let Some(cursor) = cursor {
+                    plan_of(cursor, depth + 1, &mut plan);
+                }
+            }
+        }
+        Err(_) => plan_of(&reply, 0, &mut plan),
+    }
+
+    fill_self_ms(&mut plan.nodes);
+    plan.total_ms = plan
+        .nodes
+        .first()
+        .and_then(|node| Some(node.actual?.inclusive_ms()))
+        .or_else(|| {
+            millis(
+                reply
+                    .get_document("executionStats")
+                    .ok()?
+                    .get("executionTimeMillis")?,
+            )
+        });
+    plan.text = serde_json::to_string_pretty(&reply).unwrap_or_default();
+    Some(plan)
+}
+
+/// The winning plan of one `queryPlanner`, with what each stage did where the
+/// reply came from an `executionStats` run.
+fn plan_of(holder: &mongodb::bson::Document, depth: usize, plan: &mut Plan) {
+    let winning = holder
+        .get_document("queryPlanner")
+        .and_then(|planner| planner.get_document("winningPlan"));
+    let executed = holder
+        .get_document("executionStats")
+        .and_then(|stats| stats.get_document("executionStages"));
+    // Newer servers' slot-based plans keep the stage tree one level down.
+    let root = executed.ok().or_else(|| {
+        let winning = winning.ok()?;
+        winning.get_document("queryPlan").ok().or(Some(winning))
+    });
+    if let Some(root) = root {
+        push_stage(root, depth, plan);
+    }
+    if let Ok(stats) = holder.get_document("executionStats") {
+        for (label, key) in [
+            ("Documents returned", "nReturned"),
+            ("Keys examined", "totalKeysExamined"),
+            ("Documents examined", "totalDocsExamined"),
+        ] {
+            if let Some(value) = stats.get(key).and_then(millis) {
+                plan.summary.push((label.into(), value.to_string()));
+            }
+        }
+    }
+}
+
+fn push_stage(stage: &mongodb::bson::Document, depth: usize, plan: &mut Plan) {
+    use mongodb::bson::Bson;
+
+    const COUNTERS: [&str; 19] = [
+        "stage",
+        "nReturned",
+        "executionTimeMillisEstimate",
+        "works",
+        "advanced",
+        "needTime",
+        "needYield",
+        "saveState",
+        "restoreState",
+        "isEOF",
+        "isCached",
+        "planNodeId",
+        "opens",
+        "closes",
+        "inputStage",
+        "inputStages",
+        "outerStage",
+        "innerStage",
+        "queryPlan",
+    ];
+    let name = stage.get_str("stage").unwrap_or("stage");
+    let label = match stage.get_str("indexName") {
+        Ok(index) => format!("{name} on {index}"),
+        Err(_) => name.to_string(),
+    };
+    plan.nodes.push(PlanNode {
+        depth,
+        label,
+        detail: stage
+            .iter()
+            .filter(|(key, _)| !COUNTERS.contains(&key.as_str()))
+            .map(|(key, value)| format!("{key}: {}", shown(value)))
+            .collect(),
+        actual: actual_of(stage),
+        ..PlanNode::default()
+    });
+    for key in ["inputStage", "outerStage", "innerStage"] {
+        if let Ok(child) = stage.get_document(key) {
+            push_stage(child, depth + 1, plan);
+        }
+    }
+    if let Ok(children) = stage.get_array("inputStages") {
+        for child in children.iter().filter_map(Bson::as_document) {
+            push_stage(child, depth + 1, plan);
+        }
+    }
+}
+
+/// What a stage reports having done. `executionTimeMillisEstimate` includes
+/// the stage's inputs, as Postgres' `actual time` does, so `fill_self_ms`
+/// subtracts it the same way. Absent from a `queryPlanner` reply.
+fn actual_of(stage: &mongodb::bson::Document) -> Option<Actual> {
+    Some(Actual {
+        startup_ms: 0.0,
+        total_ms: millis(stage.get("executionTimeMillisEstimate")?)?,
+        rows: millis(stage.get("nReturned")?)?,
+        loops: 1.0,
+    })
+}
+
+fn millis(value: &mongodb::bson::Bson) -> Option<f64> {
+    use mongodb::bson::Bson;
+    match value {
+        Bson::Int32(n) => Some(f64::from(*n)),
+        Bson::Int64(n) => Some(*n as f64),
+        Bson::Double(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn shown(value: &mongodb::bson::Bson) -> String {
+    match value {
+        mongodb::bson::Bson::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 /// Postgres and MySQL, where depth is drawn rather than stated.
@@ -336,6 +521,144 @@ mod tests {
             (actual - expected).abs() < 1e-9,
             "expected {expected}, got {actual}"
         );
+    }
+
+    /// What the driver hands back for an `explain`: one row, a column per
+    /// top-level field, each document or array as one line of JSON.
+    fn explain_reply(json: &str) -> Plan {
+        let reply: mongodb::bson::Document = serde_json::from_str(json).unwrap();
+        let columns: Vec<String> = reply.keys().cloned().collect();
+        let row = reply
+            .values()
+            .map(|value| match value {
+                mongodb::bson::Bson::String(text) => Some(text.clone()),
+                other => serde_json::to_string(other).ok(),
+            })
+            .collect();
+        parse(&columns, &[row])
+    }
+
+    #[test]
+    fn a_find_with_execution_stats_nests_by_input_stage_and_carries_its_counts() {
+        // dbdelve_dev, MongoDB 8.2: find({_id: {$gt: 0}}).sort({_id: 1}).limit(3)
+        let plan = explain_reply(
+            r#"{"explainVersion":"1","queryPlanner":{"namespace":"dbdelve_dev.wide_metrics","winningPlan":{"stage":"LIMIT","limitAmount":3,"inputStage":{"stage":"FETCH","inputStage":{"stage":"IXSCAN","keyPattern":{"_id":1},"indexName":"_id_","direction":"forward"}}},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":3,"executionTimeMillis":4,"totalKeysExamined":3,"totalDocsExamined":3,"executionStages":{"stage":"LIMIT","nReturned":3,"executionTimeMillisEstimate":4,"works":4,"limitAmount":3,"inputStage":{"stage":"FETCH","nReturned":3,"executionTimeMillisEstimate":3,"docsExamined":3,"inputStage":{"stage":"IXSCAN","nReturned":3,"executionTimeMillisEstimate":1,"indexName":"_id_","keysExamined":3,"direction":"forward"}}}},"ok":1}"#,
+        );
+
+        let shape: Vec<(usize, &str)> = plan
+            .nodes
+            .iter()
+            .map(|node| (node.depth, node.label.as_str()))
+            .collect();
+        assert_eq!(shape, [(0, "LIMIT"), (1, "FETCH"), (2, "IXSCAN on _id_")]);
+        assert_eq!(plan.nodes[0].detail, ["limitAmount: 3"]);
+        assert_eq!(plan.nodes[1].detail, ["docsExamined: 3"]);
+        assert_eq!(
+            plan.nodes[2].detail,
+            ["indexName: _id_", "keysExamined: 3", "direction: forward"]
+        );
+        assert_eq!(plan.nodes[2].actual.map(|actual| actual.rows), Some(3.0));
+        close(plan.nodes[0].self_ms, 1.0);
+        close(plan.nodes[1].self_ms, 2.0);
+        close(plan.nodes[2].self_ms, 1.0);
+        close(plan.total_ms, 4.0);
+        assert_eq!(
+            plan.summary,
+            [
+                ("Documents returned".to_string(), "3".to_string()),
+                ("Keys examined".to_string(), "3".to_string()),
+                ("Documents examined".to_string(), "3".to_string()),
+            ]
+        );
+        assert!(plan.text.contains("\"explainVersion\": \"1\""));
+    }
+
+    #[test]
+    fn a_query_planner_reply_has_a_shape_and_no_timings() {
+        // aggregate([{$match}, {$sort}, {$limit}]) collapsed into one cursor.
+        let plan = explain_reply(
+            r#"{"explainVersion":"1","queryPlanner":{"winningPlan":{"stage":"LIMIT","limitAmount":2,"inputStage":{"stage":"FETCH","filter":{"plan":{"$eq":"free"}},"inputStage":{"stage":"IXSCAN","indexName":"_id_"}}}},"ok":1}"#,
+        );
+        assert_eq!(plan.nodes.len(), 3);
+        assert_eq!(plan.nodes[1].detail, [r#"filter: {"plan":{"$eq":"free"}}"#]);
+        assert!(plan.nodes.iter().all(|node| node.actual.is_none()));
+        assert_eq!(plan.total_ms, None);
+        assert!(plan.summary.is_empty());
+    }
+
+    #[test]
+    fn a_pipeline_reads_last_stage_first_with_its_cursor_plan_beneath() {
+        // events.aggregate([{$match}, {$group}, {$limit}]) on a slot-based plan.
+        let plan = explain_reply(
+            r#"{"explainVersion":"2","stages":[{"$cursor":{"queryPlanner":{"winningPlan":{"isCached":false,"queryPlan":{"stage":"GROUP","planNodeId":3,"inputStage":{"stage":"PROJECTION_COVERED","planNodeId":2,"inputStage":{"stage":"IXSCAN","planNodeId":1,"indexName":"account_id_1_occurred_at_-1"}}},"slotBasedPlan":{"slots":"$$RESULT=s7"}}},"executionStats":{"nReturned":0,"executionTimeMillis":6,"totalKeysExamined":0,"totalDocsExamined":0,"executionStages":{"stage":"project","nReturned":0,"executionTimeMillisEstimate":5,"inputStage":{"stage":"ixseek","nReturned":0,"executionTimeMillisEstimate":2,"indexName":"account_id_1_occurred_at_-1"}}}},"nReturned":0,"executionTimeMillisEstimate":5},{"$limit":2,"nReturned":0,"executionTimeMillisEstimate":6}],"ok":1}"#,
+        );
+
+        let shape: Vec<(usize, &str)> = plan
+            .nodes
+            .iter()
+            .map(|node| (node.depth, node.label.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, "$limit"),
+                (1, "$cursor"),
+                (2, "project"),
+                (3, "ixseek on account_id_1_occurred_at_-1"),
+            ]
+        );
+        assert_eq!(plan.nodes[0].detail, ["2"]);
+        close(plan.nodes[0].self_ms, 1.0);
+        close(plan.nodes[1].self_ms, 0.0);
+        close(plan.nodes[2].self_ms, 3.0);
+        close(plan.total_ms, 6.0);
+    }
+
+    #[test]
+    fn a_slot_based_query_plan_without_stats_is_read_from_query_plan() {
+        let plan = explain_reply(
+            r#"{"queryPlanner":{"winningPlan":{"queryPlan":{"stage":"GROUP","inputStage":{"stage":"COLLSCAN"}},"slotBasedPlan":{"slots":"x"}}}}"#,
+        );
+        let labels: Vec<&str> = plan.nodes.iter().map(|node| node.label.as_str()).collect();
+        assert_eq!(labels, ["GROUP", "COLLSCAN"]);
+    }
+
+    #[test]
+    fn an_or_plan_lists_every_input_stage() {
+        let plan = explain_reply(
+            r#"{"queryPlanner":{"winningPlan":{"stage":"SUBPLAN","inputStage":{"stage":"OR","inputStages":[{"stage":"IXSCAN","indexName":"a_1"},{"stage":"IXSCAN","indexName":"b_1"}]}}}}"#,
+        );
+        let shape: Vec<(usize, &str)> = plan
+            .nodes
+            .iter()
+            .map(|node| (node.depth, node.label.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, "SUBPLAN"),
+                (1, "OR"),
+                (2, "IXSCAN on a_1"),
+                (2, "IXSCAN on b_1")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_with_no_plan_in_it_is_not_taken_for_one() {
+        let columns = ["ok".to_string()];
+        let plan = parse(&columns, &[vec![Some("1".into())]]);
+        assert!(plan.nodes.len() <= 1);
+        assert_eq!(plan.text, "1");
+    }
+
+    #[test]
+    fn garbage_in_a_mongo_reply_loses_nothing_and_panics_nowhere() {
+        let plan = explain_reply(
+            r#"{"queryPlanner":{"winningPlan":{"stage":7,"inputStage":"x"}},"stages":3}"#,
+        );
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].label, "stage");
     }
 
     #[test]

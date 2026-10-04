@@ -2804,6 +2804,49 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_explain_reads_a_plan_for_each_statement_kind_in_both_modes() {
+        use crate::db::ExplainMode;
+        let connection = live();
+        let engine = crate::db::Engine::MongoDb;
+        let explain = |text: &str, mode: ExplainMode| {
+            crate::sql::explainable(engine, text).unwrap();
+            let sent = format!("{text}{}", engine.explain_suffix(mode));
+            let result = ran(&connection, &sent);
+            let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+            crate::explain::parse(&columns, &result.rows)
+        };
+
+        for text in [
+            "db.accounts.find({ plan: 'free' }).sort({ _id: 1 }).limit(2)",
+            "db.accounts.aggregate([{ $match: { plan: 'free' } }, { $group: { _id: '$plan', n: { $sum: 1 } } }])",
+            "db.accounts.countDocuments({ plan: 'free' })",
+            "db.accounts.distinct('plan')",
+        ] {
+            let plan = explain(text, ExplainMode::Plan);
+            assert!(!plan.nodes.is_empty(), "{text}");
+            assert!(
+                plan.nodes.iter().all(|node| node.actual.is_none()),
+                "{text}"
+            );
+
+            let plan = explain(text, ExplainMode::Analyze);
+            assert!(
+                plan.nodes.iter().any(|node| node.actual.is_some()),
+                "{text}"
+            );
+            assert!(!plan.summary.is_empty(), "{text}");
+        }
+
+        let indexed = explain("db.events.find({ _id: 5 })", ExplainMode::Analyze);
+        let labels: Vec<&str> = indexed.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| label.contains("IXSCAN")),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
     fn live_every_seeded_bson_type_renders_as_specified() {
         let result = ran(&live(), "db.bson_types.find()");
         for (name, shown, alias) in [
