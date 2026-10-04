@@ -1248,18 +1248,29 @@ impl Workspace {
         let panel = self.switcher_open.then(|| {
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
-            let profile_rows = self
-                .profiles
-                .iter()
-                .enumerate()
-                .map(|(index, profile)| {
+            let mut profile_rows = HashMap::<Option<String>, Vec<AnyElement>>::new();
+            for (index, profile) in self.profiles.iter().enumerate().filter(|(_, profile)| {
+                self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
+            }) {
+                let group = self.group_of(&profile.id).map(str::to_string);
+                let row = {
+                    let in_project = self.group_of(&profile.id).is_some();
                     let activate_workspace = workspace.clone();
+                    let leave_workspace = workspace.clone();
+                    let assign_workspace = workspace.clone();
+                    let joinable = self
+                        .projects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, project)| !project.connections.contains(&profile.id))
+                        .collect::<Vec<_>>();
+                    let assigning = self.assigning_project.as_deref() == Some(&profile.id);
                     let edit_workspace = workspace.clone();
                     let duplicate_workspace = workspace.clone();
                     let remove_workspace = workspace.clone();
                     let pending = self.pending_removal.as_deref() == Some(&profile.id);
                     let active = index == self.active;
-                    div()
+                    let row = div()
                         .id(("profile", index))
                         .group(format!("profile-row-{index}"))
                         .h(px(30.))
@@ -1291,6 +1302,49 @@ impl Workspace {
                                         .group_hover(format!("profile-row-{index}"), |style| {
                                             style.opacity(1.)
                                         })
+                                })
+                                .when(!joinable.is_empty(), |actions| {
+                                    let id = profile.id.clone();
+                                    actions.child(
+                                        icon_button(
+                                            ("assign-project", index),
+                                            icon::ADD_TO_PROJECT,
+                                            Tone::Quiet,
+                                            Control::Inline,
+                                            t,
+                                        )
+                                        .tooltip("Move to project")
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                _ = assign_workspace.update(cx, |workspace, cx| {
+                                                    workspace.assigning_project =
+                                                        (!assigning).then(|| id.clone());
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    )
+                                })
+                                .when(in_project, |actions| {
+                                    actions.child(
+                                        icon_button(
+                                            ("leave-project", index),
+                                            icon::LEAVE_PROJECT,
+                                            Tone::Quiet,
+                                            Control::Inline,
+                                            t,
+                                        )
+                                        .tooltip("Remove from project")
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                _ = leave_workspace.update(cx, |workspace, cx| {
+                                                    workspace.move_to_project(index, None, cx);
+                                                });
+                                            },
+                                        ),
+                                    )
                                 })
                                 .child(
                                     icon_button(
@@ -1384,10 +1438,44 @@ impl Workspace {
                             _ = activate_workspace.update(cx, |workspace, cx| {
                                 workspace.activate(index, cx);
                             });
-                        })
+                        });
+                    let choices = assigning.then(|| {
+                        joinable
+                            .iter()
+                            .map(|(choice, project)| {
+                                let join_workspace = workspace.clone();
+                                let name = project.name.clone();
+                                switcher_row(("assign-to", *choice), t)
+                                    .pl(px(layout::SPACE_LG))
+                                    .text_color(t.text_muted)
+                                    .child(row_icon(t, icon::PROJECT))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(project.name.clone()),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        _ = join_workspace.update(cx, |workspace, cx| {
+                                            workspace.move_to_project(index, Some(&name), cx);
+                                        });
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(row)
+                        .children(choices.into_iter().flatten())
                         .into_any_element()
-                })
-                .collect::<Vec<_>>();
+                };
+                profile_rows.entry(group).or_default().push(row);
+            }
+            let groups = self.render_project_groups(profile_rows, cx);
 
             div()
                 .absolute()
@@ -1406,7 +1494,7 @@ impl Workspace {
                 .top_full()
                 .mt(px(layout::SPACE_XS))
                 .left_0()
-                .w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                .w(px(layout::SWITCHER_WIDTH))
                 .p(px(layout::SPACE_XS))
                 .bg(t.overlay_glass())
                 .border_1()
@@ -1415,13 +1503,7 @@ impl Workspace {
                 .shadow_lg()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .px(px(layout::SPACE_SM))
-                        .py(px(layout::SPACE_XS))
-                        .child(section_label(t, "Connections")),
-                )
-                .children(profile_rows)
+                .children(groups)
                 .child(div().my(px(layout::SPACE_XS)).h(px(1.)).bg(t.border))
                 .child(
                     div()
@@ -1439,7 +1521,12 @@ impl Workspace {
                         .child("Add connection")
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
-                                workspace.form = Some(ConnectionForm::new(None, window, cx));
+                                let mut form = ConnectionForm::new(None, window, cx);
+                                form.project = match workspace.expanded_groups.last() {
+                                    Some(group) => group.clone(),
+                                    None => workspace.current_group().map(str::to_string),
+                                };
+                                workspace.form = Some(form);
                                 workspace.switcher_open = false;
                                 cx.notify();
                             });
@@ -1451,6 +1538,7 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
+        let project_name = self.current_group().map(str::to_string);
         let toggle_workspace = workspace.clone();
 
         div()
@@ -1473,6 +1561,19 @@ impl Workspace {
                     .text_size(px(layout::TEXT_SM))
                     .text_color(t.text_faint)
                     .hover(|style| style.bg(t.element_hover).text_color(t.text))
+                    .when_some(project_name, |trigger, name| {
+                        trigger
+                            .child(row_icon(t, icon::PROJECT))
+                            .child(
+                                div()
+                                    .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(name),
+                            )
+                            .child("/")
+                    })
                     .child(row_icon_tinted(t, icon::DATABASE, active_color))
                     .child(
                         div()
@@ -1507,11 +1608,202 @@ impl Workspace {
                             _ = toggle_workspace.update(cx, |workspace, cx| {
                                 workspace.switcher_open = true;
                                 workspace.pending_removal = None;
+                                workspace.pending_project_deletion = None;
+                                workspace.assigning_project = None;
+                                workspace.expanded_groups =
+                                    vec![workspace.current_group().map(str::to_string)];
                                 cx.notify();
                             });
                         })
                     }),
             )
+            .into_any_element()
+    }
+
+    /// No project, then each project, as groups any of which may be
+    /// expanded, each holding its `members`. The group of the connection in front is
+    /// marked, but looking inside another switches nothing. With no projects
+    /// there is nothing to group, and the members are listed bare.
+    fn render_project_groups(
+        &self,
+        mut members: HashMap<Option<String>, Vec<AnyElement>>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let t = *theme(cx);
+        let workspace = cx.entity().downgrade();
+        let current = self.current_group().map(str::to_string);
+        let mut rows = Vec::new();
+        if self.projects.is_empty() {
+            rows.push(
+                div()
+                    .px(px(layout::SPACE_SM))
+                    .py(px(layout::SPACE_XS))
+                    .child(section_label(t, "Connections"))
+                    .into_any_element(),
+            );
+            rows.extend(members.remove(&None).unwrap_or_default());
+        } else {
+            let mut group_body = |group: Option<&str>, id: usize| {
+                let members = members
+                    .remove(&group.map(str::to_string))
+                    .unwrap_or_default();
+                div()
+                    .pl(px(layout::SPACE_MD))
+                    .flex()
+                    .flex_col()
+                    .when(members.is_empty(), |body| {
+                        body.child(
+                            switcher_row(("empty-group", id), t)
+                                .text_color(t.text_faint)
+                                .child("No connections yet"),
+                        )
+                    })
+                    .children(members)
+                    .into_any_element()
+            };
+
+            let expanded = self.is_expanded(None);
+            let ungrouped = self
+                .profiles
+                .iter()
+                .any(|profile| self.group_of(&profile.id).is_none());
+            if ungrouped {
+                let all_workspace = workspace.clone();
+                rows.push(
+                    group_header("no-project", current.is_none(), expanded, t)
+                        .child(row_icon(t, icon::DATABASE))
+                        .child(div().flex_1().child("No project"))
+                        .on_click(move |_, _, cx| {
+                            _ = all_workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_group(None, cx);
+                            });
+                        })
+                        .into_any_element(),
+                );
+                if expanded {
+                    rows.push(group_body(None, usize::MAX));
+                }
+            }
+
+            for (index, project) in self.projects.iter().enumerate() {
+                let expanded = self.is_expanded(Some(&project.name));
+                let is_current = current.as_deref() == Some(project.name.as_str());
+                if self.renaming_project.as_deref() == Some(project.name.as_str())
+                    && let Some(input) = &self.project_name
+                {
+                    rows.push(name_field(input));
+                } else {
+                    rows.push(self.project_header(index, project, is_current, expanded, cx));
+                }
+                if expanded {
+                    rows.push(group_body(Some(&project.name), index));
+                }
+            }
+        }
+        rows.push(match &self.project_name {
+            Some(input) if self.renaming_project.is_none() => name_field(input),
+            _ => switcher_row("new-project", t)
+                .text_color(t.text_muted)
+                .child(row_icon(t, icon::PLUS))
+                .child("New project")
+                .on_click(move |_, window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.start_naming_project(None, window, cx);
+                    });
+                })
+                .into_any_element(),
+        });
+        rows
+    }
+
+    fn project_header(
+        &self,
+        index: usize,
+        project: &store::StoredProject,
+        selected: bool,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = *theme(cx);
+        let workspace = cx.entity().downgrade();
+        let open_workspace = workspace.clone();
+        let rename_workspace = workspace.clone();
+        let name = project.name.clone();
+        let rename_name = project.name.clone();
+        let delete_name = project.name.clone();
+        let pending = self.pending_project_deletion.as_deref() == Some(project.name.as_str());
+        group_header(("project", index), selected, expanded, t)
+            .group(format!("project-row-{index}"))
+            .child(row_icon(t, icon::PROJECT))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(project.name.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .when(!pending, |actions| {
+                        actions
+                            .opacity(0.)
+                            .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
+                    })
+                    .child(
+                        icon_button(
+                            ("rename-project", index),
+                            icon::RENAME,
+                            Tone::Quiet,
+                            Control::Inline,
+                            t,
+                        )
+                        .tooltip("Rename project")
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            _ = rename_workspace.update(cx, |workspace, cx| {
+                                workspace.start_naming_project(
+                                    Some(rename_name.clone()),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
+                    .child(
+                        icon_button(
+                            ("delete-project", index),
+                            icon::DELETE,
+                            if pending { Tone::Danger } else { Tone::Quiet },
+                            Control::Inline,
+                            t,
+                        )
+                        .when(pending, |armed| {
+                            armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
+                                "Delete?",
+                                Tone::Danger,
+                                Control::Inline,
+                                t,
+                            ))
+                        })
+                        .tooltip("Delete project (its connections are kept)")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.delete_project(&delete_name, cx);
+                            });
+                        }),
+                    ),
+            )
+            .on_click(move |_, _, cx| {
+                _ = open_workspace.update(cx, |workspace, cx| {
+                    workspace.toggle_group(Some(name.clone()), cx);
+                });
+            })
             .into_any_element()
     }
 
@@ -1673,5 +1965,48 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
         .text_size(px(layout::TEXT_SM))
         .text_color(t.text_muted)
         .child(text)
+        .into_any_element()
+}
+
+/// A row in the switcher's panel, the shape every one of its rows shares.
+fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(30.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_SM))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .hover(|style| style.bg(t.element_hover))
+}
+
+/// A group's header: a chevron saying whether it is expanded, and weight
+/// saying whether it holds the connection in front.
+fn group_header(
+    id: impl Into<gpui::ElementId>,
+    current: bool,
+    expanded: bool,
+    t: Theme,
+) -> gpui::Stateful<gpui::Div> {
+    switcher_row(id, t)
+        .text_color(if current { t.text } else { t.text_muted })
+        .when(current, |row| row.font_weight(FontWeight::MEDIUM))
+        .child(row_icon(
+            t,
+            if expanded {
+                icon::CHEVRON_DOWN
+            } else {
+                icon::CHEVRON_RIGHT
+            },
+        ))
+}
+
+fn name_field(input: &Entity<InputState>) -> AnyElement {
+    div()
+        .px(px(layout::SPACE_XS))
+        .py(px(layout::SPACE_XS))
+        .child(gpui_component::Sizable::small(Input::new(input)))
         .into_any_element()
 }

@@ -50,8 +50,13 @@ impl Workspace {
             color_titlebar: Some(self.settings.color_titlebar),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
         };
-        if let Err(message) = store::save_profiles(&profiles, active.as_deref(), &fonts, &settings)
-        {
+        if let Err(message) = store::save_profiles(
+            &profiles,
+            active.as_deref(),
+            &fonts,
+            &settings,
+            &self.projects,
+        ) {
             self.note(message, cx);
         }
     }
@@ -276,9 +281,9 @@ impl Workspace {
                 else {
                     return;
                 };
-                workspace.form = Some(ConnectionForm::duplicating(
-                    profile, name, password, window, cx,
-                ));
+                let mut form = ConnectionForm::duplicating(profile, name, password, window, cx);
+                form.project = workspace.group_of(&id).map(str::to_string);
+                workspace.form = Some(form);
                 cx.notify();
             });
         })
@@ -525,6 +530,7 @@ impl Workspace {
         let color = form.color;
         let mode = form.mode;
         let editing = form.editing.clone();
+        let project = form.project.clone();
         let (name, config) = match form.config(cx) {
             Ok(profile) => profile,
             Err(error) => {
@@ -542,6 +548,9 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
+                if project.is_some() {
+                    self.move_to_project(index, project.as_deref(), cx);
+                }
                 self.activate(index, cx);
             }
         }
@@ -688,7 +697,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.form = Some(ConnectionForm::new(None, window, cx));
+        let mut form = ConnectionForm::new(None, window, cx);
+        form.project = self.current_group().map(str::to_string);
+        self.form = Some(form);
         self.switcher_open = false;
         // The form branch of `Render` returns before painting the modal, so a
         // flag left set would reappear the moment the form closes.
@@ -1202,12 +1213,16 @@ impl Workspace {
     }
 
     pub(crate) fn cycle_profile(&mut self, step: isize, cx: &mut Context<Self>) {
-        if self.profiles.len() < 2 || self.form.is_some() {
+        let members = self.current_group_members();
+        if members.len() < 2 || self.form.is_some() {
             return;
         }
-        let count = self.profiles.len() as isize;
-        let index = (self.active as isize + step).rem_euclid(count) as usize;
-        self.activate(index, cx);
+        let position = members
+            .iter()
+            .position(|index| *index == self.active)
+            .unwrap_or(0) as isize;
+        let next = (position + step).rem_euclid(members.len() as isize) as usize;
+        self.activate(members[next], cx);
     }
 
     pub(crate) fn next_profile(&mut self, _: &NextProfile, _: &mut Window, cx: &mut Context<Self>) {
@@ -1267,6 +1282,9 @@ impl Workspace {
         let removed_queries = store::delete_queries(&id);
         let _ = store::delete_grids(&id);
         self.pending_removal = None;
+        for project in &mut self.projects {
+            project.connections.retain(|member| member != &id);
+        }
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
         if self.profiles.is_empty() {

@@ -697,7 +697,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             .profiles
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index != workspace.active)
+            .filter(|(index, _)| *index != workspace.active && workspace.in_current_group(*index))
             .map(|(index, other)| Item {
                 label: format!("Switch to {}", other.name),
                 hint: "".into(),
@@ -706,7 +706,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }),
     );
 
-    if workspace.profiles.len() > 1 {
+    if workspace.current_group_members().len() > 1 {
         items.push(Item::command(
             "Next connection",
             chord_hint("next_profile", overrides),

@@ -256,7 +256,7 @@ fn main() {
             // exist first.
             let overrides = store::load_profiles()
                 .ok()
-                .and_then(|(_, _, _, settings)| settings)
+                .and_then(|(_, _, _, settings, _)| settings)
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
             cx.bind_keys(keybindings::build_bindings(&overrides));

@@ -305,14 +305,27 @@ pub struct StoredSettings {
     pub custom_keybindings: Option<HashMap<String, String>>,
 }
 
+/// A named collection of connections. A connection is listed by at most one
+/// project, and one listed by none is under No project. Membership lives here
+/// rather than on the profile so a project with no connections yet is still a
+/// project.
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredProject {
+    pub name: String,
+    /// Profile ids, in the order they were added.
+    #[serde(default)]
+    pub connections: Vec<String>,
+}
+
 /// A decoded profile file: the profiles, the id of the one that was in front,
-/// the fonts and the settings. Named because it is four things and a bare
-/// tuple in the signature reads as none of them.
+/// the fonts, the settings and the projects. Named because it is five things
+/// and a bare tuple in the signature reads as none of them.
 type Restored = (
     Vec<StoredProfile>,
     Option<String>,
     Option<StoredFonts>,
     Option<StoredSettings>,
+    Vec<StoredProject>,
 );
 
 /// Field order is load-bearing here too: `active` is a scalar, so it has to
@@ -330,6 +343,8 @@ struct ProfileFile {
     #[serde(default)]
     settings: Option<StoredSettings>,
     #[serde(default)]
+    projects: Vec<StoredProject>,
+    #[serde(default)]
     profiles: Vec<StoredProfile>,
 }
 
@@ -343,7 +358,7 @@ pub fn load_profiles() -> Result<Restored, String> {
     // it, so the overwrite hazard below technically remains. A directory we
     // cannot read is one we almost certainly cannot write either.
     let Some(text) = read_file(&path)? else {
-        return Ok((Vec::new(), None, None, None));
+        return Ok((Vec::new(), None, None, None, Vec::new()));
     };
     decode_profiles(&text).map_err(|error| {
         // The next save rewrites this path, so moving the unparsable file aside
@@ -365,7 +380,15 @@ pub fn load_profiles() -> Result<Restored, String> {
 
 fn decode_profiles(text: &str) -> Result<Restored, String> {
     toml::from_str::<ProfileFile>(text)
-        .map(|file| (file.profiles, file.active, file.fonts, file.settings))
+        .map(|file| {
+            (
+                file.profiles,
+                file.active,
+                file.fonts,
+                file.settings,
+                file.projects,
+            )
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -374,11 +397,13 @@ pub fn save_profiles(
     active: Option<&str>,
     fonts: &StoredFonts,
     settings: &StoredSettings,
+    projects: &[StoredProject],
 ) -> Result<(), String> {
     let text = toml::to_string_pretty(&ProfileFile {
         active: active.map(str::to_string),
         fonts: Some(fonts.clone()),
         settings: Some(settings.clone()),
+        projects: projects.to_vec(),
         profiles: profiles.to_vec(),
     })
     .map_err(|error| format!("Could not encode the profile list: {error}"))?;
@@ -1159,6 +1184,7 @@ user = "shayan"
                 Some(&stored.id),
                 &StoredFonts::default(),
                 &StoredSettings::default(),
+                &[],
             )
             .unwrap();
 
@@ -1224,6 +1250,7 @@ user = "shayan"
             fonts: None,
             active: Some("dev".into()),
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1314,6 +1341,7 @@ open_objects = []
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1338,6 +1366,7 @@ open_objects = []
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1353,6 +1382,7 @@ open_objects = []
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![a_stored_profile()],
         };
 
@@ -1405,6 +1435,7 @@ open_objects = []
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1472,6 +1503,7 @@ open_objects = []
             active: None,
             fonts: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1515,6 +1547,7 @@ open_objects = []
             active: None,
             fonts: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -1627,6 +1660,7 @@ open_objects = []
             active: None,
             fonts: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile],
         })
         .expect("profile must encode");
@@ -1681,6 +1715,16 @@ open_objects = []
                     "cmd-shift-s".to_string(),
                 )])),
             }),
+            projects: vec![
+                StoredProject {
+                    name: "Billing".into(),
+                    connections: vec!["dev".into(), "local".into()],
+                },
+                StoredProject {
+                    name: "Empty".into(),
+                    connections: Vec::new(),
+                },
+            ],
             profiles: vec![
                 StoredProfile {
                     id: "dev".into(),
@@ -1747,7 +1791,7 @@ open_objects = []
         // A file written before `settings` existed has no `[settings]` table
         // at all, and that is what is on disk for everyone running dbdelve
         // today -- it has to keep reading as `None`, not as the defaults.
-        let (.., missing) =
+        let (.., missing, _) =
             decode_profiles("active = \"dev\"\n").expect("a file predating settings must load");
         assert_eq!(missing, None);
     }
@@ -1757,7 +1801,10 @@ open_objects = []
         // The empty list is what the next save writes back, so a parse error
         // that reads as "no profiles" is a parse error that deletes them.
         assert!(decode_profiles("host = ").is_err());
-        assert_eq!(decode_profiles(""), Ok((Vec::new(), None, None, None)));
+        assert_eq!(
+            decode_profiles(""),
+            Ok((Vec::new(), None, None, None, Vec::new()))
+        );
     }
 
     #[test]
@@ -2108,6 +2155,7 @@ open_objects = []
             active: Some("dev".into()),
             fonts: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         })
         .expect("profiles must encode");
@@ -2404,6 +2452,7 @@ name = \"accounts\"
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         };
 
@@ -2474,6 +2523,7 @@ name = \"accounts\"
             fonts: None,
             active: None,
             settings: None,
+            projects: Vec::new(),
             profiles: vec![profile.clone()],
         })
         .expect("profiles must encode");

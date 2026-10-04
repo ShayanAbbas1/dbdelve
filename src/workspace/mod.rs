@@ -11,6 +11,7 @@ mod forms;
 mod modes;
 mod objects;
 mod profiles;
+mod projects;
 mod queries;
 mod tabs;
 
@@ -76,6 +77,22 @@ pub(crate) struct Workspace {
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
     pub(crate) switcher_open: bool,
+    pub(crate) projects: Vec<store::StoredProject>,
+    /// The switcher's project name field, while a project is being named.
+    pub(crate) project_name: Option<Entity<InputState>>,
+    /// The project that field renames; `None` while it names a new one.
+    pub(crate) renaming_project: Option<String>,
+    pub(crate) project_name_needs_focus: bool,
+    /// The project whose delete button has been clicked once and is waiting
+    /// for the second.
+    pub(crate) pending_project_deletion: Option<String>,
+    /// The groups expanded in the switcher, `None` being No project, in the
+    /// order they were expanded. Looking inside a group switches nothing, so
+    /// this is apart from the group of the connection in front.
+    pub(crate) expanded_groups: Vec<Option<String>>,
+    /// The connection whose "Add to a project" choices are unfolded in the
+    /// switcher, by id.
+    pub(crate) assigning_project: Option<String>,
     /// Whether the settings modal is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
@@ -162,6 +179,13 @@ impl Workspace {
             active: 0,
             form: None,
             switcher_open: false,
+            projects: Vec::new(),
+            project_name: None,
+            renaming_project: None,
+            project_name_needs_focus: false,
+            pending_project_deletion: None,
+            expanded_groups: Vec::new(),
+            assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             rebinding: None,
@@ -191,7 +215,7 @@ impl Workspace {
 
         let mut load_failure = None;
         match store::load_profiles() {
-            Ok((profiles, active, stored_fonts, stored_settings)) => {
+            Ok((profiles, active, stored_fonts, stored_settings, projects)) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let available = cx.text_system().all_font_names();
@@ -245,6 +269,12 @@ impl Workspace {
                 {
                     workspace.active = index;
                 }
+                let live = workspace
+                    .profiles
+                    .iter()
+                    .map(|profile| profile.id.as_str())
+                    .collect::<Vec<_>>();
+                workspace.projects = projects::normalized_projects(projects, &live);
             }
             Err(message) => {
                 workspace.store_unreadable = true;
@@ -597,6 +627,11 @@ impl Render for Workspace {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
+        // Every way the switcher closes ends here, so this is the one place
+        // its name field is put away -- before the focus handoff below.
+        if !self.switcher_open {
+            self.drop_project_name();
+        }
         // Deferred to render for the `&mut Window` a background task does not
         // have: the catalog that names these tabs resolves off-thread, and a
         // grid cannot be built without a window.
@@ -678,6 +713,11 @@ impl Render for Workspace {
         // its own, and a field it just unmounted took the window's only
         // dispatch path with it.
         if let Some(input) = self.form.as_mut().and_then(|form| form.needs_focus.take()) {
+            input.focus_handle(cx).focus(window, cx);
+        }
+        if std::mem::take(&mut self.project_name_needs_focus)
+            && let Some(input) = &self.project_name
+        {
             input.focus_handle(cx).focus(window, cx);
         }
 

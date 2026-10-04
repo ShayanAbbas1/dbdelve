@@ -234,6 +234,11 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.project_name.is_some() {
+            self.drop_project_name();
+            cx.notify();
+            return;
+        }
         if self.form.is_some() && !self.profiles.is_empty() {
             self.form = None;
             cx.notify();
