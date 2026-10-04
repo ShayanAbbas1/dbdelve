@@ -543,8 +543,8 @@ fn regex_escaped(text: &str) -> String {
 
 /// The typed text as a literal of the field's type, where the field has one
 /// type besides null: a number for a numeric field (`NumberDecimal` for a
-/// decimal one, `NumberLong` past 32 bits), an `ObjectId` from its hex or its
-/// `ObjectId('…')` cell text, an `ISODate`, a boolean. A string otherwise --
+/// decimal one, `NumberLong` past 32 bits), an `ObjectId` from its hex (its cell
+/// text) or `ObjectId('…')`, an `ISODate`, a boolean. A string otherwise --
 /// for a string field, a field of mixed or unknown type, or text that is not
 /// one of those -- since a string matching nothing is the honest answer to a
 /// value the field cannot hold.

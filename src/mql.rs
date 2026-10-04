@@ -2102,6 +2102,8 @@ pub(crate) fn coerce(text: &str, tag: Option<&str>) -> Result<Value, String> {
         "bool" => trimmed.parse().ok().map(Value::Bool),
         "date" => iso_date(trimmed).ok(),
         "objectId" => object_id(trimmed).ok(),
+        // A UUID cell shows bare; any other binary shows as `BinData(…)`.
+        "binData" => uuid(trimmed).ok(),
         _ => None,
     };
     let value = plain.or_else(|| match (tag, read_literal(text)?) {

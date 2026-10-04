@@ -2213,12 +2213,12 @@ fn cell(value: &Bson) -> Cell {
         Bson::Decimal128(n) => n.to_string(),
         Bson::Boolean(value) => value.to_string(),
         Bson::DateTime(date) => iso_date(*date),
-        Bson::ObjectId(id) => format!("ObjectId('{id}')"),
+        Bson::ObjectId(id) => id.to_hex(),
         Bson::Binary(binary) => match (
             u8::from(binary.subtype),
             <[u8; 16]>::try_from(binary.bytes.as_slice()),
         ) {
-            (4, Ok(bytes)) => format!("UUID('{}')", Uuid::from_bytes(bytes)),
+            (4, Ok(bytes)) => Uuid::from_bytes(bytes).to_string(),
             (subtype, _) => format!("BinData({subtype}, '{}')", STANDARD.encode(&binary.bytes)),
         },
         Bson::Timestamp(at) => format!("Timestamp({{ t: {}, i: {} }})", at.time, at.increment),
@@ -2855,14 +2855,10 @@ mod tests {
                 "1815-12-10T00:00:00.500Z",
                 "date",
             ),
-            (
-                &format!("ObjectId('{oid}')"),
-                &format!("ObjectId('{oid}')"),
-                "objectId",
-            ),
+            (&format!("ObjectId('{oid}')"), oid, "objectId"),
             (
                 "UUID('018f1f6e-7c2a-7000-8000-0000000000ff')",
-                "UUID('018f1f6e-7c2a-7000-8000-0000000000ff')",
+                "018f1f6e-7c2a-7000-8000-0000000000ff",
                 "binData",
             ),
             ("BinData(0, 'AP8=')", "BinData(0, 'AP8=')", "binData"),
@@ -2893,11 +2889,18 @@ mod tests {
             let value = literal(text);
             assert_eq!(cell(&value).as_deref(), Some(shown), "{text}");
             assert_eq!(type_alias(&value), alias, "{text}");
-            // A string, number or date reads back through its column's type,
-            // which says which of them its text is; the rest spell their own.
-            if !["string", "int", "long", "double", "decimal", "bool", "date"].contains(&alias) {
-                assert_eq!(literal(shown), value, "{shown} reads back as {text}");
-            }
+            // A scalar shown bare reads back through its cell's type, which says
+            // which of them its text is; the rest spell their own.
+            let typed = [
+                "string", "int", "long", "double", "decimal", "bool", "date", "objectId",
+            ];
+            let read = match typed.contains(&alias)
+                || (alias == "binData" && !shown.starts_with("BinData("))
+            {
+                true => bson(&mql::coerce(shown, Some(alias)).unwrap()).unwrap(),
+                false => literal(shown),
+            };
+            assert_eq!(read, value, "{shown} reads back as {text}");
         }
         assert_eq!(cell(&Bson::Null), None);
         assert_eq!(double(f64::INFINITY), "Infinity");
@@ -3215,11 +3218,7 @@ mod tests {
             ("empty_string", Some(""), "string"),
             ("boolean", Some("true"), "bool"),
             ("null", None, "null"),
-            (
-                "object_id",
-                Some("ObjectId('65a4f1c0ffffffffffffffff')"),
-                "objectId",
-            ),
+            ("object_id", Some("65a4f1c0ffffffffffffffff"), "objectId"),
             ("date", Some("2024-01-15T09:30:00.123Z"), "date"),
             (
                 "date_before_epoch",
@@ -3234,7 +3233,7 @@ mod tests {
             ("binary_generic", Some("BinData(0, 'AP8=')"), "binData"),
             (
                 "binary_uuid",
-                Some("UUID('018f1f6e-7c2a-7000-8000-0000000000ff')"),
+                Some("018f1f6e-7c2a-7000-8000-0000000000ff"),
                 "binData",
             ),
             ("regex", Some("/^dbdelve.*$/i"), "regex"),
@@ -3287,7 +3286,7 @@ mod tests {
                 (Some("[1,2,3]"), "array"),
                 (Some(r#"{"nested":"object"}"#), "object"),
                 (Some("2024-06-01T00:00:00.000Z"), "date"),
-                (Some("ObjectId('65a4f1c0000000000000000c')"), "objectId"),
+                (Some("65a4f1c0000000000000000c"), "objectId"),
             ]
         );
         // Columns are the union: a field one document has is a column for all.
