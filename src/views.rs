@@ -214,6 +214,7 @@ fn render_query_surface(
     let bottom = match tab.showing_plan.then_some(tab.plan.as_ref()).flatten() {
         Some(explained) => render_plan(explained, plan_copied, &scope, cx),
         None => render_results(
+            profile.config.engine(),
             shown_state,
             shown_grid,
             Some(tab),
@@ -574,6 +575,7 @@ fn render_object(
             t,
         ))
         .child(div().flex_1().min_h_0().child(render_results(
+            engine,
             query,
             results,
             None,
@@ -626,7 +628,7 @@ fn render_filter_bar(
                     button(
                         ("filter-column", row),
                         match filter.raw {
-                            true => RAW_SQL.to_string(),
+                            true => engine.raw_filter_label().to_string(),
                             false => filter
                                 .column
                                 .clone()
@@ -671,7 +673,11 @@ fn render_filter_bar(
                                 // is not one of them: it replaces the bar with
                                 // a statement of the user's own.
                                 .separator()
-                                .menu_with_check(RAW_SQL, raw, Box::new(SetFilterRaw { row }))
+                                .menu_with_check(
+                                    engine.raw_filter_label(),
+                                    raw,
+                                    Box::new(SetFilterRaw { row }),
+                                )
                         }
                     }),
                 )
@@ -680,7 +686,7 @@ fn render_filter_bar(
                 .children((!filter.raw).then(|| {
                     button(
                         ("filter-operator", row),
-                        filter.operator.symbol(),
+                        filter.operator.symbol(engine),
                         Tone::Quiet,
                         Control::Compact,
                         t,
@@ -702,7 +708,7 @@ fn render_filter_bar(
                                     menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
                                     |menu, operator| {
                                         menu.menu_with_check(
-                                            operator.label(),
+                                            operator.label(engine),
                                             operator == chosen,
                                             Box::new(SetFilterOperator { row, operator }),
                                         )
@@ -751,9 +757,6 @@ fn render_filter_bar(
         .into_any_element()
 }
 
-/// The column dropdown's last entry, which is not a column.
-const RAW_SQL: &str = "Raw SQL";
-
 /// `AND` or `OR`, as the two-state button it is. A dropdown of two rows is a
 /// menu to open for something a click already says.
 fn join_button(id: impl Into<gpui::ElementId>, conjunction: Conjunction, t: Theme) -> Button {
@@ -777,7 +780,12 @@ fn filter_bar_row() -> gpui::Div {
 ///
 /// The buttons are Cancel and **Review SQL**: this generates the statement and
 /// shows it, and running it is the review panel's ask, not this one's.
-fn render_new_row_panel(form: &InsertForm, scope: &str, cx: &mut Context<Workspace>) -> AnyElement {
+fn render_new_row_panel(
+    engine: Engine,
+    form: &InsertForm,
+    scope: &str,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let t = *theme(cx);
 
     let fields: Vec<AnyElement> = form
@@ -889,7 +897,7 @@ fn render_new_row_panel(form: &InsertForm, scope: &str, cx: &mut Context<Workspa
                 .child(
                     button(
                         "review-new-row",
-                        "Review SQL",
+                        engine.review_label(),
                         Tone::Primary,
                         Control::Standard,
                         t,
@@ -991,6 +999,7 @@ fn clock(elapsed: std::time::Duration) -> String {
 /// which has no buffer.
 #[allow(clippy::too_many_arguments)]
 fn render_results(
+    engine: Engine,
     query: &QueryState,
     results: &Entity<TableState<ResultGrid>>,
     query_tab: Option<&QueryTab>,
@@ -1274,7 +1283,7 @@ fn render_results(
     // overlay -- rather than just the grid, so New row stays usable on an
     // empty table and Delete's refusal is visible after a failed preview.
     let panel = match form {
-        Some(form) => Some((render_new_row_panel(form, scope, cx), false)),
+        Some(form) => Some((render_new_row_panel(engine, form, scope, cx), false)),
         None => {
             render_row_inspector(results, folded, row_panel, scope, cx).map(|panel| (panel, folded))
         }

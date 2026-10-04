@@ -188,7 +188,11 @@ impl Workspace {
         filter.raw = false;
         let (operator, input) = (filter.operator, filter.value.clone());
         input.update(cx, |input, cx| {
-            input.set_placeholder(value_placeholder(false, operator), window, cx);
+            input.set_placeholder(
+                value_placeholder(self.engine(), false, operator),
+                window,
+                cx,
+            );
         });
         self.apply_filter(id, cx);
         cx.notify();
@@ -215,7 +219,11 @@ impl Workspace {
         filter.applied.clear();
         let input = filter.value.clone();
         input.update(cx, |input, cx| {
-            input.set_placeholder(value_placeholder(true, Operator::default()), window, cx);
+            input.set_placeholder(
+                value_placeholder(self.engine(), true, Operator::default()),
+                window,
+                cx,
+            );
         });
         self.apply_filter(id, cx);
         cx.notify();
@@ -236,7 +244,11 @@ impl Workspace {
         filter.operator = action.operator;
         let input = filter.value.clone();
         input.update(cx, |input, cx| {
-            input.set_placeholder(value_placeholder(false, action.operator), window, cx);
+            input.set_placeholder(
+                value_placeholder(self.engine(), false, action.operator),
+                window,
+                cx,
+            );
         });
         self.apply_filter(id, cx);
         cx.notify();
@@ -318,6 +330,7 @@ impl Workspace {
             _ => return,
         };
         let row = filter_row(
+            self.engine(),
             id,
             FilterBar {
                 conjunction,

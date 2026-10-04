@@ -65,6 +65,7 @@ impl Workspace {
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let preview_rows = self.settings.preview_rows;
+        let engine = self.engine();
         let profile = self.profile_mut()?;
         let existing = matching_tab(
             profile
@@ -90,7 +91,7 @@ impl Workspace {
             } => {
                 let filters = filters
                     .into_iter()
-                    .map(|bar| filter_row(id, bar, window, cx))
+                    .map(|bar| filter_row(engine, id, bar, window, cx))
                     .collect();
                 ObjectBody::Relation {
                     showing_structure: false,
@@ -714,10 +715,10 @@ impl Workspace {
                                 .generated(&sql, &CancelToken::default())
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
-                            None => {
-                                Err("dbdelve will not run a check it cannot read as one SELECT."
-                                    .into())
-                            }
+                            None => Err(
+                                "dbdelve will not run a check it cannot read as a single read."
+                                    .into(),
+                            ),
                         };
                         (index, label, answer)
                     })

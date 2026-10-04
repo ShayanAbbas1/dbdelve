@@ -406,6 +406,30 @@ impl Engine {
         read_only_statement(self, true).is_some()
     }
 
+    /// What the filter bar's raw input asks for.
+    pub fn raw_filter_placeholder(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "SQL…",
+            Syntax::Mongo => "{ status: \"active\" }",
+        }
+    }
+
+    /// The column dropdown's entry that swaps the bar for the user's own filter.
+    pub fn raw_filter_label(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "Raw SQL",
+            Syntax::Mongo => "Raw filter",
+        }
+    }
+
+    /// What a generated statement is called where one is shown for review.
+    pub fn review_label(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "Review SQL",
+            Syntax::Mongo => "Review statement",
+        }
+    }
+
     pub fn syntax(self) -> Syntax {
         match self {
             Self::Postgres

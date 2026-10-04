@@ -506,7 +506,7 @@ impl Workspace {
             match (traced, wrote, snapshot) {
                 (true, _, _) => "This column cannot be edited.".into(),
                 (false, true, _) => {
-                    "These rows came from a statement that writes. Fetch them with a SELECT to edit them.".into()
+                    "These rows came from a statement that writes. Fetch them with a query that only reads to edit them.".into()
                 }
                 (false, false, true) => match tab {
                     Tab::Query(_) => {

@@ -11,7 +11,14 @@ use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
 use serde::Deserialize;
 
-use crate::{Workspace, db, db::Engine, explorer::preview_sql, sql, sql::SortKey, store};
+use crate::{
+    Workspace, db,
+    db::{Engine, Syntax},
+    explorer::preview_sql,
+    sql,
+    sql::SortKey,
+    store,
+};
 
 /// What a filter bar compares its column against.
 ///
@@ -69,7 +76,10 @@ impl Operator {
 
     /// What the bar's own button shows: the SQL shape rather than the English,
     /// because the bar is read beside the statement it writes.
-    pub(crate) fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self, engine: Engine) -> &'static str {
+        if engine.syntax() == Syntax::Mongo {
+            return self.mongo_symbol();
+        }
         match self {
             Self::Equals => "=",
             Self::NotEquals => "!=",
@@ -92,9 +102,45 @@ impl Operator {
         }
     }
 
+    /// MongoDB's filter documents have no `LIKE`: the same operators read as
+    /// the English they compile from.
+    fn mongo_symbol(self) -> &'static str {
+        match self {
+            Self::Equals => "=",
+            Self::NotEquals => "!=",
+            Self::Contains => "contains",
+            Self::NotContains => "not contains",
+            Self::StartsWith => "starts with",
+            Self::EndsWith => "ends with",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::IsNull => "is null",
+            Self::IsNotNull => "is not null",
+            Self::IsEmpty => "is empty",
+            Self::IsNotEmpty => "is not empty",
+            Self::InList => "in",
+            Self::NotInList => "not in",
+            Self::Between => "between",
+            Self::Regex => "regex",
+        }
+    }
+
     /// What the dropdown row reads: the symbol and the English for it, so the
     /// list can be scanned by either.
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self, engine: Engine) -> &'static str {
+        if engine.syntax() == Syntax::Mongo {
+            return match self {
+                Self::Equals => "= equals",
+                Self::NotEquals => "!= not equals",
+                Self::Greater => "> greater than",
+                Self::GreaterOrEqual => ">= greater or equal",
+                Self::Less => "< less than",
+                Self::LessOrEqual => "<= less or equal",
+                other => other.mongo_symbol(),
+            };
+        }
         match self {
             Self::Equals => "= equals",
             Self::NotEquals => "!= not equals",
@@ -111,7 +157,7 @@ impl Operator {
             Self::Between => "BETWEEN between",
             Self::Regex => "~ matches regex",
             // The four that are their own English already.
-            other => other.symbol(),
+            other => other.symbol(engine),
         }
     }
 
@@ -241,12 +287,13 @@ pub(crate) struct FilterRow {
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
 /// that ran on every keystroke would put a half-typed predicate on the wire.
 pub(crate) fn filter_row(
+    engine: Engine,
     id: u64,
     bar: FilterBar,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> FilterRow {
-    let placeholder = value_placeholder(bar.raw, bar.operator);
+    let placeholder = value_placeholder(engine, bar.raw, bar.operator);
     let applied = bar.value.clone();
     let input = cx.new(|cx| {
         let mut state = InputState::new(window, cx).placeholder(placeholder);
@@ -269,9 +316,9 @@ pub(crate) fn filter_row(
     }
 }
 
-pub(crate) fn value_placeholder(raw: bool, operator: Operator) -> &'static str {
+pub(crate) fn value_placeholder(engine: Engine, raw: bool, operator: Operator) -> &'static str {
     match raw {
-        true => "SQL…",
+        true => engine.raw_filter_placeholder(),
         false => operator.placeholder(),
     }
 }
@@ -767,6 +814,19 @@ pub(crate) fn sort_columns(
 mod tests {
     use super::*;
     use crate::{db, db::RelationKind, explorer, explorer::PREVIEW_ROW_LIMIT, sql};
+
+    #[test]
+    fn mongo_operators_read_as_english_not_like() {
+        for operator in Operator::ALL {
+            let label = operator.label(Engine::MongoDb);
+            assert!(
+                !label.contains("LIKE") && !label.contains("NULL"),
+                "{label}"
+            );
+        }
+        assert_eq!(Operator::Contains.symbol(Engine::MongoDb), "contains");
+        assert_eq!(Operator::Contains.symbol(Engine::Postgres), "LIKE %..%");
+    }
 
     fn columns(names: &[&str]) -> Vec<db::Column> {
         names
