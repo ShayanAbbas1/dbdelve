@@ -42,9 +42,9 @@ use tokio::sync::oneshot;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, MISSING, NamedDefinition,
-    QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode, Statistics,
-    Structure, plain_error,
+    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, MISSING,
+    NamedDefinition, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
+    Statistics, Structure, plain_error,
 };
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
@@ -554,8 +554,31 @@ impl Connection {
         })?;
         let started = Instant::now();
         let mut result = QueryResult::default();
-        for statement in &statements {
-            result = self.statement(&statement.target, Run::start(self, cancel)?)?;
+        for (at, statement) in statements.iter().enumerate() {
+            // Nothing brackets several statements, so a failure past the
+            // first leaves the ones before it applied.
+            result = Run::start(self, cancel)
+                .and_then(|run| self.statement(&statement.target, run))
+                .map_err(|error| match at {
+                    0 => error,
+                    1 => DbError {
+                        message: format!(
+                            "Statement 2 of {} failed after statement 1 had run: {}",
+                            statements.len(),
+                            error.message
+                        ),
+                        ..error
+                    },
+                    ran => DbError {
+                        message: format!(
+                            "Statement {} of {} failed after statements 1 to {ran} had run: {}",
+                            ran + 1,
+                            statements.len(),
+                            error.message
+                        ),
+                        ..error
+                    },
+                })?;
         }
         result.elapsed = started.elapsed();
         Ok(result)
@@ -746,6 +769,7 @@ impl Connection {
         call: &Call<Method>,
         cursor: &[Call<CursorMethod>],
     ) -> Result<QueryResult, DbError> {
+        let elsewhere = database.is_some();
         let database = self.named(database)?;
         let args = Args::of(call.method.name(), &call.args);
         match call.method {
@@ -764,7 +788,14 @@ impl Connection {
                 }
                 match chained(&mut sent, cursor, true)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
-                    None => Ok(documents(fetch(run, &database, sent)?)),
+                    None => {
+                        let whole = !elsewhere && returns_whole_documents(&sent);
+                        let mut result = documents(fetch(run, &database, sent)?);
+                        if whole {
+                            result.edit = self.edit_target(collection, &result);
+                        }
+                        Ok(result)
+                    }
                 }
             }
             Method::Aggregate => {
@@ -1157,6 +1188,49 @@ impl Connection {
             });
         }
         Ok(structure)
+    }
+
+    /// Where a `find`'s documents can be written back to: by `_id`, in a
+    /// plain collection of the connected database. A view, a time-series
+    /// collection and the server's own collections are read-only, and so is
+    /// any collection whose kind cannot be read. A field whose name a `$set`
+    /// would read as a path or an operator is not written.
+    fn edit_target(&self, collection: &str, result: &QueryResult) -> Option<EditTarget> {
+        let key = result
+            .columns
+            .iter()
+            .position(|column| column.name == "_id")?;
+        if collection.starts_with("system.") {
+            return None;
+        }
+        let database = self.database();
+        let listed: Vec<Document> = self
+            .call(async {
+                database
+                    .run_cursor_command(doc! {
+                        "listCollections": 1,
+                        "filter": { "name": collection },
+                        "nameOnly": true,
+                        "authorizedCollections": true,
+                    })
+                    .await?
+                    .try_collect()
+                    .await
+            })
+            .ok()?;
+        if listed.first()?.get_str("type") != Ok("collection") {
+            return None;
+        }
+        Some(EditTarget {
+            schema: self.database.clone(),
+            table: collection.to_string(),
+            columns: result
+                .columns
+                .iter()
+                .map(|column| mql::writable_field(&column.name).then(|| column.name.clone()))
+                .collect(),
+            keys: vec![key],
+        })
     }
 
     /// Names and types only, which is what lets a user without the
@@ -1611,6 +1685,28 @@ fn chained(
         sent.insert(field, args.required(0)?);
     }
     Ok(explain)
+}
+
+/// Whether a `find` returns each document's top-level fields as stored, so a
+/// cell is the field's whole value: no projection but plain inclusions and
+/// exclusions of top-level fields, and none of the options that return
+/// something else. A `{"a.b": 1}` projection returns part of `a`, and writing
+/// that part back would drop the rest.
+fn returns_whole_documents(sent: &Document) -> bool {
+    let plain = |(field, value): (&String, &Bson)| {
+        mql::writable_field(field)
+            && matches!(
+                value,
+                Bson::Boolean(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_)
+            )
+    };
+    !sent.contains_key("returnKey")
+        && !sent.contains_key("showRecordId")
+        && match sent.get("projection") {
+            None => true,
+            Some(Bson::Document(projection)) => projection.iter().all(plain),
+            Some(_) => false,
+        }
 }
 
 /// `.explain(verbosity)`: the command wrapped in an `explain`, which takes the
@@ -3008,6 +3104,206 @@ mod tests {
                 &CancelToken::default(),
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_find_on_a_collection_is_editable_by_its_id() {
+        let connection = live();
+        for statement in [
+            "db.accounts.find()",
+            "db.getCollection('accounts').findOne({}, { name: 1 })",
+            "db.accounts.find().projection({ email: 0 }).sort({ _id: -1 }).limit(2)",
+            "db.orders.find()",
+        ] {
+            let result = ran(&connection, statement);
+            let edit = result
+                .edit
+                .as_ref()
+                .unwrap_or_else(|| panic!("{statement}"));
+            assert_eq!(edit.schema, "dbdelve_dev", "{statement}");
+            assert_eq!(edit.keys, [0], "{statement}");
+            assert_eq!(edit.columns[0].as_deref(), Some("_id"), "{statement}");
+        }
+        // A field `$set` would read as a path or an operator is not written.
+        let shapes = ran(&connection, "db.mixed_shapes.find()");
+        let edit = shapes.edit.expect("mixed_shapes is a collection");
+        for (column, name) in shapes.columns.iter().zip(&edit.columns) {
+            let writable = !["with.dot", "$dollar", ""].contains(&column.name.as_str());
+            assert_eq!(name.is_some(), writable, "{}", column.name);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_what_is_not_a_collections_whole_documents_is_read_only() {
+        let connection = live();
+        for statement in [
+            "db.accounts.aggregate([{ $match: {} }])",
+            "db.account_overview.find()",
+            "db.sensor_readings.find().limit(5)",
+            "db.accounts.distinct('plan')",
+            "db.accounts.find({}, { _id: 0, name: 1 })",
+            "db.accounts.find({}, { 'address.city': 1 })",
+            "db.locations.find({}, { 'point.coordinates': { $slice: 1 } })",
+            "db.accounts.find().projection({ name: { $toUpper: '$name' } })",
+            "db.accounts.find({}, {}, { showRecordId: true })",
+            "db.accounts.find({}, {}, { returnKey: true })",
+            "db.getSiblingDB('dbdelve_dev').accounts.find()",
+            "db.runCommand({ find: 'accounts' })",
+            "db.accounts.countDocuments()",
+        ] {
+            let result = ran(&connection, statement);
+            assert_eq!(result.edit, None, "{statement}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_an_edited_document_keeps_every_type_through_update_insert_and_delete() {
+        use crate::result_grid::{NewValue, ResultGrid};
+        use crate::sql::{self, Mode};
+
+        let connection = live();
+        let scratch = Scratch(&connection, format!("dbdelve_test_{}", ObjectId::new()));
+        let collection = format!("db.getCollection('{}')", scratch.1);
+        ran(
+            &connection,
+            &format!(
+                "{collection}.insertOne({{ _id: NumberLong(1), n: NumberLong(5), d: Double(2), \
+                 when: ISODate('2024-01-15T09:30:00Z'), \
+                 doc: {{ long: NumberLong(7), whole: Double(3), at: ISODate('2024-01-15') }}, \
+                 name: 'Ada' }})"
+            ),
+        );
+
+        let fetched = ran(&connection, &format!("{collection}.find()"));
+        assert!(fetched.edit.is_some());
+        let mut grid =
+            ResultGrid::new(fetched.clone(), Mode::ReadWrite).with_engine(Engine::MongoDb);
+        let at = |name: &str| names(&fetched).iter().position(|n| *n == name).unwrap();
+        for (name, text) in [
+            ("n", "6"),
+            ("d", "4"),
+            ("when", "2025-02-01T00:00:00Z"),
+            ("name", "42"),
+        ] {
+            assert!(
+                grid.set_pending(0, at(name), NewValue::Value(text.into())),
+                "{name}"
+            );
+        }
+        // The document's own text, edited, keeps the types written inside it.
+        let doc = fetched.rows[0][at("doc")].clone().unwrap();
+        let edited = doc.replace("\"7\"", "\"8\"");
+        assert_ne!(doc, edited, "{doc}");
+        assert!(grid.set_pending(0, at("doc"), NewValue::Value(edited.into())));
+        let batch = sql::update_batch(Engine::MongoDb, &grid.pending_updates()).unwrap();
+        assert!(
+            sql::is_generated_write_on(Engine::MongoDb, &batch),
+            "{batch}"
+        );
+        ran(&connection, &batch);
+
+        let after = ran(&connection, &format!("{collection}.find()"));
+        for (name, shown, alias) in [
+            ("_id", "1", "long"),
+            ("n", "6", "long"),
+            ("d", "4", "double"),
+            ("when", "2025-02-01T00:00:00.000Z", "date"),
+            ("name", "42", "string"),
+            (
+                "doc",
+                r#"{"long":{"$numberLong":"8"},"whole":{"$numberDouble":"3.0"},"at":{"$date":"2024-01-15T00:00:00Z"}}"#,
+                "object",
+            ),
+        ] {
+            assert_eq!(field(&after, 0, name), (Some(shown), alias), "{name}");
+        }
+
+        // Text that does not read as the field's type stops before anything runs.
+        let mut wrong =
+            ResultGrid::new(after.clone(), Mode::ReadWrite).with_engine(Engine::MongoDb);
+        assert!(wrong.set_pending(0, at("n"), NewValue::Value("six".into())));
+        let refused = sql::update_batch(Engine::MongoDb, &wrong.pending_updates()).unwrap_err();
+        assert!(refused.starts_with("n: "), "{refused}");
+
+        let insert = sql::insert_row(
+            Engine::MongoDb,
+            "dbdelve_dev",
+            &scratch.1,
+            &[
+                ("_id", Some("2")),
+                ("n", Some("9")),
+                ("name", Some("")),
+                ("note", None),
+            ],
+            &[
+                ("_id".into(), "long".into()),
+                ("n".into(), "long | null".into()),
+            ],
+        )
+        .unwrap();
+        assert!(
+            sql::is_generated_write_on(Engine::MongoDb, &insert),
+            "{insert}"
+        );
+        ran(&connection, &insert);
+        let inserted = ran(
+            &connection,
+            &format!("{collection}.find({{ _id: NumberLong(2) }})"),
+        );
+        assert_eq!(names(&inserted), ["_id", "n", "note"]);
+        assert_eq!(field(&inserted, 0, "n"), (Some("9"), "long"));
+        assert_eq!(field(&inserted, 0, "note"), (None, "null"));
+
+        // Nothing brackets a batch: a failure names its statement, and the
+        // ones before it stay applied.
+        let failing = format!(
+            "{collection}.updateOne({{_id: NumberLong(1)}}, {{$set: {{\"name\": \"Bo\"}}}});\n\
+             {collection}.insertOne({{_id: NumberLong(2)}});"
+        );
+        let error = connection
+            .query(&failing, &CancelToken::default())
+            .expect_err("a duplicate _id");
+        assert!(
+            error
+                .message
+                .starts_with("Statement 2 of 2 failed after statement 1 had run: "),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            field(
+                &ran(
+                    &connection,
+                    &format!("{collection}.findOne({{_id: NumberLong(1)}})")
+                ),
+                0,
+                "name"
+            ),
+            (Some("Bo"), "string")
+        );
+
+        let delete = sql::delete_row(
+            Engine::MongoDb,
+            "dbdelve_dev",
+            &scratch.1,
+            &[("_id", "2")],
+            &[("_id".into(), "long".into())],
+        )
+        .unwrap();
+        assert!(
+            sql::is_generated_write_on(Engine::MongoDb, &delete),
+            "{delete}"
+        );
+        assert!(sql::delete_matches_key_on(
+            Engine::MongoDb,
+            &delete,
+            &["_id"]
+        ));
+        assert_eq!(ran(&connection, &delete).rows_affected, Some(1));
+        assert_eq!(count(&connection, &scratch.1), 1);
     }
 
     #[test]
