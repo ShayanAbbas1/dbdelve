@@ -28,6 +28,14 @@ gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
 tree-sitter = "=0.26.13"
 tree-sitter-sequel = "=0.3.11"
 
+# The grammar `mql.rs` reads mongosh statements with: they are JavaScript
+# expressions, and this is what finds their boundaries, comments and regex
+# literals in a half-typed buffer. A correctness pin like tree-sitter-sequel's,
+# since it decides what a Mongo statement is and so what the mode gate is shown.
+# Pinned to the version gpui-component's own `tree-sitter-javascript` feature
+# resolves, so turning that on for highlighting links one copy, not two.
+tree-sitter-javascript = "=0.23.1"
+
 # The vocabulary gpui-component's completion provider speaks, and nothing more:
 # no language server is started, and none could be -- the completions come from
 # the catalog DBDelve already loaded. The library re-exports `Position` but not
