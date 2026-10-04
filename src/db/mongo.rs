@@ -1226,6 +1226,14 @@ fn sampled_columns(documents: &[Document]) -> Vec<ColumnDefinition> {
         .collect()
 }
 
+/// The `&'static` spelling of a cell type read back as text.
+pub(super) fn cell_type(name: &str) -> Option<&'static str> {
+    TYPE_ORDER
+        .into_iter()
+        .chain([MISSING])
+        .find(|alias| *alias == name)
+}
+
 /// The server's own name for a value's type, as `$type` spells it.
 pub(super) fn type_alias(value: &Bson) -> &'static str {
     match value {

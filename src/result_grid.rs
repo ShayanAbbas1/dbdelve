@@ -328,6 +328,14 @@ impl ResultGrid {
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                // All or none: a snapshot naming a type this build does not
+                // know is read as having none, never as rows out of step.
+                cell_types: stored
+                    .cell_types
+                    .iter()
+                    .map(|types| types.iter().map(|name| db::cell_type(name)).collect())
+                    .collect::<Option<_>>()
+                    .unwrap_or_default(),
                 edit: stored.edit.clone(),
                 ..QueryResult::default()
             },
@@ -419,6 +427,13 @@ impl ResultGrid {
             // restart claim the cache was just taken.
             captured: self.captured.unwrap_or_else(captured_at),
             edit: self.result.edit.clone(),
+            cell_types: self
+                .result
+                .cell_types
+                .iter()
+                .take(GRID_ROW_CAP)
+                .map(|types| types.iter().map(|alias| alias.to_string()).collect())
+                .collect(),
             data_types: self
                 .result
                 .columns
@@ -637,6 +652,16 @@ impl ResultGrid {
     /// through the column.
     pub(crate) fn cell(&self, row_ix: usize, col_ix: usize) -> Option<&str> {
         self.result.rows.get(row_ix)?.get(col_ix)?.as_deref()
+    }
+
+    /// Whether the row has no such field at all: a document store's absent
+    /// field, which paints as nothing rather than as a NULL it does not hold.
+    fn missing(&self, row_ix: usize, col_ix: usize) -> bool {
+        self.result
+            .cell_types
+            .get(row_ix)
+            .and_then(|types| types.get(col_ix))
+            == Some(&db::MISSING)
     }
 
     /// Every column of one row, named, typed where the type is known, and
@@ -1805,6 +1830,7 @@ impl ResultGrid {
         // staged `DEFAULT` would read as a staged `NULL`.
         let keyword = match pending.map(|pending| &pending.value) {
             Some(NewValue::Default) => DEFAULT_LABEL,
+            None if self.missing(row_ix, col_ix) => SharedString::default(),
             _ => NULL_LABEL,
         };
         let cell = match pending {
@@ -2261,6 +2287,34 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_field_is_not_a_null_and_stays_one_across_a_snapshot() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("email"), column("phone")],
+                rows: vec![vec![None, None]],
+                cell_types: vec![vec![db::MISSING, "null"]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert!(grid.missing(0, 0));
+        assert!(!grid.missing(0, 1));
+
+        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+        assert!(restored.missing(0, 0));
+        assert!(!restored.missing(0, 1));
+
+        let mut unknown = grid.stored();
+        unknown.cell_types[0][1] = "a type from elsewhere".into();
+        assert!(
+            ResultGrid::restored(&unknown, Mode::ReadWrite)
+                .result
+                .cell_types
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_capped_snapshot_keeps_the_result_size_across_a_re_save() {
         // Restore, then quit without re-running: the snapshot is written back
         // from a grid holding `GRID_ROW_CAP` rows, and recomputing the count
@@ -2283,6 +2337,7 @@ mod tests {
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             },
             Mode::ReadWrite,
         );

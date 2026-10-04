@@ -268,6 +268,10 @@ pub struct StoredGrid {
     pub edit: Option<EditTarget>,
     #[serde(default)]
     pub data_types: Vec<Option<String>>,
+    /// Each cell's type, where the engine types cells rather than columns
+    /// (`QueryResult::cell_types`): what tells a missing field from a null.
+    #[serde(default)]
+    pub cell_types: Vec<Vec<String>>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -696,6 +700,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             captured: grid.captured,
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
+            cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
         };
         &capped
     } else {
@@ -2220,6 +2225,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -2271,6 +2277,7 @@ open_objects = []
                     keys: vec![0],
                 }),
                 data_types: vec![Some("int4".into()), None],
+                cell_types: Vec::new(),
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -2299,6 +2306,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -2345,6 +2353,7 @@ open_objects = []
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");

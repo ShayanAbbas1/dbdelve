@@ -1179,6 +1179,12 @@ pub fn is_numeric_type(data_type: &str) -> bool {
 /// where a null is a value.
 pub const MISSING: &str = "missing";
 
+/// The tag [`QueryResult::cell_types`] holds for `name`, for a snapshot read
+/// back from disk; `None` for a name no engine gives.
+pub fn cell_type(name: &str) -> Option<&'static str> {
+    mongo::cell_type(name)
+}
+
 /// A cell value, already formatted by the server. `None` is SQL NULL, which is
 /// distinct from an empty string and must stay distinguishable in the grid.
 pub type Cell = Option<String>;
