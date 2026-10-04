@@ -210,7 +210,7 @@ toml = "0.9"
 url = "2"
 
 # ISO-8601 dates in mongosh statements (`ISODate(…)`, `{"$date": …}`), for
-# `mql.rs`. Already in the graph through gpui's platform crates; pinned to the
+# `mql.rs`. Already in the graph through bson (under mongodb); pinned to the
 # version the lockfile already holds so naming it links no second copy.
 # Default features off: `parsing` and the `format_description!` macro are all
 # it reads with.

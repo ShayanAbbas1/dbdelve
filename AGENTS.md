@@ -181,6 +181,7 @@ gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
 
 tree-sitter = "=0.26.13"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below
+tree-sitter-javascript = "=0.23.1"  # the mongosh grammar. A CORRECTNESS pin too
 sqlparser = "=0.63.0"           # sql::classify only. default-features = false
 sqlformat = "=0.5.0"            # Format Query only. default-features = false
 
@@ -205,6 +206,9 @@ tokio = "=1.53.1"          # tiberius's runtime, one per connection. dff = false
 tokio-util = "=0.7.19"     # compat: tokio's socket as the futures I/O tiberius speaks
 futures-util = "=0.3.34"   # try_next over tiberius's result stream. dff = false
 
+mongodb = "=3.9.1"         # its own tokio runtime per connection. dff = false, rustls on ring
+time = "=0.3.55"           # ISO-8601 dates in mongosh statements. dff = false
+
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
 icondata_lu = "=0.1.0"     # Lucide icon data; gpui-component ships no icon files
@@ -228,9 +232,9 @@ crate is a one-off snapshot nobody republishes, and gpui-component depends on
 `gpui-pre` under the name `gpui`, so taking it keeps one copy of the framework
 in the graph.
 
-**The two tree-sitter pins are correctness, not formatting.** The grammar
-decides where every statement boundary falls, which statements `sql.rs` will
-splice an `ORDER BY` into, and what the gates accept. A bump changes what
+**The three tree-sitter pins are correctness, not formatting.** The grammar
+decides where every statement boundary falls, which statements `sql.rs` and
+`mql.rs` will splice an `ORDER BY` into, and what the gates accept. A bump changes what
 DBDelve sends to the server. Treat them like the driver pins.
 
 **`gpui_platform`'s features are load-bearing.** Without `font-kit` the macOS
