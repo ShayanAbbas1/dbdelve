@@ -22,7 +22,7 @@ use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
 use time::parsing::Parsed;
 use time::{Date, PrimitiveDateTime, Time, UtcOffset};
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Parser, Point, Tree};
 
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -350,39 +350,200 @@ impl CursorMethod {
 /// Error-tolerant, as `sql::Buffer` is: a statement that does not parse still
 /// has a range, and so does every statement around it.
 pub(crate) fn statements(text: &str) -> Vec<Range<usize>> {
-    let shows = show_commands(text);
-    let mut ranges = Vec::new();
-    let mut from = 0;
-    for show in shows {
-        ranges.extend(script_statements(text, from..show.start));
-        from = show.end;
-        ranges.push(show);
-    }
-    ranges.extend(script_statements(text, from..text.len()));
-    ranges
+    read(text).into_iter().map(|(span, _)| span).collect()
 }
 
 /// Every statement in `text`, or the first error in any of them. Spans are
 /// offsets into `text`.
 pub(crate) fn parse(text: &str) -> Result<Vec<Statement>, ParseError> {
-    statements(text)
+    read(text)
         .into_iter()
-        .map(|range| statement(text, range))
+        .map(|(span, target)| {
+            Ok(Statement {
+                span,
+                target: target?,
+            })
+        })
         .collect()
 }
 
-fn parse_script(text: &str) -> Option<Tree> {
+type Reading = (Range<usize>, Result<Target, ParseError>);
+
+/// Every statement in `text` and what it reads as, in order.
+///
+/// The text is parsed once and each statement walked from the node the
+/// grammar gave it. Parsing each statement again on its own costs a parse per
+/// statement, which over a pasted buffer of thousands of inserts is quadratic
+/// and runs on the UI thread. Only what the grammar could not read is parsed
+/// again, alone.
+//
+// ponytail: text after an error that swallowed the rest of the buffer (an
+// unclosed `{`) is parsed again from the cut, so k such errors cost k parses of
+// what follows them. Incremental reparsing is the upgrade if a wall of broken
+// statements is ever pasted.
+fn read(text: &str) -> Vec<Reading> {
     let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .ok()?;
-    parser.parse(text, None)
+    let mut shows = show_candidates(text);
+    let tree = loop {
+        let source = masked(text, &shows);
+        let tree = parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .ok()
+            .and_then(|()| parser.parse(&source, None));
+        let Some(tree) = tree else {
+            // Never reached with a grammar that loads, and answered as
+            // unreadable rather than as an empty buffer, which would classify
+            // as a read.
+            return trim_range(text, 0..text.len())
+                .map(|span| {
+                    (
+                        span.clone(),
+                        Err(error(span.start, "The grammar failed to load")),
+                    )
+                })
+                .into_iter()
+                .collect();
+        };
+        let before = shows.len();
+        shows.retain(|show| !inside_statement(&tree, show.start));
+        if shows.len() == before {
+            break tree;
+        }
+    };
+    let mut reader = Reader {
+        parser,
+        source: masked(text, &shows),
+        lines: std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+            .collect(),
+    };
+    let mut readings: Vec<Reading> = shows
+        .into_iter()
+        .map(|span| {
+            let what = text[span.start + "show".len()..span.end].trim();
+            (span.clone(), show(what, span.start))
+        })
+        .collect();
+    reader.read(&tree, &mut readings);
+    readings.sort_by_key(|(span, _)| span.start);
+    readings
 }
 
-/// `range` of `text` with everything before it blanked, so the tree's byte
-/// offsets are offsets into `text` itself.
-fn padded(text: &str, range: Range<usize>) -> String {
-    format!("{}{}", " ".repeat(range.start), &text[range])
+fn masked(text: &str, shows: &[Range<usize>]) -> String {
+    let mut masked = text.to_owned();
+    for show in shows {
+        masked.replace_range(show.clone(), &" ".repeat(show.len()));
+    }
+    masked
+}
+
+struct Reader {
+    parser: Parser,
+    /// The text with its `show` commands blanked out: the same length, so the
+    /// same offsets.
+    source: String,
+    /// Where each line starts, for the points tree-sitter's ranges carry.
+    lines: Vec<usize>,
+}
+
+impl Reader {
+    fn read(&mut self, tree: &Tree, out: &mut Vec<Reading>) {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let nodes: Vec<Node> = root.named_children(&mut cursor).collect();
+        for node in nodes {
+            if matches!(node.kind(), "comment" | "empty_statement") {
+                continue;
+            }
+            // The grammar hangs a comment that trails a statement without a
+            // `;` inside it; it is no part of what runs.
+            let mut cursor = node.walk();
+            let end = node
+                .children(&mut cursor)
+                .filter(|child| !matches!(child.kind(), "comment" | ";"))
+                .last()
+                .map_or(node.end_byte(), |child| child.end_byte());
+            let Some(piece) = trim_range(&self.source, node.start_byte()..end) else {
+                continue;
+            };
+            if !node.has_error() {
+                let walk = Walk {
+                    source: &self.source,
+                };
+                out.push((piece, walk.statement(node)));
+                continue;
+            }
+            match cut(tree, &self.source, node, piece.clone()) {
+                Some((end, resume)) => {
+                    if let Some(head) = trim_range(&self.source, piece.start..end) {
+                        let reading = self.reread(head.clone());
+                        out.push((head, reading));
+                    }
+                    if let Some(rest) = self.parse_range(resume..piece.end) {
+                        self.read(&rest, out);
+                    }
+                }
+                None => {
+                    let reading = self.reread(piece.clone());
+                    out.push((piece, reading));
+                }
+            }
+        }
+    }
+
+    /// `range` of the source parsed on its own, with offsets still into the
+    /// whole source.
+    fn parse_range(&mut self, range: Range<usize>) -> Option<Tree> {
+        let point = |byte: usize| {
+            let row = self.lines.partition_point(|&start| start <= byte) - 1;
+            Point::new(row, byte - self.lines[row])
+        };
+        let included = tree_sitter::Range {
+            start_byte: range.start,
+            end_byte: range.end,
+            start_point: point(range.start),
+            end_point: point(range.end),
+        };
+        self.parser.set_included_ranges(&[included]).ok()?;
+        let tree = self.parser.parse(&self.source, None);
+        self.parser.set_included_ranges(&[]).ok()?;
+        tree
+    }
+
+    /// A statement the whole parse could not read, read alone, so the error
+    /// is about it and not about the text around it.
+    fn reread(&mut self, span: Range<usize>) -> Result<Target, ParseError> {
+        let tree = self
+            .parse_range(span.clone())
+            .ok_or_else(|| error(span.start, "The parser gave up"))?;
+        let root = tree.root_node();
+        if let Some(bad) = first_error(root) {
+            // An error running to the end of the text is the grammar giving up
+            // on an unfinished statement, not on its first token.
+            if bad.is_error() && bad.end_byte() >= span.end {
+                return Err(error(span.end, "The statement ends before it is complete"));
+            }
+            let message = match bad.is_missing() {
+                true => format!("Expected `{}` here", bad.kind()),
+                false => format!("Unexpected `{}`", snippet(bad, &self.source)),
+            };
+            return Err(error(bad.start_byte(), message));
+        }
+        let walk = Walk {
+            source: &self.source,
+        };
+        match parts(root).as_slice() {
+            [statement] => walk.statement(*statement),
+            [] => Err(error(span.start, "There is no statement here")),
+            [_, next, ..] => Err(error(
+                next.start_byte(),
+                format!(
+                    "`{}` follows a complete statement on the same line, with no `;` between them",
+                    snippet(*next, &self.source)
+                ),
+            )),
+        }
+    }
 }
 
 fn trim_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -397,51 +558,57 @@ fn is_name_char(c: char) -> bool {
     c == '$' || c == '_' || c.is_alphanumeric()
 }
 
-/// The `show <word>` lines of `text`: the one shell command that is not
-/// JavaScript, so the grammar cannot find it. A line qualifies when `show` and
-/// one word are all it holds before a `;` or a comment, and the line is not
-/// itself inside a comment or a string -- which only a parse of the text with
-/// the candidates blanked out can tell, so a candidate the parse puts inside
-/// one is given back and the text parsed again.
-fn show_commands(text: &str) -> Vec<Range<usize>> {
-    let mut shows: Vec<Range<usize>> = Vec::new();
-    let mut line_start = 0;
-    for line in text.split_inclusive('\n') {
-        let body = line.trim_start();
-        let start = line_start + line.len() - body.len();
-        line_start += line.len();
-        let Some(rest) = body.strip_prefix("show") else {
-            continue;
-        };
-        let word = rest.trim_start_matches([' ', '\t']);
-        if word.len() == rest.len() {
-            continue;
-        }
-        let word_len = word.find(|c: char| !is_name_char(c)).unwrap_or(word.len());
-        let after = word[word_len..].trim();
-        let ends = after.is_empty()
-            || after.starts_with(';')
-            || after.starts_with("//")
-            || after.starts_with("/*");
-        if word_len > 0 && ends {
-            let end = start + (body.len() - word.len()) + word_len;
-            shows.push(start..end);
-        }
-    }
+/// Where `show <word>` may stand in `text`: the one shell command that is not
+/// JavaScript, so the grammar cannot find it. It qualifies where a statement
+/// can begin -- the start of the text or a line, or after a `;`, with blanks
+/// and block comments between -- and when nothing but a `;` or a comment
+/// follows the word on its line. Whether it is really outside every statement,
+/// string and comment only a parse can say; see `read`.
+fn show_candidates(text: &str) -> Vec<Range<usize>> {
+    text.match_indices("show")
+        .filter_map(|(start, _)| {
+            if !opens_statement(&text[..start]) {
+                return None;
+            }
+            let rest = &text[start + "show".len()..];
+            let word = rest.trim_start_matches([' ', '\t']);
+            if word.len() == rest.len() {
+                return None;
+            }
+            let word_len = word.find(|c: char| !is_name_char(c)).unwrap_or(word.len());
+            let after = word[word_len..].lines().next().unwrap_or_default().trim();
+            let ends = after.is_empty()
+                || after.starts_with(';')
+                || after.starts_with("//")
+                || after.starts_with("/*");
+            let end = start + "show".len() + (rest.len() - word.len()) + word_len;
+            (word_len > 0 && ends).then_some(start..end)
+        })
+        .collect()
+}
+
+/// Whether a statement may begin right after `before`.
+fn opens_statement(mut before: &str) -> bool {
     loop {
-        let mut masked = text.to_owned();
-        for show in &shows {
-            masked.replace_range(show.clone(), &" ".repeat(show.len()));
-        }
-        let Some(tree) = parse_script(&masked) else {
-            return shows;
+        before = before.trim_end_matches([' ', '\t']);
+        let Some(inner) = before.strip_suffix("*/") else {
+            break;
         };
-        let before = shows.len();
-        shows.retain(|show| !inside_literal(&tree, show.start));
-        if shows.len() == before {
-            return shows;
+        match inner.rfind("/*") {
+            Some(open) => before = &inner[..open],
+            None => return false,
         }
     }
+    before.is_empty() || before.ends_with(['\n', '\r', ';'])
+}
+
+/// Whether `at` falls inside something the grammar read as part of the
+/// program -- a statement, a comment, or text it could not read -- rather
+/// than between them, where a `show` line stands.
+fn inside_statement(tree: &Tree, at: usize) -> bool {
+    tree.root_node()
+        .first_child_for_byte(at)
+        .is_some_and(|child| child.start_byte() <= at)
 }
 
 /// Whether `at` falls inside a comment, string or regex, where nothing is a
@@ -460,54 +627,11 @@ fn inside_literal(tree: &Tree, at: usize) -> bool {
     false
 }
 
-/// The statements the grammar finds in `range`: the program's top-level
-/// statements, with comments and empty `;`s left out.
-///
-/// A statement holding an error may have swallowed the ones after it -- an
-/// unclosed `{` runs to the end of the text -- so it is cut at the first `;` or
-/// line opening with `db.` inside it, neither of which any literal holds, and
-/// what follows the cut is read again on its own.
-fn script_statements(text: &str, range: Range<usize>) -> Vec<Range<usize>> {
-    if trim_range(text, range.clone()).is_none() {
-        return Vec::new();
-    }
-    let source = padded(text, range.clone());
-    let Some(tree) = parse_script(&source) else {
-        return trim_range(text, range).into_iter().collect();
-    };
-    let root = tree.root_node();
-    let mut cursor = root.walk();
-    let nodes: Vec<Node> = root.named_children(&mut cursor).collect();
-    let mut ranges = Vec::new();
-    for node in nodes {
-        if matches!(node.kind(), "comment" | "empty_statement") {
-            continue;
-        }
-        // The grammar hangs a comment that trails a statement without a `;`
-        // inside it; it is no part of what runs.
-        let mut cursor = node.walk();
-        let end = node
-            .children(&mut cursor)
-            .filter(|child| !matches!(child.kind(), "comment" | ";"))
-            .last()
-            .map_or(node.end_byte(), |child| child.end_byte());
-        let piece = node.start_byte()..end;
-        match node
-            .has_error()
-            .then(|| cut(&tree, &source, node, piece.clone()))
-        {
-            Some(Some((end, resume))) => {
-                ranges.extend(trim_range(text, piece.start..end));
-                ranges.extend(script_statements(text, resume..piece.end));
-            }
-            _ => ranges.extend(trim_range(text, piece)),
-        }
-    }
-    ranges
-}
-
 /// Where an erroneous statement should be cut: the end of its first piece and
-/// where the rest resumes.
+/// where the rest resumes. A statement holding an error may have swallowed the
+/// ones after it -- an unclosed `{` runs to the end of the text -- so it is cut
+/// at the first `;` or line opening with `db.` inside it, neither of which any
+/// literal holds.
 fn cut(tree: &Tree, source: &str, node: Node, piece: Range<usize>) -> Option<(usize, usize)> {
     let semicolon = leaves(node)
         .into_iter()
@@ -531,14 +655,6 @@ fn leaves(node: Node) -> Vec<Node> {
     let mut cursor = node.walk();
     let children: Vec<Node> = node.children(&mut cursor).collect();
     children.into_iter().flat_map(leaves).collect()
-}
-
-fn statement(text: &str, span: Range<usize>) -> Result<Statement, ParseError> {
-    let target = match text[span.clone()].strip_prefix("show") {
-        Some(rest) if rest.starts_with([' ', '\t']) => show(rest.trim(), span.start)?,
-        _ => script(text, span.clone())?,
-    };
-    Ok(Statement { span, target })
 }
 
 fn show(what: &str, at: usize) -> Result<Target, ParseError> {
@@ -585,42 +701,6 @@ fn parts(node: Node) -> Vec<Node> {
     node.named_children(&mut cursor)
         .filter(|child| child.kind() != "comment")
         .collect()
-}
-
-fn script(text: &str, span: Range<usize>) -> Result<Target, ParseError> {
-    let source = padded(text, span.clone());
-    let tree = parse_script(&source).ok_or_else(|| error(span.start, "The parser gave up"))?;
-    let root = tree.root_node();
-    if let Some(bad) = first_error(root) {
-        // An error running to the end of the text is the grammar giving up on
-        // an unfinished statement, not on its first token.
-        if bad.is_error() && bad.end_byte() >= span.end {
-            return Err(error(span.end, "The statement ends before it is complete"));
-        }
-        let message = match bad.is_missing() {
-            true => format!("Expected `{}` here", bad.kind()),
-            false => format!("Unexpected `{}`", snippet(bad, &source)),
-        };
-        return Err(error(bad.start_byte(), message));
-    }
-    let walk = Walk { source: &source };
-    let statements = parts(root);
-    let Some(&statement) = statements.first() else {
-        return Err(error(span.start, "There is no statement here"));
-    };
-    if let Some(next) = statements.get(1) {
-        return Err(error(
-            next.start_byte(),
-            format!(
-                "`{}` follows a complete statement on the same line, with no `;` between them",
-                snippet(*next, &source)
-            ),
-        ));
-    }
-    match (statement.kind(), parts(statement).as_slice()) {
-        ("expression_statement", [expression]) => walk.target(*expression),
-        _ => Err(walk.unsupported(statement, "a statement")),
-    }
 }
 
 /// One step of a `db.…` chain, outermost last.
@@ -679,6 +759,13 @@ impl<'s> Walk<'s> {
                 snippet(node, self.source)
             ),
         )
+    }
+
+    fn statement(&self, node: Node<'s>) -> Result<Target, ParseError> {
+        match (node.kind(), parts(node).as_slice()) {
+            ("expression_statement", [expression]) => self.target(*expression),
+            _ => Err(self.unsupported(node, "a statement")),
+        }
     }
 
     fn field<'t>(&self, node: Node<'t>, name: &str) -> Result<Node<'t>, ParseError> {
@@ -2276,6 +2363,44 @@ mod tests {
             statements("db.a.find() /* same line */ db.b.find()").len(),
             1
         );
+    }
+
+    #[test]
+    fn show_stands_after_a_semicolon_or_a_comment_too() {
+        let text = "db.a.find(); show dbs\nshow dbs; show collections\n/* c */ show dbs // all";
+        assert_eq!(
+            texts(text, &statements(text)),
+            [
+                "db.a.find()",
+                "show dbs",
+                "show dbs",
+                "show collections",
+                "show dbs"
+            ]
+        );
+        assert_eq!(parse(text).unwrap().len(), 5);
+        assert!(parse("db.a.find() /* c */ show dbs").is_err());
+        assert!(parse("reshow dbs").is_err());
+    }
+
+    #[test]
+    fn a_show_line_inside_a_statement_is_part_of_it() {
+        let text = "db.a.find({\nshow dbs\n})";
+        assert_eq!(texts(text, &statements(text)), [text]);
+        assert_eq!(classify(text), unreadable());
+    }
+
+    #[test]
+    fn a_buffer_of_thousands_of_statements_is_read_in_one_pass() {
+        let text: String = (0..10_000)
+            .map(|i| format!("db.c.insertOne({{_id: {i}, name: 'row {i}'}})\n"))
+            .collect();
+        let started = std::time::Instant::now();
+        assert_eq!(classify(&text), Verdict::WRITE);
+        assert_eq!(statements(&text).len(), 10_000);
+        // A parse per statement took over 40 seconds here in a debug build; one
+        // parse takes a fraction of one.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]
