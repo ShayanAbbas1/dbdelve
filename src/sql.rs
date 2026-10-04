@@ -1525,11 +1525,11 @@ pub(crate) struct Verdict {
 }
 
 impl Verdict {
-    const READ: Self = Self {
+    pub(crate) const READ: Self = Self {
         mode: Mode::ReadOnly,
         destructive: Vec::new(),
     };
-    const WRITE: Self = Self {
+    pub(crate) const WRITE: Self = Self {
         mode: Mode::ReadWrite,
         destructive: Vec::new(),
     };
@@ -1538,7 +1538,7 @@ impl Verdict {
         destructive: Vec::new(),
     };
 
-    fn destroys(kind: Destructive) -> Self {
+    pub(crate) fn destroys(kind: Destructive) -> Self {
         Self {
             mode: Mode::Full,
             destructive: vec![kind],
@@ -1549,7 +1549,7 @@ impl Verdict {
     /// what they destroy. A kind only ever arrives with `Mode::Full`, so taking
     /// the union never smuggles a destructive kind under a lower mode.
     /// `Unreadable` is the exception, and `classify` returns it alone.
-    fn max(mut self, other: Self) -> Self {
+    pub(crate) fn max(mut self, other: Self) -> Self {
         self.mode = self.mode.max(other.mode);
         for kind in other.destructive {
             if !self.destructive.contains(&kind) {

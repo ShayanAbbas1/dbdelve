@@ -20,6 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use tree_sitter::{Node, Parser, Tree};
 
+use crate::sql::{Destructive, Mode, Verdict};
+
 /// One statement of a buffer, as DBDelve reads it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Statement {
@@ -1467,6 +1469,161 @@ fn binary_wrapper(data: &str, subtype: &str) -> Option<Value> {
     Some(Value::Binary { subtype, bytes })
 }
 
+/// The lowest mode that may run `text`, and what makes it dangerous if anything
+/// does: `sql::classify`'s answer, for a Mongo buffer.
+///
+/// All or nothing, as there: one statement it cannot read makes the whole
+/// submission one it cannot vouch for, and that verdict is returned alone.
+pub(crate) fn classify(text: &str) -> Verdict {
+    // Mongo has no session-level Read-only hold, so as on SQLite an unreadable
+    // statement may not run even once in Read-only.
+    let unreadable = Verdict {
+        mode: Mode::ReadWrite,
+        destructive: vec![Destructive::Unreadable],
+    };
+    let Ok(statements) = parse(text) else {
+        return unreadable;
+    };
+    statements
+        .iter()
+        .try_fold(Verdict::READ, |verdict, statement| {
+            Some(verdict.max(statement_verdict(&statement.target)?))
+        })
+        .unwrap_or(unreadable)
+}
+
+/// `None` for a statement whose effect cannot be read off it: a command not
+/// on the whitelist.
+fn statement_verdict(target: &Target) -> Option<Verdict> {
+    let verdict = match target {
+        Target::Show(Show::Databases | Show::Collections) => Verdict::READ,
+        Target::Database { call, .. } => match call.method {
+            DbMethod::RunCommand | DbMethod::AdminCommand => {
+                return call
+                    .args
+                    .first()
+                    .is_some_and(|command| command_reads(&command.value))
+                    .then_some(Verdict::READ);
+            }
+            DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
+            DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
+            DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
+        },
+        Target::Collection { call, .. } => collection_verdict(call),
+    };
+    Some(verdict)
+}
+
+fn collection_verdict(call: &Call<Method>) -> Verdict {
+    // Only a filter holding at least one condition narrows anything. A missing
+    // or non-document filter is not one, and is read the conservative way.
+    let unfiltered = !matches!(
+        call.args.first().map(|arg| &arg.value),
+        Some(Value::Document(fields)) if !fields.is_empty()
+    );
+    match call.method {
+        Method::Find
+        | Method::FindOne
+        | Method::CountDocuments
+        | Method::EstimatedDocumentCount
+        | Method::Distinct
+        | Method::GetIndexes => Verdict::READ,
+        Method::Aggregate => match call.args.iter().any(|arg| writes_out(&arg.value)) {
+            true => Verdict::WRITE,
+            false => Verdict::READ,
+        },
+        Method::InsertOne
+        | Method::InsertMany
+        | Method::UpdateOne
+        | Method::DeleteOne
+        | Method::FindOneAndUpdate
+        | Method::FindOneAndReplace
+        | Method::CreateIndex
+        | Method::CreateIndexes => Verdict::WRITE,
+        // `updateMany({})` and `replaceOne({})` share the kind SQL's
+        // unqualified DELETE has: every document, or an arbitrary one,
+        // overwritten with no condition naming it.
+        Method::DeleteMany | Method::FindOneAndDelete | Method::UpdateMany | Method::ReplaceOne
+            if unfiltered =>
+        {
+            Verdict::destroys(Destructive::UnfilteredDelete)
+        }
+        Method::DeleteMany | Method::FindOneAndDelete | Method::UpdateMany | Method::ReplaceOne => {
+            Verdict::WRITE
+        }
+        Method::Drop | Method::DropIndex | Method::DropIndexes => {
+            Verdict::destroys(Destructive::Drop)
+        }
+        // `dropTarget` drops the collection already holding the new name.
+        // Anything but an absent or literal `false` second argument is read as
+        // asking for it.
+        Method::RenameCollection => match call.args.get(1).map(|arg| &arg.value) {
+            None | Some(Value::Bool(false)) => Verdict::WRITE,
+            Some(_) => Verdict::destroys(Destructive::Drop),
+        },
+    }
+}
+
+/// The commands `runCommand` may run in Read-only: each reads and nothing
+/// else. Anything off the list is unreadable, as unparseable SQL is.
+const READ_COMMANDS: [&str; 19] = [
+    "find",
+    "aggregate",
+    "count",
+    "distinct",
+    "listCollections",
+    "listIndexes",
+    "listDatabases",
+    "dbStats",
+    "collStats",
+    "serverStatus",
+    "buildInfo",
+    "hello",
+    "isMaster",
+    "ping",
+    "connectionStatus",
+    "currentOp",
+    "hostInfo",
+    "getParameter",
+    "explain",
+];
+
+/// Whether a command reads and nothing else. The server dispatches on the
+/// first key, compared exactly. An `explain` is only as safe as the command it
+/// explains, which is held to the same list.
+fn command_reads(command: &Value) -> bool {
+    let (name, explained) = match command {
+        Value::String(name) => (name.as_str(), None),
+        Value::Document(fields) => match fields.first() {
+            Some((name, value)) => (name.as_str(), Some(value)),
+            None => return false,
+        },
+        _ => return false,
+    };
+    if writes_out(command) || !READ_COMMANDS.contains(&name) {
+        return false;
+    }
+    match (name, explained) {
+        ("explain", Some(inner @ Value::Document(_))) => command_reads(inner),
+        ("explain", _) => false,
+        _ => true,
+    }
+}
+
+/// Whether a `$out` or `$merge` stage appears anywhere in `value`. Searched
+/// for at any depth rather than only at the top of a pipeline: the server
+/// refuses one nested where it cannot run, and a classifier that looked only
+/// where it can would be trusting that refusal.
+fn writes_out(value: &Value) -> bool {
+    match value {
+        Value::Document(fields) => fields
+            .iter()
+            .any(|(key, value)| key == "$out" || key == "$merge" || writes_out(value)),
+        Value::Array(values) => values.iter().any(writes_out),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2184,5 +2341,196 @@ mod tests {
         assert!(statements(" ;; \n// nothing\n/* here */").is_empty());
         assert_eq!(parse("// nothing").unwrap(), vec![]);
         fails("/* never closed");
+    }
+
+    fn unreadable() -> Verdict {
+        Verdict {
+            mode: Mode::ReadWrite,
+            destructive: vec![Destructive::Unreadable],
+        }
+    }
+
+    fn destroys(kind: Destructive) -> Verdict {
+        Verdict::destroys(kind)
+    }
+
+    #[test]
+    fn reads_classify_as_reads() {
+        for text in [
+            "show dbs",
+            "show collections",
+            "db.getCollectionNames()",
+            "db.stats()",
+            "db.c.find({a: 1}).sort({b: 1}).limit(5).explain('executionStats')",
+            "db.c.findOne()",
+            "db.c.aggregate([{$match: {}}, {$group: {_id: '$a'}}, {$sort: {_id: 1}}])",
+            "db.c.aggregate([{$lookup: {from: 'd', pipeline: [{$match: {}}], as: 'x'}}])",
+            "db.c.countDocuments({})",
+            "db.c.estimatedDocumentCount()",
+            "db.c.distinct('a')",
+            "db.c.getIndexes()",
+            "db.c.aggregate([], {}, )",
+            "db.getSiblingDB('other').c.find()",
+            "db.c.find({$out: {$exists: true}}).limit(1)",
+            "",
+            "// nothing but a comment",
+        ] {
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+    }
+
+    #[test]
+    fn writes_classify_as_writes() {
+        for text in [
+            "db.c.insertOne({a: 1})",
+            "db.c.insertMany([{a: 1}, {a: 2}])",
+            "db.c.updateOne({}, {$set: {a: 1}})",
+            "db.c.updateMany({a: 1}, {$set: {b: 2}})",
+            "db.c.replaceOne({_id: 1}, {a: 1})",
+            "db.c.deleteOne({})",
+            "db.c.deleteOne({_id: 1})",
+            "db.c.deleteMany({a: 1})",
+            "db.c.findOneAndUpdate({}, {$set: {a: 1}})",
+            "db.c.findOneAndReplace({}, {a: 1})",
+            "db.c.findOneAndDelete({a: 1})",
+            "db.c.createIndex({a: 1})",
+            "db.c.createIndexes([{a: 1}])",
+            "db.c.renameCollection('d')",
+            "db.c.renameCollection('d', false)",
+            "db.createCollection('c')",
+            "db.createView('v', 'c', [])",
+            "db.c.aggregate([{$match: {}}, {$out: 'd'}])",
+            "db.c.aggregate([{$merge: {into: 'd'}}])",
+            "db.c.aggregate([{'$merge': 'd'}]).explain()",
+            "db.c.aggregate([{\"\\u0024out\": 'd'}])",
+            "db.c.aggregate([{$facet: {x: [{$out: 'd'}]}}])",
+        ] {
+            assert_eq!(classify(text), Verdict::WRITE, "{text}");
+        }
+    }
+
+    #[test]
+    fn drops_classify_as_destructive() {
+        for text in [
+            "db.c.drop()",
+            "db.dropDatabase()",
+            "db.getSiblingDB('prod').dropDatabase()",
+            "db.c.dropIndex('a_1')",
+            "db.c.dropIndexes()",
+            "db.c.renameCollection('d', true)",
+            "db.c.renameCollection('d', 1)",
+            "db.c.renameCollection('d', {})",
+        ] {
+            assert_eq!(classify(text), destroys(Destructive::Drop), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_empty_filter_on_a_many_document_write_is_destructive() {
+        for text in [
+            "db.c.deleteMany({})",
+            "db.c.deleteMany({ /* everything */ })",
+            "db.c.deleteMany({}, {w: 1})",
+            "db.c.deleteMany(null)",
+            "db.c.deleteMany([])",
+            "db.c.findOneAndDelete({})",
+            "db.c.updateMany({}, {$set: {a: 1}})",
+            "db.c.replaceOne({}, {a: 1})",
+        ] {
+            assert_eq!(
+                classify(text),
+                destroys(Destructive::UnfilteredDelete),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_command_reads_only_what_the_whitelist_names() {
+        for command in READ_COMMANDS {
+            let inner = match command {
+                "explain" => "{find: 'c'}",
+                _ => "1",
+            };
+            assert_eq!(
+                classify(&format!("db.runCommand({{{command}: {inner}}})")),
+                Verdict::READ,
+                "{command}"
+            );
+        }
+        assert_eq!(classify("db.adminCommand('listDatabases')"), Verdict::READ);
+        assert_eq!(
+            classify("db.adminCommand({ping: 1}, {comment: 'x'})"),
+            Verdict::READ
+        );
+        assert_eq!(
+            classify("db.runCommand({explain: {count: 'c'}, verbosity: 'queryPlanner'})"),
+            Verdict::READ
+        );
+        for text in [
+            "db.runCommand({drop: 'c'})",
+            "db.runCommand({dropDatabase: 1})",
+            "db.runCommand({delete: 'c', deletes: [{q: {}, limit: 0}]})",
+            "db.runCommand({insert: 'c', documents: [{}]})",
+            "db.runCommand({killOp: 1, op: 5})",
+            "db.runCommand({eval: 'db.c.drop()'})",
+            "db.runCommand({shutdown: 1})",
+            "db.adminCommand({setParameter: 1, x: 1})",
+            "db.adminCommand('shutdown')",
+            "db.runCommand({Ping: 1})",
+            "db.runCommand({})",
+            "db.runCommand(null)",
+            "db.runCommand([{ping: 1}])",
+            "db.runCommand({ping: 1, ping2: {$out: 'x'}})",
+            "db.runCommand({aggregate: 'c', pipeline: [{$out: 'd'}], cursor: {}})",
+            "db.runCommand({aggregate: 'c', pipeline: [{$merge: {into: 'd'}}]})",
+            "db.runCommand({explain: {delete: 'c', deletes: []}})",
+            "db.runCommand({explain: 'drop'})",
+            "db.runCommand({explain: {explain: {drop: 'c'}}})",
+            "db.runCommand({explain: {aggregate: 'c', pipeline: [{$out: 'd'}]}})",
+            "db.runCommand({find: 'c'}); db.runCommand({drop: 'c'})",
+        ] {
+            assert_eq!(classify(text), unreadable(), "{text}");
+        }
+    }
+
+    #[test]
+    fn anything_unparseable_is_unreadable() {
+        for text in [
+            "db.c.find(",
+            "db.c.find() db.c.drop()",
+            "db.c.remove({})",
+            "db.c.find().forEach(d => db.c.deleteOne(d))",
+            "db.c.find({}).deleteMany({})",
+            "db['c'].drop()",
+            "db.c.drоp()",
+            "db.c.find({a: x})",
+            "db.getCollection(name).drop()",
+            "show tables",
+            "use admin",
+            "var c = db.c; c.drop()",
+            "db.c.find(); garbage",
+            "db.c.find(); db.c.drop(",
+            "/* unclosed",
+            "db.c.insertOne({$oid: 'nope'})",
+        ] {
+            assert_eq!(classify(text), unreadable(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_submission_is_as_dangerous_as_its_worst_statement() {
+        assert_eq!(
+            classify("db.a.find(); db.b.deleteMany({})"),
+            destroys(Destructive::UnfilteredDelete)
+        );
+        assert_eq!(classify("db.a.insertOne({})\ndb.b.find()"), Verdict::WRITE);
+        assert_eq!(
+            classify("db.a.drop()\ndb.b.deleteMany({})"),
+            Verdict {
+                mode: Mode::Full,
+                destructive: vec![Destructive::Drop, Destructive::UnfilteredDelete],
+            }
+        );
     }
 }
