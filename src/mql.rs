@@ -14,6 +14,7 @@
 //! The literal tree is DBDelve's own (`Value`); `db/mongo.rs` turns it into
 //! BSON, so no driver type reaches this module.
 
+use std::cell::Cell;
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1445,11 +1446,37 @@ fn decimal(text: String) -> Result<Value, String> {
     }
 }
 
-fn now() -> Value {
-    let millis = SystemTime::now()
+thread_local! {
+    /// The instant `new Date()` reads while `format` holds the clock, so its
+    /// two parses of one statement mint the same date and compare equal.
+    static HELD_NOW: Cell<Option<i64>> = const { Cell::new(None) };
+}
+
+fn clock_millis() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64);
-    Value::Date(millis)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+fn now() -> Value {
+    Value::Date(HELD_NOW.get().unwrap_or_else(clock_millis))
+}
+
+/// Holds the clock until dropped. A guard rather than a reset at the end, so
+/// even a panic cannot leave a statement run later reading a stale date.
+struct HeldClock;
+
+impl HeldClock {
+    fn hold() -> Self {
+        HELD_NOW.set(Some(clock_millis()));
+        Self
+    }
+}
+
+impl Drop for HeldClock {
+    fn drop(&mut self) {
+        HELD_NOW.set(None);
+    }
 }
 
 /// An ISO-8601 date, read as mongosh's `ISODate` reads it: a time with no
@@ -2372,6 +2399,7 @@ fn distinct(fields: &[(String, Value)]) -> bool {
 // width is the upgrade if long one-line chains turn out to be common.
 pub(crate) fn format(text: &str) -> Result<String, &'static str> {
     const UNREADABLE: &str = "Not formatting: a statement in the buffer does not parse.";
+    let _clock = HeldClock::hold();
     let statements = parse(text).map_err(|_| UNREADABLE)?;
     let mut parser = Parser::new();
     parser
@@ -4437,6 +4465,16 @@ mod tests {
             "not idempotent"
         );
         once
+    }
+
+    #[test]
+    fn a_date_minted_now_reads_back_as_the_same_statement() {
+        // Each parse once read the clock afresh, and about one format in five
+        // was refused as a different statement.
+        for _ in 0..50 {
+            assert!(format("db.c.insertOne({at:  new Date(), on: ISODate()})").is_ok());
+        }
+        assert_eq!(HELD_NOW.get(), None);
     }
 
     #[test]
