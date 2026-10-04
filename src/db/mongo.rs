@@ -3147,6 +3147,117 @@ mod tests {
         assert_eq!(count(&connection, "events"), 1_000_000);
     }
 
+    /// A generated statement, run only once the gate has admitted it, as an
+    /// object tab runs one.
+    fn generated(connection: &Connection, statement: &str) -> QueryResult {
+        assert!(
+            crate::sql::is_generated_select(Engine::MongoDb, statement),
+            "{statement} was refused"
+        );
+        ran(connection, statement)
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_preview_pages_through_a_collection_in_the_order_its_header_asks() {
+        let connection = live();
+        let by_id = [crate::sql::SortKey::new("\"_id\"", false)];
+        let page = |offset| {
+            let statement = crate::filter::relation_sql(
+                Engine::MongoDb,
+                "dbdelve_dev",
+                "wide_metrics",
+                "",
+                &by_id,
+                10,
+                offset,
+            );
+            let result = generated(&connection, &statement);
+            (0..result.rows.len())
+                .map(|row| field(&result, row, "_id").0.expect("an _id").to_owned())
+                .collect::<Vec<_>>()
+        };
+        let ids = |range: std::ops::RangeInclusive<i32>| {
+            range.rev().map(|id| id.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(page(0), ids(16..=25));
+        assert_eq!(page(10), ids(6..=15));
+        assert_eq!(page(20), ids(1..=5));
+        assert_eq!(page(30), Vec::<String>::new());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_count_counts_what_the_filtered_preview_pages_through() {
+        use crate::filter::{FilterBar, Operator, derived_filter};
+
+        let connection = live();
+        let columns = connection
+            .structure("dbdelve_dev", "accounts")
+            .expect("structure should load")
+            .columns;
+        let bar = |column: &str, operator, value: &str| FilterBar {
+            column: Some(column.into()),
+            operator,
+            value: value.into(),
+            ..FilterBar::default()
+        };
+        let counted = |filter: &str| {
+            let statement =
+                crate::explorer::count_sql(Engine::MongoDb, "dbdelve_dev", "accounts", filter);
+            let result = generated(&connection, &statement);
+            result.rows[0][0]
+                .as_deref()
+                .and_then(|n| n.parse::<u64>().ok())
+        };
+        let previewed = |filter: &str| {
+            let statement = crate::explorer::preview_sql(
+                Engine::MongoDb,
+                "dbdelve_dev",
+                "accounts",
+                filter,
+                100,
+                0,
+            );
+            generated(&connection, &statement).rows.len() as u64
+        };
+        for (bars, expected) in [
+            (vec![], 5),
+            (vec![bar("plan", Operator::Equals, "team")], 2),
+            // Null and missing alike, as the server matches `{email: null}`.
+            (vec![bar("email", Operator::IsNull, "")], 2),
+            // An `ObjectId` from its hex, because the field holds one.
+            (
+                vec![bar("_id", Operator::Equals, "65a4f1c00000000000000001")],
+                1,
+            ),
+            (vec![bar("created_at", Operator::Less, "2024-03-01")], 2),
+            (vec![bar("name", Operator::Contains, "'n'")], 1),
+            (
+                vec![
+                    bar("plan", Operator::Equals, "free"),
+                    FilterBar {
+                        conjunction: crate::filter::Conjunction::Or,
+                        ..bar("active", Operator::Equals, "false")
+                    },
+                ],
+                2,
+            ),
+            (
+                vec![FilterBar {
+                    raw: true,
+                    value: "{ tags: 'priority' }".into(),
+                    ..FilterBar::default()
+                }],
+                1,
+            ),
+        ] {
+            let filter = derived_filter(Engine::MongoDb, &bars, &columns);
+            assert_eq!(counted(&filter), Some(expected), "{filter}");
+            assert_eq!(previewed(&filter), expected, "{filter}");
+        }
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
     fn live_the_databases_list_flags_the_one_connected_to() {
