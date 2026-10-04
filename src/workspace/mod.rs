@@ -804,7 +804,7 @@ impl Render for Workspace {
                     .border_b_1()
                     .border_color(t.border)
                     .text_size(px(layout::TEXT_SM))
-                    .child(ui::status_dot(t, &profile.state, profile.color))
+                    .child(ui::status_dot(t, &profile.state))
                     .child(
                         div()
                             .flex_1()
@@ -815,10 +815,9 @@ impl Render for Workspace {
                     )
                     .child(
                         button("reconnect", "Reconnect", Tone::Quiet, Control::Compact, t)
-                            .on_click(cx.listener(|workspace, _, _, cx| {
-                                workspace.clear_notice();
-                                workspace.reconnect(workspace.active, cx);
-                            })),
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(RefreshConnection), cx);
+                            }),
                     ),
             ),
             _ => None,
@@ -1003,7 +1002,7 @@ impl Render for Workspace {
             .items_center()
             .gap(px(layout::SPACE_SM))
             .min_w_0()
-            .child(ui::status_dot(t, &profile.state, profile.color))
+            .child(ui::status_dot(t, &profile.state))
             .child(
                 div()
                     .min_w_0()

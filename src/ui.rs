@@ -80,13 +80,14 @@ pub(crate) fn row_icon_tinted(
 }
 
 /// A connection's state as one dot, the same in the status bar and the
-/// switcher: faint idle, muted while connecting, its own colour (or green)
-/// connected, red failed or lost.
-pub(crate) fn status_dot(t: Theme, state: &ProfileState, color: Option<ConnectionColor>) -> Div {
+/// switcher: faint idle, muted while connecting, green connected, red failed
+/// or lost. Never the connection's own colour: a red one would read as lost,
+/// and a gray one as idle.
+pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
     let fill = match state {
         ProfileState::Idle => t.text_faint,
         ProfileState::Connecting => t.text_muted,
-        ProfileState::Connected(_) => color.map_or(t.success, ConnectionColor::swatch),
+        ProfileState::Connected(_) => t.success,
         ProfileState::Failed(_) => t.danger,
     };
     div()

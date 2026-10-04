@@ -1398,6 +1398,25 @@ impl Workspace {
                         // this field -- but the mode a result lands under has to
                         // be the mode at landing time, not a stale default.
                         let mode = profile.mode;
+                        // Before `slot`: a tab closed mid-run still ran on the
+                        // session that died.
+                        if lost {
+                            profile.state = ProfileState::Failed(format!(
+                                "Connection to {} was lost.",
+                                profile.config.endpoint()
+                            ));
+                            // Nothing left in the queue can run on a dead
+                            // session, so it ends here rather than asking
+                            // whether to Continue into "not open".
+                            if let Tab::Query(query) = tab
+                                && let Some(queue) = profile
+                                    .session
+                                    .query_tab_mut(query)
+                                    .and_then(|query| query.queue.as_mut())
+                            {
+                                queue.remaining.clear();
+                            }
+                        }
                         let Some((state, results)) = profile.session.slot(tab) else {
                             return;
                         };
@@ -1494,12 +1513,6 @@ impl Workspace {
                         }
                     };
 
-                    if lost && let Some(profile) = workspace.issued_to(&id, generation) {
-                        profile.state = ProfileState::Failed(format!(
-                            "Connection to {} was lost.",
-                            profile.config.endpoint()
-                        ));
-                    }
                     if keep_rows
                         && let Some(profile) = workspace.issued_to(&id, generation)
                         && profile.session.notice.as_deref() == Some(Self::REFRESHING)

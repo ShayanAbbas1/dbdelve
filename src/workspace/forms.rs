@@ -1316,7 +1316,7 @@ impl Workspace {
                         .hover(|style| style.bg(t.element_hover))
                         .when(selected == Some(index), |row| row.bg(t.element_active))
                         .child(row_icon_tinted(t, icon::DATABASE, profile.color))
-                        .child(ui::status_dot(t, &profile.state, profile.color))
+                        .child(ui::status_dot(t, &profile.state))
                         .child(
                             div()
                                 .flex_1()
