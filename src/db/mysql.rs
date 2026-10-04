@@ -592,6 +592,21 @@ impl Connection {
         structure.foreign_keys = assemble_foreign_keys(&keys)?;
         Ok(structure)
     }
+
+    /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
+    /// the same second column.
+    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        let shown = self.internal_query(&format!(
+            "SHOW CREATE TABLE {}",
+            self.engine.qualified(schema, relation)
+        ))?;
+        shown
+            .rows
+            .first()
+            .and_then(|row| row.get(1)?.as_deref())
+            .map(|definition| format!("{definition};"))
+            .ok_or_else(|| plain_error(format!("{schema}.{relation} has no definition to show.")))
+    }
 }
 
 /// One column as the server describes it: what it is called, what it is, and
@@ -1726,6 +1741,24 @@ mod tests {
         };
     }
 
+    fn live_the_ddl_of_a_table_and_a_view_is_the_servers_own(engine: Engine) {
+        let connection = live(engine);
+        let table = connection
+            .ddl("dbdelve_dev", "accounts")
+            .expect("the table's DDL should load");
+        let view = connection
+            .ddl("dbdelve_dev", "account_overview")
+            .expect("the view's DDL should load");
+
+        assert!(table.starts_with("CREATE TABLE `accounts` ("), "{table}");
+        assert!(table.contains("`email`"), "{table}");
+        assert!(table.ends_with(';'), "{table}");
+        assert!(
+            view.starts_with("CREATE ") && view.contains("VIEW `"),
+            "{view}"
+        );
+    }
+
     on_both_servers!(
         live_a_cancel_stops_a_running_statement_without_closing_the_session,
         live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb,
@@ -1746,5 +1779,6 @@ mod tests {
         live_a_foreign_key_across_databases_names_the_database_it_references,
         live_a_table_referencing_nothing_reports_no_foreign_keys,
         live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form,
+        live_the_ddl_of_a_table_and_a_view_is_the_servers_own,
     );
 }

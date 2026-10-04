@@ -276,6 +276,45 @@ pub fn preview_sql(
     sql
 }
 
+pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
+    match engine {
+        Engine::SqlServer => format!(
+            "SELECT TOP 100 * FROM {}",
+            engine.qualified(schema, relation)
+        ),
+        Engine::MongoDb => mql::browse::find_preview(relation, "", 100, 0),
+        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
+            preview_sql(engine, schema, relation, "", 100, 0)
+        }
+    }
+}
+
+pub fn drop_sql(engine: Engine, schema: &str, relation: &str, kind: RelationKind) -> String {
+    let keyword = match (engine, kind) {
+        (Engine::MongoDb, _) => return format!("{}.drop()", mql::browse::handle(relation)),
+        (_, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
+        (_, RelationKind::View) => "VIEW",
+        (_, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
+        (Engine::Snowflake, RelationKind::ForeignTable) => "EXTERNAL TABLE",
+        (_, RelationKind::ForeignTable) => "FOREIGN TABLE",
+    };
+    format!("DROP {keyword} {};", engine.qualified(schema, relation))
+}
+
+pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
+    let qualified = engine.qualified(schema, relation);
+    match engine {
+        Engine::MongoDb => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
+        // SQLite has no TRUNCATE.
+        Engine::Sqlite => format!("DELETE FROM {qualified};"),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Snowflake
+        | Engine::SqlServer => format!("TRUNCATE TABLE {qualified};"),
+    }
+}
+
 /// Whether a row matches `filter`, for the reference arrow: a constant rather
 /// than `*`, so no column's value is read or sent back to answer it.
 pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
@@ -644,6 +683,38 @@ mod tests {
         assert_eq!(
             kind("relation-1-1"),
             Some(ObjectKind::Relation(RelationKind::Table))
+        );
+    }
+
+    #[test]
+    fn copied_statements_are_spelled_for_the_engine() {
+        assert_eq!(
+            select_top_sql(Engine::SqlServer, "dbo", "t"),
+            r#"SELECT TOP 100 * FROM "dbo"."t""#
+        );
+        assert_eq!(
+            select_top_sql(Engine::MySql, "db", "t"),
+            "SELECT * FROM `db`.`t` LIMIT 100"
+        );
+        assert_eq!(
+            drop_sql(Engine::Postgres, "public", "v", RelationKind::View),
+            r#"DROP VIEW "public"."v";"#
+        );
+        assert_eq!(
+            drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable),
+            r#"DROP EXTERNAL TABLE "S"."e";"#
+        );
+        assert_eq!(
+            truncate_sql(Engine::Sqlite, "main", "t"),
+            r#"DELETE FROM "main"."t";"#
+        );
+        assert_eq!(
+            drop_sql(Engine::MongoDb, "db", "c", RelationKind::Table),
+            r#"db.getCollection("c").drop()"#
+        );
+        assert_eq!(
+            truncate_sql(Engine::MongoDb, "db", "c"),
+            r#"db.getCollection("c").deleteMany({})"#
         );
     }
 

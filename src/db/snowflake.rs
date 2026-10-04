@@ -23,7 +23,8 @@ use serde_json::{Value, json};
 
 use super::{
     CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, ForeignKey, NamedDefinition,
-    QueryResult, Structure, assemble_catalog, assemble_structure, plain_error,
+    QueryResult, RelationKind, Structure, assemble_catalog, assemble_structure, plain_error,
+    terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -962,6 +963,32 @@ impl Connection {
         .concat();
         structure.foreign_keys = foreign_keys(&imported, relation, &database);
         Ok(structure)
+    }
+
+    /// Named from the database down, like a `SHOW`, so the answer does not
+    /// hang on which database the request's field resolves a schema in.
+    pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        let name = format!(
+            "{}.{}",
+            Engine::Snowflake.qualified(&self.config.stored_database(), schema),
+            Engine::Snowflake.quote_identifier(relation)
+        );
+        let kind = match kind {
+            RelationKind::View | RelationKind::MaterializedView => "VIEW",
+            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
+                "TABLE"
+            }
+        };
+        let result = self.internal_query(&format!(
+            "SELECT GET_DDL('{kind}', {})",
+            Engine::Snowflake.quote_literal(&name)
+        ))?;
+        result
+            .rows
+            .first()
+            .and_then(|row| row.first()?.as_deref())
+            .map(terminated)
+            .ok_or_else(|| plain_error(format!("{name} has no definition to show.")))
     }
 
     /// Run statements dbdelve wrote all at the same time, in their own order.
@@ -1972,6 +1999,14 @@ mod tests {
             .expect("described");
         assert_eq!(view.columns.len(), 2);
         assert!(view.constraints.is_empty());
+        let ddl = connection
+            .ddl("DBDELVE_TEST", "ORDERS", super::super::RelationKind::Table)
+            .expect("the table's DDL loads");
+        assert!(ddl.contains("ORDERS") && ddl.contains("NOTE"), "{ddl}");
+        let ddl = connection
+            .ddl("DBDELVE_TEST", "RECENT", super::super::RelationKind::View)
+            .expect("the view's DDL loads");
+        assert!(ddl.to_ascii_lowercase().contains("view"), "{ddl}");
 
         connection
             .query("DROP SCHEMA DBDELVE_TEST")

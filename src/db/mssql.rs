@@ -32,9 +32,9 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, ServerConfig,
-    SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
-    assemble_references, assemble_structure, plain_error, required_cell,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, RelationKind,
+    ServerConfig, SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
+    assemble_references, assemble_structure, create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -134,7 +134,10 @@ const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_
 END)";
 
 // The structure queries name one relation by `{object}`, an `OBJECT_ID` over
-// the quoted name, substituted by `structure_sql`.
+// the quoted name, substituted by `structure_sql`. `{column}` spells a column
+// name and `{ddl}` is 1 when the text is for `Connection::ddl` rather than the
+// Structure tab, whose key text `Structure::row_key` reads back as bare names
+// with no clustering or `DESC` in it.
 const STRUCTURE_COLUMNS_SQL: &str = "
 SELECT
     p.name AS column_name,
@@ -152,7 +155,8 @@ SELECT
         -- `computed.definition` is null without `VIEW DEFINITION`, and `CONCAT`
         -- turns that into a silent `N'AS '`; say the definition is hidden instead.
         WHEN p.is_computed = 1 THEN CONCAT(
-            N'AS ', COALESCE(computed.definition COLLATE DATABASE_DEFAULT, N'<hidden>')
+            N'AS ', COALESCE(computed.definition COLLATE DATABASE_DEFAULT, N'<hidden>'),
+            CASE WHEN computed.is_persisted = 1 THEN N' PERSISTED' ELSE N'' END
         )
         ELSE COALESCE(default_constraint.definition COLLATE DATABASE_DEFAULT, N'')
     END AS column_default
@@ -197,7 +201,7 @@ SELECT
 FROM sys.indexes AS i
 OUTER APPLY (
     SELECT STRING_AGG(
-        CAST(c.name COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+        CAST({column} COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
             AS nvarchar(max)),
         N', '
     ) WITHIN GROUP (ORDER BY ic.key_ordinal) AS list
@@ -206,7 +210,7 @@ OUTER APPLY (
     WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
 ) AS keyed
 OUTER APPLY (
-    SELECT STRING_AGG(CAST(c.name COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
+    SELECT STRING_AGG(CAST({column} COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
         WITHIN GROUP (ORDER BY ic.index_column_id) AS list
     FROM sys.index_columns AS ic
     JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -220,10 +224,16 @@ const STRUCTURE_CONSTRAINTS_SQL: &str = "
 SELECT
     k.name AS object_name,
     CONCAT(
-        CASE k.type WHEN 'PK' THEN N'PRIMARY KEY' ELSE N'UNIQUE' END, N' (',
+        CASE k.type WHEN 'PK' THEN N'PRIMARY KEY' ELSE N'UNIQUE' END,
+        CASE WHEN {ddl} = 1 THEN N' ' + key_index.type_desc COLLATE DATABASE_DEFAULT ELSE N'' END,
+        N' (',
         (
-            SELECT STRING_AGG(CAST(c.name COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
-                WITHIN GROUP (ORDER BY ic.key_ordinal)
+            SELECT STRING_AGG(
+                CAST({column} COLLATE DATABASE_DEFAULT
+                    + CASE WHEN {ddl} = 1 AND ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+                    AS nvarchar(max)),
+                N', '
+            ) WITHIN GROUP (ORDER BY ic.key_ordinal)
             FROM sys.index_columns AS ic
             JOIN sys.columns AS c
                 ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -234,6 +244,8 @@ SELECT
         N')'
     ) AS definition
 FROM sys.key_constraints AS k
+JOIN sys.indexes AS key_index
+    ON key_index.object_id = k.parent_object_id AND key_index.index_id = k.unique_index_id
 WHERE k.parent_object_id = {object}
 UNION ALL
 SELECT
@@ -241,7 +253,7 @@ SELECT
     CONCAT(
         N'FOREIGN KEY (',
         (
-            SELECT STRING_AGG(CAST(c.name COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
+            SELECT STRING_AGG(CAST({column} COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
                 WITHIN GROUP (ORDER BY fc.constraint_column_id)
             FROM sys.foreign_key_columns AS fc
             JOIN sys.columns AS c
@@ -268,8 +280,8 @@ SELECT
         CASE WHEN f.update_referential_action_desc <> 'NO_ACTION'
             THEN CONCAT(N' ON UPDATE ', REPLACE(f.update_referential_action_desc, '_', ' ') COLLATE DATABASE_DEFAULT)
             ELSE N'' END,
-        CASE WHEN f.is_disabled = 1 THEN N' DISABLED' ELSE N'' END,
-        CASE WHEN f.is_not_trusted = 1 THEN N' NOT TRUSTED' ELSE N'' END
+        CASE WHEN {ddl} = 0 AND f.is_disabled = 1 THEN N' DISABLED' ELSE N'' END,
+        CASE WHEN {ddl} = 0 AND f.is_not_trusted = 1 THEN N' NOT TRUSTED' ELSE N'' END
     )
 FROM sys.foreign_keys AS f
 WHERE f.parent_object_id = {object}
@@ -927,9 +939,20 @@ impl Connection {
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        self.structure_for(schema, relation, false)
+    }
+
+    fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
+        let (column, ddl) = match ddl {
+            true => ("QUOTENAME(c.name, '\"')", "1"),
+            false => ("c.name", "0"),
+        };
         let query = |template: &str| {
             self.internal_query(&structure_sql(
-                &template.replace("{type}", TYPE_SQL),
+                &template
+                    .replace("{type}", TYPE_SQL)
+                    .replace("{column}", column)
+                    .replace("{ddl}", ddl),
                 schema,
                 relation,
             ))
@@ -941,6 +964,51 @@ impl Connection {
         let mut structure = assemble_structure(columns, indexes, constraints)?;
         structure.foreign_keys = assemble_foreign_keys(&keys)?;
         Ok(structure)
+    }
+
+    /// A view's text is the server's, as it was written. A table's is written
+    /// back out of its structure, whose index text stops short of a statement
+    /// (`UNIQUE NONCLUSTERED INDEX (a) INCLUDE (b)`) and so has its name and
+    /// table put in after `INDEX`.
+    ///
+    /// ponytail: a disabled or untrusted foreign key is written as an ordinary
+    /// one, and an XML or spatial index's options are not written; a `NOCHECK`
+    /// statement per such key and reading `sys.xml_indexes` /
+    /// `sys.spatial_index_tessellations` are the upgrade paths.
+    pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        let name = Engine::SqlServer.qualified(schema, relation);
+        if let RelationKind::View | RelationKind::MaterializedView = kind {
+            let result = self.internal_query(&structure_sql(
+                "SELECT OBJECT_DEFINITION({object}) AS definition",
+                schema,
+                relation,
+            ))?;
+            return result
+                .rows
+                .first()
+                .and_then(|row| row.first()?.as_deref())
+                .map(terminated)
+                .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
+        }
+
+        let structure = self.structure_for(schema, relation, true)?;
+        // Every SQL Server table has a column, so none means no such table.
+        if structure.columns.is_empty() {
+            return Err(plain_error(format!("{schema} has no relation {relation}.")));
+        }
+        Ok(create_table(
+            Engine::SqlServer,
+            &format!("CREATE TABLE {name}"),
+            &structure,
+            "",
+            |index| match index.definition.split_once("INDEX") {
+                Some((kind, rest)) => format!(
+                    "CREATE {kind}INDEX {} ON {name}{rest}",
+                    Engine::SqlServer.quote_identifier(&index.name)
+                ),
+                None => index.definition.clone(),
+            },
+        ))
     }
 }
 
@@ -2437,6 +2505,115 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_ddl_of_a_table_and_a_view_reads_back_as_their_create_statements() {
+        let connection = live();
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_ddl; \
+                 CREATE TABLE dbdelve_test_ddl (id int NOT NULL, note nvarchar(40) NULL); \
+                 CREATE INDEX dbdelve_test_ddl_note ON dbdelve_test_ddl (note DESC) INCLUDE (id)",
+            )
+            .expect("the fixture table should be created");
+        let indexed = connection.ddl("dbo", "dbdelve_test_ddl", RelationKind::Table);
+        connection
+            .query("DROP TABLE dbdelve_test_ddl")
+            .expect("the fixture table should be cleaned up");
+        let table = connection
+            .ddl("dbo", "accounts", RelationKind::Table)
+            .expect("the table's DDL should load");
+        let view = connection
+            .ddl("dbo", "account_overview", RelationKind::View)
+            .expect("the view's DDL should load");
+
+        assert!(
+            table.starts_with(
+                "CREATE TABLE \"dbo\".\"accounts\" (\n    \
+                 \"id\" bigint IDENTITY(1,1) NOT NULL,"
+            ),
+            "{table}"
+        );
+        assert!(table.contains("PRIMARY KEY CLUSTERED (\"id\")"), "{table}");
+        assert!(table.contains("CHECK ("), "{table}");
+        assert_eq!(
+            indexed.expect("the indexed table's DDL should load"),
+            "CREATE TABLE \"dbo\".\"dbdelve_test_ddl\" (\n    \"id\" int NOT NULL,\n    \
+             \"note\" nvarchar(40)\n);\nCREATE NONCLUSTERED INDEX \"dbdelve_test_ddl_note\" \
+             ON \"dbo\".\"dbdelve_test_ddl\" (\"note\" DESC) INCLUDE (\"id\");"
+        );
+        assert!(
+            view.starts_with("CREATE VIEW account_overview AS"),
+            "{view}"
+        );
+        assert!(view.ends_with(';'), "{view}");
+        let missing = |kind| {
+            connection
+                .ddl("dbo", "dbdelve_test_ddl_missing", kind)
+                .unwrap_err()
+                .message
+        };
+        assert_eq!(
+            missing(RelationKind::Table),
+            "dbo has no relation dbdelve_test_ddl_missing."
+        );
+        assert_eq!(
+            missing(RelationKind::View),
+            "\"dbo\".\"dbdelve_test_ddl_missing\" has no definition to show."
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_ddl_of_a_nonclustered_descending_key_and_quoted_columns_runs_again() {
+        let connection = live();
+        let ddl = || connection.ddl("dbo", "dbdelve_test_ddl_keys", RelationKind::Table);
+        let drop = "DROP TABLE IF EXISTS dbdelve_test_ddl_keys";
+        connection
+            .query(&format!(
+                "{drop}; \
+                 CREATE TABLE dbdelve_test_ddl_keys ( \
+                     id int NOT NULL, \
+                     [order] int NULL, \
+                     [my col] int NULL, \
+                     twice AS (id * 2) PERSISTED, \
+                     CONSTRAINT dbdelve_test_ddl_keys_pk PRIMARY KEY NONCLUSTERED (id DESC), \
+                     CONSTRAINT dbdelve_test_ddl_keys_uq UNIQUE ([my col]), \
+                     CONSTRAINT dbdelve_test_ddl_keys_fk FOREIGN KEY ([my col]) \
+                         REFERENCES dbdelve_test_ddl_keys (id)); \
+                 CREATE CLUSTERED INDEX dbdelve_test_ddl_keys_order \
+                     ON dbdelve_test_ddl_keys ([order])"
+            ))
+            .expect("the fixture table should be created");
+        // The Structure tab's key text is unchanged by what the DDL spells.
+        let key = connection
+            .structure("dbo", "dbdelve_test_ddl_keys")
+            .map(|structure| structure.row_key());
+        let written = ddl();
+        let rerun = written.as_ref().map_err(Clone::clone).and_then(|written| {
+            connection.query(drop)?;
+            connection.query(written)?;
+            ddl()
+        });
+        connection
+            .query(drop)
+            .expect("the fixture table should be cleaned up");
+
+        assert_eq!(key, Ok(vec!["id".to_string()]));
+        let written = written.expect("the DDL should load");
+        assert_eq!(rerun.as_ref(), Ok(&written));
+        for expected in [
+            "\"twice\" AS ([id]*(2)) PERSISTED,",
+            "CONSTRAINT \"dbdelve_test_ddl_keys_pk\" PRIMARY KEY NONCLUSTERED (\"id\" DESC),",
+            "CONSTRAINT \"dbdelve_test_ddl_keys_uq\" UNIQUE NONCLUSTERED (\"my col\")",
+            "FOREIGN KEY (\"my col\") REFERENCES",
+            "CREATE CLUSTERED INDEX \"dbdelve_test_ddl_keys_order\" ON \
+             \"dbo\".\"dbdelve_test_ddl_keys\" (\"order\");",
+        ] {
+            assert!(written.contains(expected), "{expected} in {written}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_structure_round_trip() {
         let structure = live()
             .structure("dbo", "accounts")
@@ -2579,7 +2756,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "tag")
             .expect("the tag column should be reported");
-        assert_eq!(tag.default.as_deref(), Some("AS <hidden>"));
+        assert_eq!(tag.default.as_deref(), Some("AS <hidden> PERSISTED"));
 
         connection
             .query(

@@ -307,7 +307,7 @@ pub(crate) fn count_documents(collection: &str, filter: &str) -> String {
 
 /// By `getCollection` rather than as a property, so any name -- one with a
 /// space, a dash, or a method's name -- is the string it is.
-fn handle(collection: &str) -> String {
+pub(crate) fn handle(collection: &str) -> String {
     format!("db.getCollection({})", quoted(collection))
 }
 

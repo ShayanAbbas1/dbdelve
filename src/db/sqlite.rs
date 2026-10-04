@@ -415,6 +415,24 @@ impl Connection {
         Ok(structure)
     }
 
+    /// The relation's own `CREATE` first, then its indexes and triggers in
+    /// the order they were made. An index SQLite made for a constraint has no
+    /// text, and is declared by the table's.
+    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        let listed = self.internal_query(&format!(
+            "SELECT sql FROM {}.sqlite_master
+             WHERE tbl_name = {} COLLATE NOCASE AND sql IS NOT NULL
+             ORDER BY type NOT IN ('table', 'view'), rowid",
+            Engine::Sqlite.quote_identifier(schema),
+            Engine::Sqlite.quote_literal(relation),
+        ))?;
+        let statements = column_of(&listed, "sql")?;
+        if statements.is_empty() {
+            return Err(plain_error(format!("{schema} has no relation {relation}.")));
+        }
+        Ok(statements.join(";\n") + ";")
+    }
+
     /// An index the user wrote has its `CREATE INDEX` in `sqlite_master`. One
     /// SQLite created to enforce a `UNIQUE` or `PRIMARY KEY` has no row there at
     /// all, so its definition is reconstructed from the columns it covers.
@@ -965,6 +983,30 @@ SELECT count(*) FROM forever
         INSERT INTO accounts (id, name, email) VALUES (1, 'Ada', 'ada@example.test');
         INSERT INTO accounts (id, name, email) VALUES (2, 'Grace', NULL);
     ";
+
+    #[test]
+    fn the_ddl_is_the_table_then_what_was_made_on_it_and_not_its_neighbours() {
+        let connection = memory(&format!(
+            "{ACCOUNTS}
+             CREATE INDEX accounts_email ON accounts (email);
+             CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;
+             CREATE TABLE other (id INTEGER);
+             CREATE INDEX other_id ON other (id);"
+        ));
+
+        assert_eq!(
+            connection
+                .ddl("main", "accounts")
+                .expect("the DDL should load"),
+            "CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT
+        );
+CREATE INDEX accounts_email ON accounts (email);
+CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
+        );
+    }
 
     #[test]
     fn a_url_names_a_file_however_many_slashes_it_uses() {

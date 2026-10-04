@@ -4,9 +4,11 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use gpui_component::checkbox::Checkbox;
+use gpui_component::menu::PopupMenuItem;
 
 use super::*;
 use crate::connection_form::ConnectionTest;
+use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
 
@@ -1890,6 +1892,8 @@ impl Workspace {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let leaves = profile.session.explorer_leaves.clone();
+        let menu_leaves = leaves.clone();
+        let menu_workspace = workspace.clone();
         let content = match &profile.catalog {
             CatalogState::Loading => div()
                 .p(px(layout::SPACE_MD))
@@ -1991,6 +1995,50 @@ impl Workspace {
                         })
                     },
                 )
+                .context_menu(move |_, entry, menu, _, cx| {
+                    let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
+                        return menu;
+                    };
+                    let Some(workspace) = menu_workspace.upgrade() else {
+                        return menu;
+                    };
+                    let workspace = workspace.read(cx);
+                    let Some((schema, relation, kind)) = workspace.relation_at(leaf.target) else {
+                        return menu;
+                    };
+                    let engine = workspace.engine();
+                    let copy = |label: &'static str, text: String| {
+                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        })
+                    };
+                    let ddl_workspace = menu_workspace.clone();
+                    let ddl_names = (schema.clone(), relation.clone());
+                    let menu = menu
+                        .item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
+                            let (schema, relation) = ddl_names.clone();
+                            _ = ddl_workspace.update(cx, |workspace, cx| {
+                                workspace.copy_ddl(schema, relation, kind, cx);
+                            });
+                        }))
+                        .item(copy(
+                            "Copy SELECT (Top 100)",
+                            select_top_sql(engine, &schema, &relation),
+                        ))
+                        .separator()
+                        .item(copy(
+                            "Copy DROP",
+                            drop_sql(engine, &schema, &relation, kind),
+                        ));
+                    if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
+                        menu.item(copy(
+                            "Copy TRUNCATE",
+                            truncate_sql(engine, &schema, &relation),
+                        ))
+                    } else {
+                        menu
+                    }
+                })
                 .into_any_element()
             }
         };
