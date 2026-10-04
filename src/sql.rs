@@ -588,7 +588,16 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
 /// Exactly one root statement rather than `generated_statements`' view through
 /// a transaction: a preview never brackets anything, so seeing through
 /// brackets here would only widen what is accepted.
-pub fn is_generated_select(sql: &str) -> bool {
+pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::is_generated_read(sql),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let Some(tree) = parse(sql) else {
         return false;
     };
@@ -3294,7 +3303,10 @@ mod tests {
             "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100",
             r#"WITH x AS (SELECT 1 AS a) SELECT * FROM x LIMIT 10"#,
         ] {
-            assert!(is_generated_select(sql), "{sql} was refused");
+            assert!(
+                is_generated_select(Engine::Postgres, sql),
+                "{sql} was refused"
+            );
         }
     }
 
@@ -3308,7 +3320,10 @@ mod tests {
             r#"SELECT * FROM "public"."t" WHERE "id" = '1'; DELETE FROM "t" LIMIT 1000"#,
             r#"SELECT * FROM "public"."t" WHERE "id" = '1'; TRUNCATE "t" LIMIT 1000"#,
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3320,7 +3335,10 @@ mod tests {
             r#"SELECT * FROM "public"."t" WHERE LIMIT 1000"#,
             "",
         ] {
-            assert!(!is_generated_select(sql), "{sql:?} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql:?} passed the gate"
+            );
         }
     }
 
@@ -3334,7 +3352,10 @@ mod tests {
             r#"WITH x AS (DELETE FROM "t" RETURNING *) SELECT * FROM x LIMIT 1000"#,
             r#"WITH x AS (SELECT 1 AS a) SELECT * FROM x WHERE a IN (SELECT 1); DROP TABLE "t""#,
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3352,7 +3373,10 @@ mod tests {
             "SELECT 1; SELECT 2",
             "-- SELECT * FROM t",
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3692,7 +3716,7 @@ mod tests {
             &[SortKey::new("\"id\"", false)],
         )
         .unwrap();
-        assert!(is_generated_select(&sorted), "{sorted}");
+        assert!(is_generated_select(Engine::SqlServer, &sorted), "{sorted}");
         assert_eq!(
             paged(Engine::SqlServer, &sorted, &[]).as_deref(),
             Some(

@@ -136,11 +136,9 @@ impl Operator {
     /// Whether this engine can express the operator at all. Only the regex
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
-    /// SQL Server has none before 2025. MongoDB's `$regex` arrives with its
-    /// filter bar.
+    /// SQL Server has none before 2025. MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex
-            || !matches!(engine, Engine::Sqlite | Engine::SqlServer | Engine::MongoDb)
+        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -325,7 +323,17 @@ pub(crate) fn derived_filter(
         };
         folded = Some(match folded {
             None => predicate,
-            Some(left) => format!("({left}) {} ({predicate})", bar.conjunction.as_str()),
+            Some(left) => match engine {
+                Engine::MongoDb => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
+                Engine::Postgres
+                | Engine::MySql
+                | Engine::MariaDb
+                | Engine::Sqlite
+                | Engine::Snowflake
+                | Engine::SqlServer => {
+                    format!("({left}) {} ({predicate})", bar.conjunction.as_str())
+                }
+            },
         });
     }
     folded.unwrap_or_default()
@@ -344,7 +352,15 @@ pub(crate) fn bar_predicate(
         // Verbatim, and checked as a whole statement by `is_generated_select`
         // rather than inspected here: a filter dbdelve does not understand is
         // exactly what the gate is for (spec §2.3).
-        return (!value.is_empty()).then(|| value.to_string());
+        return (!value.is_empty()).then(|| match engine {
+            Engine::MongoDb => crate::mql::browse::raw_filter(value),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::Sqlite
+            | Engine::Snowflake
+            | Engine::SqlServer => value.to_string(),
+        });
     }
     let column = bar.column.as_deref()?;
     if !bar.operator.on(engine) || (bar.operator.takes_value() && value.is_empty()) {
@@ -387,6 +403,17 @@ pub(crate) fn filter_predicate(
     operator: Operator,
     value: &str,
 ) -> Option<String> {
+    match engine {
+        Engine::MongoDb => {
+            return crate::mql::browse::filter_predicate(column, data_type, operator, value);
+        }
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let name = engine.quote_identifier(column);
     let literal = |value: &str| engine.quote_value(value, data_type);
     let comparison = |symbol: &str| Some(format!("{name} {symbol} {}", literal(value)));
@@ -455,8 +482,7 @@ pub(crate) fn filter_predicate(
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
             Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
-            // ponytail: no SQL predicate reaches MongoDB; its filter bar
-            // writes MQL once browsing arrives, `$regex` included.
+            // Written by `mql::browse::filter_predicate`, above.
             Engine::MongoDb => None,
         },
     }
@@ -1056,7 +1082,10 @@ mod tests {
             10,
             0,
         );
-        assert!(sql::is_generated_select(&preview), "{preview}");
+        assert!(
+            sql::is_generated_select(Engine::SqlServer, &preview),
+            "{preview}"
+        );
         assert_eq!(sql("hash", Operator::Equals, "00FF"), r#""hash" = N'00FF'"#);
         assert_eq!(sql("name", Operator::Equals, "k-1"), r#""name" = N'k-1'"#);
         // A column the structure does not list is spelled as unknown.
@@ -1134,7 +1163,10 @@ mod tests {
             r#""state" <> ''"#,
         ] {
             let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, 100, 0);
-            println!("{} {filter}", sql::is_generated_select(&sql));
+            println!(
+                "{} {filter}",
+                sql::is_generated_select(Engine::Postgres, &sql)
+            );
         }
     }
 
@@ -1153,7 +1185,7 @@ mod tests {
                 let filter = predicate(engine, operator, value).expect("applied");
                 let sql = explorer::preview_sql(engine, "public", "accounts", &filter, 100, 0);
                 assert!(
-                    sql::is_generated_select(&sql),
+                    sql::is_generated_select(engine, &sql),
                     "{} was refused: {sql}",
                     operator.slug()
                 );
@@ -1230,9 +1262,10 @@ mod tests {
         let filter = derived_filter(Engine::Postgres, &[bar], &[]);
 
         assert_eq!(filter, r#""account_id" = 'it''s'"#);
-        assert!(crate::sql::is_generated_select(&format!(
-            "SELECT * FROM t WHERE {filter}"
-        )));
+        assert!(crate::sql::is_generated_select(
+            Engine::Postgres,
+            &format!("SELECT * FROM t WHERE {filter}")
+        ));
         assert_eq!(reference_filter(&reference, None), None);
     }
 
@@ -1257,7 +1290,7 @@ mod tests {
                 100,
                 0,
             );
-            assert!(sql::is_generated_select(&sql), "{sql} was refused");
+            assert!(sql::is_generated_select(engine, &sql), "{sql} was refused");
         }
     }
 
@@ -1271,7 +1304,10 @@ mod tests {
         assert_eq!(filter, r#""id" = '1''; DROP TABLE accounts --'"#);
 
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(sql::is_generated_select(&sql), "{sql} was refused");
+        assert!(
+            sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was refused"
+        );
         // The statement runs on past the payload: neither the `;` ended it nor
         // the `--` commented out its tail, because both sit inside the literal.
         assert!(sql.ends_with(" LIMIT 100"), "{sql} was cut short");
@@ -1404,7 +1440,10 @@ mod tests {
         );
         assert_eq!(filter, r#"(("a" = '1') OR (id > 5)) AND ("c" = '3')"#);
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(sql::is_generated_select(&sql), "{sql} was refused");
+        assert!(
+            sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was refused"
+        );
     }
 
     #[test]
@@ -1420,7 +1459,10 @@ mod tests {
             }],
         );
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(!sql::is_generated_select(&sql), "{sql} was admitted");
+        assert!(
+            !sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was admitted"
+        );
     }
 
     #[test]
@@ -1852,7 +1894,7 @@ mod tests {
                 200,
             );
             assert!(
-                sql::is_generated_select(&statement),
+                sql::is_generated_select(engine, &statement),
                 "{statement} was refused"
             );
         }
