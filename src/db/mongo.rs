@@ -1899,7 +1899,8 @@ fn shared_type<'a>(types: impl Iterator<Item = &'a str>) -> &'a str {
 
 /// A value as its cell shows it: a scalar in the shell's own spelling, which a
 /// statement reads back as the same value, and a document or an array as
-/// Relaxed Extended JSON on one line, which the inspector pretty-prints.
+/// Extended JSON on one line ([`typed_json`]), which the inspector
+/// pretty-prints and a statement reads back as the same value too.
 fn cell(value: &Bson) -> Cell {
     Some(match value {
         Bson::Null => return None,
@@ -1929,8 +1930,27 @@ fn cell(value: &Bson) -> Cell {
         | Bson::JavaScriptCodeWithScope(_)
         | Bson::Symbol(_)
         | Bson::Undefined
-        | Bson::DbPointer(_) => value.clone().into_relaxed_extjson().to_string(),
+        | Bson::DbPointer(_) => typed_json(value).to_string(),
     })
+}
+
+/// Relaxed Extended JSON, except that a long and a whole double keep their
+/// canonical wrappers. Relaxed spells both as a bare number, which reads back
+/// -- by Extended JSON's rules and the shell's alike -- as an int, so editing
+/// a document's cell would quietly retype every such value inside it.
+fn typed_json(value: &Bson) -> serde_json::Value {
+    match value {
+        Bson::Document(document) => serde_json::Value::Object(
+            document
+                .iter()
+                .map(|(key, value)| (key.clone(), typed_json(value)))
+                .collect(),
+        ),
+        Bson::Array(values) => serde_json::Value::Array(values.iter().map(typed_json).collect()),
+        Bson::Int64(_) => value.clone().into_canonical_extjson(),
+        Bson::Double(n) if n.fract() == 0.0 => value.clone().into_canonical_extjson(),
+        _ => value.clone().into_relaxed_extjson(),
+    }
 }
 
 /// As JavaScript prints a number, so it reads back as the same one: `2` for
@@ -2536,6 +2556,11 @@ mod tests {
             (
                 "{ b: ISODate('2024-01-15T09:30:00Z'), a: [1, null, 'x'] }",
                 r#"{"b":{"$date":"2024-01-15T09:30:00Z"},"a":[1,null,"x"]}"#,
+                "object",
+            ),
+            (
+                "{ n: NumberLong(5), d: [Double(2), 2.5, -0.0], i: 3 }",
+                r#"{"n":{"$numberLong":"5"},"d":[{"$numberDouble":"2.0"},2.5,{"$numberDouble":"-0.0"}],"i":3}"#,
                 "object",
             ),
         ] {
