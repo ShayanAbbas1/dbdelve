@@ -51,6 +51,104 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Opens the switcher with only the group in front expanded, and its
+    /// search field focused so typing filters straight away.
+    pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_open = true;
+        self.pending_removal = None;
+        self.pending_project_deletion = None;
+        self.assigning_project = None;
+        self.expanded_groups = vec![self.current_group().map(str::to_string)];
+        self.search_selection = 0;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe_in(
+            &input,
+            window,
+            |workspace, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => {
+                    workspace.search_selection = 0;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    if let Some(index) = workspace.selected_connection(cx) {
+                        workspace.activate(index, cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.connection_search = Some(input);
+        self.connection_search_needs_focus = true;
+        cx.notify();
+    }
+
+    /// Puts the search field away, handing focus back for the reason
+    /// `drop_project_name` gives. Not when the switcher closed for a form: the
+    /// tab's focus is applied after the form's, and would take it.
+    pub(crate) fn drop_connection_search(&mut self) {
+        if self.connection_search.take().is_some()
+            && self.form.is_none()
+            && let Some(profile) = self.profile_mut()
+        {
+            profile.session.editor_needs_focus = true;
+        }
+    }
+
+    /// The match up and down have moved to, held inside the matches as they
+    /// narrow.
+    pub(crate) fn selected_connection(&self, cx: &App) -> Option<usize> {
+        let matches = self.searched_connections(cx)?;
+        matches
+            .get(self.search_selection.min(matches.len().saturating_sub(1)))
+            .copied()
+    }
+
+    pub(crate) fn step_search_selection(&mut self, step: isize, cx: &mut Context<Self>) {
+        let Some(matches) = self.searched_connections(cx) else {
+            return;
+        };
+        let last = matches.len().saturating_sub(1);
+        self.search_selection = self
+            .search_selection
+            .min(last)
+            .saturating_add_signed(step)
+            .min(last);
+        cx.notify();
+    }
+
+    /// The connections the switcher's search matches, in the order it lists
+    /// them, or `None` while there is no search.
+    pub(crate) fn searched_connections(&self, cx: &App) -> Option<Vec<usize>> {
+        let query = self
+            .connection_search
+            .as_ref()?
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return None;
+        }
+        let connections = self
+            .profiles
+            .iter()
+            .map(|profile| {
+                let host = match &profile.config {
+                    ConnectionConfig::Snowflake(snowflake) => snowflake.host(),
+                    // A SQLite path has no host, and every one under a home
+                    // directory would match its folder names.
+                    config => config
+                        .server()
+                        .map(|server| server.host.clone())
+                        .unwrap_or_default(),
+                };
+                (profile.id.as_str(), profile.name.as_str(), host)
+            })
+            .collect::<Vec<_>>();
+        Some(matching_connections(&connections, &self.projects, &query))
+    }
+
     /// Opens the name field: for a new project with `renaming` empty, or in
     /// place of an existing project's name, prefilled with it.
     pub(crate) fn start_naming_project(
@@ -134,12 +232,16 @@ impl Workspace {
 
     /// Puts the name field away. It held focus while open, and a field
     /// unmounted with focus in it takes every keybinding with it, so focus
-    /// goes back to whatever is in front.
+    /// goes back to the search field if the switcher stays open, else to
+    /// whatever is in front.
     pub(crate) fn drop_project_name(&mut self) {
         self.renaming_project = None;
-        if self.project_name.take().is_some()
-            && let Some(profile) = self.profile_mut()
-        {
+        if self.project_name.take().is_none() {
+            return;
+        }
+        if self.switcher_open && self.connection_search.is_some() {
+            self.connection_search_needs_focus = true;
+        } else if let Some(profile) = self.profile_mut() {
             profile.session.editor_needs_focus = true;
         }
     }
@@ -209,6 +311,31 @@ pub(crate) fn normalized_projects(
     projects
 }
 
+/// The `(id, name, host)` connections whose name, host or project holds
+/// `query`, ignoring case, in the order the switcher lists them: No project
+/// first, then each project's.
+fn matching_connections(
+    connections: &[(&str, &str, String)],
+    projects: &[store::StoredProject],
+    query: &str,
+) -> Vec<usize> {
+    let query = query.to_lowercase();
+    let holds = |text: &str| text.to_lowercase().contains(&query);
+    let mut matches = connections
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (id, name, host))| {
+            let project = projects
+                .iter()
+                .position(|project| project.connections.iter().any(|member| member == id));
+            (holds(name) || holds(host) || project.is_some_and(|at| holds(&projects[at].name)))
+                .then_some((project.map_or(0, |at| at + 1), index))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|&(group, _)| group);
+    matches.into_iter().map(|(_, index)| index).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +380,38 @@ mod tests {
                 project("Analytics", &["warehouse"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_search_matches_names_in_any_case_and_lists_them_as_the_switcher_does() {
+        let connections = [
+            ("billing-prod", "Billing prod", String::new()),
+            ("scratch", "Scratch", String::new()),
+            ("analytics-prod", "Analytics PROD", String::new()),
+            ("local-prod", "local prod", String::new()),
+        ];
+        let projects = [
+            project("Analytics", &["analytics-prod"]),
+            project("Billing", &["billing-prod"]),
+        ];
+        assert_eq!(
+            matching_connections(&connections, &projects, "Prod"),
+            [3, 2, 0]
+        );
+    }
+
+    #[test]
+    fn a_search_matches_a_connection_by_its_host_or_its_project() {
+        let connections = [
+            ("orders", "Orders", "db.internal".to_string()),
+            ("ledger", "Ledger", "localhost".to_string()),
+            ("scratch", "Scratch", "localhost".to_string()),
+        ];
+        let projects = [project("Billing", &["ledger"])];
+        assert_eq!(
+            matching_connections(&connections, &projects, "INTERNAL"),
+            [0]
+        );
+        assert_eq!(matching_connections(&connections, &projects, "bill"), [1]);
     }
 }

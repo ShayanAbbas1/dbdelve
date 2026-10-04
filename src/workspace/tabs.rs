@@ -275,6 +275,12 @@ impl Workspace {
         if self.close_apply_review(cx) {
             return;
         }
+        // Below the modals and prompts, which paint over the switcher.
+        if self.switcher_open {
+            self.switcher_open = false;
+            cx.notify();
+            return;
+        }
         let Some(profile) = self.profile_mut() else {
             return;
         };
