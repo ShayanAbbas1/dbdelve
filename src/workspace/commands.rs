@@ -258,6 +258,8 @@ impl Workspace {
             Command::DeleteRow => self.delete_row(&DeleteRow, window, cx),
             Command::ApplyEdits => self.apply_edits(&ApplyEdits, window, cx),
             Command::DiscardEdits => self.discard_edits(&DiscardEdits, window, cx),
+            Command::NextEdit => self.next_edit(&NextEdit, window, cx),
+            Command::PreviousEdit => self.previous_edit(&PreviousEdit, window, cx),
             Command::ExportResults(format) => self.export_results(format, cx),
             Command::CopyRow => self.copy_row(&CopyRow, window, cx),
             Command::CopyResults(format) => self.copy_results_as(format, cx),

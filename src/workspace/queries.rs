@@ -13,12 +13,13 @@ impl Workspace {
     /// the grid rather than held anywhere, so nothing can disagree with the
     /// cells about whether there is something to apply.
     pub(crate) fn has_pending_edits(&self, cx: &App) -> bool {
-        self.profile().is_some_and(|profile| {
-            profile
-                .session
-                .active_results()
-                .is_some_and(|results| results.read(cx).delegate().has_pending())
-        })
+        self.pending_edit_count(cx) > 0
+    }
+
+    pub(crate) fn pending_edit_count(&self, cx: &App) -> usize {
+        self.profile()
+            .and_then(|profile| profile.session.active_results())
+            .map_or(0, |results| results.read(cx).delegate().pending_count())
     }
 
     /// Whether the cell the ring is on can be written at all. Read off the grid

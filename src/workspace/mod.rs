@@ -996,10 +996,23 @@ impl Render for Workspace {
         };
         let notice = profile.session.notice.clone();
         let newer_release = self.newer_release.clone();
-        let has_pending = self.has_pending_edits(cx);
+        let pending_count = self.pending_edit_count(cx);
+        let has_pending = pending_count > 0;
+        let grid_shown = !profile.session.active_object().is_some_and(|tab| {
+            matches!(
+                tab.body,
+                ObjectBody::Relation {
+                    showing_structure: true,
+                    ..
+                }
+            )
+        });
         let has_results = self.has_results(cx);
+        let show_result_actions = has_results && !has_pending;
         let apply_workspace = cx.entity().downgrade();
         let discard_workspace = apply_workspace.clone();
+        let previous_workspace = apply_workspace.clone();
+        let next_workspace = apply_workspace.clone();
         let copy_workspace = apply_workspace.clone();
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
@@ -1099,7 +1112,10 @@ impl Render for Workspace {
                                 });
                             })
                         }))
-                        .children(has_results.then(|| {
+                        // Not beside pending edits: these write the rows as
+                        // fetched, not the values on screen, and the review
+                        // controls need the room.
+                        .children(show_result_actions.then(|| {
                             button(
                                 "copy-results",
                                 "Copy Results",
@@ -1118,7 +1134,7 @@ impl Render for Workspace {
                         // another control to ask which is a click spent on
                         // nothing. It also puts the format on screen, which
                         // a lone "Export" left to the file extension.
-                        .children(has_results.then(|| {
+                        .children(show_result_actions.then(|| {
                             button("export-csv", "Export CSV", Tone::Quiet, Control::Compact, t)
                                 .on_click(move |_, _, cx| {
                                     _ = csv_workspace.update(cx, |workspace, cx| {
@@ -1126,7 +1142,7 @@ impl Render for Workspace {
                                     });
                                 })
                         }))
-                        .children(has_results.then(|| {
+                        .children(show_result_actions.then(|| {
                             button(
                                 "export-json",
                                 "Export JSON",
@@ -1139,6 +1155,65 @@ impl Render for Workspace {
                                     workspace.export_results(Format::Json, cx);
                                 });
                             })
+                        }))
+                        // A tinted cell scrolled out of view is an edit
+                        // nobody knows is about to be written.
+                        .children(has_pending.then(|| {
+                            let label = div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_color(t.text_muted)
+                                .child(format!(
+                                    "{pending_count} pending {}",
+                                    if pending_count == 1 { "edit" } else { "edits" }
+                                ));
+                            // Behind Structure the grid is not drawn, and a
+                            // walk over it would move a ring nobody sees.
+                            if !grid_shown {
+                                return label.into_any_element();
+                            }
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .child(
+                                    icon_button(
+                                        "previous-edit",
+                                        icon::CHEVRON_LEFT,
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .tooltip("Previous edit")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = previous_workspace.update(cx, |workspace, cx| {
+                                                workspace.previous_edit(&PreviousEdit, window, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(label)
+                                .child(
+                                    icon_button(
+                                        "next-edit",
+                                        icon::CHEVRON_RIGHT,
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .tooltip("Next edit")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = next_workspace.update(cx, |workspace, cx| {
+                                                workspace.next_edit(&NextEdit, window, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                                .into_any_element()
                         }))
                         .children(has_pending.then(|| {
                             button("discard-edits", "Discard", Tone::Quiet, Control::Compact, t)
@@ -1242,6 +1317,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::apply_edits))
             .on_action(cx.listener(Self::discard_edits))
+            .on_action(cx.listener(Self::next_edit))
+            .on_action(cx.listener(Self::previous_edit))
             .on_action(cx.listener(Self::sort_column))
             .on_action(cx.listener(Self::set_row_limit))
             .on_action(cx.listener(Self::refresh_active_relation))
