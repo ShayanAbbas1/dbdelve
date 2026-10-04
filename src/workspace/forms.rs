@@ -1258,12 +1258,12 @@ impl Workspace {
                     let activate_workspace = workspace.clone();
                     let leave_workspace = workspace.clone();
                     let assign_workspace = workspace.clone();
-                    let orphan = !in_project
-                        && !self.projects.is_empty()
-                        && !self
-                            .projects
-                            .iter()
-                            .any(|project| project.connections.contains(&profile.id));
+                    let joinable = self
+                        .projects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, project)| !project.connections.contains(&profile.id))
+                        .collect::<Vec<_>>();
                     let assigning = self.assigning_project.as_deref() == Some(&profile.id);
                     let edit_workspace = workspace.clone();
                     let duplicate_workspace = workspace.clone();
@@ -1303,7 +1303,7 @@ impl Workspace {
                                             style.opacity(1.)
                                         })
                                 })
-                                .when(orphan, |actions| {
+                                .when(!in_project && !joinable.is_empty(), |actions| {
                                     let id = profile.id.clone();
                                     actions.child(
                                         icon_button(
@@ -1441,13 +1441,12 @@ impl Workspace {
                             });
                         });
                     let choices = assigning.then(|| {
-                        self.projects
+                        joinable
                             .iter()
-                            .enumerate()
                             .map(|(choice, project)| {
                                 let join_workspace = workspace.clone();
                                 let name = project.name.clone();
-                                switcher_row(("assign-to", choice), t)
+                                switcher_row(("assign-to", *choice), t)
                                     .pl(px(layout::SPACE_LG))
                                     .text_color(t.text_muted)
                                     .child(row_icon(t, icon::PROJECT))
@@ -1476,35 +1475,7 @@ impl Workspace {
                         .into_any_element()
                 })
                 .collect::<Vec<_>>();
-            let other_rows = self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !self.in_project(*index))
-                .map(|(index, profile)| {
-                    let join_workspace = workspace.clone();
-                    switcher_row(("join-project", index), t)
-                        .text_color(t.text_muted)
-                        .child(row_icon_tinted(t, icon::DATABASE, profile.color))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(profile.name.clone()),
-                        )
-                        .child(row_icon(t, icon::PLUS))
-                        .on_click(move |_, _, cx| {
-                            _ = join_workspace.update(cx, |workspace, cx| {
-                                workspace.add_to_project(index, cx);
-                            });
-                        })
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>();
-            let groups = self.render_project_groups(profile_rows, other_rows, cx);
+            let groups = self.render_project_groups(profile_rows, cx);
 
             div()
                 .absolute()
@@ -1523,7 +1494,7 @@ impl Workspace {
                 .top_full()
                 .mt(px(layout::SPACE_XS))
                 .left_0()
-                .w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                .w(px(layout::SWITCHER_WIDTH))
                 .p(px(layout::SPACE_XS))
                 .bg(t.overlay_glass())
                 .border_1()
@@ -1644,13 +1615,11 @@ impl Workspace {
     }
 
     /// All connections, then each project, as groups only one of which is
-    /// expanded: the one open, holding `members` and, under a project, the
-    /// `others` that can be added to it. With no projects there is nothing to
-    /// group, and the members are listed bare.
+    /// expanded: the one open, holding `members`. With no projects there is
+    /// nothing to group, and the members are listed bare.
     fn render_project_groups(
         &self,
         members: Vec<AnyElement>,
-        others: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = *theme(cx);
@@ -1669,22 +1638,12 @@ impl Workspace {
             rows.extend(members);
         } else {
             let mut members = Some(members);
-            let mut others = Some(others);
-            let group_body = |members: Vec<AnyElement>, others: Vec<AnyElement>| {
+            let group_body = |members: Vec<AnyElement>| {
                 div()
                     .pl(px(layout::SPACE_MD))
                     .flex()
                     .flex_col()
                     .children(members)
-                    .when(!others.is_empty(), |body| {
-                        body.child(
-                            div()
-                                .px(px(layout::SPACE_SM))
-                                .py(px(layout::SPACE_XS))
-                                .child(section_label(t, "Add to project")),
-                        )
-                        .children(others)
-                    })
                     .into_any_element()
             };
 
@@ -1702,7 +1661,7 @@ impl Workspace {
                     .into_any_element(),
             );
             if selected && expanded {
-                rows.push(group_body(members.take().unwrap_or_default(), Vec::new()));
+                rows.push(group_body(members.take().unwrap_or_default()));
             }
 
             for (index, project) in self.projects.iter().enumerate() {
@@ -1715,10 +1674,7 @@ impl Workspace {
                     rows.push(self.project_header(index, project, selected, expanded, cx));
                 }
                 if selected && expanded {
-                    rows.push(group_body(
-                        members.take().unwrap_or_default(),
-                        others.take().unwrap_or_default(),
-                    ));
+                    rows.push(group_body(members.take().unwrap_or_default()));
                 }
             }
         }

@@ -171,18 +171,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn add_to_project(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
-            return;
-        };
-        if let Some(project) = self.projects.iter_mut().find(|project| project.open)
-            && !project.connections.contains(&id)
-        {
-            project.connections.push(id);
-        }
-        self.activate(index, cx);
-    }
-
     pub(crate) fn remove_from_project(
         &mut self,
         index: usize,

@@ -104,6 +104,7 @@ pub mod layout {
     pub const INSPECTOR_MIN_WIDTH: f32 = 200.0;
     pub const INSPECTOR_MAX_WIDTH: f32 = 900.0;
     pub const SIDEBAR_DEFAULT_WIDTH: f32 = 220.0;
+    pub const SWITCHER_WIDTH: f32 = 320.0;
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
