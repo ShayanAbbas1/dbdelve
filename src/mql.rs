@@ -24,6 +24,7 @@ use time::parsing::Parsed;
 use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
+use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
 pub(crate) mod browse;
@@ -1865,6 +1866,457 @@ fn writes_out(value: &Value) -> bool {
     }
 }
 
+/// Each pending row as one `updateOne` that names the document by its key
+/// and `$set`s each edited field, one statement per row, in order.
+///
+/// Nothing brackets the batch (`Engine::transaction_start` is `None`): the
+/// statements run one at a time, and a failure says which one failed and
+/// that the ones before it ran.
+///
+/// Each new value is read as the type its cell held ([`coerce`]), and text
+/// that does not read as one is the error, never a string in its place.
+pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
+    if rows.is_empty() {
+        return Err("There are no edits to apply.".into());
+    }
+    let mut statements = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut sets = Vec::with_capacity(row.sets.len());
+        for (field, value) in &row.sets {
+            if !writable_field(field) {
+                return Err(unwritable_field(field));
+            }
+            let value = match value {
+                NewValue::Value(text) => typed(field, text, type_of(&row.types, field))?,
+                NewValue::Null => Value::Null,
+                NewValue::Default => {
+                    return Err(format!(
+                        "{field}: MongoDB has no default for a field to take."
+                    ));
+                }
+            };
+            sets.push((field.clone(), value));
+        }
+        statements.push(format!(
+            "{}.updateOne({}, {{$set: {}}});",
+            collection(&row.table),
+            key_filter(&row.keys, &row.types)?,
+            spelled(&Value::Document(sets))
+        ));
+    }
+    Ok(statements.join("\n"))
+}
+
+/// One `insertOne` of the fields the form filled. A field left empty is left
+/// out of the document rather than written as a null; a null is the field's
+/// null toggle. A field's sampled type decides how its text reads when the
+/// sample saw one type there, and otherwise the text is read as a literal.
+pub(crate) fn insert_row(
+    table: &str,
+    columns: &[(&str, Option<&str>)],
+    types: &[(String, String)],
+) -> Result<String, String> {
+    let mut fields = Vec::with_capacity(columns.len());
+    for &(field, value) in columns {
+        let value = match value {
+            None => Value::Null,
+            Some("") => continue,
+            Some(text) => typed(field, text, sampled_type(type_of(types, field)))?,
+        };
+        fields.push((field.to_owned(), value));
+    }
+    if fields.is_empty() {
+        return Err("There is nothing in this row to insert.".into());
+    }
+    if let Some((field, _)) = fields.iter().find(|(field, _)| field.starts_with('$')) {
+        return Err(unwritable_field(field));
+    }
+    Ok(format!(
+        "{}.insertOne({})",
+        collection(table),
+        spelled(&Value::Document(fields))
+    ))
+}
+
+/// One `deleteOne` naming the document by its key.
+pub(crate) fn delete_row(
+    table: &str,
+    keys: &[(&str, &str)],
+    types: &[(String, String)],
+) -> Result<String, String> {
+    let keys: Vec<(String, String)> = keys
+        .iter()
+        .map(|&(field, text)| (field.to_owned(), text.to_owned()))
+        .collect();
+    Ok(format!(
+        "{}.deleteOne({})",
+        collection(table),
+        key_filter(&keys, types)?
+    ))
+}
+
+/// Whether a `$set` can name `field` and reach that field alone: a `.` would
+/// reach into a subdocument, and a leading `$` is an operator.
+pub(crate) fn writable_field(field: &str) -> bool {
+    !field.is_empty() && !field.contains('.') && !field.starts_with('$')
+}
+
+fn unwritable_field(field: &str) -> String {
+    format!(
+        "`{field}` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator."
+    )
+}
+
+fn collection(table: &str) -> String {
+    format!("db.getCollection({})", quoted(table))
+}
+
+/// `{_id: <value>}`, from the key's values as the server sent them.
+fn key_filter(keys: &[(String, String)], types: &[(String, String)]) -> Result<String, String> {
+    if keys.is_empty() {
+        return Err("dbdelve cannot name an edited row by its primary key.".into());
+    }
+    let fields = keys
+        .iter()
+        .map(|(field, text)| {
+            let name = match field == "_id" {
+                true => field.clone(),
+                false => quoted(field),
+            };
+            Ok(format!(
+                "{name}: {}",
+                spelled(&typed(field, text, type_of(types, field))?)
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(format!("{{{}}}", fields.join(", ")))
+}
+
+fn type_of<'a>(types: &'a [(String, String)], field: &str) -> Option<&'a str> {
+    types
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, data_type)| data_type.as_str())
+}
+
+/// The one type a sampled field held, nulls aside (`int | null` is `int`).
+fn sampled_type(data_type: Option<&str>) -> Option<&str> {
+    let mut types = data_type?.split(" | ").filter(|alias| *alias != "null");
+    match (types.next(), types.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+fn typed(field: &str, text: &str, tag: Option<&str>) -> Result<Value, String> {
+    let value = coerce(text, tag).map_err(|message| format!("{field}: {message}"))?;
+    match operator_free(&value) {
+        true => Ok(value),
+        false => Err(format!(
+            "{field}: a field name starting with `$` inside a value is an operator, which DBDelve does not write."
+        )),
+    }
+}
+
+/// The value `text` stands for in a cell whose value was of type `tag`, a
+/// `$type` alias: the type is kept, so `42` in a long field is a long and in
+/// a string field the two characters. A scalar takes its own plain spelling
+/// (`42`, an ISO date, 24 hex digits for an ObjectId) or any literal of its
+/// type; a document, an array and the rest take a literal. A null or a
+/// missing field held no type to keep, so its text is a literal when it reads
+/// as one and a string when it does not.
+pub(crate) fn coerce(text: &str, tag: Option<&str>) -> Result<Value, String> {
+    let tag = tag.unwrap_or("missing");
+    let trimmed = text.trim();
+    let plain = match tag {
+        "null" | "missing" => {
+            return Ok(read_literal(text).unwrap_or_else(|| Value::String(text.to_owned())));
+        }
+        "string" => return Ok(Value::String(text.to_owned())),
+        "int" => trimmed.parse().ok().map(Value::Int32),
+        "long" => trimmed.parse().ok().map(Value::Int64),
+        "double" => trimmed.parse().ok().map(Value::Double),
+        "decimal" => decimal(trimmed.to_owned()).ok(),
+        "bool" => trimmed.parse().ok().map(Value::Bool),
+        "date" => iso_date(trimmed).ok(),
+        "objectId" => object_id(trimmed).ok(),
+        _ => None,
+    };
+    let value = plain.or_else(|| match (tag, read_literal(text)?) {
+        ("long", Value::Int32(n)) => Some(Value::Int64(n.into())),
+        ("double", Value::Int32(n)) => Some(Value::Double(n.into())),
+        (_, value) => Some(value),
+    });
+    match value {
+        Some(value) if alias(&value) == tag => Ok(value),
+        _ => {
+            let shown: String = text.chars().take(40).collect();
+            let more = if shown.len() < text.len() { "…" } else { "" };
+            Err(format!(
+                "`{shown}{more}` does not read as a value of type {tag}."
+            ))
+        }
+    }
+}
+
+/// One literal standing alone, read as a statement's argument is. In
+/// parentheses so a document is not read as a block, and with a newline
+/// before the closing one so a trailing `//` comment cannot swallow it.
+fn read_literal(text: &str) -> Option<Value> {
+    let source = format!("({text}\n)");
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&source, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let [statement] = parts(root)[..] else {
+        return None;
+    };
+    let [group] = parts(statement)[..] else {
+        return None;
+    };
+    let [value] = parts(group)[..] else {
+        return None;
+    };
+    if statement.kind() != "expression_statement" || group.kind() != "parenthesized_expression" {
+        return None;
+    }
+    Walk { source: &source }.value(value).ok()
+}
+
+/// The `$type` alias of a value's type.
+fn alias(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Int32(_) => "int",
+        Value::Int64(_) => "long",
+        Value::Double(_) => "double",
+        Value::Decimal128(_) => "decimal",
+        Value::String(_) => "string",
+        Value::ObjectId(_) => "objectId",
+        Value::Date(_) => "date",
+        Value::Binary { .. } => "binData",
+        Value::Timestamp { .. } => "timestamp",
+        Value::Regex { .. } => "regex",
+        Value::Code(_) => "javascript",
+        Value::MinKey => "minKey",
+        Value::MaxKey => "maxKey",
+        Value::Document(_) => "object",
+        Value::Array(_) => "array",
+    }
+}
+
+/// A value as a statement spells it, in the shell's constructors where a
+/// bare spelling would read back as another type: `NumberLong("5")`, never
+/// `5`, which is an int.
+pub(crate) fn spelled(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int32(n) => n.to_string(),
+        Value::Int64(n) => format!("NumberLong(\"{n}\")"),
+        Value::Double(n) if n.is_finite() && n.fract() != 0.0 => format!("{n:?}"),
+        Value::Double(n) => format!(
+            "Double({})",
+            match n {
+                n if n.is_nan() => "NaN".to_owned(),
+                n if n.is_infinite() && *n > 0.0 => "Infinity".to_owned(),
+                n if n.is_infinite() => "-Infinity".to_owned(),
+                n => format!("{n:?}"),
+            }
+        ),
+        Value::Decimal128(text) => format!("NumberDecimal({})", quoted(text)),
+        Value::String(text) => quoted(text),
+        Value::ObjectId(Some(bytes)) => format!("ObjectId(\"{}\")", hex::encode(bytes)),
+        Value::ObjectId(None) => "ObjectId()".into(),
+        Value::Date(millis) => {
+            const ISO: &[BorrowedFormatItem] = format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            );
+            time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(*millis) * 1_000_000)
+                .ok()
+                .and_then(|at| at.format(ISO).ok())
+                .filter(|iso| iso_millis(iso) == Some((*millis, false)))
+                .map_or_else(
+                    || format!("{{$date: {{$numberLong: \"{millis}\"}}}}"),
+                    |iso| format!("ISODate(\"{iso}\")"),
+                )
+        }
+        Value::Binary { subtype, bytes } => {
+            format!("BinData({subtype}, \"{}\")", STANDARD.encode(bytes))
+        }
+        Value::Timestamp { t, i } => format!("Timestamp({{ t: {t}, i: {i} }})"),
+        Value::Regex { pattern, flags } => {
+            format!("RegExp({}, {})", quoted(pattern), quoted(flags))
+        }
+        Value::Code(code) => format!("Code({})", quoted(code)),
+        Value::MinKey => "MinKey()".into(),
+        Value::MaxKey => "MaxKey()".into(),
+        Value::Document(fields) if fields.is_empty() => "{}".into(),
+        Value::Document(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(key, value)| format!("{}: {}", quoted(key), spelled(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(spelled).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// A JavaScript string literal, which a JSON string always is.
+fn quoted(text: &str) -> String {
+    serde_json::Value::from(text).to_string()
+}
+
+/// No `$`-named field anywhere inside: with the Extended JSON wrappers already
+/// read into the values they wrap, what is left starting with `$` is an
+/// operator, and a literal holds none.
+fn operator_free(value: &Value) -> bool {
+    match value {
+        Value::Document(fields) => fields
+            .iter()
+            .all(|(key, value)| !key.starts_with('$') && operator_free(value)),
+        Value::Array(values) => values.iter().all(operator_free),
+        _ => true,
+    }
+}
+
+/// Whether `text` is a write DBDelve's grid could have generated, read back
+/// out of the parse rather than trusted because `update_batch`, `insert_row`
+/// or `delete_row` wrote it: `sql::is_generated_write` for MongoDB.
+///
+/// Exactly one of three shapes, on a collection of the connected database,
+/// with no options and no cursor:
+///
+/// - one or more `updateOne`s on one collection, each filter exactly
+///   `{_id: <literal>}` and each update exactly `{$set: {…}}` over distinct
+///   plain field names;
+/// - one `insertOne` of a non-empty document;
+/// - one `deleteOne` whose filter is exactly `{_id: <literal>}`.
+///
+/// Every value is a literal with no `$`-named field anywhere inside it, so no
+/// operator -- `$where` included -- can ride in on a value.
+pub(crate) fn is_generated_write(text: &str) -> bool {
+    let Ok(statements) = parse(text) else {
+        return false;
+    };
+    let calls: Option<Vec<(&String, &Call<Method>)>> = statements
+        .iter()
+        .map(|statement| match &statement.target {
+            Target::Collection {
+                database: None,
+                collection,
+                call,
+                cursor,
+            } if cursor.is_empty() => Some((collection, call)),
+            _ => None,
+        })
+        .collect();
+    let Some(calls) = calls else {
+        return false;
+    };
+    let Some((first, _)) = calls.first() else {
+        return false;
+    };
+    if calls.iter().any(|(collection, _)| collection != first) {
+        return false;
+    }
+    match calls.as_slice() {
+        [(_, call)] if call.method == Method::InsertOne => {
+            matches!(arguments(call)[..], [document @ Value::Document(fields)]
+                if !fields.is_empty() && distinct(fields) && operator_free(document))
+        }
+        [(_, call)] if call.method == Method::DeleteOne => {
+            matches!(arguments(call)[..], [filter] if names_by_id(filter))
+        }
+        calls => calls.iter().all(|(_, call)| {
+            call.method == Method::UpdateOne
+                && matches!(arguments(call)[..], [filter, update]
+                    if names_by_id(filter) && sets_only(update))
+        }),
+    }
+}
+
+/// `sql::delete_matches_key` for MongoDB: whether `text` is one `deleteOne`
+/// whose filter names exactly `keys`, as a set. A readout, not a gate.
+pub(crate) fn delete_matches_key(text: &str, keys: &[&str]) -> bool {
+    let Ok(statements) = parse(text) else {
+        return false;
+    };
+    let [
+        Statement {
+            target: Target::Collection { call, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        return false;
+    };
+    let [
+        Arg {
+            value: Value::Document(fields),
+            ..
+        },
+    ] = call.args.as_slice()
+    else {
+        return false;
+    };
+    call.method == Method::DeleteOne
+        && distinct(fields)
+        && fields.len() == keys.len()
+        && fields
+            .iter()
+            .all(|(field, _)| keys.contains(&field.as_str()))
+}
+
+/// `{_id: <value>}` alone, where the value is one an equality finds only
+/// itself by: not a regex, which a filter matches as a pattern; not an array,
+/// which matches its elements; not null, which matches a missing field; not a
+/// fresh `ObjectId()`, which names nothing yet.
+fn names_by_id(filter: &Value) -> bool {
+    let Value::Document(fields) = filter else {
+        return false;
+    };
+    matches!(fields.as_slice(), [(key, value)] if key == "_id"
+        && operator_free(value)
+        && !matches!(value, Value::Regex { .. } | Value::Array(_) | Value::Null | Value::ObjectId(None)))
+}
+
+/// `{$set: {…}}` alone, over at least one field, each named so it reaches
+/// itself alone and not `_id`, and each set to a literal.
+fn sets_only(update: &Value) -> bool {
+    let Value::Document(fields) = update else {
+        return false;
+    };
+    matches!(fields.as_slice(), [(set, Value::Document(sets))] if set == "$set"
+    && !sets.is_empty()
+    && distinct(sets)
+    && sets.iter().all(|(field, value)| {
+        writable_field(field) && field != "_id" && operator_free(value)
+    }))
+}
+
+fn arguments(call: &Call<Method>) -> Vec<&Value> {
+    call.args.iter().map(|arg| &arg.value).collect()
+}
+
+fn distinct(fields: &[(String, Value)]) -> bool {
+    fields
+        .iter()
+        .enumerate()
+        .all(|(at, (key, _))| fields[..at].iter().all(|(other, _)| other != key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2985,5 +3437,361 @@ mod tests {
                 destructive: vec![Destructive::Drop, Destructive::UnfilteredDelete],
             }
         );
+    }
+
+    fn edited(sets: &[(&str, NewValue)], id: &str, types: &[(&str, &str)]) -> PendingRow {
+        PendingRow {
+            schema: "dbdelve_dev".into(),
+            table: "accounts".into(),
+            sets: sets
+                .iter()
+                .map(|(field, value)| (field.to_string(), value.clone()))
+                .collect(),
+            keys: vec![("_id".into(), id.into())],
+            types: types
+                .iter()
+                .map(|(field, alias)| (field.to_string(), alias.to_string()))
+                .collect(),
+        }
+    }
+
+    fn typed_text(text: &str) -> NewValue {
+        NewValue::Value(text.to_owned().into())
+    }
+
+    #[test]
+    fn an_edit_becomes_an_update_by_id_that_sets_each_field_in_its_own_type() {
+        let oid = "65a4f1c0ffffffffffffffff";
+        let rows = [
+            edited(
+                &[
+                    ("name", typed_text("Ada")),
+                    ("seats", typed_text("12")),
+                    ("note", NewValue::Null),
+                ],
+                &format!("ObjectId('{oid}')"),
+                &[("_id", "objectId"), ("name", "string"), ("seats", "long")],
+            ),
+            edited(
+                &[("tags", typed_text("['a', NumberLong(2)]"))],
+                "7",
+                &[("_id", "int"), ("tags", "array")],
+            ),
+        ];
+        let batch = update_batch(&rows).unwrap();
+        assert_eq!(
+            batch,
+            format!(
+                "db.getCollection(\"accounts\").updateOne({{_id: ObjectId(\"{oid}\")}}, \
+                 {{$set: {{\"name\": \"Ada\", \"seats\": NumberLong(\"12\"), \"note\": null}}}});\n\
+                 db.getCollection(\"accounts\").updateOne({{_id: 7}}, \
+                 {{$set: {{\"tags\": [\"a\", NumberLong(\"2\")]}}}});"
+            )
+        );
+        assert!(is_generated_write(&batch), "{batch}");
+        let parsed = parse(&batch).unwrap();
+        let Target::Collection { call, .. } = &parsed[0].target else {
+            panic!()
+        };
+        assert_eq!(
+            call.args[1].value,
+            Value::Document(vec![(
+                "$set".into(),
+                Value::Document(vec![
+                    ("name".into(), Value::String("Ada".into())),
+                    ("seats".into(), Value::Int64(12)),
+                    ("note".into(), Value::Null),
+                ])
+            )])
+        );
+        assert!(update_batch(&[]).is_err());
+    }
+
+    #[test]
+    fn text_that_does_not_read_as_its_cells_type_is_an_error_and_not_a_string() {
+        for (field, alias, text) in [
+            ("seats", "int", "twelve"),
+            ("seats", "int", "3000000000"),
+            ("seats", "long", "1.5"),
+            ("joined", "date", "yesterday"),
+            ("flag", "bool", "yes"),
+            ("doc", "object", "[1]"),
+            ("doc", "object", "{a: "),
+        ] {
+            let row = edited(
+                &[(field, typed_text(text))],
+                "1",
+                &[("_id", "int"), (field, alias)],
+            );
+            let error = update_batch(&[row]).expect_err(text);
+            assert!(error.starts_with(&format!("{field}: ")), "{error}");
+        }
+        let operator = edited(
+            &[("doc", typed_text("{$where: 'sleep(1)'}"))],
+            "1",
+            &[("_id", "int"), ("doc", "object")],
+        );
+        assert!(update_batch(&[operator]).is_err());
+        for field in ["a.b", "$x", ""] {
+            let row = edited(&[(field, typed_text("1"))], "1", &[("_id", "int")]);
+            assert!(update_batch(&[row]).is_err(), "{field}");
+        }
+        let default = edited(&[("a", NewValue::Default)], "1", &[("_id", "int")]);
+        assert!(update_batch(&[default]).is_err());
+    }
+
+    #[test]
+    fn each_type_reads_its_own_spellings_and_keeps_its_type() {
+        let oid = [
+            0x65, 0xa4, 0xf1, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        for (text, alias, value) in [
+            ("42", "string", Value::String("42".into())),
+            (" 42 ", "int", Value::Int32(42)),
+            ("NumberInt(42)", "int", Value::Int32(42)),
+            ("42", "long", Value::Int64(42)),
+            ("9223372036854775807", "long", Value::Int64(i64::MAX)),
+            ("2", "double", Value::Double(2.0)),
+            ("Infinity", "double", Value::Double(f64::INFINITY)),
+            ("42.50", "decimal", Value::Decimal128("42.50".into())),
+            ("false", "bool", Value::Bool(false)),
+            (
+                "2024-01-15T09:30:00.123Z",
+                "date",
+                Value::Date(1_705_311_000_123),
+            ),
+            (
+                "ISODate('2024-01-15')",
+                "date",
+                Value::Date(1_705_276_800_000),
+            ),
+            (
+                "65a4f1c0ffffffffffffffff",
+                "objectId",
+                Value::ObjectId(Some(oid)),
+            ),
+            (
+                "ObjectId('65a4f1c0ffffffffffffffff')",
+                "objectId",
+                Value::ObjectId(Some(oid)),
+            ),
+            (
+                r#"{"n": {"$numberLong": "5"}, "d": {"$numberDouble": "2.0"}}"#,
+                "object",
+                Value::Document(vec![
+                    ("n".into(), Value::Int64(5)),
+                    ("d".into(), Value::Double(2.0)),
+                ]),
+            ),
+            (
+                "[1, 'x']",
+                "array",
+                Value::Array(vec![Value::Int32(1), Value::String("x".into())]),
+            ),
+            (
+                "/a/i",
+                "regex",
+                Value::Regex {
+                    pattern: "a".into(),
+                    flags: "i".into(),
+                },
+            ),
+            (
+                "Timestamp(1, 2)",
+                "timestamp",
+                Value::Timestamp { t: 1, i: 2 },
+            ),
+            ("MinKey()", "minKey", Value::MinKey),
+            // A null or missing field had no type: a literal if it reads as one.
+            ("42", "null", Value::Int32(42)),
+            (
+                "{a: 1}",
+                "missing",
+                Value::Document(vec![("a".into(), Value::Int32(1))]),
+            ),
+            (
+                "plain words",
+                "missing",
+                Value::String("plain words".into()),
+            ),
+            ("", "null", Value::String(String::new())),
+        ] {
+            assert_eq!(coerce(text, Some(alias)), Ok(value), "{text} as {alias}");
+        }
+        assert!(coerce("1.5", Some("int")).is_err());
+        assert!(coerce("ObjectId('nope')", Some("objectId")).is_err());
+        assert!(coerce("'x'", Some("regex")).is_err());
+        assert!(coerce("x", Some("symbol")).is_err());
+        // A literal stands alone: nothing can ride in after it.
+        assert_eq!(
+            coerce("1), db.c.drop(", None),
+            Ok(Value::String("1), db.c.drop(".into()))
+        );
+        assert_eq!(coerce("1 // note", Some("int")), Ok(Value::Int32(1)));
+    }
+
+    #[test]
+    fn every_value_is_spelled_so_it_reads_back_as_itself() {
+        for value in [
+            Value::Null,
+            Value::Bool(true),
+            Value::Int32(-5),
+            Value::Int64(5),
+            Value::Int64(i64::MIN),
+            Value::Double(2.0),
+            Value::Double(-0.0),
+            Value::Double(0.1),
+            Value::Double(1e300),
+            Value::Double(f64::NEG_INFINITY),
+            Value::Decimal128("1.50".into()),
+            Value::String("quote \" and \\ and \u{2028}".into()),
+            Value::ObjectId(Some([1; 12])),
+            Value::Date(1_705_311_000_123),
+            Value::Date(-5_000_000_000_000),
+            Value::Date(i64::MAX / 2),
+            Value::Binary {
+                subtype: 4,
+                bytes: vec![0, 255],
+            },
+            Value::Timestamp { t: 1, i: 2 },
+            Value::Regex {
+                pattern: "a/b\"".into(),
+                flags: "im".into(),
+            },
+            Value::Code("return 'x';".into()),
+            Value::MinKey,
+            Value::MaxKey,
+            Value::Document(Vec::new()),
+            Value::Document(vec![(
+                "we\"ird.key".into(),
+                Value::Array(vec![Value::Int64(1)]),
+            )]),
+        ] {
+            let spelling = spelled(&value);
+            assert_eq!(read_literal(&spelling), Some(value), "{spelling}");
+        }
+        let nan = read_literal(&spelled(&Value::Double(f64::NAN)));
+        assert!(matches!(nan, Some(Value::Double(n)) if n.is_nan()));
+    }
+
+    #[test]
+    fn an_insert_leaves_out_what_the_form_left_empty() {
+        let statement = insert_row(
+            "accounts",
+            &[
+                ("_id", Some("")),
+                ("name", Some("Ada")),
+                ("seats", Some("3")),
+                ("plan", None),
+                ("meta", Some("{tier: 'gold'}")),
+            ],
+            &[
+                ("_id".into(), "objectId".into()),
+                ("name".into(), "string".into()),
+                ("seats".into(), "int | null".into()),
+                ("meta".into(), "object | string".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            statement,
+            r#"db.getCollection("accounts").insertOne({"name": "Ada", "seats": 3, "plan": null, "meta": {"tier": "gold"}})"#
+        );
+        assert!(is_generated_write(&statement), "{statement}");
+        assert!(insert_row("accounts", &[("name", Some(""))], &[]).is_err());
+        assert!(
+            insert_row(
+                "accounts",
+                &[("seats", Some("x"))],
+                &[("seats".into(), "int".into())]
+            )
+            .is_err()
+        );
+        assert!(insert_row("accounts", &[("$where", Some("1"))], &[]).is_err());
+    }
+
+    #[test]
+    fn a_delete_names_one_document_by_its_id() {
+        let statement = delete_row(
+            "we\"ird",
+            &[("_id", "{a: NumberLong(1)}")],
+            &[("_id".into(), "object".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            statement,
+            r#"db.getCollection("we\"ird").deleteOne({_id: {"a": NumberLong("1")}})"#
+        );
+        assert!(is_generated_write(&statement));
+        assert!(delete_matches_key(&statement, &["_id"]));
+        assert!(!delete_matches_key(&statement, &["id"]));
+        assert!(!delete_matches_key(&statement, &["_id", "a"]));
+        assert!(!delete_matches_key("db.c.deleteMany({_id: 1})", &["_id"]));
+        assert!(delete_row("c", &[], &[]).is_err());
+    }
+
+    #[test]
+    fn the_write_gate_admits_the_three_generated_shapes_and_nothing_else() {
+        for admitted in [
+            r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}})"#,
+            r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}}); db.getCollection("c").updateOne({_id: "x"}, {$set: {b: {c: [1]}}});"#,
+            r#"db.c.updateOne({_id: ObjectId('65a4f1c0ffffffffffffffff')}, {$set: {a: null}})"#,
+            r#"db.getCollection("c").insertOne({"a": 1, b: {c: 2}})"#,
+            r#"db.getCollection("c").deleteOne({_id: {a: 1}}) // why"#,
+        ] {
+            assert!(is_generated_write(admitted), "{admitted}");
+        }
+        for refused in [
+            "",
+            "db.c.find({_id: 1})",
+            // An operator smuggled in through a value, at any depth.
+            "db.c.updateOne({_id: 1}, {$set: {a: {$where: 'sleep(1000)'}}})",
+            "db.c.updateOne({_id: 1}, {$set: {a: [{$gt: 1}]}})",
+            "db.c.insertOne({a: {$where: 'x'}})",
+            "db.c.insertOne({$where: 'x'})",
+            "db.c.deleteOne({_id: {$ne: 1}})",
+            "db.c.deleteOne({$where: 'true'})",
+            // The filter has to be exactly `_id`, and a value only it equals.
+            "db.c.deleteOne({_id: 1, a: 2})",
+            "db.c.deleteOne({a: 1})",
+            "db.c.deleteOne({})",
+            "db.c.deleteOne({_id: /./})",
+            "db.c.deleteOne({_id: null})",
+            "db.c.deleteOne({_id: [1]})",
+            "db.c.deleteOne({_id: ObjectId()})",
+            "db.c.updateOne({_id: {$exists: true}}, {$set: {a: 1}})",
+            "db.c.updateOne({a: 1}, {$set: {a: 1}})",
+            // The update has to be exactly a `$set` of plain fields.
+            "db.c.updateOne({_id: 1}, {$unset: {a: ''}})",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}, $inc: {b: 1}})",
+            "db.c.updateOne({_id: 1}, {a: 1})",
+            "db.c.updateOne({_id: 1}, [{$set: {a: 1}}])",
+            "db.c.updateOne({_id: 1}, {$set: {}})",
+            "db.c.updateOne({_id: 1}, {$set: {'a.b': 1}})",
+            "db.c.updateOne({_id: 1}, {$set: {'$x': 1}})",
+            "db.c.updateOne({_id: 1}, {$set: {_id: 2}})",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1, a: 2}})",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}}, {upsert: true})",
+            // Other methods, other collections, other databases, more statements.
+            "db.c.updateMany({_id: 1}, {$set: {a: 1}})",
+            "db.c.replaceOne({_id: 1}, {a: 1})",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.d.updateOne({_id: 1}, {$set: {a: 1}})",
+            "db.getSiblingDB('admin').c.updateOne({_id: 1}, {$set: {a: 1}})",
+            "db.c.insertOne({a: 1}); db.c.insertOne({a: 2})",
+            "db.c.insertOne({})",
+            "db.c.insertOne({a: 1}, {writeConcern: {w: 0}})",
+            "db.c.insertMany([{a: 1}])",
+            "db.c.deleteOne({_id: 1}); db.c.deleteOne({_id: 2})",
+            "db.c.deleteOne({_id: 1}); db.c.drop()",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.drop()",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.deleteOne({_id: 1})",
+            "db.c.drop()",
+            "db.dropDatabase()",
+            "db.runCommand({delete: 'c', deletes: [{q: {}, limit: 0}]})",
+            "show dbs",
+            "db.c.updateOne({_id: 1}, {$set: {a: 1}}) db.c.drop()",
+        ] {
+            assert!(!is_generated_write(refused), "{refused} passed the gate");
+        }
     }
 }

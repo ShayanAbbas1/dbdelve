@@ -429,17 +429,26 @@ pub fn update_row(
 /// exists. So a table without a primary key can be inserted into and not
 /// edited.
 ///
-/// `None` on an empty list. The alternative is `INSERT INTO t DEFAULT VALUES`,
-/// a statement nobody has asked dbdelve for.
+/// An error on an empty list. The alternative is `INSERT INTO t DEFAULT
+/// VALUES`, a statement nobody has asked dbdelve for.
 pub fn insert_row(
     engine: Engine,
     schema: &str,
     table: &str,
     columns: &[(&str, Option<&str>)],
     types: &[(String, String)],
-) -> Option<String> {
+) -> Result<String, String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::insert_row(table, columns, types),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if columns.is_empty() {
-        return None;
+        return Err("There is nothing in this row to insert.".into());
     }
 
     let names: Vec<String> = columns
@@ -458,7 +467,7 @@ pub fn insert_row(
             )
         })
         .collect();
-    Some(format!(
+    Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
         engine.qualified(schema, table),
         names.join(", "),
@@ -483,6 +492,15 @@ pub fn delete_row(
     keys: &[(&str, &str)],
     types: &[(String, String)],
 ) -> Option<String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::delete_row(table, keys, types).ok(),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if keys.is_empty() {
         return None;
     }
@@ -568,6 +586,34 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
         return false;
     };
     columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
+}
+
+/// [`is_generated_write`] for the engine the statement is bound for. A
+/// MongoDB grid writes mongosh statements, so its gate is `mql`'s, which
+/// admits the same three shapes read out of its own parse.
+pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
+    match engine {
+        Engine::MongoDb => crate::mql::is_generated_write(statement),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => is_generated_write(statement),
+    }
+}
+
+/// [`delete_matches_key`] for the engine the statement is bound for.
+pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
+    match engine {
+        Engine::MongoDb => crate::mql::delete_matches_key(statement, keys),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => delete_matches_key(statement, keys),
+    }
 }
 
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
@@ -1365,12 +1411,22 @@ fn repeats(count: u64) -> Result<(), String> {
 /// edit and undo it, because dbdelve does not open a transaction behind anyone's
 /// back.
 ///
-/// `None` when there is nothing to apply, and `None` — rather than a shorter
-/// batch — when any one row cannot be written: a partial apply is not the change
-/// the user made, and dbdelve would have no way to say which part of it ran.
-pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Option<String> {
+/// An error when there is nothing to apply, and an error — rather than a
+/// shorter batch — when any one row cannot be written: a partial apply is not
+/// the change the user made, and dbdelve would have no way to say which part of
+/// it ran.
+pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::update_batch(rows),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if rows.is_empty() {
-        return None;
+        return Err("There are no edits to apply.".into());
     }
 
     fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -1403,9 +1459,11 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Option<String
         })
         .collect();
 
-    let batch = statements?.join("\n");
+    let batch = statements
+        .ok_or("dbdelve cannot name an edited row by its primary key.")?
+        .join("\n");
     let bracket = engine.transaction_start().filter(|_| rows.len() > 1);
-    Some(match bracket {
+    Ok(match bracket {
         Some(start) => format!("{start};\n{batch}\nCOMMIT;"),
         None => batch,
     })
@@ -3127,7 +3185,7 @@ mod tests {
         );
         // An empty form is not `INSERT INTO t DEFAULT VALUES`, which is a
         // statement dbdelve has never been asked for.
-        assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_none());
+        assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_err());
     }
 
     #[test]
@@ -3901,12 +3959,12 @@ mod tests {
             )
             .is_none()
         );
-        assert_eq!(update_batch(Engine::Postgres, &rows), None);
+        assert!(update_batch(Engine::Postgres, &rows).is_err());
     }
 
     #[test]
     fn an_empty_batch_of_rows_has_nothing_to_send() {
-        assert_eq!(update_batch(Engine::Postgres, &[]), None);
+        assert!(update_batch(Engine::Postgres, &[]).is_err());
     }
 
     #[test]

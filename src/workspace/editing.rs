@@ -143,14 +143,17 @@ impl Workspace {
             .map(|(column, value)| (column.as_str(), value.as_deref()))
             .collect();
 
-        let Some(statement) = sql::insert_row(engine, &schema, &table, &borrowed, &types) else {
-            self.note("There is nothing in this row to insert.".into(), cx);
-            return;
+        let statement = match sql::insert_row(engine, &schema, &table, &borrowed, &types) {
+            Ok(statement) => statement,
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
         };
         // The gate every generated statement passes before anything executes
         // (`AGENTS.md` rule 2). Failing it is dbdelve disagreeing with itself --
         // a bug in dbdelve rather than a user error -- so it is said and not run.
-        if !sql::is_generated_write(&statement) {
+        if !sql::is_generated_write_on(engine, &statement) {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not an INSERT.".into(),
                 cx,
@@ -785,7 +788,9 @@ impl Workspace {
         // other set of columns. Failing either is dbdelve disagreeing with itself,
         // a bug in dbdelve rather than a user error, so it is said and not run.
         let columns: Vec<&str> = borrowed.iter().map(|&(column, _)| column).collect();
-        if !sql::is_generated_write(&statement) || !sql::delete_matches_key(&statement, &columns) {
+        if !sql::is_generated_write_on(engine, &statement)
+            || !sql::delete_matches_key_on(engine, &statement, &columns)
+        {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not a DELETE of one row \
                  by its primary key."
@@ -1139,23 +1144,20 @@ impl Workspace {
             return;
         };
         let pending = results.read(cx).delegate().pending_updates();
-        let Some(batch) = update_batch(self.engine(), &pending) else {
-            self.note(
-                match pending.is_empty() {
-                    true => "There are no edits to apply.".into(),
-                    // Nothing partial runs: a batch missing one of its rows is
-                    // not the change the user made.
-                    false => "dbdelve cannot name an edited row by its primary key.".into(),
-                },
-                cx,
-            );
-            return;
+        // Nothing partial runs: a batch missing one of its rows is not the
+        // change the user made.
+        let batch = match update_batch(self.engine(), &pending) {
+            Ok(batch) => batch,
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
         };
         // The gate every generated statement passes before anything executes
         // (`AGENTS.md` rule 2). Failing it means dbdelve wrote something outside
         // the shapes the gate names, which is a bug in dbdelve rather than a user
         // error.
-        if !sql::is_generated_write(&batch) {
+        if !sql::is_generated_write_on(self.engine(), &batch) {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not an UPDATE.".into(),
                 cx,
