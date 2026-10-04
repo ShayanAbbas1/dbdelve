@@ -851,7 +851,12 @@ impl Workspace {
             return;
         };
         let result = grid.result();
-        let text = export::render_rows(Format::Tsv, &result.columns, &result.rows[row..=row]);
+        let text = export::render_rows(
+            Format::Tsv,
+            &result.columns,
+            &result.rows[row..=row],
+            result.cell_types.get(row..=row).unwrap_or_default(),
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 

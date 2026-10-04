@@ -1634,6 +1634,7 @@ fn render_row_inspector(
                                     .text_size(px(layout::TEXT_SM))
                                     .map(|value| match field.value {
                                         Some(text) => value.text_color(t.text).child(text),
+                                        None if field.missing => value,
                                         // Italic so a NULL cannot be read
                                         // as the four-letter string.
                                         None => value

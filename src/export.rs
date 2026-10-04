@@ -9,7 +9,7 @@ use std::{collections::HashSet, path::Path};
 
 use serde::Deserialize;
 
-use crate::db::{Cell, Column, EditTarget, Engine, QueryResult};
+use crate::db::{Cell, Column, EditTarget, Engine, MISSING, QueryResult, Syntax};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -57,6 +57,15 @@ impl RowsAs {
         RowsAs::InsertSql,
     ];
 
+    /// Whether the menu offers this shape for rows read from `engine`. An
+    /// `INSERT` only means something to a server that reads SQL.
+    pub fn offered_on(self, engine: Engine) -> bool {
+        match self {
+            RowsAs::Text | RowsAs::Csv | RowsAs::CsvWithHeader | RowsAs::Json => true,
+            RowsAs::InsertSql => engine.syntax() == Syntax::Sql,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             RowsAs::Text => "Text",
@@ -96,7 +105,7 @@ pub fn render_rows_as(
             let header = render_delimited(',', &result.columns, &[]);
             render_delimited(',', &result.columns, &result.rows)[header.len()..].to_string()
         }
-        RowsAs::Json => render_json(&result.columns, &result.rows),
+        RowsAs::Json => render_json(&result.columns, &result.rows, &result.cell_types),
         RowsAs::InsertSql => {
             let target = edit.map_or_else(
                 || "table_name".to_string(),
@@ -189,16 +198,22 @@ fn is_bare_binary_literal(value: &str) -> bool {
 }
 
 pub fn render(format: Format, result: &QueryResult) -> String {
-    render_rows(format, &result.columns, &result.rows)
+    render_rows(format, &result.columns, &result.rows, &result.cell_types)
 }
 
 /// `render` over some of a result's rows, under all of its columns: a copied
-/// row carries the header an exported file would.
-pub fn render_rows(format: Format, columns: &[Column], rows: &[Vec<Cell>]) -> String {
+/// row carries the header an exported file would. `cell_types` is
+/// [`QueryResult::cell_types`] for those rows.
+pub fn render_rows(
+    format: Format,
+    columns: &[Column],
+    rows: &[Vec<Cell>],
+    cell_types: &[Vec<&str>],
+) -> String {
     match format {
         Format::Csv => render_delimited(',', columns, rows),
         Format::Tsv => render_delimited('\t', columns, rows),
-        Format::Json => render_json(columns, rows),
+        Format::Json => render_json(columns, rows, cell_types),
     }
 }
 
@@ -248,14 +263,22 @@ fn csv_field(delimiter: char, value: &str) -> String {
 /// its `preserve_order` feature — something else in the graph turns that on, and
 /// we do not declare it. `json_key_order_matches_column_order` is what makes
 /// losing it a test failure rather than a silently re-sorted export.
-fn render_json(columns: &[Column], rows: &[Vec<Cell>]) -> String {
+///
+/// A document's missing field is left out of its object rather than written as
+/// the `null` it does not hold.
+fn render_json(columns: &[Column], rows: &[Vec<Cell>], cell_types: &[Vec<&str>]) -> String {
     let keys = json_keys(columns);
 
     let rows = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_ix, row)| {
+            let types = cell_types.get(row_ix);
             let mut object = serde_json::Map::new();
-            for (key, cell) in keys.iter().zip(row) {
+            for (col_ix, (key, cell)) in keys.iter().zip(row).enumerate() {
+                if types.and_then(|types| types.get(col_ix)) == Some(&MISSING) {
+                    continue;
+                }
                 object.insert(key.clone(), serde_json::Value::from(cell.clone()));
             }
             serde_json::Value::Object(object)
@@ -489,6 +512,31 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed[0]["a"], serde_json::Value::Null);
         assert!(!text.contains("\"NULL\""));
+    }
+
+    #[test]
+    fn a_missing_field_is_left_out_of_the_json_and_a_null_is_kept() {
+        let result = QueryResult {
+            columns: vec![column("email"), column("phone")],
+            rows: vec![vec![None, None]],
+            cell_types: vec![vec![MISSING, "null"]],
+            ..QueryResult::default()
+        };
+        let expected = serde_json::json!([{ "phone": null }]);
+        for text in [
+            render(Format::Json, &result),
+            render_rows_as(RowsAs::Json, Engine::MongoDb, None, &result),
+        ] {
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn insert_sql_is_offered_only_where_the_server_reads_sql() {
+        assert!(RowsAs::InsertSql.offered_on(Engine::Postgres));
+        assert!(!RowsAs::InsertSql.offered_on(Engine::MongoDb));
+        assert!(RowsAs::Json.offered_on(Engine::MongoDb));
     }
 
     #[test]

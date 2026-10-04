@@ -678,7 +678,16 @@ impl ResultGrid {
             .enumerate()
             .map(|(col_ix, column)| Field {
                 name: column.name.clone().into(),
-                data_type: column.data_type.clone().map(SharedString::from),
+                // The cell's own type where it has one: the column's is `mixed`
+                // as soon as two documents disagree.
+                data_type: self
+                    .result
+                    .cell_types
+                    .get(row_ix)
+                    .and_then(|types| types.get(col_ix))
+                    .map(|alias| SharedString::new_static(alias))
+                    .or_else(|| column.data_type.clone().map(SharedString::from)),
+                missing: self.missing(row_ix, col_ix),
                 // Reformatted before it is clipped, never after: a document cut
                 // at 4,000 characters does not parse, and the inspector would
                 // fall back to the one long line for exactly the values big
@@ -724,6 +733,10 @@ impl ResultGrid {
             rows: rows
                 .iter()
                 .filter_map(|&row| self.result.rows.get(row).cloned())
+                .collect(),
+            cell_types: rows
+                .iter()
+                .filter_map(|&row| self.result.cell_types.get(row).cloned())
                 .collect(),
             ..QueryResult::default()
         };
@@ -1178,6 +1191,8 @@ pub struct Field {
     /// without running the statement twice.
     pub data_type: Option<SharedString>,
     pub value: Option<SharedString>,
+    /// The row has no such field at all, which is not a NULL.
+    pub missing: bool,
 }
 
 enum Step {
@@ -1552,16 +1567,20 @@ impl TableDelegate for ResultGrid {
         // menu's own context and a delegate is handed the table's. The
         // library wires the parent of a submenu added this way when it paints.
         let focus = self.focus.clone();
+        let engine = self.engine;
         let rows_as = PopupMenu::build(window, cx, move |submenu, _, _| {
-            RowsAs::ALL.into_iter().fold(
-                submenu.when_some(focus.clone(), PopupMenu::action_context),
-                |submenu, kind| {
-                    submenu
-                        .when(kind == RowsAs::Csv, PopupMenu::separator)
-                        .when(kind == RowsAs::Json, PopupMenu::separator)
-                        .menu(kind.label(), Box::new(crate::CopyRows { kind }))
-                },
-            )
+            RowsAs::ALL
+                .into_iter()
+                .filter(|kind| kind.offered_on(engine))
+                .fold(
+                    submenu.when_some(focus.clone(), PopupMenu::action_context),
+                    |submenu, kind| {
+                        submenu
+                            .when(kind == RowsAs::Csv, PopupMenu::separator)
+                            .when(kind == RowsAs::Json, PopupMenu::separator)
+                            .menu(kind.label(), Box::new(crate::CopyRows { kind }))
+                    },
+                )
         });
         // "Copy Row" is redundant beside this once it reads as one row: the
         // submenu's own "Text" entry already puts the same TSV on the
@@ -2301,6 +2320,29 @@ mod tests {
         assert!(!restored.has_pending());
         // The rows the cache holds are the rows the status bar counts.
         assert_eq!(grid.stored().total_rows, 2);
+    }
+
+    #[test]
+    fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![
+                    DbColumn {
+                        name: "email".into(),
+                        data_type: Some("mixed".into()),
+                    },
+                    column("phone"),
+                ],
+                rows: vec![vec![None, None]],
+                cell_types: vec![vec![db::MISSING, "null"]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        let fields = grid.fields(0);
+        assert!(fields[0].missing && !fields[1].missing);
+        assert_eq!(fields[0].data_type.as_deref(), Some(db::MISSING));
+        assert_eq!(fields[1].data_type.as_deref(), Some("null"));
     }
 
     #[test]
