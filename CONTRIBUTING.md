@@ -34,7 +34,7 @@ docker compose up -d
 cargo run
 ```
 
-`docker compose up -d` starts the Postgres, MySQL and MariaDB dev databases (see
+`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server and MongoDB dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
 `dev/ssh/.generated/` (gitignored). With nothing configured, DBDelve opens the
@@ -44,6 +44,7 @@ connection form; the repository-owned databases accept:
 postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
+mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 ```
 
 SQLite has no server to start — build the file once and point the form at its
@@ -77,6 +78,7 @@ export PGUSER=dbdelve
 export PGPASSWORD=dbdelve
 export dbdelve_MYSQL_URL=mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 export dbdelve_MARIADB_URL=mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
+export dbdelve_MONGO_URL=mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 export dbdelve_SQLITE_PATH=$(pwd)/dev/dbdelve_dev.db
 
 cargo test -- --include-ignored
