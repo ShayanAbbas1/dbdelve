@@ -35,6 +35,24 @@ services:
       timeout: 3s
       retries: 30
 
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: dbdelve_dev
+      MARIADB_USER: dbdelve
+      MARIADB_PASSWORD: dbdelve
+      MARIADB_ROOT_PASSWORD: dbdelve
+    ports:
+      - "${DBDELVE_MARIADB_PORT:-53307}:3306"
+    volumes:
+      - dbdelve-mariadb-data:/var/lib/mysql
+      - ./dev/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
     platform: linux/amd64
@@ -88,4 +106,5 @@ services:
 volumes:
   dbdelve-postgres-data:
   dbdelve-mysql-data:
+  dbdelve-mariadb-data:
   dbdelve-mssql-data:

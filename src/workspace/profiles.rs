@@ -95,7 +95,7 @@ impl Workspace {
                 path: stored.path.unwrap_or_default(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
-            Engine::Postgres | Engine::MySql | Engine::SqlServer => {
+            Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::SqlServer => {
                 let server = ServerConfig {
                     host: stored.host,
                     port: stored.port,
@@ -110,6 +110,7 @@ impl Workspace {
                 };
                 match engine {
                     Engine::MySql => ConnectionConfig::MySql(server),
+                    Engine::MariaDb => ConnectionConfig::MariaDb(server),
                     Engine::SqlServer => ConnectionConfig::SqlServer(server),
                     _ => ConnectionConfig::Postgres(server),
                 }
@@ -323,6 +324,7 @@ impl Workspace {
             ],
             ConnectionConfig::Postgres(server)
             | ConnectionConfig::MySql(server)
+            | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server) => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.host, server.host.clone()),

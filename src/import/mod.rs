@@ -11,7 +11,7 @@ mod tableplus;
 use serde::Deserialize;
 
 use crate::{
-    db::{ConnectionConfig, SslMode},
+    db::{ConnectionConfig, Engine, SslMode},
     theme::ConnectionColor,
 };
 
@@ -97,8 +97,14 @@ pub(crate) fn already_have<'a>(
     candidate: &ConnectionConfig,
 ) -> bool {
     let engine = candidate.engine();
+    // A MariaDB connection imported before MariaDB had its own engine was
+    // stored as MySQL, and re-importing it must not add a second copy.
+    let family = |engine: Engine| match engine {
+        Engine::MariaDb => Engine::MySql,
+        other => other,
+    };
     existing.into_iter().any(|config| {
-        config.engine() == engine
+        family(config.engine()) == family(engine)
             && match (config.server(), candidate.server()) {
                 (Some(a), Some(b)) => {
                     a.host.eq_ignore_ascii_case(&b.host)
@@ -183,6 +189,23 @@ mod tests {
             user: user.into(),
             ..ServerConfig::default()
         })
+    }
+
+    #[test]
+    fn already_have_treats_mysql_and_mariadb_as_one_family() {
+        let server = || ServerConfig {
+            host: "h".into(),
+            user: "u".into(),
+            ..ServerConfig::default()
+        };
+        assert!(already_have(
+            &[ConnectionConfig::MySql(server())],
+            &ConnectionConfig::MariaDb(server())
+        ));
+        assert!(!already_have(
+            &[ConnectionConfig::Postgres(server())],
+            &ConnectionConfig::MariaDb(server())
+        ));
     }
 
     #[test]

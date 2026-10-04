@@ -25,7 +25,9 @@ use sqlparser::ast::{
 use sqlparser::dialect::{
     Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::Engine;
@@ -1568,11 +1570,17 @@ impl Verdict {
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     let dialect: Box<dyn Dialect> = match engine {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
-        Engine::MySql => Box::new(MySqlDialect {}),
+        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
         Engine::Sqlite => Box::new(SQLiteDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
     };
+
+    if engine == Engine::MariaDb
+        && let Some(explain) = mariadb_analyze_as_explain(dialect.as_ref(), sql)
+    {
+        return classify(engine, &explain);
+    }
 
     // All or nothing: one statement it cannot read makes the whole submission
     // one it cannot vouch for.
@@ -1596,6 +1604,47 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .iter()
         .map(statement_verdict)
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// MariaDB's `ANALYZE <statement>` respelled as the `EXPLAIN ANALYZE` sqlparser
+/// reads, so it is classified by the statement it runs, as MySQL's is.
+///
+/// Only a statement that opens with a DML keyword qualifies. `ANALYZE TABLE t`
+/// is a write sqlparser already reads, and would turn into an `EXPLAIN` of the
+/// query `TABLE t`; anything else this does not recognise stays unreadable.
+fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    let keyword = |token: Option<&Token>| match token {
+        Some(Token::Word(word)) => Some(word.keyword),
+        _ => None,
+    };
+    if keyword(tokens.next()) != Some(Keyword::ANALYZE) {
+        return None;
+    }
+    if keyword(tokens.peek().copied()) == Some(Keyword::FORMAT) {
+        tokens.next();
+        if tokens.next() != Some(&Token::Eq) || keyword(tokens.next()) != Some(Keyword::JSON) {
+            return None;
+        }
+    }
+    let statement = tokens.next()?;
+    let dml = *statement == Token::LParen
+        || matches!(
+            keyword(Some(statement)),
+            Some(
+                Keyword::SELECT
+                    | Keyword::WITH
+                    | Keyword::INSERT
+                    | Keyword::REPLACE
+                    | Keyword::UPDATE
+                    | Keyword::DELETE
+            )
+        );
+    dml.then(|| format!("EXPLAIN {sql}"))
 }
 
 /// Whether `sql` can run again just to reload the rows it produced. A grid is
@@ -3912,6 +3961,60 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    /// MariaDB's Explain Analyze is `ANALYZE <statement>`, which runs the
+    /// statement just as MySQL's `EXPLAIN ANALYZE` does.
+    #[test]
+    fn classify_reads_mariadb_analyze_by_the_statement_it_runs() {
+        for sql in [
+            "ANALYZE SELECT * FROM t",
+            "  /* why */ analyze\nselect id from accounts where x = 1",
+            "ANALYZE FORMAT=JSON SELECT * FROM t",
+            "ANALYZE WITH x AS (SELECT 1) SELECT * FROM x",
+        ] {
+            assert_eq!(classify(Engine::MariaDb, sql), Verdict::READ, "{sql}");
+            assert!(rerunnable(Engine::MariaDb, sql), "{sql}");
+        }
+
+        assert_eq!(
+            classify(Engine::MariaDb, "ANALYZE DELETE FROM t"),
+            classify(Engine::MySql, "EXPLAIN ANALYZE DELETE FROM t"),
+        );
+        assert_eq!(
+            classify(Engine::MariaDb, "ANALYZE DELETE FROM t"),
+            Verdict::destroys(Destructive::UnfilteredDelete),
+        );
+        for sql in [
+            "ANALYZE UPDATE t SET a = 1 WHERE id = 2",
+            "ANALYZE FORMAT=JSON DELETE FROM t WHERE id = 2",
+            "ANALYZE INSERT INTO t (a) VALUES (1)",
+            "ANALYZE SELECT 1; UPDATE t SET a = 1 WHERE id = 2",
+        ] {
+            assert_eq!(classify(Engine::MariaDb, sql), Verdict::WRITE, "{sql}");
+        }
+
+        // The table-statistics statement, which only an allowlist keeps from
+        // reading as an EXPLAIN of the query `TABLE t`.
+        for sql in [
+            "ANALYZE TABLE t",
+            "ANALYZE NO_WRITE_TO_BINLOG TABLE t",
+            "ANALYZE LOCAL TABLE t",
+            "ANALYZE t",
+            "ANALYZE FORMAT=JSON TABLE t",
+        ] {
+            assert_eq!(
+                classify(Engine::MariaDb, sql),
+                classify(Engine::MySql, sql),
+                "{sql}"
+            );
+            assert!(!rerunnable(Engine::MariaDb, sql), "{sql}");
+        }
+
+        assert_eq!(
+            classify(Engine::MySql, "ANALYZE SELECT * FROM t").destructive,
+            vec![Destructive::Unreadable],
+        );
     }
 
     /// `TO STDOUT` hands rows to the client; a `PROGRAM` or file target runs a

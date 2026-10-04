@@ -323,6 +323,7 @@ impl ConnectionForm {
             }
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
+            Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
         };
@@ -496,6 +497,7 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
     match config {
         ConnectionConfig::Postgres(server)
         | ConnectionConfig::MySql(server)
+        | ConnectionConfig::MariaDb(server)
         | ConnectionConfig::SqlServer(server) => if server.database.is_empty() {
             &server.host
         } else {

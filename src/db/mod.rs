@@ -57,6 +57,7 @@ pub enum Engine {
     #[default]
     Postgres,
     MySql,
+    MariaDb,
     Sqlite,
     Snowflake,
     SqlServer,
@@ -114,9 +115,10 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Postgres,
         Self::MySql,
+        Self::MariaDb,
         Self::Sqlite,
         Self::Snowflake,
         Self::SqlServer,
@@ -126,6 +128,7 @@ impl Engine {
         match self {
             Self::Postgres => "Postgres",
             Self::MySql => "MySQL",
+            Self::MariaDb => "MariaDB",
             Self::Sqlite => "SQLite",
             Self::Snowflake => "Snowflake",
             Self::SqlServer => "SQL Server",
@@ -138,6 +141,7 @@ impl Engine {
         match self {
             Self::Postgres => "postgres",
             Self::MySql => "mysql",
+            Self::MariaDb => "mariadb",
             Self::Sqlite => "sqlite",
             Self::Snowflake => "snowflake",
             Self::SqlServer => "mssql",
@@ -149,7 +153,8 @@ impl Engine {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
             "postgres" | "postgresql" => Ok(Self::Postgres),
-            "mysql" | "mariadb" => Ok(Self::MySql),
+            "mysql" => Ok(Self::MySql),
+            "mariadb" => Ok(Self::MariaDb),
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
             "snowflake" => Ok(Self::Snowflake),
             "mssql" | "sqlserver" => Ok(Self::SqlServer),
@@ -161,7 +166,7 @@ impl Engine {
     pub fn default_port(self) -> Option<u16> {
         match self {
             Self::Postgres => Some(postgres::DEFAULT_PORT),
-            Self::MySql => Some(mysql::DEFAULT_PORT),
+            Self::MySql | Self::MariaDb => Some(mysql::DEFAULT_PORT),
             Self::SqlServer => Some(mssql::DEFAULT_PORT),
             Self::Sqlite | Self::Snowflake => None,
         }
@@ -173,7 +178,7 @@ impl Engine {
     /// password and no transport to choose.
     pub fn fields(self) -> Fields {
         match self {
-            Self::Postgres | Self::MySql | Self::SqlServer => Fields::Server,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer => Fields::Server,
             Self::Sqlite => Fields::File,
             Self::Snowflake => Fields::Account,
         }
@@ -188,14 +193,16 @@ impl Engine {
     /// there is no form that reports what a run actually cost. `None` is what
     /// keeps the menu from offering a mode that would only produce an error.
     ///
-    /// MySQL's `EXPLAIN ANALYZE` arrived in 8.0.18, and MariaDB spells it
-    /// `ANALYZE` with no `EXPLAIN`. Neither is detected: an older server
-    /// refuses the statement and says so, which is the error the user needs and
-    /// is hard rule 6's business rather than a version check's.
+    /// MySQL's `EXPLAIN ANALYZE` arrived in 8.0.18; MariaDB has none and spells
+    /// the same thing `ANALYZE` with no `EXPLAIN`. Server versions are not
+    /// detected: an older server refuses the statement and says so, which is
+    /// the error the user needs and is hard rule 6's business rather than a
+    /// version check's.
     pub fn explain_prefix(self, mode: ExplainMode) -> Option<&'static str> {
         match (self, mode) {
-            (Self::Postgres | Self::MySql, ExplainMode::Plan) => Some("EXPLAIN "),
+            (Self::Postgres | Self::MySql | Self::MariaDb, ExplainMode::Plan) => Some("EXPLAIN "),
             (Self::Postgres | Self::MySql, ExplainMode::Analyze) => Some("EXPLAIN ANALYZE "),
+            (Self::MariaDb, ExplainMode::Analyze) => Some("ANALYZE "),
             (Self::Sqlite, ExplainMode::Plan) => Some("EXPLAIN QUERY PLAN "),
             (Self::Sqlite, ExplainMode::Analyze) => None,
             // Its plan is a fourth shape `explain.rs` does not read yet.
@@ -223,7 +230,7 @@ impl Engine {
         match self {
             // One simple-query submission is already one implicit transaction.
             Self::Postgres => None,
-            Self::MySql => Some("BEGIN"),
+            Self::MySql | Self::MariaDb => Some("BEGIN"),
             Self::Sqlite => Some("BEGIN"),
             // Every statement autocommits unless the submission brackets it.
             Self::Snowflake => Some("BEGIN"),
@@ -242,7 +249,9 @@ impl Engine {
     /// of those inside `src/db/` — the caller asks, and never matches.
     pub fn assigns_default(self) -> bool {
         match self {
-            Self::Postgres | Self::MySql | Self::Snowflake | Self::SqlServer => true,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Snowflake | Self::SqlServer => {
+                true
+            }
             Self::Sqlite => false,
         }
     }
@@ -255,7 +264,7 @@ impl Engine {
     pub fn pages_by_key(self) -> bool {
         match self {
             Self::SqlServer => true,
-            Self::Postgres | Self::MySql | Self::Sqlite | Self::Snowflake => false,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Snowflake => false,
         }
     }
 
@@ -266,7 +275,7 @@ impl Engine {
     pub fn exact_row_estimates(self) -> bool {
         match self {
             Self::Snowflake => true,
-            Self::Postgres | Self::MySql | Self::Sqlite | Self::SqlServer => false,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::SqlServer => false,
         }
     }
 
@@ -276,7 +285,9 @@ impl Engine {
     pub fn count_all(self) -> &'static str {
         match self {
             Self::SqlServer => "COUNT_BIG(*)",
-            Self::Postgres | Self::MySql | Self::Sqlite | Self::Snowflake => "COUNT(*)",
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Snowflake => {
+                "COUNT(*)"
+            }
         }
     }
 
@@ -291,7 +302,10 @@ impl Engine {
     /// Whether one server holds several databases a profile can be moved
     /// between, which [`Connection::databases`] lists.
     pub fn switches_database(self) -> bool {
-        matches!(self, Self::Postgres | Self::MySql | Self::SqlServer)
+        matches!(
+            self,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer
+        )
     }
 
     /// Postgres and SQLite take the standard's double quote. MySQL takes a
@@ -309,7 +323,7 @@ impl Engine {
             // standard quote names an identifier under `QUOTED_IDENTIFIER`,
             // which the driver's login turns on.
             Self::SqlServer => '"',
-            Self::MySql => '`',
+            Self::MySql | Self::MariaDb => '`',
         }
     }
 
@@ -348,7 +362,7 @@ impl Engine {
         match self {
             Self::Postgres | Self::Sqlite => format!("'{}'", value.replace('\'', "''")),
             // Snowflake reads a backslash as an escape too, and unconditionally.
-            Self::MySql | Self::Snowflake => {
+            Self::MySql | Self::MariaDb | Self::Snowflake => {
                 format!("'{}'", value.replace('\\', r"\\").replace('\'', "''"))
             }
             // `N` because a bare literal is converted to the database's code
@@ -620,8 +634,12 @@ pub struct ServerConfig {
     /// - MySQL sets `max_execution_time`, which bounds **read-only `SELECT`s
     ///   only** -- a runaway `UPDATE` or `ALTER` runs to completion and Cancel
     ///   is the only recourse against it. The server has also only had the
-    ///   variable since 5.7.8, and MariaDB spells it differently, so asking for
-    ///   a timeout there fails the connect rather than the statement.
+    ///   variable since 5.7.8, so asking for a timeout on an older one fails the
+    ///   connect rather than the statement.
+    /// - MariaDB sets `max_statement_time`, in seconds, which bounds any
+    ///   statement, as Postgres's does. Before 10.1 the variable does not
+    ///   exist, so asking for a timeout there fails the connect as it does on
+    ///   an old MySQL.
     /// - SQLite has no such setting and gets a wall-clock timer firing
     ///   [`Connection::cancel`]'s interrupt instead, so it counts time a
     ///   statement spent blocked on a lock as readily as time it spent scanning.
@@ -657,6 +675,7 @@ impl ServerConfig {
 pub enum ConnectionConfig {
     Postgres(ServerConfig),
     MySql(ServerConfig),
+    MariaDb(ServerConfig),
     SqlServer(ServerConfig),
     Sqlite {
         path: String,
@@ -670,6 +689,7 @@ impl ConnectionConfig {
         match self {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(_) => Engine::MySql,
+            Self::MariaDb(_) => Engine::MariaDb,
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite { .. } => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
@@ -680,7 +700,10 @@ impl ConnectionConfig {
     /// there is one — the credential fields, and the Keychain.
     pub fn server(&self) -> Option<&ServerConfig> {
         match self {
-            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => Some(server),
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => Some(server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
@@ -689,7 +712,10 @@ impl ConnectionConfig {
     /// reads it from the Keychain, which the profile on disk never holds.
     pub fn server_mut(&mut self) -> Option<&mut ServerConfig> {
         match self {
-            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => Some(server),
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => Some(server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
@@ -713,6 +739,7 @@ impl ConnectionConfig {
         })? {
             Engine::Postgres => postgres::config_from_url(url).map(Self::Postgres),
             Engine::MySql => mysql::config_from_url(url).map(Self::MySql),
+            Engine::MariaDb => server_from_url(url, "MariaDB").map(Self::MariaDb),
             Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
             Engine::Sqlite => sqlite::path_from_url(url).map(|path| Self::Sqlite {
                 path,
@@ -731,9 +758,10 @@ impl ConnectionConfig {
     /// which variant is carrying it.
     pub fn statement_timeout(&self) -> u32 {
         match self {
-            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => {
-                server.statement_timeout
-            }
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => server.statement_timeout,
             Self::Sqlite {
                 statement_timeout, ..
             } => *statement_timeout,
@@ -763,9 +791,10 @@ impl ConnectionConfig {
     /// What was being talked to, for an error or a title to name.
     pub fn endpoint(&self) -> String {
         match self {
-            Self::Postgres(server) | Self::MySql(server) | Self::SqlServer(server) => {
-                server.endpoint()
-            }
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => server.endpoint(),
             Self::Sqlite { path, .. } => path.clone(),
             Self::Snowflake(account) => account.host(),
         }
@@ -777,6 +806,7 @@ impl ConnectionConfig {
 #[derive(Clone)]
 pub enum Connection {
     Postgres(postgres::Connection),
+    /// MariaDB's too: one driver, which holds the engine it was opened for.
     MySql(mysql::Connection),
     SqlServer(mssql::Connection),
     Sqlite(sqlite::Connection),
@@ -789,7 +819,12 @@ impl Connection {
             ConnectionConfig::Postgres(server) => {
                 postgres::Connection::open(&server).map(Self::Postgres)
             }
-            ConnectionConfig::MySql(server) => mysql::Connection::open(&server).map(Self::MySql),
+            ConnectionConfig::MySql(server) => {
+                mysql::Connection::open(&server, Engine::MySql).map(Self::MySql)
+            }
+            ConnectionConfig::MariaDb(server) => {
+                mysql::Connection::open(&server, Engine::MariaDb).map(Self::MySql)
+            }
             ConnectionConfig::SqlServer(server) => {
                 mssql::Connection::open(&server).map(Self::SqlServer)
             }
@@ -954,7 +989,7 @@ impl Connection {
     pub fn set_read_only(&self, read_only: bool) -> Result<(), DbError> {
         let engine = match self {
             Self::Postgres(_) => Engine::Postgres,
-            Self::MySql(_) => Engine::MySql,
+            Self::MySql(connection) => connection.engine(),
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite(_) => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
@@ -1603,8 +1638,8 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
     match (engine, read_only) {
         (Engine::Postgres, true) => Some("SET default_transaction_read_only = on"),
         (Engine::Postgres, false) => Some("SET default_transaction_read_only = off"),
-        (Engine::MySql, true) => Some("SET SESSION TRANSACTION READ ONLY"),
-        (Engine::MySql, false) => Some("SET SESSION TRANSACTION READ WRITE"),
+        (Engine::MySql | Engine::MariaDb, true) => Some("SET SESSION TRANSACTION READ ONLY"),
+        (Engine::MySql | Engine::MariaDb, false) => Some("SET SESSION TRANSACTION READ WRITE"),
         (Engine::Sqlite, _) => None,
         // There is no session to set anything on.
         (Engine::Snowflake, _) => None,
@@ -2019,6 +2054,23 @@ mod tests {
             assert_eq!(Engine::SqlServer.explain_prefix(mode), None);
         }
         assert!(!Engine::SqlServer.holds_read_only());
+    }
+
+    #[test]
+    fn mariadb_is_its_own_engine_and_a_mysql_profile_stays_mysql() {
+        let config = ConnectionConfig::from_url("mariadb://someone@db.example.test/app").unwrap();
+        assert_eq!(config.engine(), Engine::MariaDb);
+        assert_eq!(Engine::parse("mysql"), Ok(Engine::MySql));
+        assert_eq!(
+            Engine::MariaDb.explain_prefix(ExplainMode::Plan),
+            Some("EXPLAIN ")
+        );
+        assert_eq!(
+            Engine::MariaDb.explain_prefix(ExplainMode::Analyze),
+            Some("ANALYZE ")
+        );
+        assert_eq!(Engine::MariaDb.quote_identifier("a`b"), "`a``b`");
+        assert!(Engine::MariaDb.holds_read_only());
     }
 
     #[test]
