@@ -205,7 +205,16 @@ impl SortKey {
 /// The keys of a statement's `ORDER BY`, in order. `Some(empty)` is a statement
 /// that could carry one and does not; `None` is a statement dbdelve cannot read
 /// well enough to say without guessing.
-pub fn order_by(statement: &str) -> Option<Vec<SortKey>> {
+pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::order_by(statement),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let sql = statement;
     let tree = parse(sql)?;
     let anchor = clause_anchor(&tree, sql)?;
@@ -248,7 +257,16 @@ pub fn order_by(statement: &str) -> Option<Vec<SortKey>> {
 /// parse cleanly, one with no `FROM`, or one that is not a query. Nothing is
 /// guessed at, because the alternative is handing the server a statement the
 /// user did not write and cannot read.
-pub fn with_order_by(statement: &str, keys: &[SortKey]) -> Option<String> {
+pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Option<String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::with_order_by(statement, keys),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let sql = statement;
     let tree = parse(sql)?;
     let anchor = clause_anchor(&tree, sql)?;
@@ -2143,6 +2161,7 @@ mod tests {
         // it would sort one arbitrary thousand rows of the table.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 r#"SELECT * FROM "public"."measurements" LIMIT 1000"#,
                 &[SortKey::new(r#""id""#, false)]
             )
@@ -2154,6 +2173,7 @@ mod tests {
     #[test]
     fn a_second_key_joins_the_first() {
         let sorted = with_order_by(
+            Engine::Postgres,
             "SELECT * FROM t",
             &[SortKey::new(r#""a""#, true), SortKey::new("3", false)],
         )
@@ -2161,27 +2181,36 @@ mod tests {
 
         assert_eq!(sorted, r#"SELECT * FROM t ORDER BY "a" ASC, 3 DESC"#);
         assert_eq!(
-            order_by(&sorted).unwrap(),
+            order_by(Engine::Postgres, &sorted).unwrap(),
             vec![SortKey::new(r#""a""#, true), SortKey::new("3", false)]
         );
     }
 
     #[test]
     fn sorting_again_replaces_the_clause_it_wrote() {
-        let once = with_order_by("SELECT * FROM t LIMIT 5", &[SortKey::new("a", true)]).unwrap();
-        let twice = with_order_by(&once, &[SortKey::new("b", false)]).unwrap();
+        let once = with_order_by(
+            Engine::Postgres,
+            "SELECT * FROM t LIMIT 5",
+            &[SortKey::new("a", true)],
+        )
+        .unwrap();
+        let twice = with_order_by(Engine::Postgres, &once, &[SortKey::new("b", false)]).unwrap();
 
         assert_eq!(twice, "SELECT * FROM t ORDER BY b DESC LIMIT 5");
         // And clearing it leaves the statement as it was, not a hole.
         assert_eq!(
-            with_order_by(&twice, &[]).unwrap(),
+            with_order_by(Engine::Postgres, &twice, &[]).unwrap(),
             "SELECT * FROM t LIMIT 5"
         );
     }
 
     #[test]
     fn a_key_the_user_wrote_reads_back_verbatim() {
-        let keys = order_by("SELECT * FROM t ORDER BY lower(name), 2 DESC").unwrap();
+        let keys = order_by(
+            Engine::Postgres,
+            "SELECT * FROM t ORDER BY lower(name), 2 DESC",
+        )
+        .unwrap();
 
         assert_eq!(
             keys,
@@ -2193,6 +2222,7 @@ mod tests {
     fn a_union_sorts_at_the_end_of_the_whole_query() {
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT a FROM t UNION SELECT a FROM u LIMIT 3",
                 &[SortKey::new("a", true)]
             )
@@ -2207,9 +2237,9 @@ mod tests {
         // query's sort would flip a clause the user wrote for another purpose.
         let sql = "SELECT * FROM (SELECT a FROM t ORDER BY a LIMIT 3) s";
 
-        assert_eq!(order_by(sql).unwrap(), vec![]);
+        assert_eq!(order_by(Engine::Postgres, sql).unwrap(), vec![]);
         assert_eq!(
-            with_order_by(sql, &[SortKey::new("a", false)]).unwrap(),
+            with_order_by(Engine::Postgres, sql, &[SortKey::new("a", false)]).unwrap(),
             "SELECT * FROM (SELECT a FROM t ORDER BY a LIMIT 3) s ORDER BY a DESC"
         );
     }
@@ -2223,8 +2253,14 @@ mod tests {
             "SELECT * FROM t FOR UPDATE",
             "SELECT * FROM t OFFSET 10 LIMIT 5",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} should not be sortable");
-            assert!(with_order_by(sql, &[]).is_none(), "{sql} was spliced");
+            assert!(
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} should not be sortable"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[]).is_none(),
+                "{sql} was spliced"
+            );
         }
     }
 
@@ -2237,7 +2273,10 @@ mod tests {
             "BEGIN; SELECT 1; COMMIT",
             "-- nothing here",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} should not be sortable");
+            assert!(
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} should not be sortable"
+            );
         }
     }
 
@@ -2256,9 +2295,12 @@ mod tests {
             // readout looks most convincingly like a sortable grid.
             "EXPLAIN ANALYZE SELECT * FROM t ORDER BY a",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} reported a sort");
             assert!(
-                with_order_by(sql, &[SortKey::new("a", true)]).is_none(),
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} reported a sort"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[SortKey::new("a", true)]).is_none(),
                 "{sql} was spliced"
             );
         }
@@ -2811,9 +2853,12 @@ mod tests {
             "TRUNCATE t",
             "INSERT INTO t (a) VALUES (1) RETURNING *",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} reported a sort");
             assert!(
-                with_order_by(sql, &[SortKey::new("a", true)]).is_none(),
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} reported a sort"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[SortKey::new("a", true)]).is_none(),
                 "{sql} was spliced"
             );
         }
@@ -2826,6 +2871,7 @@ mod tests {
         // what the statement means or how it reads.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT * FROM t WHERE note LIKE 'a  %' LIMIT 10",
                 &[SortKey::new("id", true)]
             )
@@ -2834,6 +2880,7 @@ mod tests {
         );
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 r#"SELECT * FROM "public"."my  table""#,
                 &[SortKey::new("id", true)]
             )
@@ -2842,6 +2889,7 @@ mod tests {
         );
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT *\nFROM t\nWHERE a = 1\n  AND b = 2",
                 &[SortKey::new("id", true)]
             )
@@ -3228,6 +3276,7 @@ mod tests {
         // the cte. The select-child guard must not read the cte's own.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "WITH x AS (SELECT 1 AS a) SELECT * FROM x",
                 &[SortKey::new("a", true)]
             )
@@ -3638,6 +3687,7 @@ mod tests {
             )
         );
         let sorted = with_order_by(
+            Engine::SqlServer,
             "SELECT * FROM \"dbo\".\"accounts\" WHERE \"name\" LIKE N'%a[%]%' LIMIT 10 OFFSET 20",
             &[SortKey::new("\"id\"", false)],
         )
@@ -3666,14 +3716,30 @@ mod tests {
     #[test]
     fn an_unpaged_preview_reads_back_the_sort_it_runs_with() {
         let unsorted = "SELECT * FROM \"dbo\".\"accounts\" LIMIT 1000 OFFSET 0";
-        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", false)]).unwrap();
+        let sorted = with_order_by(
+            Engine::SqlServer,
+            unsorted,
+            &[SortKey::new("\"id\"", false)],
+        )
+        .unwrap();
         for statement in [unsorted, sorted.as_str()] {
             let paged = paged(Engine::SqlServer, statement, &[]).unwrap();
-            assert_eq!(order_by(&paged), None, "the grammar cannot read {paged}");
-            assert_eq!(order_by(&unpaged(&paged)), order_by(statement), "{paged}");
+            assert_eq!(
+                order_by(Engine::SqlServer, &paged),
+                None,
+                "the grammar cannot read {paged}"
+            );
+            assert_eq!(
+                order_by(Engine::SqlServer, &unpaged(&paged)),
+                order_by(Engine::SqlServer, statement),
+                "{paged}"
+            );
         }
         assert_eq!(
-            order_by(&unpaged(&paged(Engine::SqlServer, &sorted, &[]).unwrap())),
+            order_by(
+                Engine::SqlServer,
+                &unpaged(&paged(Engine::SqlServer, &sorted, &[]).unwrap())
+            ),
             Some(vec![SortKey::new("\"id\"", false)])
         );
         // Not `paged`'s shape: left alone.
@@ -3693,16 +3759,21 @@ mod tests {
         );
         // Read back as the unsorted preview it is, not as a sort on the key.
         assert_eq!(unpaged(&page), unsorted);
-        assert_eq!(order_by(&unpaged(&page)), Some(Vec::new()));
+        assert_eq!(
+            order_by(Engine::SqlServer, &unpaged(&page)),
+            Some(Vec::new())
+        );
 
         // A sort the user asked for is the order, key or no key.
-        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", true)]).unwrap();
+        let sorted =
+            with_order_by(Engine::SqlServer, unsorted, &[SortKey::new("\"id\"", true)]).unwrap();
         assert_eq!(
             paged(Engine::SqlServer, &sorted, &key),
             paged(Engine::SqlServer, &sorted, &[])
         );
         // One inside a filter's string is the user's text, not paged's marker.
         let quoted = with_order_by(
+            Engine::SqlServer,
             "SELECT * FROM t WHERE a = ' ORDER BY (SELECT NULL)' LIMIT 5 OFFSET 0",
             &[SortKey::new("a", false)],
         )

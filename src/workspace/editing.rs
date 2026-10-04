@@ -409,16 +409,22 @@ impl Workspace {
         };
         let statement = &text[range.clone()];
 
-        let Some(mut keys) = sql::order_by(statement) else {
+        let Some(mut keys) = sql::order_by(engine, statement) else {
             self.note(
-                "dbdelve cannot add an ORDER BY to this statement without rewriting it.".into(),
+                format!(
+                    "dbdelve cannot add {} to this statement without rewriting it.",
+                    engine.sort_clause()
+                ),
                 cx,
             );
             return;
         };
         cycle(&mut keys, &expression);
-        let Some(sorted) = sql::with_order_by(statement, &keys) else {
-            self.note("This statement cannot carry an ORDER BY.".into(), cx);
+        let Some(sorted) = sql::with_order_by(engine, statement, &keys) else {
+            self.note(
+                format!("This statement cannot carry {}.", engine.sort_clause()),
+                cx,
+            );
             return;
         };
 

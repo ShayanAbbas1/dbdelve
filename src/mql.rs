@@ -26,6 +26,8 @@ use tree_sitter::{Node, Parser, Point, Tree};
 
 use crate::sql::{Destructive, Mode, Verdict};
 
+pub(crate) mod browse;
+
 /// One statement of a buffer, as DBDelve reads it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Statement {

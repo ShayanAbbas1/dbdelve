@@ -1329,8 +1329,8 @@ impl Workspace {
         // grammar cannot read; its sort is read from the spelling it was
         // generated in. A buffer's statement is read as typed.
         let keys = match tab {
-            Tab::Object(_) => sql::order_by(&sql::unpaged(&sql)),
-            Tab::Query(_) => sql::order_by(&sql),
+            Tab::Object(_) => sql::order_by(engine, &sql::unpaged(&sql)),
+            Tab::Query(_) => sql::order_by(engine, &sql),
         };
         let sortable = keys.is_some();
         let keys = keys.unwrap_or_default();

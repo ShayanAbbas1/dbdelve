@@ -666,7 +666,7 @@ pub(crate) fn relation_sql(
     offset: usize,
 ) -> String {
     let preview = preview_sql(engine, schema, relation, filter, limit, offset);
-    sql::with_order_by(&preview, sort).unwrap_or(preview)
+    sql::with_order_by(engine, &preview, sort).unwrap_or(preview)
 }
 
 /// How a column is named in an `ORDER BY`.
@@ -680,6 +680,16 @@ pub(crate) fn sort_expression(
     column: usize,
 ) -> Option<String> {
     let name = &columns.get(column)?.name;
+    match engine {
+        // A document's fields are unique, and a position names nothing there.
+        Engine::MongoDb => return crate::mql::browse::sort_field(name),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let unique = columns.iter().filter(|other| &other.name == name).count() == 1;
 
     Some(match unique && !name.is_empty() {
@@ -1763,7 +1773,7 @@ mod tests {
             r#"SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 100 OFFSET 200"#
         );
         assert_eq!(
-            sql::order_by(&paged),
+            sql::order_by(Engine::Postgres, &paged),
             Some(vec![SortKey::new(r#""id""#, true)])
         );
     }
@@ -1789,7 +1799,7 @@ mod tests {
         // And the sort is still readable back off the statement, which is what
         // lights the headers up on a page that is not the first.
         assert_eq!(
-            sql::order_by(&filtered),
+            sql::order_by(Engine::Postgres, &filtered),
             Some(vec![SortKey::new(r#""id""#, true)])
         );
     }
@@ -1814,7 +1824,7 @@ mod tests {
         assert_eq!(
             sort_columns(
                 Engine::Postgres,
-                &sql::order_by(&sorted).unwrap(),
+                &sql::order_by(Engine::Postgres, &sorted).unwrap(),
                 &columns(&["id", "email"])
             ),
             vec![(0, false)]

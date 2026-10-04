@@ -546,6 +546,19 @@ impl Engine {
             || (self == Self::MongoDb && name == "bindata")
     }
 
+    /// What a header click adds to a statement, as a notice names it.
+    pub fn sort_clause(self) -> &'static str {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => "an ORDER BY",
+            Self::MongoDb => "a sort",
+        }
+    }
+
     pub fn qualified(self, schema: &str, name: &str) -> String {
         format!(
             "{}.{}",
