@@ -657,6 +657,20 @@ impl<'s> Walk<'s> {
         &self.source[node.byte_range()]
     }
 
+    /// An identifier as written. JavaScript reads `\u0024out` as `$out`,
+    /// so a name spelled with an escape is refused rather than taken as its
+    /// raw text: the name checked has to be the name the server is sent.
+    fn name(&self, node: Node) -> Result<&'s str, ParseError> {
+        let text = self.text(node);
+        match text.contains('\\') {
+            true => Err(error(
+                node.start_byte(),
+                format!("`{text}` spells a name with an escape, which DBDelve does not read"),
+            )),
+            false => Ok(text),
+        }
+    }
+
     fn unsupported(&self, node: Node, what: &str) -> ParseError {
         error(
             node.start_byte(),
@@ -675,7 +689,7 @@ impl<'s> Walk<'s> {
     /// `node` flattened into the `db` it starts from and the steps after it.
     fn links(&self, node: Node<'s>, out: &mut Vec<Link<'s>>) -> Result<(), ParseError> {
         match node.kind() {
-            "identifier" if self.text(node) == "db" => Ok(()),
+            "identifier" if self.name(node)? == "db" => Ok(()),
             "identifier" => Err(error(
                 node.start_byte(),
                 format!(
@@ -695,7 +709,7 @@ impl<'s> Walk<'s> {
                     return Err(self.unsupported(property, "a name"));
                 }
                 out.push(Link::Member {
-                    name: self.text(property),
+                    name: self.name(property)?,
                     dot: dot.start_byte(),
                     at: property.start_byte(),
                 });
@@ -927,7 +941,7 @@ impl<'s> Walk<'s> {
                     Some(arguments) => self.args(arguments)?,
                     None => Vec::new(),
                 };
-                constructor_value(self.text(constructor), args, at, true)
+                constructor_value(self.name(constructor)?, args, at, true)
             }
             "call_expression" => {
                 let function = self.field(node, "function")?;
@@ -935,7 +949,7 @@ impl<'s> Walk<'s> {
                 if function.kind() != "identifier" || arguments.kind() != "arguments" {
                     return Err(self.unsupported(node, "a literal"));
                 }
-                constructor_value(self.text(function), self.args(arguments)?, at, false)
+                constructor_value(self.name(function)?, self.args(arguments)?, at, false)
             }
             _ => Err(self.unsupported(node, "a literal")),
         }
@@ -978,7 +992,7 @@ impl<'s> Walk<'s> {
             }
             let key = self.field(pair, "key")?;
             let key = match key.kind() {
-                "property_identifier" => self.text(key).to_owned(),
+                "property_identifier" => self.name(key)?.to_owned(),
                 "string" => self.string(key)?,
                 _ => return Err(self.unsupported(key, "a field name")),
             };
@@ -1880,6 +1894,30 @@ mod tests {
             fails(text);
         }
         assert_eq!(value("`plain`"), Value::String("plain".into()));
+    }
+
+    #[test]
+    fn a_name_spelled_with_an_escape_is_refused() {
+        let u = |hex: &str| format!("\\u{hex}");
+        for text in [
+            format!("db.c.aggregate([{{{}out: 'd'}}])", u("0024")),
+            format!("db.c.dr{}p()", u("006f")),
+            format!("db.{}.find()", u("0063")),
+            format!("{}b.c.find()", u("0064")),
+            format!("db.c.insertOne({{a: ObjectI{}()}})", u("0064")),
+            format!("db.c.insertOne({{a: new Dat{}(0)}})", u("0065")),
+        ] {
+            assert!(
+                fails(&text)
+                    .message
+                    .contains("spells a name with an escape"),
+                "{text}"
+            );
+            assert_eq!(classify(&text), unreadable(), "{text}");
+        }
+        // A quoted key's escapes are a string's, and decode as JavaScript's do.
+        let quoted = format!("db.c.aggregate([{{'{}out': 'd'}}])", u("0024"));
+        assert_eq!(classify(&quoted), Verdict::WRITE);
     }
 
     #[test]
