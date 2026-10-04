@@ -2016,8 +2016,9 @@ pub(crate) fn delete_row(
     ))
 }
 
-/// Whether a `$set` can name `field` and reach that field alone: a `.` would
-/// reach into a subdocument, and a leading `$` is an operator.
+/// Whether a `$set`, a generated filter or a sort can name `field` and reach
+/// that field alone: a `.` would reach into a subdocument, and a leading `$`
+/// is an operator. An empty name is refused with them rather than sent.
 pub(crate) fn writable_field(field: &str) -> bool {
     !field.is_empty() && !field.contains('.') && !field.starts_with('$')
 }

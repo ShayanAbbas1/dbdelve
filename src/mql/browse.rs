@@ -9,27 +9,17 @@
 
 use std::ops::Range;
 
-use super::{Call, CursorMethod, Method, Statement, Target, Value, classify, integer, parse};
+use super::{
+    Call, CursorMethod, Method, Statement, Target, Value, classify, integer, parse, quoted,
+    writable_field,
+};
 use crate::filter::{Conjunction, Operator};
 use crate::sql::{SortKey, Verdict};
-
-/// A JavaScript string literal, which a JSON string always is.
-fn quoted(text: &str) -> String {
-    serde_json::Value::from(text).to_string()
-}
-
-/// Whether a field can be named in a generated filter or sort. A `.` names a
-/// path into a subdocument there and a leading `$` an operator, so a top-level
-/// field spelled with either cannot be named at all; an empty name is refused
-/// with them rather than sent.
-fn nameable(field: &str) -> bool {
-    !field.is_empty() && !field.contains('.') && !field.starts_with('$')
-}
 
 /// How a header click names a field in a sort: `filter::sort_expression`'s
 /// Mongo arm. `None` for a field a sort document cannot name.
 pub(crate) fn sort_field(field: &str) -> Option<String> {
-    nameable(field).then(|| quoted(field))
+    writable_field(field).then(|| quoted(field))
 }
 
 /// A sort document's keys, or `None` for one that is not a plain list of
@@ -484,7 +474,7 @@ pub(crate) fn filter_predicate(
     operator: Operator,
     value: &str,
 ) -> Option<String> {
-    if !nameable(field) {
+    if !writable_field(field) {
         return None;
     }
     let literal = |value: &str| literal(data_type, value);
