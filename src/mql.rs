@@ -1538,19 +1538,16 @@ fn collection_verdict(call: &Call<Method>) -> Verdict {
         | Method::DeleteOne
         | Method::FindOneAndUpdate
         | Method::FindOneAndReplace
+        | Method::FindOneAndDelete
+        | Method::UpdateMany
+        | Method::ReplaceOne
         | Method::CreateIndex
         | Method::CreateIndexes => Verdict::WRITE,
-        // `updateMany({})` and `replaceOne({})` share the kind SQL's
-        // unqualified DELETE has: every document, or an arbitrary one,
-        // overwritten with no condition naming it.
-        Method::DeleteMany | Method::FindOneAndDelete | Method::UpdateMany | Method::ReplaceOne
-            if unfiltered =>
-        {
-            Verdict::destroys(Destructive::UnfilteredDelete)
-        }
-        Method::DeleteMany | Method::FindOneAndDelete | Method::UpdateMany | Method::ReplaceOne => {
-            Verdict::WRITE
-        }
+        // The exact counterpart of SQL's DELETE without WHERE, and the only
+        // one: an unqualified UPDATE is a plain write there, so `updateMany({})`
+        // is one here, and `findOneAndDelete({})` removes a single document.
+        Method::DeleteMany if unfiltered => Verdict::destroys(Destructive::UnfilteredDelete),
+        Method::DeleteMany => Verdict::WRITE,
         Method::Drop | Method::DropIndex | Method::DropIndexes => {
             Verdict::destroys(Destructive::Drop)
         }
@@ -2393,6 +2390,9 @@ mod tests {
             "db.c.findOneAndUpdate({}, {$set: {a: 1}})",
             "db.c.findOneAndReplace({}, {a: 1})",
             "db.c.findOneAndDelete({a: 1})",
+            "db.c.findOneAndDelete({})",
+            "db.c.updateMany({}, {$set: {a: 1}})",
+            "db.c.replaceOne({}, {a: 1})",
             "db.c.createIndex({a: 1})",
             "db.c.createIndexes([{a: 1}])",
             "db.c.renameCollection('d')",
@@ -2426,16 +2426,14 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_filter_on_a_many_document_write_is_destructive() {
+    fn a_delete_many_without_a_filter_is_destructive() {
         for text in [
             "db.c.deleteMany({})",
             "db.c.deleteMany({ /* everything */ })",
             "db.c.deleteMany({}, {w: 1})",
             "db.c.deleteMany(null)",
             "db.c.deleteMany([])",
-            "db.c.findOneAndDelete({})",
-            "db.c.updateMany({}, {$set: {a: 1}})",
-            "db.c.replaceOne({}, {a: 1})",
+            "db.c.deleteMany('')",
         ] {
             assert_eq!(
                 classify(text),
