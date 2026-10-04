@@ -1568,6 +1568,20 @@ impl Verdict {
     }
 }
 
+/// Whether `sql` can be put in an Explain mode, and why not when it cannot.
+pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
+    match engine {
+        Engine::MongoDb => crate::mql::explainable(sql),
+        // The server refuses what it cannot explain, and says so.
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => Ok(()),
+    }
+}
+
 /// The lowest mode that may run `sql`, and what makes it dangerous if anything
 /// does.
 ///

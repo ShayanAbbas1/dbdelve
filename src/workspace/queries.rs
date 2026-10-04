@@ -645,10 +645,14 @@ impl Workspace {
             Some(Err(message)) => return failure(self, &message, cx),
             None => return failure(self, "There is no statement to explain.", cx),
         };
+        if let Err(message) = sql::explainable(engine, &sql) {
+            return failure(self, &message, cx);
+        }
         self.sent_from(tab, start, &sql);
 
+        let suffix = engine.explain_suffix(action.mode);
         self.execute_and_then(
-            format!("{prefix}{sql}"),
+            format!("{prefix}{sql}{suffix}"),
             tab,
             None,
             false,
@@ -1339,7 +1343,9 @@ impl Workspace {
         // the prefix dbdelve put in front of it.
         let explained = explain.map(|mode| {
             let prefix = engine.explain_prefix(mode).unwrap_or_default();
-            sql.strip_prefix(prefix).unwrap_or(&sql).to_string()
+            let suffix = engine.explain_suffix(mode);
+            let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
+            bare.strip_suffix(suffix).unwrap_or(bare).to_string()
         });
         if let Tab::Query(query) = tab
             && let Some(tab) = self

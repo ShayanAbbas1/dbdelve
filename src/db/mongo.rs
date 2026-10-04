@@ -796,6 +796,9 @@ impl Connection {
                 pipeline.push(doc! { "$group": { "_id": 1, "n": { "$sum": 1 } } });
                 let mut sent = doc! { "aggregate": collection, "pipeline": pipeline, "cursor": {} };
                 sent.extend(options);
+                if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
+                    return explained(run, &database, sent, verbosity);
+                }
                 let counted = fetch(run, &database, sent)?;
                 let n = counted
                     .first()
@@ -818,6 +821,9 @@ impl Connection {
                     sent.insert("query", query);
                 }
                 sent.extend(args.document(2)?.unwrap_or_default());
+                if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
+                    return explained(run, &database, sent, verbosity);
+                }
                 let values = command(run, &database, sent)?
                     .get_array("values")
                     .cloned()

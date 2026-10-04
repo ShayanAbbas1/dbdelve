@@ -234,6 +234,15 @@ impl Method {
     fn returns_cursor(self) -> bool {
         matches!(self, Method::Find | Method::Aggregate)
     }
+
+    /// `countDocuments` and `distinct` return no cursor, but a plan is asked
+    /// for with the same `.explain(verbosity)` on the end.
+    fn takes_explain(self) -> bool {
+        matches!(
+            self,
+            Method::Find | Method::Aggregate | Method::CountDocuments | Method::Distinct
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -887,7 +896,7 @@ impl<'s> Walk<'s> {
         let mut cursor: Vec<Call<CursorMethod>> = Vec::new();
         while links.peek().is_some() {
             let (link, dot, at) = self.member(&mut links, end, "a cursor method")?;
-            if !method.returns_cursor() {
+            if !method.returns_cursor() && !(method.takes_explain() && link == "explain") {
                 return Err(error(
                     dot,
                     format!("`{name}` returns no cursor, so nothing can be chained after it"),
@@ -1616,6 +1625,60 @@ pub(crate) fn classify(text: &str) -> Verdict {
             Some(verdict.max(statement_verdict(&statement.target)?))
         })
         .unwrap_or(unreadable)
+}
+
+/// Whether `text` is a statement `.explain(verbosity)` can be put on the end
+/// of, and why not when it is not. Only a lone read is: Analyze runs what it
+/// explains, so a statement that writes, or that cannot be read whole, is
+/// refused here for both modes rather than trusted to the server's `explain`.
+pub(crate) fn explainable(text: &str) -> Result<(), String> {
+    let refusal = "Explain takes one find, aggregate, countDocuments or distinct statement.";
+    let statements = parse(text).map_err(|error| error.message)?;
+    let [
+        Statement {
+            span,
+            target: Target::Collection { call, cursor, .. },
+        },
+    ] = statements.as_slice()
+    else {
+        return Err(refusal.into());
+    };
+    // A `;` or a comment after the statement would take the suffix with it.
+    if span.end != text.trim_end().len() {
+        return Err(refusal.into());
+    }
+    match call.method {
+        Method::Find | Method::Aggregate | Method::CountDocuments | Method::Distinct => {}
+        Method::FindOne
+        | Method::EstimatedDocumentCount
+        | Method::GetIndexes
+        | Method::InsertOne
+        | Method::InsertMany
+        | Method::UpdateOne
+        | Method::UpdateMany
+        | Method::ReplaceOne
+        | Method::DeleteOne
+        | Method::DeleteMany
+        | Method::FindOneAndUpdate
+        | Method::FindOneAndReplace
+        | Method::FindOneAndDelete
+        | Method::CreateIndex
+        | Method::CreateIndexes
+        | Method::DropIndex
+        | Method::DropIndexes
+        | Method::Drop
+        | Method::RenameCollection => return Err(refusal.into()),
+    }
+    if cursor
+        .iter()
+        .any(|call| call.method == CursorMethod::Explain)
+    {
+        return Err("The statement already asks for a plan.".into());
+    }
+    if classify(text) != Verdict::READ {
+        return Err("Only a statement that reads can be explained.".into());
+    }
+    Ok(())
 }
 
 /// `None` for a statement whose effect cannot be read off it: a command not
@@ -2642,6 +2705,47 @@ mod tests {
 
     fn destroys(kind: Destructive) -> Verdict {
         Verdict::destroys(kind)
+    }
+
+    #[test]
+    fn explain_is_for_a_lone_read_with_nothing_after_it() {
+        for text in [
+            "db.c.find({a: 1}).sort({b: 1})",
+            "db.c.aggregate([{$match: {}}])  ",
+            "db.c.countDocuments({a: 1})",
+            "db.c.distinct('a')\n",
+        ] {
+            assert_eq!(explainable(text), Ok(()), "{text}");
+        }
+        for text in [
+            "",
+            "db.c.insertOne({})",
+            "db.c.updateMany({}, {$set: {a: 1}})",
+            "db.c.deleteMany({})",
+            "db.c.drop()",
+            "db.c.findOne()",
+            "db.c.aggregate([{$out: 'd'}])",
+            "db.c.aggregate([{$merge: 'd'}])",
+            "db.runCommand({find: 'c'})",
+            "show dbs",
+            "db.c.find().explain()",
+            "db.c.find();",
+            "db.c.find() // note",
+            "db.c.find(); db.c.find()",
+            "db.c.find({",
+        ] {
+            assert!(explainable(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn count_and_distinct_take_only_explain_after_them() {
+        one("db.c.countDocuments({a: 1}).explain('queryPlanner')");
+        one("db.c.distinct('a').explain('executionStats')");
+        assert_eq!(
+            fails("db.c.distinct('a').limit(1)").message,
+            "`distinct` returns no cursor, so nothing can be chained after it"
+        );
     }
 
     #[test]

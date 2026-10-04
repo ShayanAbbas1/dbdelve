@@ -251,9 +251,28 @@ impl Engine {
             // Explain would mean changing the session around the user's
             // statement rather than putting a word on a copy of it.
             (Self::SqlServer, _) => None,
-            // A plan there is `.explain()` on the statement's own cursor, not a
-            // prefix.
-            (Self::MongoDb, _) => None,
+            // A plan there is `.explain()` on the end of the statement, which
+            // is `explain_suffix`; nothing goes in front.
+            (Self::MongoDb, _) => Some(""),
+        }
+    }
+
+    /// What goes after the statement to put it in `mode`: nothing on the SQL
+    /// engines, whose whole difference is the prefix, and the cursor's own
+    /// `.explain(verbosity)` on MongoDB.
+    pub fn explain_suffix(self, mode: ExplainMode) -> &'static str {
+        match (self, mode) {
+            (Self::MongoDb, ExplainMode::Plan) => r#".explain("queryPlanner")"#,
+            (Self::MongoDb, ExplainMode::Analyze) => r#".explain("executionStats")"#,
+            (
+                Self::Postgres
+                | Self::MySql
+                | Self::MariaDb
+                | Self::Sqlite
+                | Self::Snowflake
+                | Self::SqlServer,
+                ExplainMode::Plan | ExplainMode::Analyze,
+            ) => "",
         }
     }
 
@@ -2216,6 +2235,22 @@ mod tests {
         );
         assert_eq!(Engine::MariaDb.quote_identifier("a`b"), "`a``b`");
         assert!(Engine::MariaDb.holds_read_only());
+    }
+
+    #[test]
+    fn mongodb_explains_by_suffix_and_the_sql_engines_by_prefix() {
+        for mode in ExplainMode::ALL {
+            assert_eq!(Engine::MongoDb.explain_prefix(mode), Some(""));
+            assert_eq!(Engine::Postgres.explain_suffix(mode), "");
+        }
+        assert_eq!(
+            Engine::MongoDb.explain_suffix(ExplainMode::Plan),
+            r#".explain("queryPlanner")"#
+        );
+        assert_eq!(
+            Engine::MongoDb.explain_suffix(ExplainMode::Analyze),
+            r#".explain("executionStats")"#
+        );
     }
 
     #[test]
