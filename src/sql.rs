@@ -2118,7 +2118,7 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
         .map(Stop::Confirm)
 }
 
-/// `sql` laid out over several lines: the same tokens, indented. `None` when
+/// `sql` laid out over several lines: the same tokens, indented. Refused when
 /// the buffer holds a dollar-quoted body, which this cannot reflow safely.
 ///
 /// Token-level reformatting rather than a round trip through the `sqlparser`
@@ -2141,20 +2141,28 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // ponytail: `FormatOptions`' `dialect` is Generic except on SQL Server, where
 // Generic splits `[my col]` into `[ my col ]`, another name. Postgres's dialect
 // is the upgrade path if its output ever looks wrong there.
-pub(crate) fn format(engine: Engine, sql: &str) -> Option<String> {
+///
+/// Err is the refusal, said to the user as it stands. A MongoDB buffer is not
+/// SQL, and sqlformat over it splits regexes and turns comment text into code,
+/// so `mql::format` lays it out instead.
+pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
+    let dialect = match engine {
+        Engine::MongoDb => return crate::mql::format(sql),
+        Engine::SqlServer => sqlformat::Dialect::SQLServer,
+        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
+            sqlformat::Dialect::Generic
+        }
+    };
     if has_dollar_quote(sql) {
-        return None;
+        return Err("Not formatting: a dollar-quoted body would be rewritten.");
     }
     let options = sqlformat::FormatOptions {
-        dialect: match engine {
-            Engine::SqlServer => sqlformat::Dialect::SQLServer,
-            _ => sqlformat::Dialect::Generic,
-        },
+        dialect,
         ..sqlformat::FormatOptions::default()
     };
     let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
     if engine != Engine::SqlServer {
-        return Some(reflow(sql));
+        return Ok(reflow(sql));
     }
     // A `GO` line is not T-SQL, and reflowed with its batch `GO 5` becomes a
     // `GO` and a stray `5` on the next line: a count the refusal no longer
@@ -2172,7 +2180,7 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Option<String> {
         start = line.end;
     }
     formatted += reflow(&sql[start..]).trim();
-    Some(formatted)
+    Ok(formatted)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -4603,18 +4611,15 @@ mod tests {
     // hard rule 1; this is the test that catches the day that stops being true.
     #[test]
     fn a_buffer_holding_a_dollar_quoted_body_is_refused() {
-        assert_eq!(
-            format(Engine::Postgres, "DO $$ BEGIN DELETE FROM t; END $$"),
-            None
-        );
-        assert_eq!(format(Engine::Postgres, "select $tag$ x; y $tag$"), None);
+        assert!(format(Engine::Postgres, "DO $$ BEGIN DELETE FROM t; END $$").is_err());
+        assert!(format(Engine::Postgres, "select $tag$ x; y $tag$").is_err());
     }
 
     // A placeholder is not a quote, and reading it as one would refuse to format
     // every parameterised statement anybody writes.
     #[test]
     fn a_numbered_placeholder_still_formats() {
-        assert!(format(Engine::Postgres, "select a from t where id = $1").is_some());
+        assert!(format(Engine::Postgres, "select a from t where id = $1").is_ok());
     }
 
     #[test]

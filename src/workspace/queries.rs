@@ -1608,12 +1608,12 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let Some(formatted) = crate::sql::format(self.engine(), &text) else {
-            self.note(
-                "Not formatting: a dollar-quoted body would be rewritten.".into(),
-                cx,
-            );
-            return;
+        let formatted = match crate::sql::format(self.engine(), &text) {
+            Ok(formatted) => formatted,
+            Err(refusal) => {
+                self.note(refusal.into(), cx);
+                return;
+            }
         };
         if formatted == text {
             return;
@@ -1623,7 +1623,7 @@ impl Workspace {
         // not on the token it was on -- a reflow moves every offset, and the
         // statement is the unit the user was working in. Map the token too if
         // the jump ever reads as losing your place.
-        let buffer = Buffer::parse(&text);
+        let buffer = Buffer::for_engine(self.engine(), &text);
         let was_in = buffer
             .statement_at(cursor)
             .and_then(|range| {
@@ -1633,7 +1633,7 @@ impl Workspace {
                     .position(|r| r.start == range.start)
             })
             .and_then(|index| {
-                Buffer::parse(&formatted)
+                Buffer::for_engine(self.engine(), &formatted)
                     .statements()
                     .get(index)
                     .map(|r| r.start)

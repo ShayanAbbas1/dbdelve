@@ -35,7 +35,9 @@ require it, stop and raise it instead.
    - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
      statement, never into the buffer.
    - **Format Query** rewrites the buffer on command only, through
-     `sqlformat`'s token-level reformatter. Never an AST round-trip: that
+     `sqlformat`'s token-level reformatter (on MongoDB, `mql::format`'s
+     bracket-depth layout over the tree-sitter tokens, refused unless the
+     result reads back as the same statements). Never an AST round-trip: that
      regenerates the statement and drops every comment the user wrote.
 
    Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`,

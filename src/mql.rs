@@ -2317,6 +2317,297 @@ fn distinct(fields: &[(String, Value)]) -> bool {
         .all(|(at, (key, _))| fields[..at].iter().all(|(other, _)| other != key))
 }
 
+/// `text` laid out over lines and indented by bracket depth: the same tokens
+/// and every comment, with only the whitespace between them changed.
+///
+/// Token-level, as `sql::format` is through sqlformat, and for the same reason:
+/// regenerating a statement from what it parsed to drops the comments and
+/// respells the literals. A JavaScript formatter crate would be that
+/// regeneration (dprint's and Biome's both reprint a syntax tree, and bring a
+/// second parser with them), so the layout here walks the tree-sitter tokens
+/// this module already reads statements with.
+///
+/// Refused, never guessed, when a statement does not read, and when the layout
+/// would read back as anything else: a line break is a statement boundary in
+/// this language, so the result is parsed again and must say exactly what the
+/// buffer said. Text between statements -- comments, blank lines, the `;`s --
+/// is kept as written, and so is a `show` line.
+//
+// ponytail: a chain outside every bracket keeps the line breaks it was written
+// with, however long its line runs. Breaking before each `.sort(…)` past the
+// width is the upgrade if long one-line chains turn out to be common.
+pub(crate) fn format(text: &str) -> Result<String, &'static str> {
+    const UNREADABLE: &str = "Not formatting: a statement in the buffer does not parse.";
+    let statements = parse(text).map_err(|_| UNREADABLE)?;
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|_| UNREADABLE)?;
+
+    let mut formatted = String::with_capacity(text.len());
+    let mut written = 0;
+    for statement in &statements {
+        let span = statement.span.clone();
+        formatted += &text[written..span.start];
+        let source = &text[span.clone()];
+        match (&statement.target, parser.parse(source, None)) {
+            (Target::Show(_), _) | (_, None) => formatted += source,
+            (_, Some(tree)) if tree.root_node().has_error() => formatted += source,
+            (_, Some(tree)) => {
+                let line = text[..span.start].rfind('\n').map_or(0, |at| at + 1);
+                let indent = &text[line..span.start];
+                let indent = &indent[..indent.len() - indent.trim_start_matches([' ', '\t']).len()];
+                formatted += &lay_out(source, &tree, indent);
+            }
+        }
+        written = span.end;
+    }
+    formatted += &text[written..];
+
+    let reread = parse(&formatted).map_err(|_| UNREADABLE)?;
+    let same = reread.len() == statements.len()
+        && reread
+            .iter()
+            .zip(&statements)
+            .all(|(after, before)| unspanned(&after.target) == unspanned(&before.target));
+    match same {
+        true => Ok(formatted),
+        false => Err("Not formatting: the new layout would read as different statements."),
+    }
+}
+
+/// How wide a bracket may stand on one line before its items go one per line.
+const FORMAT_WIDTH: usize = 80;
+const FORMAT_INDENT: usize = 2;
+
+struct Token<'s> {
+    text: &'s str,
+    /// The source between the previous token and this one.
+    gap: &'s str,
+}
+
+impl Token<'_> {
+    fn is(&self, text: &str) -> bool {
+        self.text == text
+    }
+
+    fn opens(&self) -> bool {
+        matches!(self.text, "(" | "[" | "{")
+    }
+
+    fn closes(&self) -> bool {
+        matches!(self.text, ")" | "]" | "}")
+    }
+
+    fn is_line_comment(&self) -> bool {
+        self.text.starts_with("//")
+    }
+
+    fn is_comment(&self) -> bool {
+        self.text.starts_with("//") || self.text.starts_with("/*")
+    }
+}
+
+/// The statement's tokens: the grammar's leaves, with a string, regex or
+/// comment held whole however the grammar divides it inside.
+fn tokens<'s>(source: &'s str, tree: &Tree) -> Vec<Token<'s>> {
+    fn collect(node: Node, out: &mut Vec<Range<usize>>) {
+        let whole = matches!(
+            node.kind(),
+            "string" | "template_string" | "regex" | "comment"
+        );
+        if whole || node.child_count() == 0 {
+            if !node.byte_range().is_empty() {
+                out.push(node.byte_range());
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect(child, out);
+        }
+    }
+    let mut ranges = Vec::new();
+    collect(tree.root_node(), &mut ranges);
+    let mut end = 0;
+    ranges
+        .into_iter()
+        .map(|range| {
+            let token = Token {
+                text: &source[range.clone()],
+                gap: &source[end..range.start],
+            };
+            end = range.end;
+            token
+        })
+        .collect()
+}
+
+/// What stands between two tokens on one line. Whitespace is only ever
+/// dropped beside punctuation; anywhere else the source's choice stands, so
+/// two tokens it kept apart are never run together.
+fn spacing(prev: &Token, next: &Token) -> &'static str {
+    let tight = matches!(next.text, "," | ":" | ";" | ")" | "]" | ".")
+        || matches!(prev.text, "(" | "[" | ".");
+    if tight || (prev.is("{") && next.is("}")) {
+        ""
+    } else if prev.is("{") || next.is("}") || matches!(prev.text, "," | ":") {
+        " "
+    } else if next.is("(") || next.gap.is_empty() {
+        ""
+    } else {
+        " "
+    }
+}
+
+struct Frame {
+    broken: bool,
+    /// The indent of the line the bracket opened on, which its closer returns to.
+    outer: usize,
+}
+
+/// One statement laid out, its continuation lines under `indent`.
+fn lay_out(source: &str, tree: &Tree, indent: &str) -> String {
+    let tokens = tokens(source, tree);
+    let mut closer = vec![0; tokens.len()];
+    let mut open = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        if token.opens() {
+            open.push(at);
+        } else if token.closes()
+            && let Some(opener) = open.pop()
+        {
+            closer[opener] = at;
+        }
+    }
+    let flat = |from: usize, to: usize| {
+        (from..=to)
+            .map(|at| {
+                let before = match at {
+                    0 => "",
+                    _ if at == from => "",
+                    _ => spacing(&tokens[at - 1], &tokens[at]),
+                };
+                before.len() + tokens[at].text.chars().count()
+            })
+            .sum::<usize>()
+    };
+
+    let mut out = String::new();
+    let mut column = indent.chars().count();
+    let mut line_indent = 0;
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut pending = false;
+    for (at, token) in tokens.iter().enumerate() {
+        let inner = frames
+            .iter()
+            .rev()
+            .find(|frame| frame.broken)
+            .map_or(FORMAT_INDENT, |frame| frame.outer + FORMAT_INDENT);
+        let break_to = if token.closes() {
+            frames
+                .last()
+                .filter(|frame| frame.broken)
+                .map(|frame| frame.outer)
+        } else {
+            let on_new_line = at > 0 && token.gap.contains('\n');
+            // A comment trailing an item stays on the item's line.
+            let trails = token.is_comment() && !on_new_line;
+            // Outside every bracket a line break is the user's, and keeping
+            // one is what keeps `.sort(…)` continuing the statement above.
+            let kept = on_new_line && (token.is_comment() || frames.is_empty());
+            ((pending && !trails) || kept).then_some(inner)
+        };
+        match break_to {
+            Some(level) => {
+                out.push('\n');
+                out += indent;
+                out += &" ".repeat(level);
+                column = indent.chars().count() + level;
+                line_indent = level;
+                pending = false;
+            }
+            None if at > 0 => {
+                let space = spacing(&tokens[at - 1], token);
+                out += space;
+                column += space.len();
+            }
+            None => {}
+        }
+        let opened_at = column;
+        out += token.text;
+        column = match token.text.rfind('\n') {
+            Some(newline) => token.text[newline + 1..].chars().count(),
+            None => column + token.text.chars().count(),
+        };
+
+        if token.opens() {
+            let close = closer[at];
+            let hugs = close > at + 2 && tokens[at + 1].opens() && closer[at + 1] == close - 1;
+            let forced = tokens[at + 1..close].iter().any(Token::is_line_comment)
+                || tokens[at + 1..=close]
+                    .iter()
+                    .any(|token| token.gap.contains('\n') || token.text.contains('\n'));
+            let broken =
+                close > at + 1 && !hugs && (forced || opened_at + flat(at, close) > FORMAT_WIDTH);
+            frames.push(Frame {
+                broken,
+                outer: line_indent,
+            });
+            pending |= broken;
+        } else if token.closes() {
+            frames.pop();
+        } else if token.is(",") && frames.last().is_some_and(|frame| frame.broken) {
+            pending = true;
+        }
+        if token.is_line_comment() {
+            pending = true;
+        }
+    }
+    out
+}
+
+/// A statement's reading with every span dropped, so two layouts of it compare
+/// equal.
+fn unspanned(target: &Target) -> Target {
+    fn call<M: Copy>(call: &Call<M>) -> Call<M> {
+        Call {
+            method: call.method,
+            args: call
+                .args
+                .iter()
+                .map(|arg| Arg {
+                    value: arg.value.clone(),
+                    span: 0..0,
+                    items: Vec::new(),
+                })
+                .collect(),
+            span: 0..0,
+        }
+    }
+    match target {
+        Target::Show(show) => Target::Show(*show),
+        Target::Database {
+            database,
+            call: db_call,
+        } => Target::Database {
+            database: database.clone(),
+            call: call(db_call),
+        },
+        Target::Collection {
+            database,
+            collection,
+            call: method,
+            cursor,
+        } => Target::Collection {
+            database: database.clone(),
+            collection: collection.clone(),
+            call: call(method),
+            cursor: cursor.iter().map(call).collect(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3793,5 +4084,84 @@ mod tests {
         ] {
             assert!(!is_generated_write(refused), "{refused} passed the gate");
         }
+    }
+
+    /// Format Query's answer for `text`, checked to read back as the same
+    /// statements and to be its own answer.
+    fn formatted(text: &str) -> String {
+        let format = |text: &str| crate::sql::format(crate::db::Engine::MongoDb, text);
+        let once = format(text).unwrap_or_else(|refusal| panic!("{text}: {refusal}"));
+        assert_eq!(classify(&once), classify(text), "{once}");
+        assert_eq!(statements(&once).len(), statements(text).len(), "{once}");
+        assert_eq!(
+            format(&once).as_deref(),
+            Ok(once.as_str()),
+            "not idempotent"
+        );
+        once
+    }
+
+    #[test]
+    fn a_regex_comes_through_formatting_as_written() {
+        // sqlformat made this `/ John Smith /`: another pattern.
+        let once = formatted("db.users.find({name: /John  Smith/i})");
+        assert_eq!(once, "db.users.find({ name: /John  Smith/i })");
+    }
+
+    #[test]
+    fn a_comment_never_becomes_code_when_formatted() {
+        // sqlformat broke both of these onto lines where the comment's text
+        // ran: a live `db.c.drop()`, and a statement made of a note.
+        let trailing = "db.c.find({}) // ; db.c.drop()";
+        assert_eq!(formatted(trailing), trailing);
+        let leading = "// note: drop later\ndb.c.find({})";
+        assert_eq!(formatted(leading), leading);
+    }
+
+    #[test]
+    fn a_long_statement_goes_one_item_per_line() {
+        let once = formatted(
+            r#"db.orders.aggregate([{$match:{status:"A"}},{$group:{_id:"$cust_id",total:{$sum:"$amount"}}},{$sort:{total:-1}}])"#,
+        );
+        assert_eq!(
+            once,
+            "db.orders.aggregate([\n  { $match: { status: \"A\" } },\n  \
+             { $group: { _id: \"$cust_id\", total: { $sum: \"$amount\" } } },\n  \
+             { $sort: { total: -1 } }\n])"
+        );
+        let once = formatted(
+            "db.c.updateOne({ _id: 1 }, { $set: { name: 'x', tags: ['a', 'b', 'c'], nested: { deep: true } } })",
+        );
+        assert_eq!(
+            once,
+            "db.c.updateOne(\n  { _id: 1 },\n  \
+             { $set: { name: 'x', tags: ['a', 'b', 'c'], nested: { deep: true } } }\n)"
+        );
+    }
+
+    #[test]
+    fn formatting_keeps_every_comment_and_whatever_stands_between_statements() {
+        let text = "db.c.find({\n  a: 1, // the a\n      /* b */ b: 2,\n})\n.sort({ a: -1 })\n\n\
+                    show dbs\n  db.c.insertOne({x: new Date(\"2024-01-01T00:00:00Z\")});db.c.countDocuments()";
+        assert_eq!(
+            formatted(text),
+            "db.c.find({\n  a: 1, // the a\n  /* b */ b: 2,\n})\n  .sort({ a: -1 })\n\n\
+             show dbs\n  db.c.insertOne({ x: new Date(\"2024-01-01T00:00:00Z\") });db.c.countDocuments()"
+        );
+    }
+
+    #[test]
+    fn a_half_typed_buffer_is_refused_rather_than_formatted() {
+        let format = |text: &str| crate::sql::format(crate::db::Engine::MongoDb, text);
+        for text in [
+            "db.c.find({a:",
+            "db.c.find({}).sort(",
+            "db.c.insertOne({a: 1}",
+        ] {
+            let refusal = format(text).expect_err(text);
+            assert!(!refusal.contains("dollar"), "{refusal}");
+        }
+        // Valid JavaScript, but not a statement DBDelve reads.
+        assert!(format("db.c.find().count()").is_err());
     }
 }
