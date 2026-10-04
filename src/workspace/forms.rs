@@ -1620,8 +1620,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// No project, then each project, as groups at most one of which is
-    /// expanded, holding `members`. The group of the connection in front is
+    /// No project, then each project, as groups any of which may be
+    /// expanded, each holding its `members`. The group of the connection in front is
     /// marked, but looking inside another switches nothing. With no projects
     /// there is nothing to group, and the members are listed bare.
     fn render_project_groups(

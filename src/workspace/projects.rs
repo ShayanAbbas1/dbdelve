@@ -85,16 +85,24 @@ impl Workspace {
         cx.notify();
     }
 
-    fn name_taken(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
-        let taken = self.projects.iter().any(|project| project.name == name);
-        if taken {
-            self.note(format!("A project named {name} already exists."), cx);
-        }
-        taken
+    /// Whether `name` cannot be given to a project, saying why when it
+    /// cannot. `keeping` is the project's current name on a rename, which it
+    /// may keep.
+    fn name_refused(&mut self, name: &str, keeping: Option<&str>, cx: &mut Context<Self>) -> bool {
+        let message = if name.is_empty() {
+            "A project needs a name.".to_string()
+        } else if Some(name) != keeping && self.projects.iter().any(|project| project.name == name)
+        {
+            format!("A project named {name} already exists.")
+        } else {
+            return false;
+        };
+        self.note(message, cx);
+        true
     }
 
     fn rename_project(&mut self, old: &str, name: String, cx: &mut Context<Self>) {
-        if name.is_empty() || (name != old && self.name_taken(&name, cx)) {
+        if self.name_refused(&name, Some(old), cx) {
             return;
         }
         for expanded in self.expanded_groups.iter_mut().flatten() {
@@ -111,7 +119,7 @@ impl Workspace {
     }
 
     fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
-        if name.is_empty() || self.name_taken(&name, cx) {
+        if self.name_refused(&name, None, cx) {
             return;
         }
         self.drop_project_name();
@@ -147,6 +155,8 @@ impl Workspace {
         }
         self.pending_project_deletion = None;
         self.projects.retain(|project| project.name != name);
+        self.expanded_groups
+            .retain(|expanded| expanded.as_deref() != Some(name));
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -174,20 +184,27 @@ impl Workspace {
     }
 }
 
-/// Projects as read from disk, held to what the switcher assumes: every id
-/// names a live connection, and each connection is in one project at most,
-/// the first that lists it. A hand-edited file, or one an earlier build wrote,
-/// can break either, and a stale id would quietly claim the next connection
-/// given the same name.
+/// Projects as read from disk, held to what the switcher assumes: names are
+/// unique, every id names a live connection, and each connection is in one
+/// project at most, the first that lists it. A hand-edited file, or one an
+/// earlier build wrote, can break any of them, and a stale id would quietly
+/// claim the next connection given the same name.
 pub(crate) fn normalized_projects(
     mut projects: Vec<store::StoredProject>,
     live: &[&str],
 ) -> Vec<store::StoredProject> {
     let mut seen = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
     for project in &mut projects {
         project
             .connections
             .retain(|id| live.contains(&id.as_str()) && seen.insert(id.clone()));
+        let base = project.name.clone();
+        let mut suffix = 2;
+        while !names.insert(project.name.clone()) {
+            project.name = format!("{base} {suffix}");
+            suffix += 1;
+        }
     }
     projects
 }
@@ -201,6 +218,23 @@ mod tests {
             name: name.into(),
             connections: connections.iter().map(|id| id.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn a_loaded_project_with_a_taken_name_is_renamed_rather_than_merged() {
+        let projects = normalized_projects(
+            vec![
+                project("Billing", &[]),
+                project("Billing", &[]),
+                project("Billing 2", &[]),
+            ],
+            &[],
+        );
+        let names = projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Billing", "Billing 2", "Billing 2 2"]);
     }
 
     #[test]
