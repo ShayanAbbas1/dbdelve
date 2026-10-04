@@ -1512,8 +1512,9 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             continue;
         }
         let grid = tab.results.read(cx).delegate().stored();
-        // A statement that returned no columns produced no grid to keep --
-        // which is every `UPDATE` and `DELETE` the buffer has run.
+        // A statement that returned no columns produced no grid to keep. A
+        // write can still return one (`RETURNING`, or any MongoDB reply), so a
+        // restored grid's `last_query` is not safe to re-run as it stands.
         if grid.columns.is_empty() {
             continue;
         }

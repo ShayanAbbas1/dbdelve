@@ -4144,6 +4144,28 @@ mod tests {
         }
     }
 
+    /// Every MongoDB write returns a reply grid, so a restored one is offered
+    /// Refresh only when this holds.
+    #[test]
+    fn a_mongo_write_is_never_rerun_to_reload_its_reply() {
+        for sql in [
+            "db.accounts.find({})",
+            "db.accounts.aggregate([{$match: {}}])",
+        ] {
+            assert!(rerunnable(Engine::MongoDb, sql), "{sql}");
+        }
+        for sql in [
+            "db.accounts.insertOne({a: 1})",
+            "db.accounts.updateOne({_id: 1}, {$set: {a: 2}})",
+            "db.accounts.deleteOne({_id: 1})",
+            "db.accounts.findOneAndUpdate({_id: 1}, {$set: {a: 2}})",
+            "db.accounts.aggregate([{$out: 'copy'}])",
+            "db.accounts.find({}",
+        ] {
+            assert!(!rerunnable(Engine::MongoDb, sql), "{sql}");
+        }
+    }
+
     #[test]
     fn classify_sees_through_data_modifying_ctes() {
         let delete = "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x";

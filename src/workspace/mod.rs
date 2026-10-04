@@ -828,12 +828,15 @@ impl Render for Workspace {
         let stale_buffer =
             snapshot_age.is_some() && matches!(profile.session.active, Tab::Query(_));
         // Only with the statement to show: a snapshot older than `last_query`
-        // would have the prompt's Refresh run whatever the cursor is on.
+        // would have the prompt's Refresh run whatever the cursor is on. And
+        // only a read, since a write restored from the last session would
+        // write again.
         let refreshable_snapshot = stale_buffer
-            && profile
-                .session
-                .active_query_tab()
-                .is_some_and(|tab| tab.last_query.is_some());
+            && profile.session.active_query_tab().is_some_and(|tab| {
+                tab.last_query
+                    .as_deref()
+                    .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
+            });
         let paging = views::render_paging(profile, cx);
         let relation = profile
             .session

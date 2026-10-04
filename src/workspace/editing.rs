@@ -651,6 +651,11 @@ impl Workspace {
             Some((tab.id, tab.last_query.clone()?))
         });
         match rerun {
+            Some((_, statement)) if !sql::rerunnable(self.engine(), &statement) => self.note(
+                "These rows came from a statement that writes, and refreshing would run it again."
+                    .into(),
+                cx,
+            ),
             Some((id, select)) => self.execute_sql(select, Tab::Query(id), cx),
             None => self.run_query(&RunQuery, window, cx),
         }
