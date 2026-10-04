@@ -150,6 +150,8 @@ actions!(
         DeleteRow,
         ApplyEdits,
         DiscardEdits,
+        NextEdit,
+        PreviousEdit,
         FuzzyOpen,
         CommandPalette,
         PaletteNext,

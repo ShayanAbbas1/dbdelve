@@ -1289,6 +1289,33 @@ impl Workspace {
         }
         cx.notify();
     }
+
+    /// Ring the next pending edit, so a batch can be read over before it is
+    /// applied.
+    pub(crate) fn next_edit(&mut self, _: &NextEdit, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_pending_edit(false, window, cx);
+    }
+
+    pub(crate) fn previous_edit(
+        &mut self,
+        _: &PreviousEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_pending_edit(true, window, cx);
+    }
+
+    fn step_pending_edit(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results().cloned())
+        else {
+            return;
+        };
+        results.update(cx, |table, cx| {
+            result_grid::step_pending(table, back, window, cx)
+        });
+    }
 }
 
 /// What a typed page names, counted from zero the way an offset is. Pages are

@@ -103,6 +103,8 @@ pub enum Command {
     DeleteRow,
     ApplyEdits,
     DiscardEdits,
+    NextEdit,
+    PreviousEdit,
     /// The format here only picks the extension the save dialog suggests. What
     /// the file is written as is read back off the path the user confirmed, so
     /// these two rows are one code path — see `export::Format::for_path`.
@@ -719,6 +721,18 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "",
             icon::DELETE,
             Command::DiscardEdits,
+        ));
+        items.push(Item::command(
+            "Next edit",
+            "",
+            icon::CHEVRON_RIGHT,
+            Command::NextEdit,
+        ));
+        items.push(Item::command(
+            "Previous edit",
+            "",
+            icon::CHEVRON_LEFT,
+            Command::PreviousEdit,
         ));
     }
 

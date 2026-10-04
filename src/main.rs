@@ -53,12 +53,13 @@ use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
     CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
     FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewQuery, NewRow,
-    NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
-    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetFilterColumn, SetFilterOperator,
-    SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor, ShowReferences, SortColumn,
-    ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext,
+    PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
+    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
+    ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
+    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor,
+    ShowReferences, SortColumn, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel, ToggleSidebar,
+    ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

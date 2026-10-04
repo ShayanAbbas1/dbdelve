@@ -1040,6 +1040,32 @@ impl ResultGrid {
         !self.pending.is_empty()
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The pending cell after the ring in reading order (before it, when
+    /// `back`), wrapping at either end. Reading order rather than edit order:
+    /// the walk should move through the grid the way the eye does.
+    fn pending_beside(&self, back: bool) -> Option<(usize, usize)> {
+        let mut cells: Vec<_> = self
+            .pending
+            .iter()
+            .map(|edit| (edit.row, edit.col))
+            .collect();
+        cells.sort_unstable();
+        let found = self.active.and_then(|here| match back {
+            false => cells.iter().find(|&&cell| cell > here),
+            true => cells.iter().rev().find(|&&cell| cell < here),
+        });
+        found
+            .or(match back {
+                false => cells.first(),
+                true => cells.last(),
+            })
+            .copied()
+    }
+
     /// Back to exactly what the server returned.
     pub fn discard_pending(&mut self) {
         self.pending.clear();
@@ -1251,6 +1277,29 @@ fn commit_and_step(
         Step::Rows(_) => table.set_selected_row(to.0, cx),
         Step::Cols(_) => table.set_selected_col(to.1 + GUTTER, cx),
     }
+}
+
+/// Move the ring to the next pending edit (the previous one when `back`) and
+/// scroll it into view. The row goes through `set_selected_row`, whose echo
+/// lands in `select_row` keeping the column set here, so the row selection
+/// follows the ring the way an arrow key would leave it.
+///
+/// The grid takes focus because the button clicked to get here does not: an
+/// input open on another cell closes with the move and takes focus with it,
+/// and `Enter` on the new ring would otherwise reach nothing, or the buffer.
+pub(crate) fn step_pending(
+    table: &mut TableState<ResultGrid>,
+    back: bool,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    let Some((row, col)) = table.delegate().pending_beside(back) else {
+        return;
+    };
+    table.focus_handle(cx).focus(window, cx);
+    table.delegate_mut().set_active(row, col);
+    table.set_selected_row(row, cx);
+    table.scroll_to_col(col + GUTTER, cx);
 }
 
 /// The cell one `step` from `from` in a `rows` by `cols` grid, or `None` at the
@@ -2236,6 +2285,39 @@ mod tests {
         ] {
             assert_eq!(grouped_digits(value), shown, "{value}");
         }
+    }
+
+    #[test]
+    fn pending_edits_are_walked_in_reading_order_and_wrap() {
+        let mut grid = editable_grid();
+        grid.result.edit.as_mut().unwrap().columns[2] = Some("total".into());
+        assert_eq!(grid.pending_beside(false), None);
+
+        assert!(grid.set_pending(1, 1, value("later")));
+        assert!(grid.set_pending(0, 2, value("5")));
+        assert!(grid.set_pending(0, 1, value("earlier")));
+        assert_eq!(grid.pending_count(), 3);
+
+        let walk = |grid: &mut ResultGrid, back| {
+            let to = grid.pending_beside(back).unwrap();
+            grid.set_active(to.0, to.1);
+            to
+        };
+        assert_eq!(walk(&mut grid, false), (0, 1));
+        assert_eq!(walk(&mut grid, false), (0, 2));
+        assert_eq!(walk(&mut grid, false), (1, 1));
+        assert_eq!(walk(&mut grid, false), (0, 1));
+        assert_eq!(walk(&mut grid, true), (1, 1));
+        assert_eq!(walk(&mut grid, true), (0, 2));
+
+        // With no ring yet, back starts from the bottom.
+        grid.active = None;
+        assert_eq!(grid.pending_beside(true), Some((1, 1)));
+
+        // From a cell that holds no edit, each way lands on its neighbour.
+        grid.set_active(1, 0);
+        assert_eq!(grid.pending_beside(false), Some((1, 1)));
+        assert_eq!(grid.pending_beside(true), Some((0, 2)));
     }
 
     #[test]
