@@ -29,8 +29,8 @@ use tokio::sync::oneshot;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, DbError, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
-    Statistics, Structure, plain_error,
+    Catalog, ColumnDefinition, DbError, NamedDefinition, QueryResult, Relation, RelationKind,
+    Schema, ServerConfig, Sizes, SslMode, Statistics, Structure, plain_error,
 };
 
 /// The port the server listens on when the profile does not say.
@@ -39,6 +39,36 @@ pub(super) const DEFAULT_PORT: u16 = 27017;
 /// How long a connect waits for a server to answer, TLS and login included.
 /// The driver's own default is thirty seconds of "Connecting…".
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
+
+/// How many documents a structure is inferred from. A collection has no
+/// declared columns, so its shape is whatever this many of them say.
+const SAMPLE_SIZE: i32 = 1000;
+
+/// The order a field's types are joined in. Null last, so a field that is
+/// sometimes null reads as `string | null`.
+const TYPE_ORDER: [&str; 21] = [
+    "objectId",
+    "string",
+    "int",
+    "long",
+    "double",
+    "decimal",
+    "bool",
+    "date",
+    "object",
+    "array",
+    "binData",
+    "regex",
+    "javascript",
+    "timestamp",
+    "minKey",
+    "maxKey",
+    "javascriptWithScope",
+    "symbol",
+    "dbPointer",
+    "undefined",
+    "null",
+];
 
 /// What a MongoDB profile connects with: a server engine's fields plus what
 /// a connection string carries that they do not.
@@ -537,10 +567,69 @@ impl Connection {
         Ok(Sizes::from([(self.database.clone(), sizes)]))
     }
 
-    pub fn structure(&self, _schema: &str, _relation: &str) -> Result<Structure, DbError> {
-        Err(plain_error(
-            "Reading a MongoDB collection's structure is not wired yet.".into(),
-        ))
+    /// Columns sampled from the documents, since nothing declares them. A
+    /// collection is keyed by `_id`, which every document has and an index
+    /// keeps unique, so it is the primary key `Structure::row_key` reads; a
+    /// view's `_id` is whatever its pipeline made it, and keys nothing.
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        let database = self.client().database(schema);
+        let listed: Vec<Document> = self.call(async {
+            database
+                .run_cursor_command(doc! {
+                    "listCollections": 1,
+                    "filter": { "name": relation },
+                })
+                .await?
+                .try_collect()
+                .await
+        })?;
+        let listed = listed
+            .into_iter()
+            .next()
+            .ok_or_else(|| plain_error(format!("{schema} has no collection {relation}.")))?;
+        let collection = database.collection::<Document>(relation);
+        let sample: Vec<Document> = self.call(async {
+            collection
+                .aggregate([doc! { "$sample": { "size": SAMPLE_SIZE } }])
+                .await?
+                .try_collect()
+                .await
+        })?;
+        let mut structure = Structure {
+            columns: sampled_columns(&sample),
+            ..Structure::default()
+        };
+
+        if listed.get_str("type") != Ok("view") {
+            let indexes: Vec<Document> = self.call(async {
+                database
+                    .run_cursor_command(doc! { "listIndexes": relation })
+                    .await?
+                    .try_collect()
+                    .await
+            })?;
+            structure.indexes = indexes
+                .iter()
+                .map(|index| NamedDefinition {
+                    name: index.get_str("name").unwrap_or_default().to_string(),
+                    definition: index_definition(index),
+                })
+                .collect();
+            structure.constraints.push(NamedDefinition {
+                name: "_id_".into(),
+                definition: "PRIMARY KEY (_id)".into(),
+            });
+        }
+        if let Ok(validator) = listed
+            .get_document("options")
+            .and_then(|options| options.get_document("validator"))
+        {
+            structure.constraints.push(NamedDefinition {
+                name: "validator".into(),
+                definition: relaxed_json(validator),
+            });
+        }
+        Ok(structure)
     }
 
     /// Names and types only, which is what lets a user without the
@@ -578,6 +667,105 @@ fn relation(listed: &Document) -> Option<Relation> {
         size: None,
         rows: None,
     })
+}
+
+/// Every top-level field the sample holds, `_id` first and the rest in the
+/// order they were first seen, each with every type it was seen holding.
+/// Nullable when a document lacks the field or holds null in it: either way a
+/// row may show nothing there.
+fn sampled_columns(documents: &[Document]) -> Vec<ColumnDefinition> {
+    let mut fields: Vec<(&str, Vec<&'static str>, usize)> = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for document in documents {
+        for (name, value) in document {
+            let position = *positions.entry(name.as_str()).or_insert_with(|| {
+                fields.push((name.as_str(), Vec::new(), 0));
+                fields.len() - 1
+            });
+            let (_, types, present) = &mut fields[position];
+            *present += 1;
+            let alias = type_alias(value);
+            if !types.contains(&alias) {
+                types.push(alias);
+            }
+        }
+    }
+    fields.sort_by_key(|(name, ..)| *name != "_id");
+    fields
+        .into_iter()
+        .map(|(name, mut types, present)| {
+            types.sort_by_key(|alias| TYPE_ORDER.iter().position(|order| order == alias));
+            ColumnDefinition {
+                name: name.to_string(),
+                nullable: present < documents.len() || types.contains(&"null"),
+                data_type: types.join(" | "),
+                default: None,
+            }
+        })
+        .collect()
+}
+
+/// The server's own name for a value's type, as `$type` spells it.
+pub(super) fn type_alias(value: &Bson) -> &'static str {
+    match value {
+        Bson::Double(_) => "double",
+        Bson::String(_) => "string",
+        Bson::Array(_) => "array",
+        Bson::Document(_) => "object",
+        Bson::Boolean(_) => "bool",
+        Bson::Null => "null",
+        Bson::RegularExpression(_) => "regex",
+        Bson::JavaScriptCode(_) => "javascript",
+        Bson::JavaScriptCodeWithScope(_) => "javascriptWithScope",
+        Bson::Int32(_) => "int",
+        Bson::Int64(_) => "long",
+        Bson::Timestamp(_) => "timestamp",
+        Bson::Binary(_) => "binData",
+        Bson::ObjectId(_) => "objectId",
+        Bson::DateTime(_) => "date",
+        Bson::Symbol(_) => "symbol",
+        Bson::Decimal128(_) => "decimal",
+        Bson::Undefined => "undefined",
+        Bson::MaxKey => "maxKey",
+        Bson::MinKey => "minKey",
+        Bson::DbPointer(_) => "dbPointer",
+    }
+}
+
+/// A `listIndexes` entry as its key and the options that change what it
+/// does: `{"external_id":1} unique`.
+fn index_definition(index: &Document) -> String {
+    let mut parts = vec![
+        index
+            .get_document("key")
+            .map(relaxed_json)
+            .unwrap_or_default(),
+    ];
+    for flag in ["unique", "sparse"] {
+        if index.get_bool(flag) == Ok(true) {
+            parts.push(flag.to_string());
+        }
+    }
+    if let Some(seconds) = index.get("expireAfterSeconds") {
+        parts.push(format!("TTL {}s", seconds.clone().into_relaxed_extjson()));
+    }
+    for (option, label) in [
+        ("partialFilterExpression", "partial"),
+        ("collation", "collation"),
+    ] {
+        if let Ok(document) = index.get_document(option) {
+            parts.push(format!("{label} {}", relaxed_json(document)));
+        }
+    }
+    parts.join(" ")
+}
+
+/// A document as Relaxed Extended JSON on one line, the shell's own reading
+/// of it.
+pub(super) fn relaxed_json(document: &Document) -> String {
+    Bson::Document(document.clone())
+        .into_relaxed_extjson()
+        .to_string()
 }
 
 /// `$collStats` answers once per shard, so the numbers are summed; one shard
@@ -1067,6 +1255,64 @@ mod tests {
         assert_eq!(statistics(&[]), Statistics::default());
     }
 
+    #[test]
+    fn a_sample_names_each_field_once_with_every_type_it_held() {
+        let id = mongodb::bson::oid::ObjectId::new();
+        let columns = sampled_columns(&[
+            doc! { "name": "Ada", "_id": id, "email": "ada@example.test", "seats": 3_i32 },
+            doc! { "_id": id, "name": "Edsger", "email": null, "seats": 4_i64 },
+            doc! { "_id": id, "name": "Bruce", "seats": 5.5, "tags": [] },
+        ]);
+        let shape = columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name.as_str(),
+                    column.data_type.as_str(),
+                    column.nullable,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            [
+                ("_id", "objectId", false),
+                ("name", "string", false),
+                ("email", "string | null", true),
+                ("seats", "int | long | double", false),
+                // Missing from two of three is as empty a cell as null.
+                ("tags", "array", true),
+            ]
+        );
+        assert!(sampled_columns(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_index_reads_as_its_key_and_what_changes_it() {
+        assert_eq!(
+            index_definition(&doc! { "v": 2, "key": { "_id": 1 }, "name": "_id_" }),
+            r#"{"_id":1}"#
+        );
+        assert_eq!(
+            index_definition(&doc! {
+                "key": { "external_id": 1, "at": -1 },
+                "name": "external_id_1_at_-1",
+                "unique": true,
+                "sparse": true,
+            }),
+            r#"{"external_id":1,"at":-1} unique sparse"#
+        );
+        assert_eq!(
+            index_definition(&doc! {
+                "key": { "seen": 1 },
+                "expireAfterSeconds": 3600_i32,
+                "partialFilterExpression": { "active": true },
+                "collation": { "locale": "fr" },
+            }),
+            r#"{"seen":1} TTL 3600s partial {"active":true} collation {"locale":"fr"}"#
+        );
+    }
+
     /// The server the `live_` tests talk to, from `dbdelve_MONGO_URL`.
     fn live_config() -> MongoConfig {
         let url = std::env::var("dbdelve_MONGO_URL").expect("dbdelve_MONGO_URL is required");
@@ -1176,6 +1422,67 @@ mod tests {
         assert!(sizes["sensor_readings"].size.is_some());
         assert_eq!(sizes["sensor_readings"].rows, None);
         assert!(!sizes.contains_key("account_overview"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_structure_round_trip() {
+        let connection = live();
+        let accounts = connection
+            .structure("dbdelve_dev", "accounts")
+            .expect("structure should load");
+        let column = |structure: &Structure, name: &str| {
+            structure
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .map(|column| (column.data_type.clone(), column.nullable))
+                .unwrap_or_else(|| panic!("{name} is sampled: {:?}", structure.columns))
+        };
+        assert_eq!(accounts.columns[0].name, "_id");
+        assert_eq!(column(&accounts, "_id"), ("objectId".into(), false));
+        // Dijkstra's is null and Bruce Lee has none.
+        assert_eq!(column(&accounts, "email"), ("string | null".into(), true));
+        assert_eq!(column(&accounts, "balance"), ("decimal".into(), false));
+        assert_eq!(accounts.row_key(), ["_id"]);
+        assert_eq!(accounts.primary_key(), ["_id"]);
+        let index = |name: &str| {
+            accounts
+                .indexes
+                .iter()
+                .find(|index| index.name == name)
+                .map(|index| index.definition.as_str())
+        };
+        assert_eq!(index("_id_"), Some(r#"{"_id":1}"#));
+        assert_eq!(index("external_id_1"), Some(r#"{"external_id":1} unique"#));
+
+        let mixed = connection
+            .structure("dbdelve_dev", "mixed_shapes")
+            .expect("structure should load");
+        assert_eq!(
+            column(&mixed, "value"),
+            (
+                [
+                    "objectId", "string", "int", "long", "double", "decimal", "bool", "date",
+                    "object", "array", "null",
+                ]
+                .join(" | "),
+                true
+            )
+        );
+
+        let view = connection
+            .structure("dbdelve_dev", "account_overview")
+            .expect("a view's structure should load");
+        assert!(view.row_key().is_empty(), "{:?}", view.constraints);
+        assert!(view.indexes.is_empty());
+        assert_eq!(column(&view, "_id"), ("string".into(), false));
+
+        let readings = connection
+            .structure("dbdelve_dev", "sensor_readings")
+            .expect("a time-series collection's structure should load");
+        assert_eq!(readings.row_key(), ["_id"]);
+        assert_eq!(column(&readings, "recorded_at"), ("date".into(), false));
     }
 
     #[test]
