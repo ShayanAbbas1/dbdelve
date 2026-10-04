@@ -871,9 +871,7 @@ impl Workspace {
         profile.session.clear_prompts();
         profile.session.apply_review = None;
         profile.databases = Databases::default();
-        if let Some(server) = profile.config.server_mut() {
-            server.database = name;
-        }
+        profile.config.set_database(name);
         self.remember_profiles(cx);
         self.reconnect(index, cx);
     }

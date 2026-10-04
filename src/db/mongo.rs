@@ -23,7 +23,7 @@ use mongodb::error::{Error, ErrorKind};
 use mongodb::event::{EventHandler, sdam::SdamEvent};
 use mongodb::options::{ClientOptions, ConnectionString, HostInfo, ServerAddress, Tls, TlsOptions};
 use mongodb::{Client, Database};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
@@ -39,6 +39,16 @@ pub(super) const DEFAULT_PORT: u16 = 27017;
 /// How long a connect waits for a server to answer, TLS and login included.
 /// The driver's own default is thirty seconds of "Connecting…".
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
+
+/// What ends or changes an option's value in a query string, escaped so a
+/// database name written into the options reads back as itself.
+const OPTION_VALUE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'=');
 
 /// How many documents a structure is inferred from. A collection has no
 /// declared columns, so its shape is whatever this many of them say.
@@ -97,6 +107,37 @@ impl MongoConfig {
 
     fn seed_list(&self) -> bool {
         self.server.host.contains(',')
+    }
+
+    /// Move onto `database`, keeping the login where it was.
+    ///
+    /// With no `authSource` the driver authenticates against the database the
+    /// connection string names, so a user defined in one database could not
+    /// log in once moved to another. The source it had is written into the
+    /// options, where the form shows it, before the database changes. Only for
+    /// a password mechanism: X.509, AWS, Kerberos and LDAP authenticate against
+    /// `$external` whatever the database.
+    pub(super) fn set_database(&mut self, database: String) {
+        let options = self.options.trim().trim_start_matches('?');
+        let option = |name: &str| {
+            options.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                key.eq_ignore_ascii_case(name).then_some(value)
+            })
+        };
+        let password_login = option("authMechanism")
+            .is_none_or(|mechanism| mechanism.to_ascii_uppercase().starts_with("SCRAM-"));
+        if !self.server.user.is_empty() && password_login && option("authSource").is_none() {
+            let source = match self.server.database.as_str() {
+                "" => "admin".to_string(),
+                current => utf8_percent_encode(current, OPTION_VALUE).to_string(),
+            };
+            self.options = match options {
+                "" => format!("authSource={source}"),
+                options => format!("{options}&authSource={source}"),
+            };
+        }
+        self.server.database = database;
     }
 }
 
@@ -1108,6 +1149,39 @@ mod tests {
     }
 
     #[test]
+    fn switching_database_keeps_the_login_where_it_was() {
+        let mut config = url("mongodb://u:p@h/dbdelve_dev");
+        config.set_database("dbdelve_archive".into());
+        assert_eq!(config.server.database, "dbdelve_archive");
+        assert_eq!(config.options, "authSource=dbdelve_dev");
+        // The second switch finds a source already written and leaves it.
+        config.set_database("other".into());
+        assert_eq!(config.options, "authSource=dbdelve_dev");
+
+        let mut blank = url("mongodb://u:p@h/?replicaSet=rs0");
+        blank.set_database("app".into());
+        assert_eq!(blank.options, "replicaSet=rs0&authSource=admin");
+
+        for unpinned in [
+            "mongodb://h/dbdelve_dev",
+            "mongodb://u:p@h/dbdelve_dev?authSource=admin",
+            "mongodb://u@h/dbdelve_dev?authMechanism=MONGODB-X509",
+        ] {
+            let mut config = url(unpinned);
+            let options = config.options.clone();
+            config.set_database("app".into());
+            assert_eq!(config.options, options, "{unpinned}");
+            assert_eq!(config.server.database, "app", "{unpinned}");
+        }
+        let mut scram = url("mongodb://u:p@h/r%26d?authMechanism=SCRAM-SHA-256");
+        scram.set_database("app".into());
+        assert_eq!(
+            scram.options,
+            "authMechanism=SCRAM-SHA-256&authSource=r%26d"
+        );
+    }
+
+    #[test]
     fn every_rung_gets_the_checks_it_asked_for() {
         let tls_for = |sslmode| {
             tls(&ServerConfig {
@@ -1377,6 +1451,27 @@ mod tests {
         assert_eq!(databases.current, None);
         assert!(databases.names.contains(&"dbdelve_dev".to_string()));
         assert_eq!(connection.catalog().unwrap(), Catalog::default());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_switch_to_a_database_the_user_is_not_defined_in_still_logs_in() {
+        let mut config = ConnectionConfig::MongoDb(live_config());
+        config.set_database("dbdelve_archive".into());
+        let ConnectionConfig::MongoDb(config) = config else {
+            unreachable!()
+        };
+        let catalog = Connection::open(&config)
+            .expect("the switched profile should log in")
+            .catalog()
+            .expect("catalog should load");
+        assert_eq!(catalog.schemas[0].name, "dbdelve_archive");
+        assert!(
+            catalog.schemas[0]
+                .relations
+                .iter()
+                .any(|relation| relation.name == "closed_accounts")
+        );
     }
 
     #[test]

@@ -801,6 +801,18 @@ impl ConnectionConfig {
         }
     }
 
+    /// Move the profile onto another database on the same server.
+    pub fn set_database(&mut self, name: String) {
+        match self {
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => server.database = name,
+            Self::MongoDb(mongo) => mongo.set_database(name),
+            Self::Sqlite { .. } | Self::Snowflake(_) => {}
+        }
+    }
+
     /// The scheme picks the engine, and the engine parses the rest. dbdelve never
     /// guesses from the shape of a URL: a host-looking string is a host to
     /// three different drivers.
