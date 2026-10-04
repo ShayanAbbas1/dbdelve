@@ -79,11 +79,22 @@ enum Site {
         argument: Range<usize>,
         keys: Value,
     },
-    /// A pipeline's last stage, when it is `{$sort: …}`.
+    /// A pipeline's last stage before any trailing `$skip` and `$limit`,
+    /// when it is `{$sort: …}`.
     Stage { stage: Range<usize>, keys: Value },
     /// Where a sort goes on a statement without one: after `find(…)`, or as a
-    /// pipeline's last stage (`first` when the pipeline is empty).
-    Absent { at: usize, stage: bool, first: bool },
+    /// pipeline stage, with the separators that stand before and after it.
+    Absent {
+        at: usize,
+        stage: bool,
+        around: (&'static str, &'static str),
+    },
+}
+
+/// A `$skip` or `$limit` stage.
+fn pages(stage: &Value) -> bool {
+    matches!(stage, Value::Document(fields)
+        if fields.len() == 1 && matches!(fields[0].0.as_str(), "$skip" | "$limit"))
 }
 
 /// Only a `find` or an `aggregate` that reads, read whole and alone. Anything
@@ -119,7 +130,7 @@ fn site(text: &str) -> Option<Site> {
             [] => Some(Site::Absent {
                 at: call.span.end,
                 stage: false,
-                first: false,
+                around: ("", ""),
             }),
             [sort] => match sort.args.as_slice() {
                 [argument] => Some(Site::Call {
@@ -140,24 +151,41 @@ fn site(text: &str) -> Option<Site> {
             let Value::Array(stages) = &pipeline.value else {
                 return None;
             };
-            match (stages.last(), pipeline.items.last()) {
-                (Some(Value::Document(fields)), Some(stage))
+            if stages.len() != pipeline.items.len() {
+                return None;
+            }
+            // A sort after `$skip` or `$limit` would order only the page they
+            // kept, so it stands before them, as `ORDER BY` stands before
+            // `LIMIT`.
+            let paging = stages.len() - stages.iter().rev().take_while(|s| pages(s)).count();
+            let before = paging.checked_sub(1);
+            match (
+                before.map(|at| &stages[at]),
+                before,
+                pipeline.items.get(paging),
+            ) {
+                (Some(Value::Document(fields)), Some(at), _)
                     if fields.len() == 1 && fields[0].0 == "$sort" =>
                 {
                     Some(Site::Stage {
-                        stage: stage.clone(),
+                        stage: pipeline.items[at].clone(),
                         keys: fields[0].1.clone(),
                     })
                 }
-                (_, Some(stage)) => Some(Site::Absent {
-                    at: stage.end,
+                (_, Some(at), _) => Some(Site::Absent {
+                    at: pipeline.items[at].end,
                     stage: true,
-                    first: false,
+                    around: (", ", ""),
                 }),
-                (_, None) => Some(Site::Absent {
+                (_, None, Some(first)) => Some(Site::Absent {
+                    at: first.start,
+                    stage: true,
+                    around: ("", ", "),
+                }),
+                (_, None, None) => Some(Site::Absent {
                     at: pipeline.span.start + 1,
                     stage: true,
-                    first: true,
+                    around: ("", ""),
                 }),
             }
         }
@@ -166,7 +194,8 @@ fn site(text: &str) -> Option<Site> {
 }
 
 /// `sql::order_by` for a mongosh statement: the keys of a `find`'s `.sort(…)`
-/// or an `aggregate`'s trailing `$sort` stage. `Some(empty)` for one that
+/// or an `aggregate`'s last `$sort` stage before any trailing `$skip` and
+/// `$limit`. `Some(empty)` for one that
 /// could carry a sort and does not; `None` for anything this cannot say
 /// without guessing.
 pub(crate) fn order_by(text: &str) -> Option<Vec<SortKey>> {
@@ -180,8 +209,9 @@ pub(crate) fn order_by(text: &str) -> Option<Vec<SortKey>> {
 /// with its sort removed when `keys` is empty.
 ///
 /// A `find`'s existing `.sort(…)` has its argument replaced, or a `.sort(…)`
-/// goes directly after `find(…)`. An `aggregate`'s trailing `$sort` stage is
-/// replaced, or one is appended. Nothing else in the text moves.
+/// goes directly after `find(…)`. An `aggregate`'s `$sort` stage standing
+/// last before any trailing `$skip` and `$limit` is replaced, or one goes
+/// there. Nothing else in the text moves.
 ///
 /// The result is read back before it is returned, so a splice that landed
 /// anywhere but where it was aimed is refused rather than run.
@@ -199,9 +229,15 @@ pub(crate) fn with_order_by(text: &str, keys: &[SortKey]) -> Option<String> {
         ) => {
             sorted.insert_str(at, &format!(".sort({document})"));
         }
-        (Site::Absent { at, first, .. }, false) => {
-            let separator = if first { "" } else { ", " };
-            sorted.insert_str(at, &format!("{separator}{stage}"));
+        (
+            Site::Absent {
+                at,
+                around: (lead, trail),
+                ..
+            },
+            false,
+        ) => {
+            sorted.insert_str(at, &format!("{lead}{stage}{trail}"));
         }
         (Site::Call { argument, .. }, false) => sorted.replace_range(argument, &document),
         (Site::Stage { stage: span, .. }, false) => sorted.replace_range(span, &stage),
@@ -231,9 +267,9 @@ fn own_line(text: &str, span: Range<usize>) -> Range<usize> {
     }
 }
 
-/// A pipeline's last stage's span, widened to take one comma beside it: the
-/// one before it, else a trailing one after it (and its line, when nothing
-/// else is left on it). `None` when a comment stands between the stage and
+/// A pipeline stage's span, widened to take one comma beside it: the one
+/// before it, else the one after it with the spaces that follow it (and its
+/// line, when nothing else is left on it). `None` when a comment stands between the stage and
 /// every comma and the stage is not alone in the pipeline, since which comma
 /// belongs to it is then a guess.
 fn listed(text: &str, stage: Range<usize>) -> Option<Range<usize>> {
@@ -244,7 +280,11 @@ fn listed(text: &str, stage: Range<usize>) -> Option<Range<usize>> {
     let after = text[stage.end..].trim_start();
     let next = text.len() - after.len();
     match after.chars().next() {
-        Some(',') => Some(own_line(text, stage.start..next + 1)),
+        Some(',') => {
+            let rest = &after[1..];
+            let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            Some(own_line(text, stage.start..next + 1 + spaces))
+        }
         Some(']') if before.ends_with('[') => Some(stage),
         _ => None,
     }
@@ -652,6 +692,43 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_sorts_before_its_trailing_skip_and_limit() {
+        let text = "db.c.aggregate([{$match: {}}, {$skip: 20}, {$limit: 10}])";
+        assert_eq!(order_by(text), Some(vec![]));
+        assert_eq!(
+            sorted(text, &[key("a", true)]),
+            r#"db.c.aggregate([{$match: {}}, {"$sort": {"a": 1}}, {$skip: 20}, {$limit: 10}])"#
+        );
+        assert_eq!(
+            sorted("db.c.aggregate([{$limit: 10}])", &[key("a", true)]),
+            r#"db.c.aggregate([{"$sort": {"a": 1}}, {$limit: 10}])"#
+        );
+
+        let text = "db.c.aggregate([{$sort: {a: 1}}, {$limit: 10}])";
+        assert_eq!(order_by(text), Some(vec![key("a", true)]));
+        assert_eq!(
+            sorted(text, &[key("b", false)]),
+            r#"db.c.aggregate([{"$sort": {"b": -1}}, {$limit: 10}])"#
+        );
+        assert_eq!(sorted(text, &[]), "db.c.aggregate([{$limit: 10}])");
+        assert_eq!(
+            sorted(
+                "db.c.aggregate([{$match: {}}, {$sort: {a: 1}}, {$skip: 5}])",
+                &[]
+            ),
+            "db.c.aggregate([{$match: {}}, {$skip: 5}])"
+        );
+        // A `$limit` with a stage after it is not the page's.
+        assert_eq!(
+            sorted(
+                "db.c.aggregate([{$limit: 10}, {$match: {}}])",
+                &[key("a", true)]
+            ),
+            r#"db.c.aggregate([{$limit: 10}, {$match: {}}, {"$sort": {"a": 1}}])"#
+        );
+    }
+
+    #[test]
     fn a_trailing_sort_stage_is_replaced_and_removed_with_its_comma() {
         let text = "db.c.aggregate([\n  { $match: {} }, // all\n  { $sort: { a: 1 } },\n])";
         assert_eq!(order_by(text), Some(vec![key("a", true)]));
@@ -665,20 +742,20 @@ mod tests {
         );
         assert_eq!(
             sorted("db.c.aggregate([{$sort: {a: 1}}, ])", &[]),
-            "db.c.aggregate([ ])"
+            "db.c.aggregate([])"
         );
         assert_eq!(
             sorted("db.c.aggregate([{$sort: {a: 1}}])", &[]),
             "db.c.aggregate([])"
         );
         // A `$sort` earlier in the pipeline is the user's, and a new one goes
-        // after everything.
+        // after everything that is not paging.
         assert_eq!(
             sorted(
-                "db.c.aggregate([{$sort: {a: 1}}, {$limit: 5}])",
+                "db.c.aggregate([{$sort: {a: 1}}, {$match: {}}])",
                 &[key("b", true)]
             ),
-            r#"db.c.aggregate([{$sort: {a: 1}}, {$limit: 5}, {"$sort": {"b": 1}}])"#
+            r#"db.c.aggregate([{$sort: {a: 1}}, {$match: {}}, {"$sort": {"b": 1}}])"#
         );
         // A comment between the stage and its comma: which comma goes is a
         // guess.
