@@ -125,7 +125,14 @@ fn site(text: &str) -> Option<Site> {
         .iter()
         .filter(|link| link.method == CursorMethod::Sort)
         .collect();
+    let sorted_by_options = matches!(
+        call.args.get(2).map(|options| &options.value),
+        Some(Value::Document(fields)) if fields.iter().any(|(name, _)| name == "sort")
+    );
     match call.method {
+        // A sort in the options is not where a click would edit one, and the
+        // server takes only one of the two.
+        Method::Find if sorted_by_options => None,
         Method::Find => match sorts.as_slice() {
             [] => Some(Site::Absent {
                 at: call.span.end,
@@ -782,6 +789,8 @@ mod tests {
             "db.c.aggregate([{$merge: {into: 'd'}}])",
             "db.c.find().explain()",
             "db.c.find().sort({a: 1}).sort({b: 1})",
+            "db.c.find({}, {}, {sort: {b: 1}})",
+            "db.c.find({}, {}, {sort: {b: 1}}).sort({a: 1})",
             "db.c.aggregate([]).sort({a: 1})",
             "db.c.aggregate({$match: {}})",
             "db.c.aggregate()",

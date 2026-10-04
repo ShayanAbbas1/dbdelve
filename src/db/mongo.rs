@@ -1785,6 +1785,7 @@ fn chained(
     find: bool,
 ) -> Result<Option<Bson>, DbError> {
     let mut explain = None;
+    let preset: Vec<String> = sent.keys().cloned().collect();
     for call in cursor {
         let args = Args::of(call.method.name(), &call.args);
         let field = match call.method {
@@ -1816,6 +1817,13 @@ fn chained(
             }
             CursorMethod::ToArray | CursorMethod::Pretty => continue,
         };
+        // Set both ways, one would silently replace the other.
+        if preset.iter().any(|key| key == field) {
+            return Err(plain_error(format!(
+                "{}() sets {field}, which the statement already sets.",
+                args.method
+            )));
+        }
         sent.insert(field, args.required(0)?);
     }
     Ok(explain)
@@ -2310,6 +2318,42 @@ mod tests {
             },
             ..MongoConfig::default()
         }
+    }
+
+    #[test]
+    fn a_cursor_method_never_replaces_what_the_options_set() {
+        let cursor = |text: &str| match mql::parse(text).expect(text).remove(0).target {
+            mql::Target::Collection { cursor, .. } => cursor,
+            target => panic!("{text}: {target:?}"),
+        };
+        for (field, chain) in [
+            ("sort", ".sort({a: 1})"),
+            ("limit", ".limit(5)"),
+            ("skip", ".skip(5)"),
+            ("projection", ".projection({a: 1})"),
+            ("hint", ".hint({a: 1})"),
+            ("collation", ".collation({locale: 'en'})"),
+            ("comment", ".comment('x')"),
+            ("maxTimeMS", ".maxTimeMS(5)"),
+        ] {
+            let cursor = cursor(&format!("db.c.find(){chain}"));
+            let mut sent = doc! { field: 1 };
+            let refused = chained(&mut sent, &cursor, true).expect_err(chain);
+            assert!(
+                refused.message.contains("already sets"),
+                "{}",
+                refused.message
+            );
+            assert_eq!(sent, doc! { field: 1 }, "{chain}");
+
+            let mut sent = Document::new();
+            chained(&mut sent, &cursor, true).expect(chain);
+            assert!(sent.contains_key(field), "{chain}");
+        }
+        // Chained twice, the later one wins, as in mongosh.
+        let mut sent = Document::new();
+        chained(&mut sent, &cursor("db.c.find().limit(1).limit(2)"), true).expect("two limits");
+        assert_eq!(sent.get("limit"), Some(&Bson::Int32(2)));
     }
 
     #[test]
