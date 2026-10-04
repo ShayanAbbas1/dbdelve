@@ -253,9 +253,9 @@ writes the object tab's preview, count and filter and holds the read gate;
 rendering of BSON.
 
 **The three tree-sitter pins are correctness, not formatting.** The grammar
-decides where every statement boundary falls, which statements `sql.rs` and
-`mql.rs` will splice a `.sort()` into, and what the gates accept. A bump changes what
-DBDelve sends to the server. Treat them like the driver pins.
+decides where every statement boundary falls, which statements `sql.rs` will
+splice an `ORDER BY` into (and `mql.rs` a `.sort()`), and what the gates
+accept. A bump changes what DBDelve sends to the server. Treat them like the driver pins.
 
 **`gpui_platform`'s features are load-bearing.** Without `font-kit` the macOS
 backend swaps in a no-op text system and renders no text at all, silently.
