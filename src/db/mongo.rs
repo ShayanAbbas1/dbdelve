@@ -1270,20 +1270,7 @@ impl Connection {
     /// view's `_id` is whatever its pipeline made it, and keys nothing.
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         let database = self.client().database(schema);
-        let listed: Vec<Document> = self.call(async {
-            database
-                .run_cursor_command(doc! {
-                    "listCollections": 1,
-                    "filter": { "name": relation },
-                })
-                .await?
-                .try_collect()
-                .await
-        })?;
-        let listed = listed
-            .into_iter()
-            .next()
-            .ok_or_else(|| plain_error(format!("{schema} has no collection {relation}.")))?;
+        let listed = self.listed(&database, schema, relation)?;
         let collection = database.collection::<Document>(relation);
         let sample: Vec<Document> = self.call(async {
             collection
@@ -1298,14 +1285,8 @@ impl Connection {
         };
 
         if listed.get_str("type") != Ok("view") {
-            let indexes: Vec<Document> = self.call(async {
-                database
-                    .run_cursor_command(doc! { "listIndexes": relation })
-                    .await?
-                    .try_collect()
-                    .await
-            })?;
-            structure.indexes = indexes
+            structure.indexes = self
+                .indexes(&database, relation)?
                 .iter()
                 .map(|index| NamedDefinition {
                     name: index.get_str("name").unwrap_or_default().to_string(),
@@ -1327,6 +1308,55 @@ impl Connection {
             });
         }
         Ok(structure)
+    }
+
+    /// The collection's options are what made it whatever it is -- a view's
+    /// `viewOn` and pipeline, a validator, a cap, a time series -- so they are
+    /// written back whole.
+    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        let database = self.client().database(schema);
+        let listed = self.listed(&database, schema, relation)?;
+        let indexes = match listed.get_str("type") {
+            Ok("view") => Vec::new(),
+            _ => self.indexes(&database, relation)?,
+        };
+        Ok(create_statements(
+            relation,
+            &listed.get_document("options").cloned().unwrap_or_default(),
+            &indexes,
+        ))
+    }
+
+    fn listed(
+        &self,
+        database: &Database,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Document, DbError> {
+        let listed: Vec<Document> = self.call(async {
+            database
+                .run_cursor_command(doc! {
+                    "listCollections": 1,
+                    "filter": { "name": relation },
+                })
+                .await?
+                .try_collect()
+                .await
+        })?;
+        listed
+            .into_iter()
+            .next()
+            .ok_or_else(|| plain_error(format!("{schema} has no collection {relation}.")))
+    }
+
+    fn indexes(&self, database: &Database, relation: &str) -> Result<Vec<Document>, DbError> {
+        self.call(async {
+            database
+                .run_cursor_command(doc! { "listIndexes": relation })
+                .await?
+                .try_collect()
+                .await
+        })
     }
 
     /// Where a `find`'s documents can be written back to: by `_id`, in a
@@ -1506,6 +1536,84 @@ fn index_definition(index: &Document) -> String {
         }
     }
     parts.join(" ")
+}
+
+/// `db.createCollection` with the options it was made with, then a
+/// `createIndex` per index but `_id`'s, which every collection is made with,
+/// and a clustered collection's, which its options already declare. Written in
+/// the shell's constructors rather than Extended JSON, which the shell reads
+/// as plain subdocuments: a `{"$date": …}` in a partial filter would make
+/// another index.
+fn create_statements(collection: &str, options: &Document, indexes: &[Document]) -> String {
+    let spelled = |document: Document| mql::spelled(&shell_value(&Bson::Document(document)));
+    let name = super::Engine::MongoDb.quote_literal(collection);
+    let mut statements = vec![match options.is_empty() {
+        true => format!("db.createCollection({name})"),
+        false => format!("db.createCollection({name}, {})", spelled(options.clone())),
+    }];
+    for index in indexes {
+        if index.get_str("name") == Ok("_id_") || index.get_bool("clustered") == Ok(true) {
+            continue;
+        }
+        let mut options = index.clone();
+        let key = options.remove("key").and_then(|key| match key {
+            Bson::Document(key) => Some(key),
+            _ => None,
+        });
+        options.remove("v");
+        options.remove("ns");
+        statements.push(format!(
+            "{}.createIndex({}, {})",
+            mql::browse::handle(collection),
+            spelled(key.unwrap_or_default()),
+            spelled(options)
+        ));
+    }
+    statements.join(";\n") + ";"
+}
+
+/// The inverse of [`bson`], for writing a value back out through
+/// [`mql::spelled`].
+///
+/// ponytail: the deprecated types, which the shell has no constructor for,
+/// read as their nearest -- a symbol as a string, code with scope as its code,
+/// a DBPointer and undefined as null. Collection options and index specs, the
+/// one thing this writes, hold none of them.
+fn shell_value(value: &Bson) -> Value {
+    match value {
+        Bson::Null | Bson::Undefined | Bson::DbPointer(_) => Value::Null,
+        Bson::Boolean(value) => Value::Bool(*value),
+        Bson::Int32(n) => Value::Int32(*n),
+        Bson::Int64(n) => Value::Int64(*n),
+        Bson::Double(n) => Value::Double(*n),
+        Bson::Decimal128(n) => Value::Decimal128(n.to_string()),
+        Bson::String(text) | Bson::Symbol(text) => Value::String(text.clone()),
+        Bson::ObjectId(id) => Value::ObjectId(Some(id.bytes())),
+        Bson::DateTime(date) => Value::Date(date.timestamp_millis()),
+        Bson::Binary(binary) => Value::Binary {
+            subtype: binary.subtype.into(),
+            bytes: binary.bytes.clone(),
+        },
+        Bson::Timestamp(at) => Value::Timestamp {
+            t: at.time,
+            i: at.increment,
+        },
+        Bson::RegularExpression(regex) => Value::Regex {
+            pattern: regex.pattern.clone(),
+            flags: regex.options.clone(),
+        },
+        Bson::JavaScriptCode(code) => Value::Code(code.clone()),
+        Bson::JavaScriptCodeWithScope(code) => Value::Code(code.code.clone()),
+        Bson::MinKey => Value::MinKey,
+        Bson::MaxKey => Value::MaxKey,
+        Bson::Document(document) => Value::Document(
+            document
+                .iter()
+                .map(|(key, value)| (key.clone(), shell_value(value)))
+                .collect(),
+        ),
+        Bson::Array(values) => Value::Array(values.iter().map(shell_value).collect()),
+    }
 }
 
 /// A document as Relaxed Extended JSON on one line, the shell's own reading
@@ -2333,6 +2441,63 @@ mod tests {
             },
             ..MongoConfig::default()
         }
+    }
+
+    #[test]
+    fn a_collection_is_created_with_its_options_and_every_index_but_its_ids() {
+        let indexes = [
+            doc! { "v": 2, "key": { "_id": 1 }, "name": "_id_" },
+            doc! { "v": 2, "key": { "code": 1 }, "name": "by_code", "clustered": true },
+            doc! { "v": 2, "key": { "external_id": 1 }, "name": "external_id_1", "unique": true },
+        ];
+        assert_eq!(
+            create_statements("accounts", &Document::new(), &indexes),
+            "db.createCollection(\"accounts\");\n\
+             db.getCollection(\"accounts\").createIndex({\"external_id\": 1}, \
+             {\"name\": \"external_id_1\", \"unique\": true});"
+        );
+
+        // Every type the shell would otherwise read as another reads back as
+        // itself.
+        let options = doc! {
+            "validator": {
+                "at": { "$gte": DateTime::from_millis(1_705_311_000_000) },
+                "name": Regex { pattern: "^a/b".into(), options: "i".into() },
+                "seats": { "$lt": 9_000_000_000_i64 },
+                "ratio": 2.0,
+            },
+        };
+        let index = doc! {
+            "v": 2,
+            "key": { "at": -1 },
+            "name": "recent",
+            "partialFilterExpression": { "at": { "$gt": DateTime::from_millis(0) } },
+        };
+        let written = create_statements("c", &options, std::slice::from_ref(&index));
+        assert!(
+            written.contains("ISODate(\"2024-01-15T09:30:00.000Z\")"),
+            "{written}"
+        );
+        let read: Vec<Vec<Bson>> = mql::parse(&written)
+            .expect(&written)
+            .into_iter()
+            .map(|statement| match statement.target {
+                Target::Database { call, .. } => call.args,
+                Target::Collection { call, .. } => call.args,
+                Target::Show(_) => unreachable!(),
+            })
+            .map(|args| args.iter().map(|arg| bson(&arg.value).unwrap()).collect())
+            .collect();
+        let mut index_options = index.clone();
+        index_options.remove("v");
+        let key = index_options.remove("key").unwrap();
+        assert_eq!(
+            read,
+            [
+                vec![Bson::String("c".into()), Bson::Document(options)],
+                vec![key, Bson::Document(index_options)],
+            ]
+        );
     }
 
     #[test]
@@ -4052,6 +4217,69 @@ mod tests {
             .expect("a time-series collection's structure should load");
         assert_eq!(readings.row_key(), ["_id"]);
         assert_eq!(column(&readings, "recorded_at"), ("date".into(), false));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_the_ddl_of_a_collection_and_a_view_creates_them_again() {
+        let connection = live();
+        let accounts = connection
+            .ddl("dbdelve_dev", "accounts")
+            .expect("the collection's DDL should load");
+        let view = connection
+            .ddl("dbdelve_dev", "account_overview")
+            .expect("the view's DDL should load");
+
+        assert!(
+            accounts.starts_with("db.createCollection(\"accounts\""),
+            "{accounts}"
+        );
+        assert!(
+            accounts.contains(
+                "db.getCollection(\"accounts\").createIndex({\"external_id\": 1}, \
+                 {\"name\": \"external_id_1\", \"unique\": true});"
+            ),
+            "{accounts}"
+        );
+        assert!(!accounts.contains("\"_id_\""), "{accounts}");
+        assert!(
+            view.starts_with(
+                "db.createCollection(\"account_overview\", {\"viewOn\": \"accounts\", \"pipeline\": ["
+            ),
+            "{view}"
+        );
+        assert!(!view.contains("createIndex"), "{view}");
+
+        // A clustered collection whose clustered index has a name of its own,
+        // and a partial index over a date and a long: run again, the DDL makes
+        // the same collection.
+        let scratch = Scratch(&connection, format!("dbdelve_test_{}", ObjectId::new()));
+        let collection = format!("db.getCollection('{}')", scratch.1);
+        ran(
+            &connection,
+            &format!(
+                "db.createCollection('{}', {{ clusteredIndex: {{ key: {{ _id: 1 }}, unique: true, \
+                 name: 'by_id' }} }});\n\
+                 {collection}.createIndex({{ at: -1 }}, {{ partialFilterExpression: \
+                 {{ at: {{ $gt: ISODate('2024-01-15T09:30:00Z') }}, n: {{ $gt: NumberLong(5) }} }} }})",
+                scratch.1
+            ),
+        );
+        let written = connection
+            .ddl("dbdelve_dev", &scratch.1)
+            .expect("the scratch collection's DDL should load");
+        ran(&connection, &format!("{collection}.drop()"));
+        ran(&connection, &written);
+        assert_eq!(
+            connection.ddl("dbdelve_dev", &scratch.1).as_deref(),
+            Ok(written.as_str())
+        );
+        assert_eq!(written.matches("createIndex").count(), 1, "{written}");
+        assert!(
+            written.contains("ISODate(\"2024-01-15T09:30:00.000Z\")")
+                && written.contains("NumberLong(\"5\")"),
+            "{written}"
+        );
     }
 
     #[test]

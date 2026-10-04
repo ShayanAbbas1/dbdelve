@@ -40,10 +40,15 @@ require it, stop and raise it instead.
      result reads back as the same statements). Never an AST round-trip: that
      regenerates the statement and drops every comment the user wrote.
 
-   Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`,
-   whatever the user asked for. It writes `DELETE` only as the explicit
-   deletion of one named row: by primary key, from a direct ask, with the
-   statement shown before it runs (`sql::delete_row`). And it never writes into
+   Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`
+   into a buffer or onto the wire, whatever the user asked for. It writes
+   `DELETE` only as the explicit deletion of one named row: by primary key,
+   from a direct ask, with the statement shown before it runs
+   (`sql::delete_row`). The one exception to both is the explorer's
+   right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
+   `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`) put the text on the
+   clipboard and nothing else: no buffer, no run, no gate, so pasting and
+   running it is the user's own statement. And it never writes into
    a statement it cannot parse whole: `sql::with_order_by` refuses rather than
    guessing at a clause boundary, because a corrupted statement is worse than
    an unsorted grid.
@@ -122,7 +127,8 @@ require it, stop and raise it instead.
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
-   `ConnectionConfig`, are the only places above `src/db/` that match on it.
+   `ConnectionConfig`, are the only places above `src/db/` that match on it,
+  bar `explorer.rs`'s generators listed under "Engine divergences".
 
 5. **Blank passwords are valid.** Never warn about them. Usernames containing `@`
    must work. Both are required by cloud IAM auth and both are commonly broken.
@@ -512,7 +518,7 @@ Decided, and not to be re-litigated:
   MariaDB unless a bullet names it. A profile stored before it existed says
   `mysql` and stays MySQL. The `live_` tests in `mysql.rs` run once per server
   (`on_mysql::`, `on_mariadb::`).
-- **Nine functions generate SQL, and every one quotes through `Engine`:**
+- **Nine functions generate the SQL DBDelve runs, and every one quotes through `Engine`:**
   `explorer::preview_sql`, `explorer::probe_sql` (the reference arrow's
   `SELECT 1 … LIMIT 1` per referencing relation), `explorer::count_sql` (the status bar's Count, a
   `COUNT(*)` -- `COUNT_BIG(*)` on SQL Server, whose `COUNT` is an `int` --
@@ -541,7 +547,11 @@ Decided, and not to be re-litigated:
   `filter::foreign_key_filter` yields a bar rather than a `WHERE`, and
   `filter::derived_filter` folds the bars through `filter_predicate` rather than
   quoting anything itself. `sql::paged` writes too, but only two integers, into
-  a preview's limit (see the SQL Server paging entry below).
+  a preview's limit (see the SQL Server paging entry below). The explorer
+  menu's clipboard text (`explorer::select_top_sql`, `explorer::drop_sql`,
+  `explorer::truncate_sql`, and `Connection::ddl` where an engine assembles
+  its DDL rather than asking the server for it) quotes through `Engine` too,
+  though none of it is ever run.
 - **A relation tab's row number is the catalog's, never a count run unasked.**
   An unfiltered tab shows the row estimate that rides along with the explorer's
   sizes (Postgres `reltuples`, MySQL `TABLE_ROWS`, SQL Server

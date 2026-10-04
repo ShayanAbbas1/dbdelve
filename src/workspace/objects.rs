@@ -419,6 +419,61 @@ impl Workspace {
         );
     }
 
+    pub(crate) fn relation_at(
+        &self,
+        target: ExplorerTarget,
+    ) -> Option<(String, String, RelationKind)> {
+        let ExplorerTarget::Relation {
+            schema_index,
+            relation_index,
+        } = target
+        else {
+            return None;
+        };
+        let schema = self.catalog()?.schemas.get(schema_index)?;
+        let relation = schema.relations.get(relation_index)?;
+        Some((schema.name.clone(), relation.name.clone(), relation.kind))
+    }
+
+    pub(crate) fn copy_ddl(
+        &mut self,
+        schema: String,
+        relation: String,
+        kind: RelationKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let profile_id = profile.id.clone();
+        let generation = profile.generation;
+        let task = cx
+            .background_executor()
+            .spawn(async move { connection.ddl(&schema, &relation, kind) });
+
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.issued_to(&profile_id, generation).is_none() {
+                        return;
+                    }
+                    match result {
+                        Ok(ddl) => cx.write_to_clipboard(ClipboardItem::new_string(ddl)),
+                        Err(error) => {
+                            workspace.note(format!("Could not read the DDL: {error}"), cx)
+                        }
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn load_structure(
         &mut self,
         id: u64,

@@ -1165,6 +1165,21 @@ impl Connection {
         }
     }
 
+    /// The statements that would create this relation, for the clipboard:
+    /// nothing dbdelve does runs them. The server's own rendering wherever it
+    /// has one; Postgres and SQL Server tables are written back out of their
+    /// structure ([`create_table`]).
+    pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.ddl(schema, relation, kind),
+            Self::MySql(connection) => connection.ddl(schema, relation),
+            Self::SqlServer(connection) => connection.ddl(schema, relation, kind),
+            Self::Sqlite(connection) => connection.ddl(schema, relation),
+            Self::Snowflake(connection) => connection.ddl(schema, relation, kind),
+            Self::MongoDb(connection) => connection.ddl(schema, relation),
+        }
+    }
+
     /// Ask the server to stop the statement running under `cancel` -- on
     /// Postgres, MySQL and SQLite, whatever this connection is running.
     ///
@@ -1731,6 +1746,71 @@ pub(super) fn assemble_structure(
     }
 
     Ok(structure)
+}
+
+/// `{head} (columns, constraints){tail};` written back out of a loaded
+/// structure, then each index as a statement of its own, spelled by `index`.
+/// An index sharing a key or exclusion constraint's name is that constraint's,
+/// already declared with it.
+///
+/// ponytail: a column's collation and anything else [`Structure`] does not
+/// carry is not written; reading those from the catalog is the upgrade path.
+pub(super) fn create_table(
+    engine: Engine,
+    head: &str,
+    structure: &Structure,
+    tail: &str,
+    index: impl Fn(&NamedDefinition) -> String,
+) -> String {
+    let columns = structure.columns.iter().map(|column| {
+        let name = engine.quote_identifier(&column.name);
+        let default = column.default.as_deref().unwrap_or_default();
+        // SQL Server's computed column: an expression where the type would be.
+        if let Some(expression) = default.strip_prefix("AS ") {
+            return format!("{name} AS {expression}");
+        }
+        let generated = default.starts_with("GENERATED ") || default.starts_with("IDENTITY(");
+        let default = match default {
+            "" => String::new(),
+            _ if generated => format!(" {default}"),
+            _ => format!(" DEFAULT {default}"),
+        };
+        let not_null = if column.nullable { "" } else { " NOT NULL" };
+        format!("{name} {}{default}{not_null}", column.data_type)
+    });
+    let constraints = structure.constraints.iter().map(|constraint| {
+        format!(
+            "CONSTRAINT {} {}",
+            engine.quote_identifier(&constraint.name),
+            constraint.definition
+        )
+    });
+    let body = columns
+        .chain(constraints)
+        .collect::<Vec<_>>()
+        .join(",\n    ");
+    let mut statements = vec![format!("{head} (\n    {body}\n){tail}")];
+    statements.extend(
+        structure
+            .indexes
+            .iter()
+            .filter(|definition| {
+                !structure.constraints.iter().any(|constraint| {
+                    constraint.name == definition.name
+                        && ["PRIMARY KEY", "UNIQUE", "EXCLUDE"]
+                            .iter()
+                            .any(|kind| constraint.definition.starts_with(kind))
+                })
+            })
+            .map(index),
+    );
+    statements.join(";\n") + ";"
+}
+
+/// A statement the server rendered, ending in exactly one `;` whether or not
+/// the server wrote one.
+pub(super) fn terminated(statement: &str) -> String {
+    format!("{};", statement.trim().trim_end_matches(';'))
 }
 
 /// Reads foreign keys out of a result whose columns are named the way dbdelve
@@ -2906,5 +2986,47 @@ mod tests {
         );
         assert_eq!(read_only_statement(Engine::Sqlite, true), None);
         assert_eq!(read_only_statement(Engine::Sqlite, false), None);
+    }
+
+    #[test]
+    fn a_table_is_written_back_with_its_constraints_and_only_its_own_indexes() {
+        let column =
+            |name: &str, data_type: &str, nullable, default: Option<&str>| ColumnDefinition {
+                name: name.into(),
+                data_type: data_type.into(),
+                nullable,
+                default: default.map(str::to_string),
+            };
+        let named = |name: &str, definition: &str| NamedDefinition {
+            name: name.into(),
+            definition: definition.into(),
+        };
+        let structure = Structure {
+            columns: vec![
+                column("id", "bigint", false, Some("IDENTITY(1,1)")),
+                column("note", "nvarchar(40)", true, Some("(N'x')")),
+                column("twice", "int", true, Some("AS ([id]*(2))")),
+            ],
+            indexes: vec![named("pk", "CLUSTERED INDEX (id)"), named("by_note", "x")],
+            constraints: vec![
+                named("pk", "PRIMARY KEY (id)"),
+                named("by_note", "CHECK (note <> N'')"),
+            ],
+            ..Structure::default()
+        };
+
+        assert_eq!(
+            create_table(
+                Engine::SqlServer,
+                "CREATE TABLE \"dbo\".\"t\"",
+                &structure,
+                "",
+                |index| format!("CREATE INDEX {}", index.name),
+            ),
+            "CREATE TABLE \"dbo\".\"t\" (\n    \"id\" bigint IDENTITY(1,1) NOT NULL,\n    \
+             \"note\" nvarchar(40) DEFAULT (N'x'),\n    \"twice\" AS ([id]*(2)),\n    \
+             CONSTRAINT \"pk\" PRIMARY KEY (id),\n    \
+             CONSTRAINT \"by_note\" CHECK (note <> N'')\n);\nCREATE INDEX by_note;"
+        );
     }
 }
