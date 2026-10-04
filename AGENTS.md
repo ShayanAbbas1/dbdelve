@@ -104,7 +104,7 @@ require it, stop and raise it instead.
    and has to spell it the way the server will read it. It holds no connection.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
-   `fields`, and `filter::Operator::on` for the filter dropdown) and never
+   `fields`, `syntax`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
@@ -177,7 +177,7 @@ trusts. `Cargo.toml` carries the full reasoning; this is the shape of it.
 ```toml
 gpui = { package = "gpui-pre", version = "=0.3.5" }  # rolling republish of zed main
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5" }  # font-kit, x11, wayland
-gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
+gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql", "tree-sitter-javascript"] }  # each engine's highlighter
 
 tree-sitter = "=0.26.13"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below

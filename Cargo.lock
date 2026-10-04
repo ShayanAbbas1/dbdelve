@@ -2710,6 +2710,7 @@ dependencies = [
  "smol",
  "tracing",
  "tree-sitter",
+ "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-sequel",
  "uuid",

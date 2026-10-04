@@ -882,6 +882,7 @@ impl Workspace {
                 active: true,
                 queued_results: 0,
             },
+            self.engine(),
             window,
             cx,
         );
@@ -983,6 +984,7 @@ impl Workspace {
                 active: true,
                 queued_results: 0,
             },
+            self.engine(),
             window,
             cx,
         );

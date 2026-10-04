@@ -23,7 +23,7 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, Relation, RelationKind, Routine, Structure,
+        ExplainMode, Relation, RelationKind, Routine, Structure, Syntax,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -361,6 +361,7 @@ impl Session {
         stored_queries: Vec<store::StoredQueryTab>,
         stored_next_query_id: u64,
         pending_objects: Vec<store::StoredObject>,
+        engine: Engine,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -425,7 +426,7 @@ impl Session {
         let queries = stored_queries
             .iter()
             .map(|stored| {
-                let (tab, failure) = QueryTab::restore(&id, stored, window, cx);
+                let (tab, failure) = QueryTab::restore(&id, stored, engine, window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -588,6 +589,17 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_) => None,
             },
+        }
+    }
+
+    /// Every buffer highlighted and prompted for `syntax`, once an edit has
+    /// moved the profile to an engine written in another language.
+    pub(crate) fn set_syntax(&self, syntax: Syntax, window: &mut Window, cx: &mut App) {
+        for tab in &self.queries {
+            tab.editor.update(cx, |editor, cx| {
+                editor.set_highlighter(syntax.highlighter(), cx);
+                editor.set_placeholder(syntax.placeholder(), window, cx);
+            });
         }
     }
 
@@ -991,6 +1003,7 @@ impl QueryTab {
     pub(crate) fn restore(
         profile_id: &str,
         stored: &store::StoredQueryTab,
+        engine: Engine,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1007,9 +1020,9 @@ impl QueryTab {
             id: stored.id,
             editor: cx.new(|cx| {
                 EditorState::new(window, cx)
-                    .language("sql")
+                    .language(engine.syntax().highlighter())
                     .soft_wrap(false)
-                    .placeholder("Write SQL…")
+                    .placeholder(engine.syntax().placeholder())
                     .default_value(sql)
             }),
             results: result_grid::new_grid(window, cx),

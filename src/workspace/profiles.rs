@@ -164,6 +164,7 @@ impl Workspace {
             stored_queries,
             stored.next_query_id.unwrap_or(0),
             stored.open_objects,
+            config.engine(),
             window,
             cx,
         );
@@ -231,7 +232,15 @@ impl Workspace {
             .map(|profile| profile.id.clone())
             .collect::<Vec<_>>();
         let id = store::profile_id(&name, &existing);
-        let session = Session::new(id.clone(), first_buffer(None), 0, Vec::new(), window, cx);
+        let session = Session::new(
+            id.clone(),
+            first_buffer(None),
+            0,
+            Vec::new(),
+            config.engine(),
+            window,
+            cx,
+        );
         let password = password_to_persist(&config, origin).map(str::to_string);
         self.profiles.push(Profile {
             id: id.clone(),
@@ -567,7 +576,7 @@ impl Workspace {
 
         self.form = None;
         match editing {
-            Some(id) => self.save_profile(&id, name, config, color, cx),
+            Some(id) => self.save_profile(&id, name, config, color, window, cx),
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
@@ -653,6 +662,7 @@ impl Workspace {
         name: String,
         config: ConnectionConfig,
         color: Option<ConnectionColor>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Removed from the switcher while the form sat open: there is nothing
@@ -665,6 +675,10 @@ impl Workspace {
         let password = password_to_persist(&config, Origin::Form).map(str::to_string);
         let profile = &mut self.profiles[index];
         let reconnect = profile.config.needs_reconnect(&config);
+        let syntax = config.engine().syntax();
+        if profile.config.engine().syntax() != syntax {
+            profile.session.set_syntax(syntax, window, cx);
+        }
         profile.name = name;
         profile.color = color;
         profile.config = config;

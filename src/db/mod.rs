@@ -78,6 +78,33 @@ pub enum Fields {
     Account,
 }
 
+/// What a query buffer is written in: what the editor highlights it as, what
+/// completion reads it as, and whether a row can be copied as a statement that
+/// recreates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Syntax {
+    Sql,
+    /// mongosh statements, which are JavaScript expressions.
+    Mongo,
+}
+
+impl Syntax {
+    /// gpui-component's name for the grammar it highlights with.
+    pub fn highlighter(self) -> &'static str {
+        match self {
+            Self::Sql => "sql",
+            Self::Mongo => "javascript",
+        }
+    }
+
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Sql => "Write SQL…",
+            Self::Mongo => "Write a query, like db.collection.find({})…",
+        }
+    }
+}
+
 /// How much the server should be asked to do to answer "how would you run
 /// this?".
 ///
@@ -377,6 +404,18 @@ impl Engine {
     /// refuses it in Read-only instead of offering to run it once.
     pub fn holds_read_only(self) -> bool {
         read_only_statement(self, true).is_some()
+    }
+
+    pub fn syntax(self) -> Syntax {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => Syntax::Sql,
+            Self::MongoDb => Syntax::Mongo,
+        }
     }
 
     /// Whether one server holds several databases a profile can be moved
@@ -1833,6 +1872,19 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_buffer_is_highlighted_by_a_grammar_the_editor_was_built_with() {
+        // An unknown name falls back to plain text without a word, so a
+        // missing gpui-component feature would only show as a grey buffer.
+        use gpui_component::highlighter::Language;
+        for engine in Engine::ALL {
+            let name = engine.syntax().highlighter();
+            assert_ne!(Language::from_str(name), Language::Plain, "{name}");
+        }
+        assert_eq!(Engine::MongoDb.syntax(), Syntax::Mongo);
+        assert_eq!(Engine::SqlServer.syntax(), Syntax::Sql);
+    }
 
     #[test]
     fn only_numbers_are_numeric_across_the_three_engines_spellings() {
