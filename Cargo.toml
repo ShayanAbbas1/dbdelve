@@ -15,7 +15,7 @@ publish = false
 # taking it here is what keeps one copy of the framework in the graph.
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.5" }
-gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
+gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql", "tree-sitter-javascript"] }
 
 # gpui-component keeps its parse tree private, so we run our own parser to find
 # statement boundaries. Versions match what gpui-component pulls, to avoid
@@ -27,6 +27,15 @@ gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
 # dependency, not a formatting one.
 tree-sitter = "=0.26.13"
 tree-sitter-sequel = "=0.3.11"
+
+# The grammar `mql.rs` reads mongosh statements with: they are JavaScript
+# expressions, and this is what finds their boundaries, comments and regex
+# literals in a half-typed buffer. A correctness pin like tree-sitter-sequel's,
+# since it decides what a Mongo statement is and so what the mode gate is shown.
+# Pinned to the version gpui-component's own `tree-sitter-javascript` feature
+# resolves -- that feature is what highlights a Mongo buffer -- so the graph
+# links one copy, not two.
+tree-sitter-javascript = "=0.23.1"
 
 # The vocabulary gpui-component's completion provider speaks, and nothing more:
 # no language server is started, and none could be -- the completions come from
@@ -155,15 +164,40 @@ tiberius = { version = "=0.12.3", default-features = false, features = [
 ] }
 # The runtime tiberius is driven on, and the adapter from tokio's socket to the
 # `futures` I/O traits tiberius speaks. Pinned to the versions already locked,
-# so naming them adds no copy.
+# so naming them adds no copy. `rt-multi-thread`, `sync` and `macros` are for
+# MongoDB's runtime, below, which already enables all three itself.
 tokio = { version = "=1.53.1", default-features = false, features = [
     "rt",
+    "rt-multi-thread",
     "net",
     "time",
+    "sync",
+    "macros",
 ] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["compat"] }
 # `try_next` over tiberius's result stream. Already linked through tiberius.
 futures-util = { version = "=0.3.34", default-features = false }
+
+# MongoDB. The official driver, async on tokio like tiberius and driven the
+# same way: each connection owns a runtime and every call is a `block_on` on
+# the background thread it already runs on. A multi-thread runtime of one
+# worker rather than tiberius's current-thread one, because this driver spawns
+# server monitors and pool maintenance that have to keep running between calls.
+#
+# `default-features = false` states what its defaults happen to be, as on
+# `ureq`: named so a release that changes them cannot bring aws-lc-rs in.
+# `rustls-tls` is rustls 0.23 *on ring* with webpki-roots, the copies already in
+# the graph; `dns-resolver` is what resolves `mongodb+srv`; `compat-3-0-0` is
+# the 3.x API, which the crate makes every user name.
+mongodb = { version = "=3.9.1", default-features = false, features = [
+    "compat-3-0-0",
+    "rustls-tls",
+    "dns-resolver",
+] }
+# A MongoDB profile's user, password and database, escaped into the connection
+# string the driver reads its options from. Already in the graph through `url`;
+# pinned to the locked version so naming it links no second copy.
+percent-encoding = "=2.3.2"
 
 # The palette's scorer. gpui-component ships the list, the virtualized scroll
 # and the search field, but no fuzzy matching at all -- and ranking that reads
@@ -175,6 +209,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 url = "2"
+
+# ISO-8601 dates in mongosh statements (`ISODate(…)`, `{"$date": …}`), for
+# `mql.rs`, and in the cells of a MongoDB result. Already in the graph through
+# bson (under mongodb); pinned to the version the lockfile already holds so
+# naming it links no second copy. Default features off: `parsing`,
+# `formatting` and the `format_description!` macro are all it is used for.
+time = { version = "=0.3.55", default-features = false, features = [
+    "parsing",
+    "formatting",
+    "macros",
+] }
 
 # Classification only, for `sql::classify`: the mode check reads a typed
 # `Statement` so it cannot mistake one statement for another. tree-sitter-sequel

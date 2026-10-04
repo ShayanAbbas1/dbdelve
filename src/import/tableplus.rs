@@ -12,7 +12,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Imported, Report, Skipped, port, root_certificate};
+use super::{Imported, Report, Skipped, mongo, mongo_url, port, root_certificate};
 use crate::{
     db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
     store,
@@ -154,6 +154,14 @@ struct Row {
     /// Client key, client certificate, CA certificate.
     #[serde(rename = "TlsKeyPaths")]
     tls_key_paths: Vec<String>,
+    /// What each path in `TlsKeyPaths` is, in order, as the driver names them:
+    /// `Certificate Key,Certificate Authority` on MongoDB.
+    #[serde(rename = "TlsKeyName")]
+    tls_key_name: String,
+    /// What the dropdown behind the driver's "Advanced" options holds. Its
+    /// entries' shape is unknown, so only whether there are any is read.
+    #[serde(rename = "OtherOptions")]
+    other_options: Vec<Value>,
     #[serde(rename = "isOverSSH")]
     over_ssh: bool,
     #[serde(rename = "ServerAddress")]
@@ -218,6 +226,7 @@ fn read_rows(
                 continue;
             }
         };
+        let mut stored_url = None;
         if let Some(server) = imported.config.server_mut()
             && !row.id.is_empty()
         {
@@ -228,7 +237,19 @@ fn read_rows(
                     .map(|found| found.map(String::from_utf8))
                 {
                     Ok(None) => {}
-                    Ok(Some(Ok(password))) => server.password = password,
+                    Ok(Some(Ok(password))) => {
+                        // TablePlus keeps a pasted connection string, login
+                        // included, where it keeps the password.
+                        if matches!(
+                            row.driver.to_ascii_lowercase().as_str(),
+                            "mongo" | "mongodb"
+                        ) && is_mongo_url(password.trim())
+                        {
+                            stored_url = Some(password.trim().to_string());
+                        } else {
+                            server.password = password;
+                        }
+                    }
                     Ok(Some(Err(_))) | Err(_) => keychain_refused = true,
                 }
             }
@@ -256,8 +277,43 @@ fn read_rows(
                 report.notes.push(UNREADABLE_PASSWORDS.to_string());
             }
         }
+        if let Some(url) = stored_url {
+            match from_connection_string(&url, &row.user, &imported.config) {
+                Ok(config) => imported.config = config,
+                Err(_) => imported.notes.push(
+                    "the saved connection string couldn't be read, so its login was left off"
+                        .into(),
+                ),
+            }
+        }
         report.imported.push(imported);
     }
+}
+
+fn is_mongo_url(text: &str) -> bool {
+    text.starts_with("mongodb://") || text.starts_with("mongodb+srv://")
+}
+
+/// `fields` as a connection string reads, keeping what a URL has no place for
+/// (the tunnel), the database where it names none, and the row's TLS where it
+/// names none (a seed list that says nothing about TLS reads as the default).
+fn from_connection_string(
+    url: &str,
+    user: &str,
+    fields: &ConnectionConfig,
+) -> Result<ConnectionConfig, String> {
+    let mut from_url = mongo_url(url, user, "")?;
+    if let (Some(url), Some(fields)) = (from_url.server_mut(), fields.server()) {
+        url.ssh = fields.ssh.clone();
+        if url.database.is_empty() {
+            url.database = fields.database.clone();
+        }
+        if url.sslmode == SslMode::default() {
+            url.sslmode = fields.sslmode;
+            url.root_certificate = fields.root_certificate.clone();
+        }
+    }
+    Ok(from_url)
 }
 
 /// The engine, and what each index of TablePlus's TLS dropdown for the driver
@@ -286,6 +342,9 @@ const MYSQL_TLS: &[SslMode] = &[
     SslMode::VerifyFull,
 ];
 const MARIADB_TLS: &[SslMode] = &[SslMode::Prefer, SslMode::Require, SslMode::VerifyFull];
+// From TablePro's TablePlus importer (TablePlusFormValues.swift), which maps
+// the dropdown as disabled, verifyIdentity, required.
+const MONGO_TLS: &[SslMode] = &[SslMode::Disable, SslMode::VerifyFull, SslMode::Require];
 
 fn target(driver: &str) -> Result<Target, String> {
     let lowered = driver.to_ascii_lowercase();
@@ -295,6 +354,7 @@ fn target(driver: &str) -> Result<Target, String> {
         }
         "mysql" => Ok(Target::Server(ConnectionConfig::MySql, MYSQL_TLS)),
         "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb, MARIADB_TLS)),
+        "mongo" | "mongodb" => Ok(Target::Server(mongo, MONGO_TLS)),
         "sqlite" => Ok(Target::File),
         "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
         // Only the first entry of its dropdown is known, so any other comes in
@@ -323,7 +383,7 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
                 return Err("it has no host".into());
             }
             let (sslmode, ca) = ssl(row, tls, &mut notes);
-            engine(ServerConfig {
+            let mut config = engine(ServerConfig {
                 host: row.host.clone(),
                 port: port("port", filled(&row.port), &mut notes),
                 database: row.database.clone(),
@@ -332,7 +392,19 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
                 root_certificate: root_certificate(sslmode, ca, &mut notes),
                 ssh: ssh(row, &mut notes),
                 ..ServerConfig::default()
-            })
+            });
+            if matches!(config, ConnectionConfig::MongoDb(_)) {
+                // A host that is a connection string says more than the
+                // fields beside it, TLS included, so it is read as one. Only
+                // the tunnel is kept from the fields: a URL has no place for it.
+                if is_mongo_url(&row.host) {
+                    config = from_connection_string(&row.host, &row.user, &config)?;
+                }
+                if !row.other_options.is_empty() {
+                    notes.push("other options left off: their format isn't known".into());
+                }
+            }
+            config
         }
     };
     let color = match row.environment.to_ascii_lowercase().as_str() {
@@ -362,10 +434,17 @@ fn ssl(row: &Row, tls: &[SslMode], notes: &mut Vec<String>) -> (SslMode, Option<
             SslMode::VerifyFull
         });
     let key_path = |index: usize| row.tls_key_paths.get(index).and_then(|path| filled(path));
-    if key_path(0).is_some() || key_path(1).is_some() {
+    let authority = row
+        .tls_key_name
+        .split(',')
+        .position(|name| name.trim() == "Certificate Authority")
+        .unwrap_or(2);
+    if (0..row.tls_key_paths.len().max(authority))
+        .any(|index| index != authority && key_path(index).is_some())
+    {
         notes.push("client certificate left off: DBDelve doesn't send one".into());
     }
-    (sslmode, key_path(2))
+    (sslmode, key_path(authority))
 }
 
 fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
@@ -492,6 +571,209 @@ mod tests {
         );
         assert_eq!(wrote.is_empty(), identity.is_none());
         (identity, imported.notes.clone())
+    }
+
+    /// A MongoDB row as TablePlus wrote it, trimmed to what is read.
+    fn mongo_row(extra: Value) -> Value {
+        let mut base = row(
+            "Mongo",
+            json!({
+                "DatabaseHost": "127.0.0.1", "DatabasePort": "57017", "DatabaseName": "app",
+                "DatabaseUser": "", "tLSMode": 0, "TlsKeyName": "Certificate Key,Certificate Authority",
+                "TlsKeyPaths": ["", ""], "OtherOptions": [],
+            }),
+        );
+        for (key, value) in extra.as_object().expect("an object") {
+            base[key] = value.clone();
+        }
+        base
+    }
+
+    #[test]
+    fn a_mongo_row_becomes_a_mongodb_profile() {
+        let imported = import(
+            "m".into(),
+            &Row::deserialize(&mongo_row(json!({}))).unwrap(),
+        )
+        .unwrap();
+        let ConnectionConfig::MongoDb(config) = &imported.config else {
+            panic!("{:?}", imported.config)
+        };
+        assert_eq!(imported.config.engine(), Engine::MongoDb);
+        assert_eq!(
+            (config.server.host.as_str(), config.server.port),
+            ("127.0.0.1", Some(57017))
+        );
+        assert_eq!(config.server.database, "app");
+        assert_eq!(config.server.sslmode, SslMode::Disable);
+        assert!(!config.srv && config.options.is_empty());
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+    }
+
+    #[test]
+    fn mongo_reads_its_ca_from_its_own_slot_and_never_sends_a_client_certificate() {
+        let imported = import(
+            "m".into(),
+            &Row::deserialize(&mongo_row(json!({
+                "tLSMode": 9, "TlsKeyPaths": ["/c/client.pem", "/c/ca.pem"],
+            })))
+            .unwrap(),
+        )
+        .unwrap();
+        let server = server(&imported);
+        assert_eq!(server.sslmode, SslMode::VerifyFull);
+        assert_eq!(server.root_certificate.as_deref(), Some("/c/ca.pem"));
+        assert!(
+            imported
+                .notes
+                .contains(&"client certificate left off: DBDelve doesn't send one".to_string())
+        );
+    }
+
+    #[test]
+    fn a_mongo_host_that_is_a_connection_string_is_read_as_one() {
+        let imported = import(
+            "m".into(),
+            &Row::deserialize(&mongo_row(json!({
+                "DatabaseHost": "mongodb+srv://cluster0.example.mongodb.net/app?authSource=admin",
+                "DatabaseUser": "alice", "isOverSSH": true, "ServerAddress": "bastion",
+                "ServerPasswordMode": 2,
+            })))
+            .unwrap(),
+        )
+        .unwrap();
+        let ConnectionConfig::MongoDb(config) = &imported.config else {
+            panic!()
+        };
+        assert!(config.srv);
+        assert_eq!(config.server.host, "cluster0.example.mongodb.net");
+        assert_eq!(config.server.user, "alice");
+        assert_eq!(config.server.sslmode, SslMode::VerifyFull);
+        assert_eq!(config.options, "authSource=admin");
+        assert_eq!(
+            config.server.ssh.as_ref().map(|ssh| ssh.host.as_str()),
+            Some("bastion")
+        );
+    }
+
+    #[test]
+    fn mongo_options_whose_format_is_unknown_are_said_and_a_sql_row_is_not_asked() {
+        let mongo = import(
+            "m".into(),
+            &Row::deserialize(&mongo_row(json!({ "OtherOptions": [{ "k": "v" }] }))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            mongo.notes,
+            ["other options left off: their format isn't known"]
+        );
+        assert!(
+            imported("PostgreSQL", json!({ "OtherOptions": [1] }))
+                .unwrap()
+                .notes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_mongo_password_comes_from_the_keychain_like_any_other() {
+        let report = read(
+            vec![named(
+                "m",
+                "m",
+                mongo_row(json!({ "Driver": "Mongo", "DatabasePasswordMode": 0 })),
+            )],
+            |account| {
+                assert_eq!(account, "m_database");
+                Ok(Some(b"s3cret".to_vec()))
+            },
+        );
+        assert_eq!(server(&report.imported[0]).password, "s3cret");
+    }
+
+    fn mongo_with_secret(secret: &str, extra: Value) -> Imported {
+        let secret = secret.to_string();
+        read(vec![named("m", "m", mongo_row(extra))], move |_| {
+            Ok(Some(secret.clone().into_bytes()))
+        })
+        .imported
+        .remove(0)
+    }
+
+    fn mongo_config(imported: &Imported) -> &crate::db::MongoConfig {
+        let ConnectionConfig::MongoDb(config) = &imported.config else {
+            panic!("{:?}", imported.config)
+        };
+        config
+    }
+
+    #[test]
+    fn a_connection_string_kept_as_the_password_supplies_the_login() {
+        let imported = mongo_with_secret(
+            "mongodb://dbdelve:s3cret@127.0.0.1:57017/dbdelve_dev?authSource=admin",
+            json!({ "DatabasePasswordMode": 0, "DatabaseName": "dbdelve_dev" }),
+        );
+        let config = mongo_config(&imported);
+        assert_eq!(config.server.user, "dbdelve");
+        assert_eq!(config.server.password, "s3cret");
+        assert_eq!(config.options, "authSource=admin");
+        assert_eq!(config.server.sslmode, SslMode::Disable);
+        assert_eq!(config.server.database, "dbdelve_dev");
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+    }
+
+    #[test]
+    fn a_srv_connection_string_kept_as_the_password_sets_srv() {
+        let imported = mongo_with_secret(
+            "mongodb+srv://u:p@cluster0.example.mongodb.net/app",
+            json!({ "DatabasePasswordMode": 0 }),
+        );
+        assert!(mongo_config(&imported).srv);
+    }
+
+    #[test]
+    fn a_stored_connection_string_without_a_database_keeps_the_rows() {
+        let imported = mongo_with_secret(
+            "mongodb://u:p@127.0.0.1:57017",
+            json!({ "DatabasePasswordMode": 0, "DatabaseName": "kept" }),
+        );
+        assert_eq!(mongo_config(&imported).server.database, "kept");
+        assert_eq!(mongo_config(&imported).server.user, "u");
+    }
+
+    #[test]
+    fn an_unreadable_stored_connection_string_is_said_and_the_row_kept() {
+        let imported = mongo_with_secret("mongodb://[broken", json!({ "DatabasePasswordMode": 0 }));
+        let config = mongo_config(&imported);
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.password, "");
+        assert_eq!(
+            imported.notes,
+            ["the saved connection string couldn't be read, so its login was left off"]
+        );
+    }
+
+    #[test]
+    fn a_plain_password_kept_for_mongo_stays_one() {
+        let imported = mongo_with_secret("hunter2", json!({ "DatabasePasswordMode": 0 }));
+        assert_eq!(mongo_config(&imported).server.password, "hunter2");
+        assert!(imported.notes.is_empty());
+    }
+
+    #[test]
+    fn mongo_tls_indexes_map_to_disable_verify_full_and_require() {
+        for (index, expected) in [
+            (0, SslMode::Disable),
+            (1, SslMode::VerifyFull),
+            (2, SslMode::Require),
+        ] {
+            let imported = import(
+                "m".into(),
+                &Row::deserialize(&mongo_row(json!({ "tLSMode": index }))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(server(&imported).sslmode, expected);
+        }
     }
 
     #[test]

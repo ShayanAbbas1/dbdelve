@@ -53,14 +53,22 @@ impl Buffer {
     /// `BEGIN … END` block is one statement however many `;`s it holds. Sending
     /// the second `DELETE` of an `IF … BEGIN … END` alone runs it outside its
     /// `IF`.
+    ///
+    /// A MongoDB buffer is mongosh statements, not SQL, and `mql` reads its
+    /// boundaries: a newline ends a statement there unless a `.` continues it.
     pub fn for_engine(engine: Engine, sql: &str) -> Self {
-        if engine != Engine::SqlServer {
-            return Self::parse(sql);
-        }
-        let statements = batches(sql)
-            .into_iter()
-            .flat_map(|batch| tsql_statements(sql, batch))
-            .collect();
+        let statements = match engine {
+            Engine::SqlServer => batches(sql)
+                .into_iter()
+                .flat_map(|batch| tsql_statements(sql, batch))
+                .collect(),
+            Engine::MongoDb => crate::mql::statements(sql),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::Sqlite
+            | Engine::Snowflake => statements_in(sql),
+        };
 
         Self { statements }
     }
@@ -130,7 +138,12 @@ pub(crate) fn queued_statements(
 ) -> Vec<Range<usize>> {
     let units = match engine {
         Engine::SqlServer => queued_batches(sql),
-        _ => Buffer::for_engine(engine, sql).statements().to_vec(),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::MongoDb => Buffer::for_engine(engine, sql).statements().to_vec(),
     };
     let Some(selection) = selection.filter(|sel| !sel.is_empty()) else {
         return units;
@@ -152,7 +165,12 @@ pub(crate) fn queued_statements(
 pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
     match engine {
         Engine::SqlServer => tsql_statements(sql, 0..sql.len()).len().max(1),
-        _ => 1,
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::MongoDb => 1,
     }
 }
 
@@ -197,7 +215,16 @@ impl SortKey {
 /// The keys of a statement's `ORDER BY`, in order. `Some(empty)` is a statement
 /// that could carry one and does not; `None` is a statement dbdelve cannot read
 /// well enough to say without guessing.
-pub fn order_by(statement: &str) -> Option<Vec<SortKey>> {
+pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::order_by(statement),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let sql = statement;
     let tree = parse(sql)?;
     let anchor = clause_anchor(&tree, sql)?;
@@ -240,7 +267,16 @@ pub fn order_by(statement: &str) -> Option<Vec<SortKey>> {
 /// parse cleanly, one with no `FROM`, or one that is not a query. Nothing is
 /// guessed at, because the alternative is handing the server a statement the
 /// user did not write and cannot read.
-pub fn with_order_by(statement: &str, keys: &[SortKey]) -> Option<String> {
+pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Option<String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::with_order_by(statement, keys),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let sql = statement;
     let tree = parse(sql)?;
     let anchor = clause_anchor(&tree, sql)?;
@@ -403,17 +439,26 @@ pub fn update_row(
 /// exists. So a table without a primary key can be inserted into and not
 /// edited.
 ///
-/// `None` on an empty list. The alternative is `INSERT INTO t DEFAULT VALUES`,
-/// a statement nobody has asked dbdelve for.
+/// An error on an empty list. The alternative is `INSERT INTO t DEFAULT
+/// VALUES`, a statement nobody has asked dbdelve for.
 pub fn insert_row(
     engine: Engine,
     schema: &str,
     table: &str,
     columns: &[(&str, Option<&str>)],
     types: &[(String, String)],
-) -> Option<String> {
+) -> Result<String, String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::insert_row(table, columns, types),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if columns.is_empty() {
-        return None;
+        return Err("There is nothing in this row to insert.".into());
     }
 
     let names: Vec<String> = columns
@@ -432,7 +477,7 @@ pub fn insert_row(
             )
         })
         .collect();
-    Some(format!(
+    Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
         engine.qualified(schema, table),
         names.join(", "),
@@ -457,6 +502,15 @@ pub fn delete_row(
     keys: &[(&str, &str)],
     types: &[(String, String)],
 ) -> Option<String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::delete_row(table, keys, types).ok(),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if keys.is_empty() {
         return None;
     }
@@ -544,6 +598,34 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
     columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
 }
 
+/// [`is_generated_write`] for the engine the statement is bound for. A
+/// MongoDB grid writes mongosh statements, so its gate is `mql`'s, which
+/// admits the same three shapes read out of its own parse.
+pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
+    match engine {
+        Engine::MongoDb => crate::mql::is_generated_write(statement),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => is_generated_write(statement),
+    }
+}
+
+/// [`delete_matches_key`] for the engine the statement is bound for.
+pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
+    match engine {
+        Engine::MongoDb => crate::mql::delete_matches_key(statement, keys),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => delete_matches_key(statement, keys),
+    }
+}
+
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
 /// statement, a query, with nothing destructive anywhere under it.
 ///
@@ -562,7 +644,16 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
 /// Exactly one root statement rather than `generated_statements`' view through
 /// a transaction: a preview never brackets anything, so seeing through
 /// brackets here would only widen what is accepted.
-pub fn is_generated_select(sql: &str) -> bool {
+pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
+    match engine {
+        Engine::MongoDb => return crate::mql::browse::is_generated_read(sql),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let Some(tree) = parse(sql) else {
         return false;
     };
@@ -1330,12 +1421,22 @@ fn repeats(count: u64) -> Result<(), String> {
 /// edit and undo it, because dbdelve does not open a transaction behind anyone's
 /// back.
 ///
-/// `None` when there is nothing to apply, and `None` — rather than a shorter
-/// batch — when any one row cannot be written: a partial apply is not the change
-/// the user made, and dbdelve would have no way to say which part of it ran.
-pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Option<String> {
+/// An error when there is nothing to apply, and an error — rather than a
+/// shorter batch — when any one row cannot be written: a partial apply is not
+/// the change the user made, and dbdelve would have no way to say which part of
+/// it ran.
+pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
+    match engine {
+        Engine::MongoDb => return crate::mql::update_batch(rows),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     if rows.is_empty() {
-        return None;
+        return Err("There are no edits to apply.".into());
     }
 
     fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -1368,9 +1469,11 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Option<String
         })
         .collect();
 
-    let batch = statements?.join("\n");
+    let batch = statements
+        .ok_or("dbdelve cannot name an edited row by its primary key.")?
+        .join("\n");
     let bracket = engine.transaction_start().filter(|_| rows.len() > 1);
-    Some(match bracket {
+    Ok(match bracket {
         Some(start) => format!("{start};\n{batch}\nCOMMIT;"),
         None => batch,
     })
@@ -1525,11 +1628,11 @@ pub(crate) struct Verdict {
 }
 
 impl Verdict {
-    const READ: Self = Self {
+    pub(crate) const READ: Self = Self {
         mode: Mode::ReadOnly,
         destructive: Vec::new(),
     };
-    const WRITE: Self = Self {
+    pub(crate) const WRITE: Self = Self {
         mode: Mode::ReadWrite,
         destructive: Vec::new(),
     };
@@ -1538,7 +1641,7 @@ impl Verdict {
         destructive: Vec::new(),
     };
 
-    fn destroys(kind: Destructive) -> Self {
+    pub(crate) fn destroys(kind: Destructive) -> Self {
         Self {
             mode: Mode::Full,
             destructive: vec![kind],
@@ -1549,7 +1652,7 @@ impl Verdict {
     /// what they destroy. A kind only ever arrives with `Mode::Full`, so taking
     /// the union never smuggles a destructive kind under a lower mode.
     /// `Unreadable` is the exception, and `classify` returns it alone.
-    fn max(mut self, other: Self) -> Self {
+    pub(crate) fn max(mut self, other: Self) -> Self {
         self.mode = self.mode.max(other.mode);
         for kind in other.destructive {
             if !self.destructive.contains(&kind) {
@@ -1557,6 +1660,20 @@ impl Verdict {
             }
         }
         self
+    }
+}
+
+/// Whether `sql` can be put in an Explain mode, and why not when it cannot.
+pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
+    match engine {
+        Engine::MongoDb => crate::mql::explainable(sql),
+        // The server refuses what it cannot explain, and says so.
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => Ok(()),
     }
 }
 
@@ -1574,6 +1691,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         Engine::Sqlite => Box::new(SQLiteDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
+        Engine::MongoDb => return crate::mql::classify(sql),
     };
 
     if engine == Engine::MariaDb
@@ -2010,7 +2128,7 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
         .map(Stop::Confirm)
 }
 
-/// `sql` laid out over several lines: the same tokens, indented. `None` when
+/// `sql` laid out over several lines: the same tokens, indented. Refused when
 /// the buffer holds a dollar-quoted body, which this cannot reflow safely.
 ///
 /// Token-level reformatting rather than a round trip through the `sqlparser`
@@ -2033,20 +2151,28 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // ponytail: `FormatOptions`' `dialect` is Generic except on SQL Server, where
 // Generic splits `[my col]` into `[ my col ]`, another name. Postgres's dialect
 // is the upgrade path if its output ever looks wrong there.
-pub(crate) fn format(engine: Engine, sql: &str) -> Option<String> {
+///
+/// Err is the refusal, said to the user as it stands. A MongoDB buffer is not
+/// SQL, and sqlformat over it splits regexes and turns comment text into code,
+/// so `mql::format` lays it out instead.
+pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
+    let dialect = match engine {
+        Engine::MongoDb => return crate::mql::format(sql),
+        Engine::SqlServer => sqlformat::Dialect::SQLServer,
+        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
+            sqlformat::Dialect::Generic
+        }
+    };
     if has_dollar_quote(sql) {
-        return None;
+        return Err("Not formatting: a dollar-quoted body would be rewritten.");
     }
     let options = sqlformat::FormatOptions {
-        dialect: match engine {
-            Engine::SqlServer => sqlformat::Dialect::SQLServer,
-            _ => sqlformat::Dialect::Generic,
-        },
+        dialect,
         ..sqlformat::FormatOptions::default()
     };
     let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
     if engine != Engine::SqlServer {
-        return Some(reflow(sql));
+        return Ok(reflow(sql));
     }
     // A `GO` line is not T-SQL, and reflowed with its batch `GO 5` becomes a
     // `GO` and a stray `5` on the next line: a count the refusal no longer
@@ -2064,7 +2190,7 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Option<String> {
         start = line.end;
     }
     formatted += reflow(&sql[start..]).trim();
-    Some(formatted)
+    Ok(formatted)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -2120,6 +2246,7 @@ mod tests {
         // it would sort one arbitrary thousand rows of the table.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 r#"SELECT * FROM "public"."measurements" LIMIT 1000"#,
                 &[SortKey::new(r#""id""#, false)]
             )
@@ -2131,6 +2258,7 @@ mod tests {
     #[test]
     fn a_second_key_joins_the_first() {
         let sorted = with_order_by(
+            Engine::Postgres,
             "SELECT * FROM t",
             &[SortKey::new(r#""a""#, true), SortKey::new("3", false)],
         )
@@ -2138,27 +2266,36 @@ mod tests {
 
         assert_eq!(sorted, r#"SELECT * FROM t ORDER BY "a" ASC, 3 DESC"#);
         assert_eq!(
-            order_by(&sorted).unwrap(),
+            order_by(Engine::Postgres, &sorted).unwrap(),
             vec![SortKey::new(r#""a""#, true), SortKey::new("3", false)]
         );
     }
 
     #[test]
     fn sorting_again_replaces_the_clause_it_wrote() {
-        let once = with_order_by("SELECT * FROM t LIMIT 5", &[SortKey::new("a", true)]).unwrap();
-        let twice = with_order_by(&once, &[SortKey::new("b", false)]).unwrap();
+        let once = with_order_by(
+            Engine::Postgres,
+            "SELECT * FROM t LIMIT 5",
+            &[SortKey::new("a", true)],
+        )
+        .unwrap();
+        let twice = with_order_by(Engine::Postgres, &once, &[SortKey::new("b", false)]).unwrap();
 
         assert_eq!(twice, "SELECT * FROM t ORDER BY b DESC LIMIT 5");
         // And clearing it leaves the statement as it was, not a hole.
         assert_eq!(
-            with_order_by(&twice, &[]).unwrap(),
+            with_order_by(Engine::Postgres, &twice, &[]).unwrap(),
             "SELECT * FROM t LIMIT 5"
         );
     }
 
     #[test]
     fn a_key_the_user_wrote_reads_back_verbatim() {
-        let keys = order_by("SELECT * FROM t ORDER BY lower(name), 2 DESC").unwrap();
+        let keys = order_by(
+            Engine::Postgres,
+            "SELECT * FROM t ORDER BY lower(name), 2 DESC",
+        )
+        .unwrap();
 
         assert_eq!(
             keys,
@@ -2170,6 +2307,7 @@ mod tests {
     fn a_union_sorts_at_the_end_of_the_whole_query() {
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT a FROM t UNION SELECT a FROM u LIMIT 3",
                 &[SortKey::new("a", true)]
             )
@@ -2184,9 +2322,9 @@ mod tests {
         // query's sort would flip a clause the user wrote for another purpose.
         let sql = "SELECT * FROM (SELECT a FROM t ORDER BY a LIMIT 3) s";
 
-        assert_eq!(order_by(sql).unwrap(), vec![]);
+        assert_eq!(order_by(Engine::Postgres, sql).unwrap(), vec![]);
         assert_eq!(
-            with_order_by(sql, &[SortKey::new("a", false)]).unwrap(),
+            with_order_by(Engine::Postgres, sql, &[SortKey::new("a", false)]).unwrap(),
             "SELECT * FROM (SELECT a FROM t ORDER BY a LIMIT 3) s ORDER BY a DESC"
         );
     }
@@ -2200,8 +2338,14 @@ mod tests {
             "SELECT * FROM t FOR UPDATE",
             "SELECT * FROM t OFFSET 10 LIMIT 5",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} should not be sortable");
-            assert!(with_order_by(sql, &[]).is_none(), "{sql} was spliced");
+            assert!(
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} should not be sortable"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[]).is_none(),
+                "{sql} was spliced"
+            );
         }
     }
 
@@ -2214,7 +2358,10 @@ mod tests {
             "BEGIN; SELECT 1; COMMIT",
             "-- nothing here",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} should not be sortable");
+            assert!(
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} should not be sortable"
+            );
         }
     }
 
@@ -2233,9 +2380,12 @@ mod tests {
             // readout looks most convincingly like a sortable grid.
             "EXPLAIN ANALYZE SELECT * FROM t ORDER BY a",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} reported a sort");
             assert!(
-                with_order_by(sql, &[SortKey::new("a", true)]).is_none(),
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} reported a sort"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[SortKey::new("a", true)]).is_none(),
                 "{sql} was spliced"
             );
         }
@@ -2635,13 +2785,54 @@ mod tests {
             "BEGIN SELECT 1; SELECT 2; END",
             "SELECT 1\nGO\nSELECT 2",
         ] {
-            for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+            for engine in Engine::ALL
+                .into_iter()
+                .filter(|e| !matches!(e, Engine::SqlServer | Engine::MongoDb))
+            {
                 assert_eq!(
                     Buffer::for_engine(engine, sql).statements(),
                     Buffer::parse(sql).statements(),
                     "{engine:?}: {sql}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_mongodb_buffer_runs_by_mongosh_statements_and_read_only_fails_closed() {
+        let buffer =
+            "db.accounts.find({ plan: 'free' })\n  .sort({ name: 1 })\ndb.accounts.deleteMany({})";
+        let statements = queued_statements(Engine::MongoDb, buffer, None);
+        assert_eq!(
+            statements
+                .iter()
+                .map(|range| &buffer[range.clone()])
+                .collect::<Vec<_>>(),
+            [
+                "db.accounts.find({ plan: 'free' })\n  .sort({ name: 1 })",
+                "db.accounts.deleteMany({})"
+            ]
+        );
+
+        let stopped =
+            |statement: &str| gate(&classify(Engine::MongoDb, statement), Mode::ReadOnly, &[]);
+        assert_eq!(stopped("db.accounts.find({ plan: 'free' })"), None);
+        assert_eq!(
+            stopped("db.accounts.insertOne({})"),
+            Some(Stop::Upgrade(Mode::ReadWrite))
+        );
+        // Nothing on the server holds a Mongo session to reads, so what the
+        // classifier cannot read is never run once in Read-only.
+        for unreadable in [
+            "db.accounts.find(",
+            "db.runCommand({ eval: 'x' })",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                stopped(unreadable),
+                Some(Stop::Upgrade(Mode::ReadWrite)),
+                "{unreadable}"
+            );
         }
     }
 
@@ -2747,9 +2938,12 @@ mod tests {
             "TRUNCATE t",
             "INSERT INTO t (a) VALUES (1) RETURNING *",
         ] {
-            assert!(order_by(sql).is_none(), "{sql} reported a sort");
             assert!(
-                with_order_by(sql, &[SortKey::new("a", true)]).is_none(),
+                order_by(Engine::Postgres, sql).is_none(),
+                "{sql} reported a sort"
+            );
+            assert!(
+                with_order_by(Engine::Postgres, sql, &[SortKey::new("a", true)]).is_none(),
                 "{sql} was spliced"
             );
         }
@@ -2762,6 +2956,7 @@ mod tests {
         // what the statement means or how it reads.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT * FROM t WHERE note LIKE 'a  %' LIMIT 10",
                 &[SortKey::new("id", true)]
             )
@@ -2770,6 +2965,7 @@ mod tests {
         );
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 r#"SELECT * FROM "public"."my  table""#,
                 &[SortKey::new("id", true)]
             )
@@ -2778,6 +2974,7 @@ mod tests {
         );
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "SELECT *\nFROM t\nWHERE a = 1\n  AND b = 2",
                 &[SortKey::new("id", true)]
             )
@@ -3006,7 +3203,7 @@ mod tests {
         );
         // An empty form is not `INSERT INTO t DEFAULT VALUES`, which is a
         // statement dbdelve has never been asked for.
-        assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_none());
+        assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_err());
     }
 
     #[test]
@@ -3164,6 +3361,7 @@ mod tests {
         // the cte. The select-child guard must not read the cte's own.
         assert_eq!(
             with_order_by(
+                Engine::Postgres,
                 "WITH x AS (SELECT 1 AS a) SELECT * FROM x",
                 &[SortKey::new("a", true)]
             )
@@ -3181,7 +3379,10 @@ mod tests {
             "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100",
             r#"WITH x AS (SELECT 1 AS a) SELECT * FROM x LIMIT 10"#,
         ] {
-            assert!(is_generated_select(sql), "{sql} was refused");
+            assert!(
+                is_generated_select(Engine::Postgres, sql),
+                "{sql} was refused"
+            );
         }
     }
 
@@ -3195,7 +3396,10 @@ mod tests {
             r#"SELECT * FROM "public"."t" WHERE "id" = '1'; DELETE FROM "t" LIMIT 1000"#,
             r#"SELECT * FROM "public"."t" WHERE "id" = '1'; TRUNCATE "t" LIMIT 1000"#,
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3207,7 +3411,10 @@ mod tests {
             r#"SELECT * FROM "public"."t" WHERE LIMIT 1000"#,
             "",
         ] {
-            assert!(!is_generated_select(sql), "{sql:?} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql:?} passed the gate"
+            );
         }
     }
 
@@ -3221,7 +3428,10 @@ mod tests {
             r#"WITH x AS (DELETE FROM "t" RETURNING *) SELECT * FROM x LIMIT 1000"#,
             r#"WITH x AS (SELECT 1 AS a) SELECT * FROM x WHERE a IN (SELECT 1); DROP TABLE "t""#,
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3239,7 +3449,10 @@ mod tests {
             "SELECT 1; SELECT 2",
             "-- SELECT * FROM t",
         ] {
-            assert!(!is_generated_select(sql), "{sql} passed the gate");
+            assert!(
+                !is_generated_select(Engine::Postgres, sql),
+                "{sql} passed the gate"
+            );
         }
     }
 
@@ -3574,11 +3787,12 @@ mod tests {
             )
         );
         let sorted = with_order_by(
+            Engine::SqlServer,
             "SELECT * FROM \"dbo\".\"accounts\" WHERE \"name\" LIKE N'%a[%]%' LIMIT 10 OFFSET 20",
             &[SortKey::new("\"id\"", false)],
         )
         .unwrap();
-        assert!(is_generated_select(&sorted), "{sorted}");
+        assert!(is_generated_select(Engine::SqlServer, &sorted), "{sorted}");
         assert_eq!(
             paged(Engine::SqlServer, &sorted, &[]).as_deref(),
             Some(
@@ -3602,14 +3816,30 @@ mod tests {
     #[test]
     fn an_unpaged_preview_reads_back_the_sort_it_runs_with() {
         let unsorted = "SELECT * FROM \"dbo\".\"accounts\" LIMIT 1000 OFFSET 0";
-        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", false)]).unwrap();
+        let sorted = with_order_by(
+            Engine::SqlServer,
+            unsorted,
+            &[SortKey::new("\"id\"", false)],
+        )
+        .unwrap();
         for statement in [unsorted, sorted.as_str()] {
             let paged = paged(Engine::SqlServer, statement, &[]).unwrap();
-            assert_eq!(order_by(&paged), None, "the grammar cannot read {paged}");
-            assert_eq!(order_by(&unpaged(&paged)), order_by(statement), "{paged}");
+            assert_eq!(
+                order_by(Engine::SqlServer, &paged),
+                None,
+                "the grammar cannot read {paged}"
+            );
+            assert_eq!(
+                order_by(Engine::SqlServer, &unpaged(&paged)),
+                order_by(Engine::SqlServer, statement),
+                "{paged}"
+            );
         }
         assert_eq!(
-            order_by(&unpaged(&paged(Engine::SqlServer, &sorted, &[]).unwrap())),
+            order_by(
+                Engine::SqlServer,
+                &unpaged(&paged(Engine::SqlServer, &sorted, &[]).unwrap())
+            ),
             Some(vec![SortKey::new("\"id\"", false)])
         );
         // Not `paged`'s shape: left alone.
@@ -3629,16 +3859,21 @@ mod tests {
         );
         // Read back as the unsorted preview it is, not as a sort on the key.
         assert_eq!(unpaged(&page), unsorted);
-        assert_eq!(order_by(&unpaged(&page)), Some(Vec::new()));
+        assert_eq!(
+            order_by(Engine::SqlServer, &unpaged(&page)),
+            Some(Vec::new())
+        );
 
         // A sort the user asked for is the order, key or no key.
-        let sorted = with_order_by(unsorted, &[SortKey::new("\"id\"", true)]).unwrap();
+        let sorted =
+            with_order_by(Engine::SqlServer, unsorted, &[SortKey::new("\"id\"", true)]).unwrap();
         assert_eq!(
             paged(Engine::SqlServer, &sorted, &key),
             paged(Engine::SqlServer, &sorted, &[])
         );
         // One inside a filter's string is the user's text, not paged's marker.
         let quoted = with_order_by(
+            Engine::SqlServer,
             "SELECT * FROM t WHERE a = ' ORDER BY (SELECT NULL)' LIMIT 5 OFFSET 0",
             &[SortKey::new("a", false)],
         )
@@ -3742,12 +3977,12 @@ mod tests {
             )
             .is_none()
         );
-        assert_eq!(update_batch(Engine::Postgres, &rows), None);
+        assert!(update_batch(Engine::Postgres, &rows).is_err());
     }
 
     #[test]
     fn an_empty_batch_of_rows_has_nothing_to_send() {
-        assert_eq!(update_batch(Engine::Postgres, &[]), None);
+        assert!(update_batch(Engine::Postgres, &[]).is_err());
     }
 
     #[test]
@@ -3906,6 +4141,28 @@ mod tests {
             "SELEC * FROM t",
         ] {
             assert!(!rerunnable(Engine::Postgres, sql), "{sql}");
+        }
+    }
+
+    /// Every MongoDB write returns a reply grid, so a restored one is offered
+    /// Refresh only when this holds.
+    #[test]
+    fn a_mongo_write_is_never_rerun_to_reload_its_reply() {
+        for sql in [
+            "db.accounts.find({})",
+            "db.accounts.aggregate([{$match: {}}])",
+        ] {
+            assert!(rerunnable(Engine::MongoDb, sql), "{sql}");
+        }
+        for sql in [
+            "db.accounts.insertOne({a: 1})",
+            "db.accounts.updateOne({_id: 1}, {$set: {a: 2}})",
+            "db.accounts.deleteOne({_id: 1})",
+            "db.accounts.findOneAndUpdate({_id: 1}, {$set: {a: 2}})",
+            "db.accounts.aggregate([{$out: 'copy'}])",
+            "db.accounts.find({}",
+        ] {
+            assert!(!rerunnable(Engine::MongoDb, sql), "{sql}");
         }
     }
 
@@ -4386,18 +4643,15 @@ mod tests {
     // hard rule 1; this is the test that catches the day that stops being true.
     #[test]
     fn a_buffer_holding_a_dollar_quoted_body_is_refused() {
-        assert_eq!(
-            format(Engine::Postgres, "DO $$ BEGIN DELETE FROM t; END $$"),
-            None
-        );
-        assert_eq!(format(Engine::Postgres, "select $tag$ x; y $tag$"), None);
+        assert!(format(Engine::Postgres, "DO $$ BEGIN DELETE FROM t; END $$").is_err());
+        assert!(format(Engine::Postgres, "select $tag$ x; y $tag$").is_err());
     }
 
     // A placeholder is not a quote, and reading it as one would refuse to format
     // every parameterised statement anybody writes.
     #[test]
     fn a_numbered_placeholder_still_formats() {
-        assert!(format(Engine::Postgres, "select a from t where id = $1").is_some());
+        assert!(format(Engine::Postgres, "select a from t where id = $1").is_ok());
     }
 
     #[test]

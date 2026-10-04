@@ -10,6 +10,9 @@ mod explorer;
 mod export;
 mod filter;
 mod import;
+// Nothing calls it until the MongoDB engine is wired in (phase 1b).
+#[cfg_attr(not(test), allow(dead_code))]
+mod mql;
 mod palette;
 mod result_grid;
 mod scroller;

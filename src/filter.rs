@@ -11,7 +11,14 @@ use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
 use serde::Deserialize;
 
-use crate::{Workspace, db, db::Engine, explorer::preview_sql, sql, sql::SortKey, store};
+use crate::{
+    Workspace, db,
+    db::{Engine, Syntax},
+    explorer::preview_sql,
+    sql,
+    sql::SortKey,
+    store,
+};
 
 /// What a filter bar compares its column against.
 ///
@@ -69,7 +76,10 @@ impl Operator {
 
     /// What the bar's own button shows: the SQL shape rather than the English,
     /// because the bar is read beside the statement it writes.
-    pub(crate) fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self, engine: Engine) -> &'static str {
+        if engine.syntax() == Syntax::Mongo {
+            return self.mongo_symbol();
+        }
         match self {
             Self::Equals => "=",
             Self::NotEquals => "!=",
@@ -92,9 +102,45 @@ impl Operator {
         }
     }
 
+    /// MongoDB's filter documents have no `LIKE`: the same operators read as
+    /// the English they compile from.
+    fn mongo_symbol(self) -> &'static str {
+        match self {
+            Self::Equals => "=",
+            Self::NotEquals => "!=",
+            Self::Contains => "contains",
+            Self::NotContains => "not contains",
+            Self::StartsWith => "starts with",
+            Self::EndsWith => "ends with",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::IsNull => "is null",
+            Self::IsNotNull => "is not null",
+            Self::IsEmpty => "is empty",
+            Self::IsNotEmpty => "is not empty",
+            Self::InList => "in",
+            Self::NotInList => "not in",
+            Self::Between => "between",
+            Self::Regex => "regex",
+        }
+    }
+
     /// What the dropdown row reads: the symbol and the English for it, so the
     /// list can be scanned by either.
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self, engine: Engine) -> &'static str {
+        if engine.syntax() == Syntax::Mongo {
+            return match self {
+                Self::Equals => "= equals",
+                Self::NotEquals => "!= not equals",
+                Self::Greater => "> greater than",
+                Self::GreaterOrEqual => ">= greater or equal",
+                Self::Less => "< less than",
+                Self::LessOrEqual => "<= less or equal",
+                other => other.mongo_symbol(),
+            };
+        }
         match self {
             Self::Equals => "= equals",
             Self::NotEquals => "!= not equals",
@@ -111,7 +157,7 @@ impl Operator {
             Self::Between => "BETWEEN between",
             Self::Regex => "~ matches regex",
             // The four that are their own English already.
-            other => other.symbol(),
+            other => other.symbol(engine),
         }
     }
 
@@ -136,7 +182,7 @@ impl Operator {
     /// Whether this engine can express the operator at all. Only the regex
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
-    /// SQL Server has none before 2025.
+    /// SQL Server has none before 2025. MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
         self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
     }
@@ -241,12 +287,13 @@ pub(crate) struct FilterRow {
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
 /// that ran on every keystroke would put a half-typed predicate on the wire.
 pub(crate) fn filter_row(
+    engine: Engine,
     id: u64,
     bar: FilterBar,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> FilterRow {
-    let placeholder = value_placeholder(bar.raw, bar.operator);
+    let placeholder = value_placeholder(engine, bar.raw, bar.operator);
     let applied = bar.value.clone();
     let input = cx.new(|cx| {
         let mut state = InputState::new(window, cx).placeholder(placeholder);
@@ -269,9 +316,9 @@ pub(crate) fn filter_row(
     }
 }
 
-pub(crate) fn value_placeholder(raw: bool, operator: Operator) -> &'static str {
+pub(crate) fn value_placeholder(engine: Engine, raw: bool, operator: Operator) -> &'static str {
     match raw {
-        true => "SQL…",
+        true => engine.raw_filter_placeholder(),
         false => operator.placeholder(),
     }
 }
@@ -323,7 +370,17 @@ pub(crate) fn derived_filter(
         };
         folded = Some(match folded {
             None => predicate,
-            Some(left) => format!("({left}) {} ({predicate})", bar.conjunction.as_str()),
+            Some(left) => match engine {
+                Engine::MongoDb => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
+                Engine::Postgres
+                | Engine::MySql
+                | Engine::MariaDb
+                | Engine::Sqlite
+                | Engine::Snowflake
+                | Engine::SqlServer => {
+                    format!("({left}) {} ({predicate})", bar.conjunction.as_str())
+                }
+            },
         });
     }
     folded.unwrap_or_default()
@@ -342,7 +399,15 @@ pub(crate) fn bar_predicate(
         // Verbatim, and checked as a whole statement by `is_generated_select`
         // rather than inspected here: a filter dbdelve does not understand is
         // exactly what the gate is for (spec §2.3).
-        return (!value.is_empty()).then(|| value.to_string());
+        return (!value.is_empty()).then(|| match engine {
+            Engine::MongoDb => crate::mql::browse::raw_filter(value),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::Sqlite
+            | Engine::Snowflake
+            | Engine::SqlServer => value.to_string(),
+        });
     }
     let column = bar.column.as_deref()?;
     if !bar.operator.on(engine) || (bar.operator.takes_value() && value.is_empty()) {
@@ -385,6 +450,17 @@ pub(crate) fn filter_predicate(
     operator: Operator,
     value: &str,
 ) -> Option<String> {
+    match engine {
+        Engine::MongoDb => {
+            return crate::mql::browse::filter_predicate(column, data_type, operator, value);
+        }
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let name = engine.quote_identifier(column);
     let literal = |value: &str| engine.quote_value(value, data_type);
     let comparison = |symbol: &str| Some(format!("{name} {symbol} {}", literal(value)));
@@ -453,6 +529,8 @@ pub(crate) fn filter_predicate(
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
             Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
+            // Written by `mql::browse::filter_predicate`, above.
+            Engine::MongoDb => None,
         },
     }
 }
@@ -661,7 +739,7 @@ pub(crate) fn relation_sql(
     offset: usize,
 ) -> String {
     let preview = preview_sql(engine, schema, relation, filter, limit, offset);
-    sql::with_order_by(&preview, sort).unwrap_or(preview)
+    sql::with_order_by(engine, &preview, sort).unwrap_or(preview)
 }
 
 /// How a column is named in an `ORDER BY`.
@@ -675,6 +753,16 @@ pub(crate) fn sort_expression(
     column: usize,
 ) -> Option<String> {
     let name = &columns.get(column)?.name;
+    match engine {
+        // A document's fields are unique, and a position names nothing there.
+        Engine::MongoDb => return crate::mql::browse::sort_field(name),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let unique = columns.iter().filter(|other| &other.name == name).count() == 1;
 
     Some(match unique && !name.is_empty() {
@@ -726,6 +814,19 @@ pub(crate) fn sort_columns(
 mod tests {
     use super::*;
     use crate::{db, db::RelationKind, explorer, explorer::PREVIEW_ROW_LIMIT, sql};
+
+    #[test]
+    fn mongo_operators_read_as_english_not_like() {
+        for operator in Operator::ALL {
+            let label = operator.label(Engine::MongoDb);
+            assert!(
+                !label.contains("LIKE") && !label.contains("NULL"),
+                "{label}"
+            );
+        }
+        assert_eq!(Operator::Contains.symbol(Engine::MongoDb), "contains");
+        assert_eq!(Operator::Contains.symbol(Engine::Postgres), "LIKE %..%");
+    }
 
     fn columns(names: &[&str]) -> Vec<db::Column> {
         names
@@ -1041,7 +1142,10 @@ mod tests {
             10,
             0,
         );
-        assert!(sql::is_generated_select(&preview), "{preview}");
+        assert!(
+            sql::is_generated_select(Engine::SqlServer, &preview),
+            "{preview}"
+        );
         assert_eq!(sql("hash", Operator::Equals, "00FF"), r#""hash" = N'00FF'"#);
         assert_eq!(sql("name", Operator::Equals, "k-1"), r#""name" = N'k-1'"#);
         // A column the structure does not list is spelled as unknown.
@@ -1119,7 +1223,10 @@ mod tests {
             r#""state" <> ''"#,
         ] {
             let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, 100, 0);
-            println!("{} {filter}", sql::is_generated_select(&sql));
+            println!(
+                "{} {filter}",
+                sql::is_generated_select(Engine::Postgres, &sql)
+            );
         }
     }
 
@@ -1138,7 +1245,7 @@ mod tests {
                 let filter = predicate(engine, operator, value).expect("applied");
                 let sql = explorer::preview_sql(engine, "public", "accounts", &filter, 100, 0);
                 assert!(
-                    sql::is_generated_select(&sql),
+                    sql::is_generated_select(engine, &sql),
                     "{} was refused: {sql}",
                     operator.slug()
                 );
@@ -1215,9 +1322,10 @@ mod tests {
         let filter = derived_filter(Engine::Postgres, &[bar], &[]);
 
         assert_eq!(filter, r#""account_id" = 'it''s'"#);
-        assert!(crate::sql::is_generated_select(&format!(
-            "SELECT * FROM t WHERE {filter}"
-        )));
+        assert!(crate::sql::is_generated_select(
+            Engine::Postgres,
+            &format!("SELECT * FROM t WHERE {filter}")
+        ));
         assert_eq!(reference_filter(&reference, None), None);
     }
 
@@ -1242,7 +1350,7 @@ mod tests {
                 100,
                 0,
             );
-            assert!(sql::is_generated_select(&sql), "{sql} was refused");
+            assert!(sql::is_generated_select(engine, &sql), "{sql} was refused");
         }
     }
 
@@ -1256,7 +1364,10 @@ mod tests {
         assert_eq!(filter, r#""id" = '1''; DROP TABLE accounts --'"#);
 
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(sql::is_generated_select(&sql), "{sql} was refused");
+        assert!(
+            sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was refused"
+        );
         // The statement runs on past the payload: neither the `;` ended it nor
         // the `--` commented out its tail, because both sit inside the literal.
         assert!(sql.ends_with(" LIMIT 100"), "{sql} was cut short");
@@ -1389,7 +1500,10 @@ mod tests {
         );
         assert_eq!(filter, r#"(("a" = '1') OR (id > 5)) AND ("c" = '3')"#);
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(sql::is_generated_select(&sql), "{sql} was refused");
+        assert!(
+            sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was refused"
+        );
     }
 
     #[test]
@@ -1405,7 +1519,10 @@ mod tests {
             }],
         );
         let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
-        assert!(!sql::is_generated_select(&sql), "{sql} was admitted");
+        assert!(
+            !sql::is_generated_select(Engine::Postgres, &sql),
+            "{sql} was admitted"
+        );
     }
 
     #[test]
@@ -1758,7 +1875,7 @@ mod tests {
             r#"SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 100 OFFSET 200"#
         );
         assert_eq!(
-            sql::order_by(&paged),
+            sql::order_by(Engine::Postgres, &paged),
             Some(vec![SortKey::new(r#""id""#, true)])
         );
     }
@@ -1784,7 +1901,7 @@ mod tests {
         // And the sort is still readable back off the statement, which is what
         // lights the headers up on a page that is not the first.
         assert_eq!(
-            sql::order_by(&filtered),
+            sql::order_by(Engine::Postgres, &filtered),
             Some(vec![SortKey::new(r#""id""#, true)])
         );
     }
@@ -1809,7 +1926,7 @@ mod tests {
         assert_eq!(
             sort_columns(
                 Engine::Postgres,
-                &sql::order_by(&sorted).unwrap(),
+                &sql::order_by(Engine::Postgres, &sorted).unwrap(),
                 &columns(&["id", "email"])
             ),
             vec![(0, false)]
@@ -1837,7 +1954,7 @@ mod tests {
                 200,
             );
             assert!(
-                sql::is_generated_select(&statement),
+                sql::is_generated_select(engine, &statement),
                 "{statement} was refused"
             );
         }

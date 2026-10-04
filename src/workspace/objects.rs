@@ -65,6 +65,7 @@ impl Workspace {
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let preview_rows = self.settings.preview_rows;
+        let engine = self.engine();
         let profile = self.profile_mut()?;
         let existing = matching_tab(
             profile
@@ -90,7 +91,7 @@ impl Workspace {
             } => {
                 let filters = filters
                     .into_iter()
-                    .map(|bar| filter_row(id, bar, window, cx))
+                    .map(|bar| filter_row(engine, id, bar, window, cx))
                     .collect();
                 ObjectBody::Relation {
                     showing_structure: false,
@@ -216,7 +217,7 @@ impl Workspace {
         // Checked before anything leaves the machine: a refused filter leaves
         // the rows on screen and the bars as they stand, so it can be corrected
         // rather than retyped.
-        let paged = sql::is_generated_select(&sql)
+        let paged = sql::is_generated_select(engine, &sql)
             .then(|| sql::paged(engine, &sql, &key))
             .flatten();
         let Some(sql) = paged else {
@@ -225,7 +226,7 @@ impl Workspace {
             // a filter refused every time.
             *stale = false;
             self.note(
-                "dbdelve will not run a filter it cannot read as one SELECT.".into(),
+                "dbdelve will not run a filter it cannot read as one query.".into(),
                 cx,
             );
             return;
@@ -279,7 +280,7 @@ impl Workspace {
             return;
         }
         let sql = explorer::count_sql(engine, &schema, &relation, filter);
-        if !sql::is_generated_select(&sql)
+        if !sql::is_generated_select(engine, &sql)
             || sql::gate(&sql::classify(engine, &sql), mode, &confirmed).is_some()
         {
             self.note(
@@ -688,7 +689,7 @@ impl Workspace {
                     .collect();
                 let filter = derived_filter(engine, &[bar], &columns);
                 let sql = explorer::probe_sql(engine, &reference.schema, &reference.table, &filter);
-                let sql = sql::is_generated_select(&sql)
+                let sql = sql::is_generated_select(engine, &sql)
                     .then(|| sql::paged(engine, &sql, &[]))
                     .flatten();
                 Some((index, label, sql))
@@ -714,10 +715,10 @@ impl Workspace {
                                 .generated(&sql, &CancelToken::default())
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
-                            None => {
-                                Err("dbdelve will not run a check it cannot read as one SELECT."
-                                    .into())
-                            }
+                            None => Err(
+                                "dbdelve will not run a check it cannot read as a single read."
+                                    .into(),
+                            ),
                         };
                         (index, label, answer)
                     })

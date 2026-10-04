@@ -645,10 +645,14 @@ impl Workspace {
             Some(Err(message)) => return failure(self, &message, cx),
             None => return failure(self, "There is no statement to explain.", cx),
         };
+        if let Err(message) = sql::explainable(engine, &sql) {
+            return failure(self, &message, cx);
+        }
         self.sent_from(tab, start, &sql);
 
+        let suffix = engine.explain_suffix(action.mode);
         self.execute_and_then(
-            format!("{prefix}{sql}"),
+            format!("{prefix}{sql}{suffix}"),
             tab,
             None,
             false,
@@ -878,6 +882,7 @@ impl Workspace {
                 active: true,
                 queued_results: 0,
             },
+            self.engine(),
             window,
             cx,
         );
@@ -979,6 +984,7 @@ impl Workspace {
                 active: true,
                 queued_results: 0,
             },
+            self.engine(),
             window,
             cx,
         );
@@ -1325,8 +1331,8 @@ impl Workspace {
         // grammar cannot read; its sort is read from the spelling it was
         // generated in. A buffer's statement is read as typed.
         let keys = match tab {
-            Tab::Object(_) => sql::order_by(&sql::unpaged(&sql)),
-            Tab::Query(_) => sql::order_by(&sql),
+            Tab::Object(_) => sql::order_by(engine, &sql::unpaged(&sql)),
+            Tab::Query(_) => sql::order_by(engine, &sql),
         };
         let sortable = keys.is_some();
         let keys = keys.unwrap_or_default();
@@ -1339,7 +1345,9 @@ impl Workspace {
         // the prefix dbdelve put in front of it.
         let explained = explain.map(|mode| {
             let prefix = engine.explain_prefix(mode).unwrap_or_default();
-            sql.strip_prefix(prefix).unwrap_or(&sql).to_string()
+            let suffix = engine.explain_suffix(mode);
+            let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
+            bare.strip_suffix(suffix).unwrap_or(bare).to_string()
         });
         if let Tab::Query(query) = tab
             && let Some(tab) = self
@@ -1600,12 +1608,12 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let Some(formatted) = crate::sql::format(self.engine(), &text) else {
-            self.note(
-                "Not formatting: a dollar-quoted body would be rewritten.".into(),
-                cx,
-            );
-            return;
+        let formatted = match crate::sql::format(self.engine(), &text) {
+            Ok(formatted) => formatted,
+            Err(refusal) => {
+                self.note(refusal.into(), cx);
+                return;
+            }
         };
         if formatted == text {
             return;
@@ -1615,7 +1623,7 @@ impl Workspace {
         // not on the token it was on -- a reflow moves every offset, and the
         // statement is the unit the user was working in. Map the token too if
         // the jump ever reads as losing your place.
-        let buffer = Buffer::parse(&text);
+        let buffer = Buffer::for_engine(self.engine(), &text);
         let was_in = buffer
             .statement_at(cursor)
             .and_then(|range| {
@@ -1625,7 +1633,7 @@ impl Workspace {
                     .position(|r| r.start == range.start)
             })
             .and_then(|index| {
-                Buffer::parse(&formatted)
+                Buffer::for_engine(self.engine(), &formatted)
                     .statements()
                     .get(index)
                     .map(|r| r.start)

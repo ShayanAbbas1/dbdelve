@@ -75,6 +75,28 @@ services:
       timeout: 5s
       retries: 60
 
+  mongo:
+    # Not 8.0 or latest: on a Linux kernel 6.19+ (current Docker Desktop VMs)
+    # they refuse to start (SERVER-121912). 8.2 is the line that boots there.
+    image: mongo:8.2
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: dbdelve
+      MONGO_INITDB_DATABASE: dbdelve_dev
+    ports:
+      - "${DBDELVE_MONGO_PORT:-57017}:27017"
+    volumes:
+      - dbdelve-mongo-data:/data/db
+      - ./dev/mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # The seed runs against a temporary mongod bound to 127.0.0.1 only, so
+      # asking on the container's own address is what proves the real server
+      # is up; the count is what proves the seed finished (it fills last).
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$(hostname -i)\" -u dbdelve -p dbdelve dbdelve_dev --eval 'quit(db.wide_metrics.countDocuments() === 25 ? 0 : 1)'"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
   # Dev SSH bastions for the tunnel feature: `bastion` is reachable from the
   # host, `bastion2` only through it (no published port), so a tunnel through
   # either can be exercised against `postgres`/`mysql`/`mssql` by name. Regular
@@ -108,3 +130,4 @@ volumes:
   dbdelve-mysql-data:
   dbdelve-mariadb-data:
   dbdelve-mssql-data:
+  dbdelve-mongo-data:

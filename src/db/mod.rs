@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+mod mongo;
 mod mssql;
 mod mysql;
 mod postgres;
@@ -27,6 +28,7 @@ mod snowflake;
 mod sqlite;
 mod ssh;
 
+pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
@@ -61,6 +63,7 @@ pub enum Engine {
     Sqlite,
     Snowflake,
     SqlServer,
+    MongoDb,
 }
 
 /// The shape of a connection's details. The form draws one of these and never
@@ -73,6 +76,33 @@ pub enum Fields {
     File,
     /// An account reached over HTTPS with a private key.
     Account,
+}
+
+/// What a query buffer is written in: what the editor highlights it as, what
+/// completion reads it as, and whether a row can be copied as a statement that
+/// recreates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Syntax {
+    Sql,
+    /// mongosh statements, which are JavaScript expressions.
+    Mongo,
+}
+
+impl Syntax {
+    /// gpui-component's name for the grammar it highlights with.
+    pub fn highlighter(self) -> &'static str {
+        match self {
+            Self::Sql => "sql",
+            Self::Mongo => "javascript",
+        }
+    }
+
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Sql => "Write SQL…",
+            Self::Mongo => "Write a query, like db.collection.find({})…",
+        }
+    }
 }
 
 /// How much the server should be asked to do to answer "how would you run
@@ -115,13 +145,14 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
         Self::Sqlite,
         Self::Snowflake,
         Self::SqlServer,
+        Self::MongoDb,
     ];
 
     pub fn label(self) -> &'static str {
@@ -132,6 +163,7 @@ impl Engine {
             Self::Sqlite => "SQLite",
             Self::Snowflake => "Snowflake",
             Self::SqlServer => "SQL Server",
+            Self::MongoDb => "MongoDB",
         }
     }
 
@@ -145,6 +177,7 @@ impl Engine {
             Self::Sqlite => "sqlite",
             Self::Snowflake => "snowflake",
             Self::SqlServer => "mssql",
+            Self::MongoDb => "mongodb",
         }
     }
 
@@ -158,6 +191,7 @@ impl Engine {
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
             "snowflake" => Ok(Self::Snowflake),
             "mssql" | "sqlserver" => Ok(Self::SqlServer),
+            "mongodb" | "mongodb+srv" => Ok(Self::MongoDb),
             other => Err(format!("{other} is not a database engine dbdelve speaks.")),
         }
     }
@@ -168,6 +202,7 @@ impl Engine {
             Self::Postgres => Some(postgres::DEFAULT_PORT),
             Self::MySql | Self::MariaDb => Some(mysql::DEFAULT_PORT),
             Self::SqlServer => Some(mssql::DEFAULT_PORT),
+            Self::MongoDb => Some(mongo::DEFAULT_PORT),
             Self::Sqlite | Self::Snowflake => None,
         }
     }
@@ -178,9 +213,40 @@ impl Engine {
     /// password and no transport to choose.
     pub fn fields(self) -> Fields {
         match self {
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer => Fields::Server,
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer | Self::MongoDb => {
+                Fields::Server
+            }
             Self::Sqlite => Fields::File,
             Self::Snowflake => Fields::Account,
+        }
+    }
+
+    /// Whether the form offers a field of driver options passed through as
+    /// typed: MongoDB's connection-string options (`authSource`, `replicaSet`,
+    /// `readPreference`, …), which outnumber any set of fields worth drawing.
+    pub fn takes_options(self) -> bool {
+        match self {
+            Self::MongoDb => true,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => false,
+        }
+    }
+
+    /// Whether the host may instead be a DNS name whose SRV records list the
+    /// servers (`mongodb+srv`), which the form offers as a toggle.
+    pub fn resolves_srv(self) -> bool {
+        match self {
+            Self::MongoDb => true,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => false,
         }
     }
 
@@ -212,6 +278,28 @@ impl Engine {
             // Explain would mean changing the session around the user's
             // statement rather than putting a word on a copy of it.
             (Self::SqlServer, _) => None,
+            // A plan there is `.explain()` on the end of the statement, which
+            // is `explain_suffix`; nothing goes in front.
+            (Self::MongoDb, _) => Some(""),
+        }
+    }
+
+    /// What goes after the statement to put it in `mode`: nothing on the SQL
+    /// engines, whose whole difference is the prefix, and the cursor's own
+    /// `.explain(verbosity)` on MongoDB.
+    pub fn explain_suffix(self, mode: ExplainMode) -> &'static str {
+        match (self, mode) {
+            (Self::MongoDb, ExplainMode::Plan) => r#".explain("queryPlanner")"#,
+            (Self::MongoDb, ExplainMode::Analyze) => r#".explain("executionStats")"#,
+            (
+                Self::Postgres
+                | Self::MySql
+                | Self::MariaDb
+                | Self::Sqlite
+                | Self::Snowflake
+                | Self::SqlServer,
+                ExplainMode::Plan | ExplainMode::Analyze,
+            ) => "",
         }
     }
 
@@ -237,6 +325,9 @@ impl Engine {
             // A bare `BEGIN` opens a statement block in T-SQL, not a
             // transaction. The gate's grammar reads this spelling too.
             Self::SqlServer => Some("BEGIN TRANSACTION"),
+            // No statement opens one: a batch applies in order, and a failure
+            // says which rows already did.
+            Self::MongoDb => None,
         }
     }
 
@@ -252,7 +343,23 @@ impl Engine {
             Self::Postgres | Self::MySql | Self::MariaDb | Self::Snowflake | Self::SqlServer => {
                 true
             }
-            Self::Sqlite => false,
+            // A document has no column defaults to fall back to.
+            Self::Sqlite | Self::MongoDb => false,
+        }
+    }
+
+    /// Whether New row may insert into a relation of `kind`. A SQL view can
+    /// take an insert (an updatable view, or a trigger behind it), so the
+    /// server is left to say; a MongoDB view never does.
+    pub fn takes_inserts(self, kind: RelationKind) -> bool {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => true,
+            Self::MongoDb => kind != RelationKind::View,
         }
     }
 
@@ -264,7 +371,12 @@ impl Engine {
     pub fn pages_by_key(self) -> bool {
         match self {
             Self::SqlServer => true,
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Snowflake => false,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::MongoDb => false,
         }
     }
 
@@ -275,7 +387,12 @@ impl Engine {
     pub fn exact_row_estimates(self) -> bool {
         match self {
             Self::Snowflake => true,
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::SqlServer => false,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::SqlServer
+            | Self::MongoDb => false,
         }
     }
 
@@ -285,9 +402,14 @@ impl Engine {
     pub fn count_all(self) -> &'static str {
         match self {
             Self::SqlServer => "COUNT_BIG(*)",
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Snowflake => {
-                "COUNT(*)"
-            }
+            // ponytail: MongoDB writes no SQL, so this is never what its count
+            // runs; the count statement it does run arrives with browsing.
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::MongoDb => "COUNT(*)",
         }
     }
 
@@ -299,12 +421,48 @@ impl Engine {
         read_only_statement(self, true).is_some()
     }
 
+    /// What the filter bar's raw input asks for.
+    pub fn raw_filter_placeholder(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "SQL…",
+            Syntax::Mongo => "{ status: \"active\" }",
+        }
+    }
+
+    /// The column dropdown's entry that swaps the bar for the user's own filter.
+    pub fn raw_filter_label(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "Raw SQL",
+            Syntax::Mongo => "Raw filter",
+        }
+    }
+
+    /// What a generated statement is called where one is shown for review.
+    pub fn review_label(self) -> &'static str {
+        match self.syntax() {
+            Syntax::Sql => "Review SQL",
+            Syntax::Mongo => "Review statement",
+        }
+    }
+
+    pub fn syntax(self) -> Syntax {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => Syntax::Sql,
+            Self::MongoDb => Syntax::Mongo,
+        }
+    }
+
     /// Whether one server holds several databases a profile can be moved
     /// between, which [`Connection::databases`] lists.
     pub fn switches_database(self) -> bool {
         matches!(
             self,
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer | Self::MongoDb
         )
     }
 
@@ -312,27 +470,33 @@ impl Engine {
     /// backtick, which it accepts whether or not `ANSI_QUOTES` is set — a double
     /// quote there is a *string literal*, so quoting a MySQL identifier the
     /// standard way produces a statement that runs and means something else.
-    fn identifier_quote(self) -> char {
+    ///
+    /// `None` for MongoDB, whose field names are JavaScript strings, escaped
+    /// with a backslash rather than doubled.
+    fn identifier_quote(self) -> Option<char> {
         match self {
             // Snowflake folds an unquoted name to upper case and reads a quoted
             // one exactly, and the catalog reports names as stored -- so quoting
             // what the catalog said is always the name it meant.
-            Self::Postgres | Self::Sqlite | Self::Snowflake => '"',
+            Self::Postgres | Self::Sqlite | Self::Snowflake => Some('"'),
             // Not T-SQL's own `[name]`: the grammar every gate in `sql.rs`
             // parses with has no brackets, and the pin does not move. The
             // standard quote names an identifier under `QUOTED_IDENTIFIER`,
             // which the driver's login turns on.
-            Self::SqlServer => '"',
-            Self::MySql | Self::MariaDb => '`',
+            Self::SqlServer => Some('"'),
+            Self::MySql | Self::MariaDb => Some('`'),
+            Self::MongoDb => None,
         }
     }
 
     pub fn quote_identifier(self, identifier: &str) -> String {
-        let quote = self.identifier_quote();
-        format!(
-            "{quote}{}{quote}",
-            identifier.replace(quote, &format!("{quote}{quote}"))
-        )
+        match self.identifier_quote() {
+            Some(quote) => format!(
+                "{quote}{}{quote}",
+                identifier.replace(quote, &format!("{quote}{quote}"))
+            ),
+            None => json_string(identifier),
+        }
     }
 
     /// The inverse, for reading back a name dbdelve wrote — matching a sort key in
@@ -342,7 +506,10 @@ impl Engine {
     /// position or a function call names no column, and pretending otherwise
     /// would light up the wrong header.
     pub fn unquote_identifier(self, expression: &str) -> String {
-        let quote = self.identifier_quote();
+        let Some(quote) = self.identifier_quote() else {
+            return serde_json::from_str::<String>(expression)
+                .unwrap_or_else(|_| expression.to_string());
+        };
         match expression
             .strip_prefix(quote)
             .and_then(|rest| rest.strip_suffix(quote))
@@ -369,6 +536,7 @@ impl Engine {
             // page first, and a character it lacks arrives as `?`. No
             // backslash escape in T-SQL.
             Self::SqlServer => format!("N'{}'", value.replace('\'', "''")),
+            Self::MongoDb => json_string(value),
         }
     }
 
@@ -453,6 +621,20 @@ impl Engine {
             || name.contains("binary")
             || (self == Self::SqlServer
                 && matches!(name.as_str(), "image" | "rowversion" | "timestamp"))
+            || (self == Self::MongoDb && name == "bindata")
+    }
+
+    /// What a header click adds to a statement, as a notice names it.
+    pub fn sort_clause(self) -> &'static str {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Snowflake
+            | Self::SqlServer => "an ORDER BY",
+            Self::MongoDb => "a sort",
+        }
     }
 
     pub fn qualified(self, schema: &str, name: &str) -> String {
@@ -462,6 +644,11 @@ impl Engine {
             self.quote_identifier(name)
         )
     }
+}
+
+/// A JavaScript string literal, which a JSON string always is.
+fn json_string(value: &str) -> String {
+    serde_json::Value::from(value).to_string()
 }
 
 /// A `datetime` value as `'YYYY-MM-DDThh:mm:ss…'`, the one spelling of it
@@ -682,6 +869,7 @@ pub enum ConnectionConfig {
         statement_timeout: u32,
     },
     Snowflake(SnowflakeConfig),
+    MongoDb(MongoConfig),
 }
 
 impl ConnectionConfig {
@@ -693,6 +881,7 @@ impl ConnectionConfig {
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite { .. } => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::MongoDb(_) => Engine::MongoDb,
         }
     }
 
@@ -704,6 +893,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
+            Self::MongoDb(mongo) => Some(&mongo.server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
         }
     }
@@ -716,7 +906,20 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
+            Self::MongoDb(mongo) => Some(&mut mongo.server),
             Self::Sqlite { .. } | Self::Snowflake(_) => None,
+        }
+    }
+
+    /// Move the profile onto another database on the same server.
+    pub fn set_database(&mut self, name: String) {
+        match self {
+            Self::Postgres(server)
+            | Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server) => server.database = name,
+            Self::MongoDb(mongo) => mongo.set_database(name),
+            Self::Sqlite { .. } | Self::Snowflake(_) => {}
         }
     }
 
@@ -741,6 +944,7 @@ impl ConnectionConfig {
             Engine::MySql => mysql::config_from_url(url).map(Self::MySql),
             Engine::MariaDb => server_from_url(url, "MariaDB").map(Self::MariaDb),
             Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
+            Engine::MongoDb => mongo::config_from_url(url).map(Self::MongoDb),
             Engine::Sqlite => sqlite::path_from_url(url).map(|path| Self::Sqlite {
                 path,
                 // A URL has nowhere to say it; the form is where it is set.
@@ -762,6 +966,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.statement_timeout,
+            Self::MongoDb(mongo) => mongo.server.statement_timeout,
             Self::Sqlite {
                 statement_timeout, ..
             } => *statement_timeout,
@@ -795,6 +1000,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.endpoint(),
+            Self::MongoDb(mongo) => mongo.endpoint(),
             Self::Sqlite { path, .. } => path.clone(),
             Self::Snowflake(account) => account.host(),
         }
@@ -811,6 +1017,7 @@ pub enum Connection {
     SqlServer(mssql::Connection),
     Sqlite(sqlite::Connection),
     Snowflake(snowflake::Connection),
+    MongoDb(mongo::Connection),
 }
 
 impl Connection {
@@ -835,6 +1042,7 @@ impl Connection {
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
+            ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
         }
     }
 
@@ -850,6 +1058,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
+            Self::MongoDb(connection) => connection.query(sql, cancel),
         }
     }
 
@@ -860,9 +1069,11 @@ impl Connection {
     pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
         match self {
             Self::SqlServer(connection) => connection.generated(sql),
-            Self::Postgres(_) | Self::MySql(_) | Self::Sqlite(_) | Self::Snowflake(_) => {
-                self.query(sql, cancel)
-            }
+            Self::Postgres(_)
+            | Self::MySql(_)
+            | Self::Sqlite(_)
+            | Self::Snowflake(_)
+            | Self::MongoDb(_) => self.query(sql, cancel),
         }
     }
 
@@ -881,6 +1092,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
+            Self::MongoDb(connection) => connection.catalog(),
         }
     }
 
@@ -893,6 +1105,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.routines(),
             Self::Sqlite(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
+            Self::MongoDb(connection) => connection.routines(),
         }
     }
 
@@ -909,6 +1122,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.sizes(),
             Self::MySql(connection) => connection.sizes(),
+            Self::MongoDb(connection) => connection.sizes(),
             Self::SqlServer(_) | Self::Sqlite(_) | Self::Snowflake(_) => Ok(Sizes::new()),
         }
     }
@@ -923,7 +1137,8 @@ impl Connection {
             Self::MySql(connection) => connection.references(schema, relation),
             Self::SqlServer(connection) => connection.references(schema, relation),
             Self::Sqlite(connection) => connection.references(schema, relation),
-            Self::Snowflake(_) => Ok(Vec::new()),
+            // Nothing declares one document's field a reference to another's.
+            Self::Snowflake(_) | Self::MongoDb(_) => Ok(Vec::new()),
         }
     }
 
@@ -934,6 +1149,7 @@ impl Connection {
             Self::Postgres(connection) => connection.databases(),
             Self::MySql(connection) => connection.databases(),
             Self::SqlServer(connection) => connection.databases(),
+            Self::MongoDb(connection) => connection.databases(),
             Self::Sqlite(_) | Self::Snowflake(_) => Ok(Databases::default()),
         }
     }
@@ -945,6 +1161,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
+            Self::MongoDb(connection) => connection.structure(schema, relation),
         }
     }
 
@@ -975,6 +1192,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
+            Self::MongoDb(connection) => connection.cancel(cancel),
         }
     }
 
@@ -993,6 +1211,7 @@ impl Connection {
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite(_) => Engine::Sqlite,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::MongoDb(_) => Engine::MongoDb,
         };
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
@@ -1042,6 +1261,7 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "int2"
             | "int4"
             | "int8"
+            | "long"
             | "integer"
             | "tinyint"
             | "smallint"
@@ -1063,6 +1283,16 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "money"
             | "smallmoney"
     )
+}
+
+/// The cell type of a field its document does not have: no value at all,
+/// where a null is a value.
+pub const MISSING: &str = "missing";
+
+/// The tag [`QueryResult::cell_types`] holds for `name`, for a snapshot read
+/// back from disk; `None` for a name no engine gives.
+pub fn cell_type(name: &str) -> Option<&'static str> {
+    mongo::cell_type(name)
 }
 
 /// A cell value, already formatted by the server. `None` is SQL NULL, which is
@@ -1320,6 +1550,12 @@ pub struct QueryResult {
     /// zero both for commands that affected no rows and commands without a row
     /// count, so callers must not infer the command kind from this value.
     pub rows_affected: Option<u64>,
+    /// Each cell's type, row by row, where a column's type is not every one of
+    /// its cells': a MongoDB field holds whatever each document put there. The
+    /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
+    /// field the document does not have. Empty on every SQL engine, whose
+    /// columns are typed whole ([`Column::data_type`]).
+    pub cell_types: Vec<Vec<&'static str>>,
     /// Where these rows can be written back to, when they can be at all.
     /// `None` is the answer for every result set dbdelve cannot address a single
     /// row of, and it is not an error — see [`Connection::edit_target`].
@@ -1646,6 +1882,9 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         // No session-level switch exists. `ApplicationIntent=ReadOnly` routes a
         // login to a readable replica and is ignored by a primary.
         (Engine::SqlServer, _) => None,
+        // No session setting holds a client to reads; the classifier is the
+        // boundary there.
+        (Engine::MongoDb, _) => None,
     }
 }
 
@@ -1674,6 +1913,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_buffer_is_highlighted_by_a_grammar_the_editor_was_built_with() {
+        // An unknown name falls back to plain text without a word, so a
+        // missing gpui-component feature would only show as a grey buffer.
+        use gpui_component::highlighter::Language;
+        for engine in Engine::ALL {
+            let name = engine.syntax().highlighter();
+            assert_ne!(Language::from_str(name), Language::Plain, "{name}");
+        }
+        assert_eq!(Engine::MongoDb.syntax(), Syntax::Mongo);
+        assert_eq!(Engine::SqlServer.syntax(), Syntax::Sql);
+    }
+
+    #[test]
+    fn new_row_is_withheld_only_from_a_mongo_view() {
+        for engine in Engine::ALL {
+            assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
+            assert_eq!(
+                engine.takes_inserts(RelationKind::View),
+                engine != Engine::MongoDb,
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn only_numbers_are_numeric_across_the_three_engines_spellings() {
         for numeric in [
             "int4",
@@ -1686,6 +1950,11 @@ mod tests {
             "numeric",
             "money",
             "REAL",
+            // MongoDB's `$type` names.
+            "int",
+            "long",
+            "double",
+            "decimal",
         ] {
             assert!(is_numeric_type(numeric), "{numeric}");
         }
@@ -1700,6 +1969,8 @@ mod tests {
             "uuid",
             "jsonb",
             "bytea",
+            "mixed",
+            "timestamp",
         ] {
             assert!(!is_numeric_type(other), "{other}");
         }
@@ -1731,10 +2002,16 @@ mod tests {
             }
         );
 
+        assert_eq!(
+            ConnectionConfig::from_url("mongodb://db.example.test/dbdelve")
+                .unwrap()
+                .engine(),
+            Engine::MongoDb
+        );
         // Named, not merely rejected: "invalid URL" leaves the user guessing
         // which part of it dbdelve objected to.
-        let error = ConnectionConfig::from_url("mongodb://db.example.test/dbdelve").unwrap_err();
-        assert!(error.contains("mongodb"), "{error}");
+        let error = ConnectionConfig::from_url("redis://db.example.test/0").unwrap_err();
+        assert!(error.contains("redis"), "{error}");
         assert!(ConnectionConfig::from_url("db.example.test/dbdelve").is_err());
     }
 
@@ -1853,7 +2130,10 @@ mod tests {
         );
         assert_eq!(Engine::MySql.quote_identifier("odd`name"), "`odd``name`");
 
-        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|e| !matches!(e, Engine::SqlServer | Engine::MongoDb))
+        {
             assert_eq!(
                 engine.quote_literal("odd'value"),
                 "'odd''value'",
@@ -2071,6 +2351,22 @@ mod tests {
         );
         assert_eq!(Engine::MariaDb.quote_identifier("a`b"), "`a``b`");
         assert!(Engine::MariaDb.holds_read_only());
+    }
+
+    #[test]
+    fn mongodb_explains_by_suffix_and_the_sql_engines_by_prefix() {
+        for mode in ExplainMode::ALL {
+            assert_eq!(Engine::MongoDb.explain_prefix(mode), Some(""));
+            assert_eq!(Engine::Postgres.explain_suffix(mode), "");
+        }
+        assert_eq!(
+            Engine::MongoDb.explain_suffix(ExplainMode::Plan),
+            r#".explain("queryPlanner")"#
+        );
+        assert_eq!(
+            Engine::MongoDb.explain_suffix(ExplainMode::Analyze),
+            r#".explain("executionStats")"#
+        );
     }
 
     #[test]

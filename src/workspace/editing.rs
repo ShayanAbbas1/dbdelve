@@ -42,6 +42,10 @@ impl Workspace {
         let ObjectBody::Relation { structure, .. } = &tab.body else {
             return;
         };
+        if !tab.takes_inserts(self.engine()) {
+            self.note("This view takes no inserts.".into(), cx);
+            return;
+        }
         // The columns are the form: without them there is nothing to draw, and
         // guessing at them would be inventing a table. Checked before
         // `show_structure` flips the tab, so a refused New row leaves
@@ -143,14 +147,17 @@ impl Workspace {
             .map(|(column, value)| (column.as_str(), value.as_deref()))
             .collect();
 
-        let Some(statement) = sql::insert_row(engine, &schema, &table, &borrowed, &types) else {
-            self.note("There is nothing in this row to insert.".into(), cx);
-            return;
+        let statement = match sql::insert_row(engine, &schema, &table, &borrowed, &types) {
+            Ok(statement) => statement,
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
         };
         // The gate every generated statement passes before anything executes
         // (`AGENTS.md` rule 2). Failing it is dbdelve disagreeing with itself --
         // a bug in dbdelve rather than a user error -- so it is said and not run.
-        if !sql::is_generated_write(&statement) {
+        if !sql::is_generated_write_on(engine, &statement) {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not an INSERT.".into(),
                 cx,
@@ -409,16 +416,22 @@ impl Workspace {
         };
         let statement = &text[range.clone()];
 
-        let Some(mut keys) = sql::order_by(statement) else {
+        let Some(mut keys) = sql::order_by(engine, statement) else {
             self.note(
-                "dbdelve cannot add an ORDER BY to this statement without rewriting it.".into(),
+                format!(
+                    "dbdelve cannot add {} to this statement without rewriting it.",
+                    engine.sort_clause()
+                ),
                 cx,
             );
             return;
         };
         cycle(&mut keys, &expression);
-        let Some(sorted) = sql::with_order_by(statement, &keys) else {
-            self.note("This statement cannot carry an ORDER BY.".into(), cx);
+        let Some(sorted) = sql::with_order_by(engine, statement, &keys) else {
+            self.note(
+                format!("This statement cannot carry {}.", engine.sort_clause()),
+                cx,
+            );
             return;
         };
 
@@ -497,7 +510,7 @@ impl Workspace {
             match (traced, wrote, snapshot) {
                 (true, _, _) => "This column cannot be edited.".into(),
                 (false, true, _) => {
-                    "These rows came from a statement that writes. Fetch them with a SELECT to edit them.".into()
+                    "These rows came from a statement that writes. Fetch them with a query that only reads to edit them.".into()
                 }
                 (false, false, true) => match tab {
                     Tab::Query(_) => {
@@ -642,6 +655,11 @@ impl Workspace {
             Some((tab.id, tab.last_query.clone()?))
         });
         match rerun {
+            Some((_, statement)) if !sql::rerunnable(self.engine(), &statement) => self.note(
+                "These rows came from a statement that writes, and refreshing would run it again."
+                    .into(),
+                cx,
+            ),
             Some((id, select)) => self.execute_sql(select, Tab::Query(id), cx),
             None => self.run_query(&RunQuery, window, cx),
         }
@@ -746,12 +764,13 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
-        let types = grid.delegate().column_types();
-        let key = grid
-            .delegate()
-            .active()
-            .and_then(|(row, _)| grid.delegate().row_key(row));
-        let Some((schema, table, keys)) = key else {
+        let key = grid.delegate().active().and_then(|(row, _)| {
+            Some((
+                grid.delegate().row_key(row)?,
+                grid.delegate().row_types(row),
+            ))
+        });
+        let Some(((schema, table, keys), types)) = key else {
             self.note(
                 "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
                 cx,
@@ -779,7 +798,9 @@ impl Workspace {
         // other set of columns. Failing either is dbdelve disagreeing with itself,
         // a bug in dbdelve rather than a user error, so it is said and not run.
         let columns: Vec<&str> = borrowed.iter().map(|&(column, _)| column).collect();
-        if !sql::is_generated_write(&statement) || !sql::delete_matches_key(&statement, &columns) {
+        if !sql::is_generated_write_on(engine, &statement)
+            || !sql::delete_matches_key_on(engine, &statement, &columns)
+        {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not a DELETE of one row \
                  by its primary key."
@@ -839,7 +860,12 @@ impl Workspace {
             return;
         };
         let result = grid.result();
-        let text = export::render_rows(Format::Tsv, &result.columns, &result.rows[row..=row]);
+        let text = export::render_rows(
+            Format::Tsv,
+            &result.columns,
+            &result.rows[row..=row],
+            result.cell_types.get(row..=row).unwrap_or_default(),
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -1133,23 +1159,20 @@ impl Workspace {
             return;
         };
         let pending = results.read(cx).delegate().pending_updates();
-        let Some(batch) = update_batch(self.engine(), &pending) else {
-            self.note(
-                match pending.is_empty() {
-                    true => "There are no edits to apply.".into(),
-                    // Nothing partial runs: a batch missing one of its rows is
-                    // not the change the user made.
-                    false => "dbdelve cannot name an edited row by its primary key.".into(),
-                },
-                cx,
-            );
-            return;
+        // Nothing partial runs: a batch missing one of its rows is not the
+        // change the user made.
+        let batch = match update_batch(self.engine(), &pending) {
+            Ok(batch) => batch,
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
         };
         // The gate every generated statement passes before anything executes
         // (`AGENTS.md` rule 2). Failing it means dbdelve wrote something outside
         // the shapes the gate names, which is a bug in dbdelve rather than a user
         // error.
-        if !sql::is_generated_write(&batch) {
+        if !sql::is_generated_write_on(self.engine(), &batch) {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not an UPDATE.".into(),
                 cx,

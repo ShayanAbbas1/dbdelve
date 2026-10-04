@@ -23,7 +23,7 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, Relation, RelationKind, Routine, Structure,
+        ExplainMode, Relation, RelationKind, Routine, Structure, Syntax,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -100,6 +100,10 @@ impl Profile {
             ConnectionConfig::Snowflake(account) => Some(account),
             _ => None,
         };
+        let mongo = match &self.config {
+            ConnectionConfig::MongoDb(mongo) => Some(mongo),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -127,6 +131,9 @@ impl Profile {
             private_key: snowflake.map(|account| account.private_key.clone()),
             warehouse: snowflake.and_then(|account| account.warehouse.clone()),
             role: snowflake.and_then(|account| account.role.clone()),
+            srv: mongo.map(|mongo| mongo.srv),
+            options: mongo.map(|mongo| mongo.options.clone()),
+            login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.
@@ -355,6 +362,7 @@ impl Session {
         stored_queries: Vec<store::StoredQueryTab>,
         stored_next_query_id: u64,
         pending_objects: Vec<store::StoredObject>,
+        engine: Engine,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -419,7 +427,7 @@ impl Session {
         let queries = stored_queries
             .iter()
             .map(|stored| {
-                let (tab, failure) = QueryTab::restore(&id, stored, window, cx);
+                let (tab, failure) = QueryTab::restore(&id, stored, engine, window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -582,6 +590,17 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_) => None,
             },
+        }
+    }
+
+    /// Every buffer highlighted and prompted for `syntax`, once an edit has
+    /// moved the profile to an engine written in another language.
+    pub(crate) fn set_syntax(&self, syntax: Syntax, window: &mut Window, cx: &mut App) {
+        for tab in &self.queries {
+            tab.editor.update(cx, |editor, cx| {
+                editor.set_highlighter(syntax.highlighter(), cx);
+                editor.set_placeholder(syntax.placeholder(), window, cx);
+            });
         }
     }
 
@@ -985,6 +1004,7 @@ impl QueryTab {
     pub(crate) fn restore(
         profile_id: &str,
         stored: &store::StoredQueryTab,
+        engine: Engine,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1001,9 +1021,9 @@ impl QueryTab {
             id: stored.id,
             editor: cx.new(|cx| {
                 EditorState::new(window, cx)
-                    .language("sql")
+                    .language(engine.syntax().highlighter())
                     .soft_wrap(false)
-                    .placeholder("Write SQL…")
+                    .placeholder(engine.syntax().placeholder())
                     .default_value(sql)
             }),
             results: result_grid::new_grid(window, cx),
@@ -1054,6 +1074,11 @@ pub(crate) struct ObjectTab {
 }
 
 impl ObjectTab {
+    /// Whether New row is offered here: on a relation the engine inserts into.
+    pub(crate) fn takes_inserts(&self, engine: Engine) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_inserts(kind))
+    }
+
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
     /// and for an unfiltered relation -- which is what makes an unfiltered tab
     /// dedupe exactly as it did before the filter joined the key.
@@ -1492,8 +1517,9 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             continue;
         }
         let grid = tab.results.read(cx).delegate().stored();
-        // A statement that returned no columns produced no grid to keep --
-        // which is every `UPDATE` and `DELETE` the buffer has run.
+        // A statement that returned no columns produced no grid to keep. A
+        // write can still return one (`RETURNING`, or any MongoDB reply), so a
+        // restored grid's `last_query` is not safe to re-run as it stands.
         if grid.columns.is_empty() {
             continue;
         }

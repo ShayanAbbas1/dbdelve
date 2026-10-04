@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, Snowflake and SQL Server.
+speaking Postgres, MySQL, MariaDB, SQLite, Snowflake, SQL Server and MongoDB.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -35,7 +35,9 @@ require it, stop and raise it instead.
    - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
      statement, never into the buffer.
    - **Format Query** rewrites the buffer on command only, through
-     `sqlformat`'s token-level reformatter. Never an AST round-trip: that
+     `sqlformat`'s token-level reformatter (on MongoDB, `mql::format`'s
+     bracket-depth layout over the tree-sitter tokens, refused unless the
+     result reads back as the same statements). Never an AST round-trip: that
      regenerates the statement and drops every comment the user wrote.
 
    Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`,
@@ -68,6 +70,18 @@ require it, stop and raise it instead.
    spliced into DBDelve's statement: exactly one query, nothing destructive
    under it, no delete at all. It admits no write and is not a way around the
    first gate. Do not add a path that bypasses either.
+
+   MongoDB has its own pair, reached through the same two entry points
+   (`sql::is_generated_write_on` and `sql::is_generated_select` dispatch on the
+   engine): `mql::is_generated_write` admits `updateOne`s whose filter is
+   exactly `{_id: <literal>}` and whose update is exactly a `$set` of literals,
+   one `insertOne` of a literal document, and one `deleteOne` by `_id`; and
+   `mql::browse::is_generated_read` admits only the preview's own
+   `find(filter).sort().skip().limit()` and the status bar's `countDocuments`,
+   each written again from its parts and compared with the text,
+   with a filter that is one document running no server-side JavaScript
+   (`$where`, `$function`, `$accumulator`). Both read the tree-sitter parse, not
+   the builder's word, for the reason above.
 
    **The `DELETE`'s shape is verified from the parse tree, not trusted because
    `sql::delete_row` produced it.** A gate that trusts its caller is a comment;
@@ -104,7 +118,7 @@ require it, stop and raise it instead.
    and has to spell it the way the server will read it. It holds no connection.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
-   `fields`, and `filter::Operator::on` for the filter dropdown) and never
+   `fields`, `syntax`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
@@ -177,10 +191,11 @@ trusts. `Cargo.toml` carries the full reasoning; this is the shape of it.
 ```toml
 gpui = { package = "gpui-pre", version = "=0.3.5" }  # rolling republish of zed main
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5" }  # font-kit, x11, wayland
-gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql"] }
+gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql", "tree-sitter-javascript"] }  # each engine's highlighter
 
 tree-sitter = "=0.26.13"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below
+tree-sitter-javascript = "=0.23.1"  # the mongosh grammar. A CORRECTNESS pin too
 sqlparser = "=0.63.0"           # sql::classify only. default-features = false
 sqlformat = "=0.5.0"            # Format Query only. default-features = false
 
@@ -205,6 +220,9 @@ tokio = "=1.53.1"          # tiberius's runtime, one per connection. dff = false
 tokio-util = "=0.7.19"     # compat: tokio's socket as the futures I/O tiberius speaks
 futures-util = "=0.3.34"   # try_next over tiberius's result stream. dff = false
 
+mongodb = "=3.9.1"         # its own tokio runtime per connection. dff = false, rustls on ring
+time = "=0.3.55"           # ISO-8601 dates in mongosh statements. dff = false
+
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
 icondata_lu = "=0.1.0"     # Lucide icon data; gpui-component ships no icon files
@@ -228,10 +246,16 @@ crate is a one-off snapshot nobody republishes, and gpui-component depends on
 `gpui-pre` under the name `gpui`, so taking it keeps one copy of the framework
 in the graph.
 
-**The two tree-sitter pins are correctness, not formatting.** The grammar
+Where the MongoDB code lives: `src/mql.rs` parses and classifies mongosh
+statements, formats them and splices a sort into one; `src/mql/browse.rs`
+writes the object tab's preview, count and filter and holds the read gate;
+`src/db/mongo.rs` is the driver, its catalog, its sampled structure and its
+rendering of BSON.
+
+**The three tree-sitter pins are correctness, not formatting.** The grammar
 decides where every statement boundary falls, which statements `sql.rs` will
-splice an `ORDER BY` into, and what the gates accept. A bump changes what
-DBDelve sends to the server. Treat them like the driver pins.
+splice an `ORDER BY` into (and `mql.rs` a `.sort()`), and what the gates
+accept. A bump changes what DBDelve sends to the server. Treat them like the driver pins.
 
 **`gpui_platform`'s features are load-bearing.** Without `font-kit` the macOS
 backend swaps in a no-op text system and renders no text at all, silently.
@@ -875,6 +899,41 @@ Decided, and not to be re-litigated:
   grid, never special-cased into a JSON type. Its catalog also
   reports what MySQL 8 no longer does, `bigint(20)`'s display width and a
   nullable column's default as the text `NULL`, and both are shown as they come.
+- **MongoDB is a statement language of its own, and the classifier is the only
+  Read-only boundary.** The server has no read-only hold to ask for
+  (`holds_read_only` is false), so `mql::classify` is all that stands between a
+  Read-only profile and a write. It fails closed: anything it cannot parse whole
+  is `Unreadable`, a `$out` or `$merge` at any depth of any argument counts, and
+  a `runCommand` is a read only when its name is on a whitelist.
+- **`$out` is a `Drop`.** It replaces the target collection whole, as
+  `CREATE OR REPLACE TABLE … AS SELECT` does, which `sql::classify` also calls a
+  `Drop`, so it asks for confirmation the same way. `$merge` is a write. An
+  unfiltered `deleteMany` is an `UnfilteredDelete`; `updateMany({})` is a plain
+  write, as an unqualified `UPDATE` is.
+- **There are no transactions to bracket a batch with** (`transaction_start` is
+  `None`). A multi-row edit applies in order, and when one fails the error says
+  which row did and that the rows before it applied. Nothing is rolled back.
+- **A missing field is not a null.** A document may lack a field another has, and
+  the grid says so: a missing cell renders empty with no `NULL` label, a null
+  renders `NULL`, and a snapshot keeps the difference.
+- **Types are per cell, not per column.** A field's type varies from document to
+  document, so `QueryResult` carries a type tag for each cell (`$type` aliases,
+  plus `missing`) beside the SQL engines' empty one. `Column::data_type` is the
+  shared type when the present, non-null cells agree and `mixed` otherwise. An
+  edit is coerced back to its cell's tag; text that does not coerce is an error
+  before the review, never a quiet string.
+- **Cancel goes by session, not by comment.** Every run is sent in a driver
+  session of its own with the statement untouched (a user's `comment` is theirs
+  and is never rewritten to carry a tag). `cancel` takes `&self`, finds the run's
+  operations through `$currentOp` on that session's `lsid` and `killOp`s them.
+  The connection survives.
+- **`login_database` is the database a profile logs in to, kept apart from the
+  one it is on.** Select Database moves the profile to another database, and a
+  user is defined in one database: the driver authenticates against the
+  connection string's database unless `options` names an `authSource`. So the
+  first switch records the original in `login_database` and the string keeps
+  naming it, rather than rewriting the options. The form does not show it and
+  saves it as it was.
 
 ### SSH tunnels
 
@@ -1089,6 +1148,13 @@ wants completed and the text the grammar returns an `ERROR` node for. And **it
 must offer nothing inside a string literal or a comment**, which a token scan
 cannot do by itself and is the one place accepting a row rewrites data rather
 than a query.
+
+A MongoDB buffer (`Engine::syntax`) is read by `mql::completing` instead, a
+scan of the same kind: collections and database methods after `db.`, the
+collection methods `mql.rs` reads after `db.<collection>.`, cursor methods
+after `find(…).` or `aggregate(…).`, and inside a document the `$` operators
+with the collection's sampled field names, which arrive through the same
+column cache.
 
 The provider is a snapshot, replaced whole when the catalog reloads
 (`Workspace::install_completions`), and installed on every buffer rather than

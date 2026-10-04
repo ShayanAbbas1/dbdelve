@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use gpui_component::tree::TreeItem;
 
 use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
+use crate::mql;
 
 /// The row counts a preview can be asked for, and the one it opens with. Every
 /// result set is capped (spec §4.3); this is the part of the cap the user gets
@@ -253,6 +254,15 @@ pub fn preview_sql(
     limit: usize,
     offset: usize,
 ) -> String {
+    match engine {
+        Engine::MongoDb => return mql::browse::find_preview(relation, filter, limit, offset),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     let mut sql = format!("SELECT *{}", from_where(engine, schema, relation, filter));
     sql.push_str(&format!(" LIMIT {limit}"));
     // `OFFSET` after `LIMIT`: the one order all three engines accept, and the
@@ -278,6 +288,15 @@ pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 /// The size of what `preview_sql` would page through, for the status bar's
 /// Count. Never run unasked: on a large table it is a full scan.
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
+    match engine {
+        Engine::MongoDb => return mql::browse::count_documents(relation, filter),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Snowflake
+        | Engine::SqlServer => {}
+    }
     format!(
         "SELECT {}{}",
         engine.count_all(),
@@ -340,7 +359,7 @@ mod tests {
             let narrowed = count_sql(engine, "public", "orders", " id > 3 ");
             assert!(narrowed.ends_with(" WHERE id > 3"));
             for sql in [&all, &narrowed] {
-                assert!(crate::sql::is_generated_select(sql), "{sql}");
+                assert!(crate::sql::is_generated_select(engine, sql), "{sql}");
                 // Runnable in Read-only without a prompt: the Count button
                 // refuses rather than asks.
                 let verdict = crate::sql::classify(engine, sql);
@@ -362,7 +381,7 @@ mod tests {
             Engine::SqlServer,
         ] {
             let probe = probe_sql(engine, "public", "orders", "account_id = 7");
-            assert!(crate::sql::is_generated_select(&probe), "{probe}");
+            assert!(crate::sql::is_generated_select(engine, &probe), "{probe}");
             let paged = crate::sql::paged(engine, &probe, &[]).expect("a probe has a limit");
             assert!(paged.starts_with("SELECT 1 FROM "), "{paged}");
         }

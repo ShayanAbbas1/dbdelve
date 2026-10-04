@@ -328,6 +328,14 @@ impl ResultGrid {
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                // All or none: a snapshot naming a type this build does not
+                // know is read as having none, never as rows out of step.
+                cell_types: stored
+                    .cell_types
+                    .iter()
+                    .map(|types| types.iter().map(|name| db::cell_type(name)).collect())
+                    .collect::<Option<_>>()
+                    .unwrap_or_default(),
                 edit: stored.edit.clone(),
                 ..QueryResult::default()
             },
@@ -419,6 +427,13 @@ impl ResultGrid {
             // restart claim the cache was just taken.
             captured: self.captured.unwrap_or_else(captured_at),
             edit: self.result.edit.clone(),
+            cell_types: self
+                .result
+                .cell_types
+                .iter()
+                .take(GRID_ROW_CAP)
+                .map(|types| types.iter().map(|alias| alias.to_string()).collect())
+                .collect(),
             data_types: self
                 .result
                 .columns
@@ -639,6 +654,16 @@ impl ResultGrid {
         self.result.rows.get(row_ix)?.get(col_ix)?.as_deref()
     }
 
+    /// Whether the row has no such field at all: a document store's absent
+    /// field, which paints as nothing rather than as a NULL it does not hold.
+    fn missing(&self, row_ix: usize, col_ix: usize) -> bool {
+        self.result
+            .cell_types
+            .get(row_ix)
+            .and_then(|types| types.get(col_ix))
+            == Some(&db::MISSING)
+    }
+
     /// Every column of one row, named, typed where the type is known, and
     /// carrying the value itself rather than the string the column had room
     /// for. This is what the row inspector reads.
@@ -653,7 +678,16 @@ impl ResultGrid {
             .enumerate()
             .map(|(col_ix, column)| Field {
                 name: column.name.clone().into(),
-                data_type: column.data_type.clone().map(SharedString::from),
+                // The cell's own type where it has one: the column's is `mixed`
+                // as soon as two documents disagree.
+                data_type: self
+                    .result
+                    .cell_types
+                    .get(row_ix)
+                    .and_then(|types| types.get(col_ix))
+                    .map(|alias| SharedString::new_static(alias))
+                    .or_else(|| column.data_type.clone().map(SharedString::from)),
+                missing: self.missing(row_ix, col_ix),
                 // Reformatted before it is clipped, never after: a document cut
                 // at 4,000 characters does not parse, and the inspector would
                 // fall back to the one long line for exactly the values big
@@ -699,6 +733,10 @@ impl ResultGrid {
             rows: rows
                 .iter()
                 .filter_map(|&row| self.result.rows.get(row).cloned())
+                .collect(),
+            cell_types: rows
+                .iter()
+                .filter_map(|&row| self.result.cell_types.get(row).cloned())
                 .collect(),
             ..QueryResult::default()
         };
@@ -803,12 +841,28 @@ impl ResultGrid {
         row < self.result.rows.len()
             && edit.columns.get(col).is_some_and(Option::is_some)
             && !edit.keys.contains(&col)
-            && !self
-                .result
-                .columns
-                .get(col)
-                .and_then(|column| column.data_type.as_deref())
-                .is_some_and(|data_type| self.engine.is_binary_type(data_type))
+            && ![self.column_type(col), self.cell_type(row, col)]
+                .into_iter()
+                .flatten()
+                .any(|data_type| self.engine.is_binary_type(data_type))
+    }
+
+    fn column_type(&self, col: usize) -> Option<&str> {
+        self.result.columns.get(col)?.data_type.as_deref()
+    }
+
+    /// The cell's own type where the result types each cell (a MongoDB
+    /// field holds whatever each document put there), else its column's.
+    fn cell_type(&self, row: usize, col: usize) -> Option<&str> {
+        match self
+            .result
+            .cell_types
+            .get(row)
+            .and_then(|types| types.get(col))
+        {
+            Some(tag) => Some(tag),
+            None => self.column_type(col),
+        }
     }
 
     fn is_numeric_column(&self, col: usize) -> bool {
@@ -899,7 +953,8 @@ impl ResultGrid {
         // from one that is not.
         let unchanged = match &value {
             NewValue::Value(value) => self.cell(row, col) == Some(value.as_ref()),
-            NewValue::Null => self.cell(row, col).is_none(),
+            // A missing field is not a null, so nulling one is an edit.
+            NewValue::Null => self.cell(row, col).is_none() && !self.missing(row, col),
             NewValue::Default => false,
         };
         if unchanged {
@@ -1028,22 +1083,22 @@ impl ResultGrid {
                     table: edit.table.clone(),
                     sets,
                     keys: self.key_values(edit, row)?,
-                    types: self.column_types(),
+                    types: self.row_types(row),
                 })
             })
             .collect()
     }
 
     /// Each edit target column's real name against the type the result gave
-    /// it, for the SQL writers that spell a literal by its column's type.
-    pub fn column_types(&self) -> Vec<(String, String)> {
+    /// its cell in `row`, for the writers that spell a literal by its type.
+    pub fn row_types(&self, row: usize) -> Vec<(String, String)> {
         let Some(edit) = &self.result.edit else {
             return Vec::new();
         };
         edit.columns
             .iter()
-            .zip(&self.result.columns)
-            .filter_map(|(name, column)| Some((name.clone()?, column.data_type.clone()?)))
+            .enumerate()
+            .filter_map(|(col, name)| Some((name.clone()?, self.cell_type(row, col)?.to_string())))
             .collect()
     }
 
@@ -1136,6 +1191,8 @@ pub struct Field {
     /// without running the statement twice.
     pub data_type: Option<SharedString>,
     pub value: Option<SharedString>,
+    /// The row has no such field at all, which is not a NULL.
+    pub missing: bool,
 }
 
 enum Step {
@@ -1510,16 +1567,20 @@ impl TableDelegate for ResultGrid {
         // menu's own context and a delegate is handed the table's. The
         // library wires the parent of a submenu added this way when it paints.
         let focus = self.focus.clone();
+        let engine = self.engine;
         let rows_as = PopupMenu::build(window, cx, move |submenu, _, _| {
-            RowsAs::ALL.into_iter().fold(
-                submenu.when_some(focus.clone(), PopupMenu::action_context),
-                |submenu, kind| {
-                    submenu
-                        .when(kind == RowsAs::Csv, PopupMenu::separator)
-                        .when(kind == RowsAs::Json, PopupMenu::separator)
-                        .menu(kind.label(), Box::new(crate::CopyRows { kind }))
-                },
-            )
+            RowsAs::ALL
+                .into_iter()
+                .filter(|kind| kind.offered_on(engine))
+                .fold(
+                    submenu.when_some(focus.clone(), PopupMenu::action_context),
+                    |submenu, kind| {
+                        submenu
+                            .when(kind == RowsAs::Csv, PopupMenu::separator)
+                            .when(kind == RowsAs::Json, PopupMenu::separator)
+                            .menu(kind.label(), Box::new(crate::CopyRows { kind }))
+                    },
+                )
         });
         // "Copy Row" is redundant beside this once it reads as one row: the
         // submenu's own "Text" entry already puts the same TSV on the
@@ -1805,6 +1866,7 @@ impl ResultGrid {
         // staged `DEFAULT` would read as a staged `NULL`.
         let keyword = match pending.map(|pending| &pending.value) {
             Some(NewValue::Default) => DEFAULT_LABEL,
+            None if self.missing(row_ix, col_ix) => SharedString::default(),
             _ => NULL_LABEL,
         };
         let cell = match pending {
@@ -2261,6 +2323,107 @@ mod tests {
     }
 
     #[test]
+    fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![
+                    DbColumn {
+                        name: "email".into(),
+                        data_type: Some("mixed".into()),
+                    },
+                    column("phone"),
+                ],
+                rows: vec![vec![None, None]],
+                cell_types: vec![vec![db::MISSING, "null"]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        let fields = grid.fields(0);
+        assert!(fields[0].missing && !fields[1].missing);
+        assert_eq!(fields[0].data_type.as_deref(), Some(db::MISSING));
+        assert_eq!(fields[1].data_type.as_deref(), Some("null"));
+    }
+
+    #[test]
+    fn a_missing_field_is_not_a_null_and_stays_one_across_a_snapshot() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("email"), column("phone")],
+                rows: vec![vec![None, None]],
+                cell_types: vec![vec![db::MISSING, "null"]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert!(grid.missing(0, 0));
+        assert!(!grid.missing(0, 1));
+
+        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+        assert!(restored.missing(0, 0));
+        assert!(!restored.missing(0, 1));
+
+        let mut unknown = grid.stored();
+        unknown.cell_types[0][1] = "a type from elsewhere".into();
+        assert!(
+            ResultGrid::restored(&unknown, Mode::ReadWrite)
+                .result
+                .cell_types
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_typed_cell_carries_its_own_type_to_the_write() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("_id", "mixed"), typed("value", "mixed")],
+                rows: vec![
+                    vec![Some("ObjectId('65a4f1c0ffffffffffffffff')".into()), None],
+                    vec![Some("2".into()), Some("BinData(0, 'AP8=')".into())],
+                    vec![Some("3".into()), Some("42".into())],
+                ],
+                cell_types: vec![
+                    vec!["objectId", db::MISSING],
+                    vec!["int", "binData"],
+                    vec!["int", "long"],
+                ],
+                edit: Some(EditTarget {
+                    schema: "dbdelve_dev".into(),
+                    table: "mixed_shapes".into(),
+                    columns: vec![Some("_id".into()), Some("value".into())],
+                    keys: vec![0],
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::MongoDb);
+
+        // A binary cell is read-only even where its column is not all binary.
+        assert!(!grid.editable(1, 1));
+        assert!(grid.editable(2, 1));
+        // Nulling a field the document does not have adds it.
+        assert!(grid.set_pending(0, 1, NewValue::Null));
+        assert!(grid.set_pending(2, 1, NewValue::Value("43".into())));
+        let types: Vec<Vec<(String, String)>> = grid
+            .pending_updates()
+            .into_iter()
+            .map(|row| row.types)
+            .collect();
+        assert_eq!(
+            types,
+            [
+                [("_id", "objectId"), ("value", db::MISSING)],
+                [("_id", "int"), ("value", "long")],
+            ]
+            .map(|row| row
+                .map(|(name, alias)| (name.to_string(), alias.to_string()))
+                .to_vec())
+        );
+    }
+
+    #[test]
     fn a_capped_snapshot_keeps_the_result_size_across_a_re_save() {
         // Restore, then quit without re-running: the snapshot is written back
         // from a grid holding `GRID_ROW_CAP` rows, and recomputing the count
@@ -2283,6 +2446,7 @@ mod tests {
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             },
             Mode::ReadWrite,
         );

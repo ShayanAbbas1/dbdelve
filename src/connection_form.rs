@@ -12,7 +12,9 @@ use gpui_component::input::InputState;
 
 use crate::{
     Workspace,
-    db::{ConnectionConfig, Engine, ServerConfig, SnowflakeConfig, SshTunnel, SslMode},
+    db::{
+        ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
+    },
     import::Source,
     session::Profile,
     sql::Mode,
@@ -58,6 +60,14 @@ pub(crate) struct ConnectionForm {
     pub(crate) private_key: Entity<InputState>,
     pub(crate) warehouse: Entity<InputState>,
     pub(crate) role: Entity<InputState>,
+    /// Driver options passed through as typed, where `Engine::takes_options`.
+    pub(crate) options: Entity<InputState>,
+    /// The host is a DNS name listing the servers, where
+    /// `Engine::resolves_srv`.
+    pub(crate) srv: bool,
+    /// The profile's login database, which the form does not show and keeps
+    /// as it was.
+    pub(crate) login_database: Option<String>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -94,6 +104,10 @@ impl ConnectionForm {
         };
         let file = match config {
             Some(ConnectionConfig::Sqlite { path, .. }) => Some(path.as_str()),
+            _ => None,
+        };
+        let mongo = match config {
+            Some(ConnectionConfig::MongoDb(mongo)) => Some(mongo),
             _ => None,
         };
 
@@ -200,6 +214,11 @@ impl ConnectionForm {
                 .placeholder("Role (optional)")
                 .default_value(value(account.and_then(|account| account.role.as_deref())))
         });
+        let options = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("authSource=admin&replicaSet=rs0 (optional)")
+                .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
+        });
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Seconds (0 for no limit)")
@@ -240,6 +259,9 @@ impl ConnectionForm {
             private_key,
             warehouse,
             role,
+            options,
+            srv: mongo.is_some_and(|mongo| mongo.srv),
+            login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             statement_timeout,
             error: None,
             test: None,
@@ -326,6 +348,19 @@ impl ConnectionForm {
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
+            Engine::MongoDb => {
+                let mut server = self.server_requiring(&[], cx)?;
+                // Hidden while SRV is on, so whatever it held is not asked for.
+                if self.srv {
+                    server.port = None;
+                }
+                ConnectionConfig::MongoDb(MongoConfig {
+                    server,
+                    srv: self.srv,
+                    login_database: self.login_database.clone(),
+                    options: read(&self.options),
+                })
+            }
         };
 
         Ok((name, config))
@@ -384,6 +419,13 @@ impl ConnectionForm {
     }
 
     pub(crate) fn server(&self, cx: &App) -> Result<ServerConfig, String> {
+        self.server_requiring(&["Username"], cx)
+    }
+
+    /// The server fields, with the host and whichever of `required` always
+    /// required: MongoDB asks for no username, since a server without
+    /// authentication is an ordinary one there.
+    fn server_requiring(&self, required: &[&str], cx: &App) -> Result<ServerConfig, String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let host = read(&self.host);
         let database = read(&self.database);
@@ -393,7 +435,7 @@ impl ConnectionForm {
         // Blank database is the one the server signs the login into, which is
         // what a profile that moves between databases starts on.
         for (label, value) in [("Host", &host), ("Username", &user)] {
-            if value.is_empty() {
+            if value.is_empty() && (label == "Host" || required.contains(&label)) {
                 return Err(format!("{label} is required."));
             }
         }
@@ -498,7 +540,8 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         ConnectionConfig::Postgres(server)
         | ConnectionConfig::MySql(server)
         | ConnectionConfig::MariaDb(server)
-        | ConnectionConfig::SqlServer(server) => if server.database.is_empty() {
+        | ConnectionConfig::SqlServer(server)
+        | ConnectionConfig::MongoDb(MongoConfig { server, .. }) => if server.database.is_empty() {
             &server.host
         } else {
             &server.database

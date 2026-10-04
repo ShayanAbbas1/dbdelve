@@ -1130,8 +1130,9 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(format!("SELECT {} FROM {rest}", columns.join(", ")))
-        .filter(|projected| crate::sql::is_generated_select(&crate::sql::unpaged(projected)))
+    Some(format!("SELECT {} FROM {rest}", columns.join(", "))).filter(|projected| {
+        crate::sql::is_generated_select(super::Engine::SqlServer, &crate::sql::unpaged(projected))
+    })
 }
 
 async fn collect(client: &mut Tds, sql: &str) -> Result<Collected, tiberius::error::Error> {
@@ -2755,7 +2756,7 @@ mod tests {
                 10,
                 offset,
             );
-            assert!(sql::is_generated_select(&sql), "{sql}");
+            assert!(sql::is_generated_select(Engine::SqlServer, &sql), "{sql}");
             let paged = sql::paged(Engine::SqlServer, &sql, &[]).expect("a preview has a page");
             connection
                 .generated(&paged)
@@ -3044,7 +3045,7 @@ mod tests {
                     &schema,
                     &relation,
                     &keys,
-                    &grid.column_types(),
+                    &grid.row_types(0),
                 )
                 .unwrap();
                 assert!(sql::delete_matches_key(&delete, &["id"]));
@@ -3106,7 +3107,10 @@ mod tests {
             };
             let filter = derived_filter(Engine::SqlServer, &[bar], &structure.columns);
             let preview = relation_sql(Engine::SqlServer, "dbo", table, &filter, &[], 10, 0);
-            assert!(sql::is_generated_select(&preview), "{preview}");
+            assert!(
+                sql::is_generated_select(Engine::SqlServer, &preview),
+                "{preview}"
+            );
             let paged = sql::paged(Engine::SqlServer, &preview, &structure.row_key()).unwrap();
             let found = connection
                 .generated(&paged)

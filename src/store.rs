@@ -69,6 +69,17 @@ pub struct StoredProfile {
     pub warehouse: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// What MongoDB needs beyond a server engine's fields: whether the host is
+    /// an SRV name, and the connection string's options as typed. Both absent
+    /// for every other engine.
+    #[serde(default)]
+    pub srv: Option<bool>,
+    #[serde(default)]
+    pub options: Option<String>,
+    /// MongoDB's database to log in to, once Select Database has moved the
+    /// profile off it. Absent until then, and for every other engine.
+    #[serde(default)]
+    pub login_database: Option<String>,
     /// The editor's zoom, back when it was a per-profile setting. Read only:
     /// the live value is [`StoredSettings::editor_font_size`] now, and this is
     /// what the migration seeds it from for anyone upgrading -- dropping the
@@ -261,6 +272,10 @@ pub struct StoredGrid {
     pub edit: Option<EditTarget>,
     #[serde(default)]
     pub data_types: Vec<Option<String>>,
+    /// Each cell's type, where the engine types cells rather than columns
+    /// (`QueryResult::cell_types`): what tells a missing field from a null.
+    #[serde(default)]
+    pub cell_types: Vec<Vec<String>>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -689,6 +704,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             captured: grid.captured,
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
+            cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
         };
         &capped
     } else {
@@ -1167,6 +1183,9 @@ user = "shayan"
                 private_key: None,
                 warehouse: None,
                 role: None,
+                srv: None,
+                options: None,
+                login_database: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
                 next_query_id: Some(1),
@@ -1212,6 +1231,9 @@ user = "shayan"
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1313,6 +1335,9 @@ open_objects = []
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1410,6 +1435,9 @@ open_objects = []
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1478,6 +1506,9 @@ open_objects = []
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
             next_query_id: Some(7),
@@ -1532,6 +1563,9 @@ open_objects = []
             private_key: Some("/Users/dev/.ssh/snowflake.p8".into()),
             warehouse: Some("COMPUTE_WH".into()),
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: Some(60),
             next_query_id: Some(1),
@@ -1635,6 +1669,9 @@ open_objects = []
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1741,6 +1778,9 @@ open_objects = []
                     private_key: None,
                     warehouse: None,
                     role: None,
+                    srv: None,
+                    options: None,
+                    login_database: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
                     next_query_id: Some(2),
@@ -1767,6 +1807,9 @@ open_objects = []
                     private_key: None,
                     warehouse: None,
                     role: None,
+                    srv: None,
+                    options: None,
+                    login_database: None,
                     editor_font_size: None,
                     statement_timeout: None,
                     next_query_id: None,
@@ -2117,6 +2160,9 @@ open_objects = []
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -2193,6 +2239,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -2244,6 +2291,7 @@ open_objects = []
                     keys: vec![0],
                 }),
                 data_types: vec![Some("int4".into()), None],
+                cell_types: Vec::new(),
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -2272,6 +2320,7 @@ open_objects = []
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -2318,6 +2367,7 @@ open_objects = []
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
+                cell_types: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -2408,6 +2458,9 @@ name = \"accounts\"
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -2508,6 +2561,9 @@ name = \"accounts\"
             private_key: None,
             warehouse: None,
             role: None,
+            srv: None,
+            options: None,
+            login_database: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
