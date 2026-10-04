@@ -948,7 +948,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
-            Self::MongoDb(connection) => connection.query(sql),
+            Self::MongoDb(connection) => connection.query(sql, cancel),
         }
     }
 
@@ -1082,7 +1082,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
-            Self::MongoDb(connection) => connection.cancel(),
+            Self::MongoDb(connection) => connection.cancel(cancel),
         }
     }
 
@@ -1151,6 +1151,7 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "int2"
             | "int4"
             | "int8"
+            | "long"
             | "integer"
             | "tinyint"
             | "smallint"
@@ -1173,6 +1174,10 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "smallmoney"
     )
 }
+
+/// The cell type of a field its document does not have: no value at all,
+/// where a null is a value.
+pub const MISSING: &str = "missing";
 
 /// A cell value, already formatted by the server. `None` is SQL NULL, which is
 /// distinct from an empty string and must stay distinguishable in the grid.
@@ -1429,6 +1434,12 @@ pub struct QueryResult {
     /// zero both for commands that affected no rows and commands without a row
     /// count, so callers must not infer the command kind from this value.
     pub rows_affected: Option<u64>,
+    /// Each cell's type, row by row, where a column's type is not every one of
+    /// its cells': a MongoDB field holds whatever each document put there. The
+    /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
+    /// field the document does not have. Empty on every SQL engine, whose
+    /// columns are typed whole ([`Column::data_type`]).
+    pub cell_types: Vec<Vec<&'static str>>,
     /// Where these rows can be written back to, when they can be at all.
     /// `None` is the answer for every result set dbdelve cannot address a single
     /// row of, and it is not an error — see [`Connection::edit_target`].
@@ -1798,6 +1809,11 @@ mod tests {
             "numeric",
             "money",
             "REAL",
+            // MongoDB's `$type` names.
+            "int",
+            "long",
+            "double",
+            "decimal",
         ] {
             assert!(is_numeric_type(numeric), "{numeric}");
         }
@@ -1812,6 +1828,8 @@ mod tests {
             "uuid",
             "jsonb",
             "bytea",
+            "mixed",
+            "timestamp",
         ] {
             assert!(!is_numeric_type(other), "{other}");
         }
