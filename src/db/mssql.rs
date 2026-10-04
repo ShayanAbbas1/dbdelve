@@ -3045,7 +3045,7 @@ mod tests {
                     &schema,
                     &relation,
                     &keys,
-                    &grid.column_types(),
+                    &grid.row_types(0),
                 )
                 .unwrap();
                 assert!(sql::delete_matches_key(&delete, &["id"]));

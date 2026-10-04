@@ -755,12 +755,13 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
-        let types = grid.delegate().column_types();
-        let key = grid
-            .delegate()
-            .active()
-            .and_then(|(row, _)| grid.delegate().row_key(row));
-        let Some((schema, table, keys)) = key else {
+        let key = grid.delegate().active().and_then(|(row, _)| {
+            Some((
+                grid.delegate().row_key(row)?,
+                grid.delegate().row_types(row),
+            ))
+        });
+        let Some(((schema, table, keys), types)) = key else {
             self.note(
                 "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
                 cx,

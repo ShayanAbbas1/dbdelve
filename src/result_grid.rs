@@ -828,12 +828,28 @@ impl ResultGrid {
         row < self.result.rows.len()
             && edit.columns.get(col).is_some_and(Option::is_some)
             && !edit.keys.contains(&col)
-            && !self
-                .result
-                .columns
-                .get(col)
-                .and_then(|column| column.data_type.as_deref())
-                .is_some_and(|data_type| self.engine.is_binary_type(data_type))
+            && ![self.column_type(col), self.cell_type(row, col)]
+                .into_iter()
+                .flatten()
+                .any(|data_type| self.engine.is_binary_type(data_type))
+    }
+
+    fn column_type(&self, col: usize) -> Option<&str> {
+        self.result.columns.get(col)?.data_type.as_deref()
+    }
+
+    /// The cell's own type where the result types each cell (a MongoDB
+    /// field holds whatever each document put there), else its column's.
+    fn cell_type(&self, row: usize, col: usize) -> Option<&str> {
+        match self
+            .result
+            .cell_types
+            .get(row)
+            .and_then(|types| types.get(col))
+        {
+            Some(tag) => Some(tag),
+            None => self.column_type(col),
+        }
     }
 
     fn is_numeric_column(&self, col: usize) -> bool {
@@ -924,7 +940,8 @@ impl ResultGrid {
         // from one that is not.
         let unchanged = match &value {
             NewValue::Value(value) => self.cell(row, col) == Some(value.as_ref()),
-            NewValue::Null => self.cell(row, col).is_none(),
+            // A missing field is not a null, so nulling one is an edit.
+            NewValue::Null => self.cell(row, col).is_none() && !self.missing(row, col),
             NewValue::Default => false,
         };
         if unchanged {
@@ -1053,22 +1070,22 @@ impl ResultGrid {
                     table: edit.table.clone(),
                     sets,
                     keys: self.key_values(edit, row)?,
-                    types: self.column_types(),
+                    types: self.row_types(row),
                 })
             })
             .collect()
     }
 
     /// Each edit target column's real name against the type the result gave
-    /// it, for the SQL writers that spell a literal by its column's type.
-    pub fn column_types(&self) -> Vec<(String, String)> {
+    /// its cell in `row`, for the writers that spell a literal by its type.
+    pub fn row_types(&self, row: usize) -> Vec<(String, String)> {
         let Some(edit) = &self.result.edit else {
             return Vec::new();
         };
         edit.columns
             .iter()
-            .zip(&self.result.columns)
-            .filter_map(|(name, column)| Some((name.clone()?, column.data_type.clone()?)))
+            .enumerate()
+            .filter_map(|(col, name)| Some((name.clone()?, self.cell_type(row, col)?.to_string())))
             .collect()
     }
 
@@ -2311,6 +2328,56 @@ mod tests {
                 .result
                 .cell_types
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_typed_cell_carries_its_own_type_to_the_write() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("_id", "mixed"), typed("value", "mixed")],
+                rows: vec![
+                    vec![Some("ObjectId('65a4f1c0ffffffffffffffff')".into()), None],
+                    vec![Some("2".into()), Some("BinData(0, 'AP8=')".into())],
+                    vec![Some("3".into()), Some("42".into())],
+                ],
+                cell_types: vec![
+                    vec!["objectId", db::MISSING],
+                    vec!["int", "binData"],
+                    vec!["int", "long"],
+                ],
+                edit: Some(EditTarget {
+                    schema: "dbdelve_dev".into(),
+                    table: "mixed_shapes".into(),
+                    columns: vec![Some("_id".into()), Some("value".into())],
+                    keys: vec![0],
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::MongoDb);
+
+        // A binary cell is read-only even where its column is not all binary.
+        assert!(!grid.editable(1, 1));
+        assert!(grid.editable(2, 1));
+        // Nulling a field the document does not have adds it.
+        assert!(grid.set_pending(0, 1, NewValue::Null));
+        assert!(grid.set_pending(2, 1, NewValue::Value("43".into())));
+        let types: Vec<Vec<(String, String)>> = grid
+            .pending_updates()
+            .into_iter()
+            .map(|row| row.types)
+            .collect();
+        assert_eq!(
+            types,
+            [
+                [("_id", "objectId"), ("value", db::MISSING)],
+                [("_id", "int"), ("value", "long")],
+            ]
+            .map(|row| row
+                .map(|(name, alias)| (name.to_string(), alias.to_string()))
+                .to_vec())
         );
     }
 
