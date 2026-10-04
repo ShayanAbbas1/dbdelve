@@ -305,9 +305,10 @@ pub struct StoredSettings {
     pub custom_keybindings: Option<HashMap<String, String>>,
 }
 
-/// A named collection of connections. Membership lives here rather than on
-/// the profile so one connection can belong to several projects, and a project
-/// with no connections yet is still a project.
+/// A named collection of connections. A connection is listed by at most one
+/// project, and one listed by none is under No project. Membership lives here
+/// rather than on the profile so a project with no connections yet is still a
+/// project.
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredProject {
     pub name: String,

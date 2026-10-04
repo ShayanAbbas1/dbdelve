@@ -931,11 +931,13 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 `Workspace` methods split across `src/workspace/`).
 
 - **A project is a named list of profile ids** (`store::StoredProject`, the
-  `[[projects]]` tables in `profiles.toml`), so one connection can sit in
-  several. Opening one only narrows the switcher, the palette and
-  next/previous connection (`Workspace::in_project`); tabs, saved queries and
-  history stay per profile, which is what keeps projects from mixing state.
-  A connection created while a project is open joins it (`create_profile`).
+  `[[projects]]` tables in `profiles.toml`). A connection is in at most one,
+  and those in none form the No project group, so each appears in the
+  switcher exactly once (`Workspace::move_to_project` keeps it that way).
+  Opening a group only narrows the switcher, the palette and next/previous
+  connection (`Workspace::in_project`); tabs, saved queries and history stay
+  per profile, which is what keeps projects from mixing state. A connection
+  created while a project is open joins it (`create_profile`).
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.

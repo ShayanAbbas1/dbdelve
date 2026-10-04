@@ -1,7 +1,8 @@
-//! Projects: named collections of connections. Opening one narrows the
-//! switcher, the palette and next/previous connection to its members; nothing
-//! about a connection itself changes, so its tabs, saved queries and history
-//! come back exactly as they were whichever project it is reached from.
+//! Projects: named collections of connections. A connection is in at most one
+//! project, and the ones in none form the No project group. Opening a group
+//! narrows the switcher, the palette and next/previous connection to its
+//! members; nothing about a connection itself changes, so its tabs, saved
+//! queries and history come back exactly as they were.
 
 use super::*;
 
@@ -10,14 +11,22 @@ impl Workspace {
         self.projects.iter().find(|project| project.open)
     }
 
-    /// Whether the profile at `index` is shown under the open project. With
-    /// none open, every connection is.
+    /// Whether the profile at `index` is in the open group: the open project,
+    /// or with none open, no project at all.
     pub(crate) fn in_project(&self, index: usize) -> bool {
         let Some(profile) = self.profiles.get(index) else {
             return false;
         };
-        self.open_project()
-            .is_none_or(|project| project.connections.contains(&profile.id))
+        match self.open_project() {
+            Some(project) => project.connections.contains(&profile.id),
+            None => self.project_of(&profile.id).is_none(),
+        }
+    }
+
+    pub(crate) fn project_of(&self, id: &str) -> Option<&store::StoredProject> {
+        self.projects
+            .iter()
+            .find(|project| project.connections.iter().any(|member| member == id))
     }
 
     pub(crate) fn project_members(&self) -> Vec<usize> {
@@ -26,7 +35,7 @@ impl Workspace {
             .collect()
     }
 
-    /// `None` closes whatever project is open and shows every connection.
+    /// `None` closes whatever project is open, opening the No project group.
     pub(crate) fn switch_project(
         &mut self,
         name: Option<&str>,
@@ -144,47 +153,38 @@ impl Workspace {
         self.switch_project(Some(&name), window, cx);
     }
 
-    /// The project goes; its connections stay, since they may belong to
-    /// other projects and are reachable under All connections either way.
+    /// The project goes; its connections stay, under No project.
     pub(crate) fn delete_project(&mut self, name: &str, cx: &mut Context<Self>) {
         self.projects.retain(|project| project.name != name);
         self.remember_profiles(cx);
         cx.notify();
     }
 
-    /// Adds a connection to a named project without opening it: the switcher
-    /// stays where it was, under All connections.
-    pub(crate) fn join_project(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
-        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
-            return;
-        };
-        if let Some(project) = self
-            .projects
-            .iter_mut()
-            .find(|project| project.name == name)
-            && !project.connections.contains(&id)
-        {
-            project.connections.push(id);
-        }
-        self.assigning_project = None;
-        self.remember_profiles(cx);
-        cx.notify();
-    }
-
-    pub(crate) fn remove_from_project(
+    /// Moves a connection into `project`, or with `None` out of every project
+    /// and into No project. The connection in front is followed into its new
+    /// group rather than left in front of a group that no longer lists it.
+    pub(crate) fn move_to_project(
         &mut self,
         index: usize,
+        project: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;
         };
-        if let Some(project) = self.projects.iter_mut().find(|project| project.open) {
-            project.connections.retain(|member| member != &id);
+        for each in &mut self.projects {
+            each.connections.retain(|member| member != &id);
+            if Some(each.name.as_str()) == project {
+                each.connections.push(id.clone());
+            }
         }
-        self.remember_profiles(cx);
-        self.settle_project(window, cx);
-        cx.notify();
+        self.assigning_project = None;
+        if index == self.active {
+            self.switch_project(project, window, cx);
+        } else {
+            self.remember_profiles(cx);
+            cx.notify();
+        }
     }
 }

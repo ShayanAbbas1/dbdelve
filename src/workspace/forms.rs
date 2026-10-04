@@ -1303,7 +1303,7 @@ impl Workspace {
                                             style.opacity(1.)
                                         })
                                 })
-                                .when(!in_project && !joinable.is_empty(), |actions| {
+                                .when(!joinable.is_empty(), |actions| {
                                     let id = profile.id.clone();
                                     actions.child(
                                         icon_button(
@@ -1313,7 +1313,7 @@ impl Workspace {
                                             Control::Inline,
                                             t,
                                         )
-                                        .tooltip("Add to a project")
+                                        .tooltip("Move to project")
                                         .on_click(
                                             move |_, _, cx| {
                                                 cx.stop_propagation();
@@ -1341,7 +1341,7 @@ impl Workspace {
                                                 cx.stop_propagation();
                                                 _ = leave_workspace.update(cx, |workspace, cx| {
                                                     workspace
-                                                        .remove_from_project(index, window, cx);
+                                                        .move_to_project(index, None, window, cx);
                                                 });
                                             },
                                         ),
@@ -1459,9 +1459,14 @@ impl Workspace {
                                             .whitespace_nowrap()
                                             .child(project.name.clone()),
                                     )
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         _ = join_workspace.update(cx, |workspace, cx| {
-                                            workspace.join_project(index, &name, cx);
+                                            workspace.move_to_project(
+                                                index,
+                                                Some(&name),
+                                                window,
+                                                cx,
+                                            );
                                         });
                                     })
                             })
@@ -1614,7 +1619,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// All connections, then each project, as groups only one of which is
+    /// No project, then each project, as groups only one of which is
     /// expanded: the one open, holding `members`. With no projects there is
     /// nothing to group, and the members are listed bare.
     fn render_project_groups(
@@ -1648,18 +1653,26 @@ impl Workspace {
             };
 
             let selected = open.is_none();
-            let all_workspace = workspace.clone();
-            rows.push(
-                group_header("all-connections", selected, expanded, t)
-                    .child(row_icon(t, icon::DATABASE))
-                    .child(div().flex_1().child("All connections"))
-                    .on_click(move |_, window, cx| {
-                        _ = all_workspace.update(cx, |workspace, cx| {
-                            workspace.select_group(None, window, cx);
-                        });
-                    })
-                    .into_any_element(),
-            );
+            // An empty No project group has nothing to open, and selecting it
+            // would only ask for a new connection.
+            let ungrouped = self
+                .profiles
+                .iter()
+                .any(|profile| self.project_of(&profile.id).is_none());
+            if selected || ungrouped {
+                let all_workspace = workspace.clone();
+                rows.push(
+                    group_header("no-project", selected, expanded, t)
+                        .child(row_icon(t, icon::DATABASE))
+                        .child(div().flex_1().child("No project"))
+                        .on_click(move |_, window, cx| {
+                            _ = all_workspace.update(cx, |workspace, cx| {
+                                workspace.select_group(None, window, cx);
+                            });
+                        })
+                        .into_any_element(),
+                );
+            }
             if selected && expanded {
                 rows.push(group_body(members.take().unwrap_or_default()));
             }
