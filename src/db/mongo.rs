@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
-use mongodb::bson::{Document, doc};
+use mongodb::bson::{Bson, Document, doc};
 use mongodb::error::{Error, ErrorKind};
 use mongodb::event::{EventHandler, sdam::SdamEvent};
 use mongodb::options::{ClientOptions, ConnectionString, HostInfo, ServerAddress, Tls, TlsOptions};
@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, DbError, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
-    Structure, plain_error,
+    Statistics, Structure, plain_error,
 };
 
 /// The port the server listens on when the profile does not say.
@@ -503,8 +503,38 @@ impl Connection {
         Ok(Catalog::default())
     }
 
+    /// Each collection's bytes on disk, indexes included as the other engines
+    /// count them, and its document count, from `$collStats`. A view has
+    /// neither, and a time-series collection no count.
+    ///
+    /// ponytail: one `$collStats` per collection, one after another. Fine for
+    /// hundreds; run them concurrently if a database of thousands is slow.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        Ok(Sizes::new())
+        if self.database.is_empty() {
+            return Ok(Sizes::new());
+        }
+        let database = self.database();
+        let mut sizes = std::collections::HashMap::new();
+        for listed in self.collections()? {
+            let Some(relation) =
+                relation(&listed).filter(|relation| relation.kind == RelationKind::Table)
+            else {
+                continue;
+            };
+            let collection = database.collection::<Document>(&relation.name);
+            let reports: Vec<Document> = self.call(async {
+                collection
+                    .aggregate([doc! { "$collStats": { "storageStats": {} } }])
+                    .await?
+                    .try_collect()
+                    .await
+            })?;
+            let statistics = statistics(&reports);
+            if statistics != Statistics::default() {
+                sizes.insert(relation.name, statistics);
+            }
+        }
+        Ok(Sizes::from([(self.database.clone(), sizes)]))
     }
 
     pub fn structure(&self, _schema: &str, _relation: &str) -> Result<Structure, DbError> {
@@ -548,6 +578,32 @@ fn relation(listed: &Document) -> Option<Relation> {
         size: None,
         rows: None,
     })
+}
+
+/// `$collStats` answers once per shard, so the numbers are summed; one shard
+/// without a number leaves the total unknown rather than short.
+fn statistics(reports: &[Document]) -> Statistics {
+    if reports.is_empty() {
+        return Statistics::default();
+    }
+    let total = |field: &str| {
+        reports
+            .iter()
+            .map(|report| {
+                let value = report.get_document("storageStats").ok()?.get(field)?;
+                match value {
+                    Bson::Int32(number) => u64::try_from(*number).ok(),
+                    Bson::Int64(number) => u64::try_from(*number).ok(),
+                    Bson::Double(number) if *number >= 0.0 => Some(*number as u64),
+                    _ => None,
+                }
+            })
+            .sum::<Option<u64>>()
+    };
+    Statistics {
+        size: total("totalSize"),
+        rows: total("count"),
+    }
 }
 
 /// One client, connected and logged in: a `ping` is the first thing that
@@ -987,6 +1043,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn statistics_sum_across_shards_and_a_missing_count_is_unknown() {
+        let report = |stats: Document| doc! { "storageStats": stats };
+        assert_eq!(
+            statistics(&[
+                report(doc! { "totalSize": 8192_i32, "count": 3_i64 }),
+                report(doc! { "totalSize": 4096.0, "count": 2_i32 }),
+            ]),
+            Statistics {
+                size: Some(12288),
+                rows: Some(5),
+            }
+        );
+        // What a time-series collection reports: bytes, and no count.
+        assert_eq!(
+            statistics(&[report(doc! { "totalSize": 40960_i32 })]),
+            Statistics {
+                size: Some(40960),
+                rows: None,
+            }
+        );
+        assert_eq!(statistics(&[]), Statistics::default());
+    }
+
     /// The server the `live_` tests talk to, from `dbdelve_MONGO_URL`.
     fn live_config() -> MongoConfig {
         let url = std::env::var("dbdelve_MONGO_URL").expect("dbdelve_MONGO_URL is required");
@@ -1083,6 +1163,19 @@ mod tests {
             .map(|relation| relation.name.as_str())
             .collect::<Vec<_>>();
         assert!(names.is_sorted(), "{names:?}");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_sizes_land_on_collections_and_not_on_views() {
+        let sizes = live().sizes().expect("sizes should load");
+        let sizes = &sizes["dbdelve_dev"];
+        let events = sizes["events"];
+        assert_eq!(events.rows, Some(1_000_000));
+        assert!(events.size.is_some_and(|size| size > 0), "{events:?}");
+        assert!(sizes["sensor_readings"].size.is_some());
+        assert_eq!(sizes["sensor_readings"].rows, None);
+        assert!(!sizes.contains_key("account_overview"));
     }
 
     #[test]
