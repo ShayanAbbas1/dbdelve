@@ -730,7 +730,9 @@ impl Connection {
                 let mut sent = doc! { "dbStats": 1 };
                 match args.bson(0)? {
                     None => {}
-                    Some(Bson::Document(options)) => sent.extend(options),
+                    Some(Bson::Document(options)) => {
+                        merged(&mut sent, args.method, options, &["scale", "freeStorage"])?
+                    }
                     Some(scale) => {
                         sent.insert("scale", scale);
                     }
@@ -739,7 +741,31 @@ impl Connection {
             }
             DbMethod::CreateCollection => {
                 let mut sent = doc! { "create": args.string(0)? };
-                sent.extend(args.document(1)?.unwrap_or_default());
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(1)?.unwrap_or_default(),
+                    &[
+                        "capped",
+                        "size",
+                        "max",
+                        "timeseries",
+                        "expireAfterSeconds",
+                        "clusteredIndex",
+                        "changeStreamPreAndPostImages",
+                        "storageEngine",
+                        "validator",
+                        "validationLevel",
+                        "validationAction",
+                        "indexOptionDefaults",
+                        "viewOn",
+                        "pipeline",
+                        "collation",
+                        "encryptedFields",
+                        "comment",
+                        "writeConcern",
+                    ],
+                )?;
                 Ok(reply(command(run, &self.named(database)?, sent)?))
             }
             DbMethod::CreateView => {
@@ -748,7 +774,12 @@ impl Connection {
                     "viewOn": args.string(1)?,
                     "pipeline": args.pipeline(2)?,
                 };
-                sent.extend(args.document(3)?.unwrap_or_default());
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(3)?.unwrap_or_default(),
+                    &["collation", "comment", "writeConcern"],
+                )?;
                 Ok(reply(command(run, &self.named(database)?, sent)?))
             }
             DbMethod::DropDatabase => {
@@ -781,11 +812,34 @@ impl Connection {
                 if let Some(projection) = args.document(1)? {
                     sent.insert("projection", projection);
                 }
-                sent.extend(args.document(2)?.unwrap_or_default());
                 if call.method == Method::FindOne {
                     sent.insert("limit", 1);
                     sent.insert("singleBatch", true);
                 }
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(2)?.unwrap_or_default(),
+                    &[
+                        "projection",
+                        "sort",
+                        "skip",
+                        "limit",
+                        "batchSize",
+                        "hint",
+                        "collation",
+                        "comment",
+                        "maxTimeMS",
+                        "readConcern",
+                        "max",
+                        "min",
+                        "returnKey",
+                        "showRecordId",
+                        "allowDiskUse",
+                        "allowPartialResults",
+                        "let",
+                    ],
+                )?;
                 match chained(&mut sent, cursor, true)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
                     None => {
@@ -808,7 +862,22 @@ impl Connection {
                 if let Some(size) = options.remove("batchSize") {
                     sent.insert("cursor", doc! { "batchSize": size });
                 }
-                sent.extend(options);
+                merged(
+                    &mut sent,
+                    args.method,
+                    options,
+                    &[
+                        "allowDiskUse",
+                        "bypassDocumentValidation",
+                        "collation",
+                        "comment",
+                        "hint",
+                        "let",
+                        "maxTimeMS",
+                        "readConcern",
+                        "writeConcern",
+                    ],
+                )?;
                 match chained(&mut sent, cursor, false)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
                     None => Ok(documents(fetch(run, &database, sent)?)),
@@ -826,7 +895,12 @@ impl Connection {
                 }
                 pipeline.push(doc! { "$group": { "_id": 1, "n": { "$sum": 1 } } });
                 let mut sent = doc! { "aggregate": collection, "pipeline": pipeline, "cursor": {} };
-                sent.extend(options);
+                merged(
+                    &mut sent,
+                    args.method,
+                    options,
+                    &["collation", "comment", "hint", "maxTimeMS", "readConcern"],
+                )?;
                 if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
                     return explained(run, &database, sent, verbosity);
                 }
@@ -840,7 +914,12 @@ impl Connection {
             }
             Method::EstimatedDocumentCount => {
                 let mut sent = doc! { "count": collection };
-                sent.extend(args.document(0)?.unwrap_or_default());
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(0)?.unwrap_or_default(),
+                    &["comment", "maxTimeMS", "readConcern"],
+                )?;
                 let counted = command(run, &database, sent)?;
                 let n = counted.get("n").cloned().unwrap_or(Bson::Null);
                 Ok(documents(vec![doc! { "count": n }]))
@@ -851,7 +930,12 @@ impl Connection {
                 if let Some(query) = args.document(1)? {
                     sent.insert("query", query);
                 }
-                sent.extend(args.document(2)?.unwrap_or_default());
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(2)?.unwrap_or_default(),
+                    &["collation", "comment", "hint", "maxTimeMS", "readConcern"],
+                )?;
                 if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
                     return explained(run, &database, sent, verbosity);
                 }
@@ -879,7 +963,21 @@ impl Connection {
                 let (ids, inserted): (Vec<Bson>, Vec<Document>) =
                     given.into_iter().map(with_id).unzip();
                 let mut sent = doc! { "insert": collection, "documents": inserted };
-                sent.extend(args.document(1)?.unwrap_or_default());
+                let takes: &[&str] = match call.method {
+                    Method::InsertMany => &[
+                        "ordered",
+                        "bypassDocumentValidation",
+                        "comment",
+                        "writeConcern",
+                    ],
+                    _ => &["bypassDocumentValidation", "comment", "writeConcern"],
+                };
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(1)?.unwrap_or_default(),
+                    takes,
+                )?;
                 let written = write(run, &database, sent)?;
                 let shown = match call.method {
                     Method::InsertOne => {
@@ -898,14 +996,21 @@ impl Connection {
                     "multi": call.method == Method::UpdateMany,
                 };
                 let mut sent = doc! { "update": collection };
+                let mut options = Document::new();
                 for (key, value) in args.document(2)?.unwrap_or_default() {
                     match key.as_str() {
                         "upsert" | "arrayFilters" | "hint" | "collation" | "sort" => {
                             statement.insert(key, value)
                         }
-                        _ => sent.insert(key, value),
+                        _ => options.insert(key, value),
                     };
                 }
+                merged(
+                    &mut sent,
+                    args.method,
+                    options,
+                    &["bypassDocumentValidation", "comment", "let", "writeConcern"],
+                )?;
                 sent.insert("updates", vec![statement]);
                 let written = write(run, &database, sent)?;
                 let upserted = written.get_array("upserted").map_or(&[][..], Vec::as_slice);
@@ -929,12 +1034,19 @@ impl Connection {
                     "limit": i32::from(call.method == Method::DeleteOne),
                 };
                 let mut sent = doc! { "delete": collection };
+                let mut options = Document::new();
                 for (key, value) in args.document(1)?.unwrap_or_default() {
                     match key.as_str() {
                         "hint" | "collation" => statement.insert(key, value),
-                        _ => sent.insert(key, value),
+                        _ => options.insert(key, value),
                     };
                 }
+                merged(
+                    &mut sent,
+                    args.method,
+                    options,
+                    &["comment", "let", "writeConcern"],
+                )?;
                 sent.insert("deletes", vec![statement]);
                 let written = write(run, &database, sent)?;
                 let shown = doc! { "acknowledged": true, "deletedCount": number(written.get("n")) };
@@ -957,6 +1069,7 @@ impl Connection {
                         args.document(2)?
                     }
                 };
+                let mut rest = Document::new();
                 for (key, value) in options.unwrap_or_default() {
                     match key.as_str() {
                         "projection" => sent.insert("fields", value),
@@ -971,9 +1084,33 @@ impl Connection {
                                 )));
                             }
                         },
-                        _ => sent.insert(key, value),
+                        _ => rest.insert(key, value),
                     };
                 }
+                let takes: &[&str] = match call.method {
+                    Method::FindOneAndDelete => &[
+                        "sort",
+                        "collation",
+                        "hint",
+                        "maxTimeMS",
+                        "comment",
+                        "let",
+                        "writeConcern",
+                    ],
+                    _ => &[
+                        "sort",
+                        "upsert",
+                        "arrayFilters",
+                        "bypassDocumentValidation",
+                        "collation",
+                        "hint",
+                        "maxTimeMS",
+                        "comment",
+                        "let",
+                        "writeConcern",
+                    ],
+                };
+                merged(&mut sent, args.method, rest, takes)?;
                 let written = write(run, &database, sent)?;
                 let found = match written.get("value") {
                     Some(Bson::Document(found)) => vec![found.clone()],
@@ -997,13 +1134,13 @@ impl Connection {
                     .map(|key| {
                         let name = index_name(&key);
                         let mut index = doc! { "key": key };
-                        index.extend(options.clone());
+                        merged(&mut index, args.method, options.clone(), &INDEX_OPTIONS)?;
                         if !index.contains_key("name") {
                             index.insert("name", name);
                         }
-                        index
+                        Ok(index)
                     })
-                    .collect();
+                    .collect::<Result<_, DbError>>()?;
                 let names = indexes
                     .iter()
                     .map(|index| doc! { "name": index.get("name").cloned().unwrap_or(Bson::Null) })
@@ -1033,7 +1170,12 @@ impl Connection {
             }
             Method::Drop => {
                 let mut sent = doc! { "drop": collection };
-                sent.extend(args.document(0)?.unwrap_or_default());
+                merged(
+                    &mut sent,
+                    args.method,
+                    args.document(0)?.unwrap_or_default(),
+                    &["comment", "writeConcern"],
+                )?;
                 Ok(reply(command(run, &database, sent)?))
             }
             Method::RenameCollection => {
@@ -1882,6 +2024,53 @@ impl<'a> Args<'a> {
         ))
     }
 }
+
+/// `options` added to `sent`, each one a key `method` takes. The server reads
+/// them as the command's own fields, so one naming a field the statement set
+/// (`pipeline`, `filter`, the collection) would replace it and run something
+/// other than what was classified.
+fn merged(
+    sent: &mut Document,
+    method: &str,
+    options: Document,
+    takes: &[&str],
+) -> Result<(), DbError> {
+    for (key, value) in options {
+        if !takes.contains(&key.as_str()) {
+            return Err(plain_error(format!("{method} takes no option {key}.")));
+        }
+        if sent.contains_key(&key) {
+            return Err(plain_error(format!(
+                "{method}'s option {key} is one the statement already sets."
+            )));
+        }
+        sent.insert(key, value);
+    }
+    Ok(())
+}
+
+/// What `createIndex` and `createIndexes` take beside the key.
+const INDEX_OPTIONS: [&str; 19] = [
+    "name",
+    "unique",
+    "sparse",
+    "background",
+    "expireAfterSeconds",
+    "partialFilterExpression",
+    "collation",
+    "hidden",
+    "storageEngine",
+    "weights",
+    "default_language",
+    "language_override",
+    "textIndexVersion",
+    "2dsphereIndexVersion",
+    "bits",
+    "min",
+    "max",
+    "wildcardProjection",
+    "v",
+];
 
 /// A literal as the BSON it spells.
 fn bson(value: &Value) -> Result<Bson, DbError> {
@@ -3389,6 +3578,70 @@ mod tests {
             Some("4")
         );
         assert_eq!(count(&connection, &scratch.1), 0);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_an_option_naming_a_field_of_the_command_is_refused_before_it_is_sent() {
+        let connection = live();
+        let scratch = Scratch(&connection, format!("dbdelve_test_{}", ObjectId::new()));
+        let c = format!("db.getCollection('{}')", scratch.1);
+        let out = format!(
+            "[{{ $match: {{ _id: null }} }}, {{ $out: '{}' }}]",
+            scratch.1
+        );
+        let hostile = [
+            format!("{c}.countDocuments({{}}, {{ pipeline: {out} }})"),
+            format!("{c}.find({{}}, null, {{ filter: {{ x: 1 }} }})"),
+            format!("{c}.find({{}}, null, {{ find: 'accounts' }})"),
+            format!("{c}.find({{}}, {{ a: 1 }}, {{ projection: {{ b: 1 }} }})"),
+            format!("{c}.findOne({{}}, null, {{ limit: 5 }})"),
+            format!("{c}.aggregate([], {{ pipeline: {out} }})"),
+            format!("{c}.aggregate([], {{ cursor: {{}} }})"),
+            format!("{c}.estimatedDocumentCount({{ count: 'accounts' }})"),
+            format!("{c}.distinct('a', {{}}, {{ key: 'b' }})"),
+            format!("{c}.insertOne({{ a: 1 }}, {{ documents: [] }})"),
+            format!("{c}.insertMany([{{ a: 1 }}], {{ insert: 'accounts' }})"),
+            format!("{c}.updateOne({{}}, {{ $set: {{ a: 1 }} }}, {{ update: 'accounts' }})"),
+            format!("{c}.updateMany({{ a: 1 }}, {{ $set: {{ a: 1 }} }}, {{ updates: [] }})"),
+            format!("{c}.replaceOne({{}}, {{ a: 1 }}, {{ update: 'accounts' }})"),
+            format!("{c}.deleteOne({{}}, {{ delete: 'accounts' }})"),
+            format!("{c}.deleteMany({{ a: 1 }}, {{ deletes: [{{ q: {{}}, limit: 0 }}] }})"),
+            format!("{c}.findOneAndUpdate({{}}, {{ $set: {{ a: 1 }} }}, {{ remove: true }})"),
+            format!("{c}.findOneAndReplace({{}}, {{ a: 1 }}, {{ query: {{}} }})"),
+            format!("{c}.findOneAndDelete({{ a: 1 }}, {{ findAndModify: 'accounts' }})"),
+            format!("{c}.createIndex({{ a: 1 }}, {{ key: {{ b: 1 }} }})"),
+            format!("{c}.createIndexes([{{ a: 1 }}], {{ key: {{ b: 1 }} }})"),
+            format!("{c}.drop({{ drop: 'accounts' }})"),
+            "db.stats({ dbStats: 0 })".to_string(),
+            format!(
+                "db.createCollection('{}', {{ create: 'accounts' }})",
+                scratch.1
+            ),
+            format!(
+                "db.createView('{}', 'accounts', [], {{ pipeline: {out} }})",
+                scratch.1
+            ),
+        ];
+        for statement in &hostile {
+            let refused = connection
+                .query(statement, &CancelToken::default())
+                .expect_err(statement)
+                .message;
+            assert!(
+                refused.contains("takes no option") || refused.contains("already sets"),
+                "{statement}: {refused}"
+            );
+        }
+        let listed = ran(&connection, "db.getCollectionNames()");
+        assert!(
+            !listed
+                .rows
+                .iter()
+                .any(|row| row[0].as_deref() == Some(&scratch.1)),
+            "a refused statement reached the server"
+        );
+        assert_eq!(count(&connection, "accounts"), 5);
     }
 
     #[test]
