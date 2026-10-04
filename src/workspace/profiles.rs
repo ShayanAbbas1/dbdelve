@@ -120,6 +120,7 @@ impl Workspace {
                         server,
                         srv: stored.srv.unwrap_or_default(),
                         options: stored.options.unwrap_or_default(),
+                        login_database: stored.login_database,
                     }),
                     _ => ConnectionConfig::Postgres(server),
                 }

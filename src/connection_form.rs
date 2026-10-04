@@ -65,6 +65,9 @@ pub(crate) struct ConnectionForm {
     /// The host is a DNS name listing the servers, where
     /// `Engine::resolves_srv`.
     pub(crate) srv: bool,
+    /// The profile's login database, which the form does not show and keeps
+    /// as it was.
+    pub(crate) login_database: Option<String>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -258,6 +261,7 @@ impl ConnectionForm {
             role,
             options,
             srv: mongo.is_some_and(|mongo| mongo.srv),
+            login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             statement_timeout,
             error: None,
             test: None,
@@ -353,6 +357,7 @@ impl ConnectionForm {
                 ConnectionConfig::MongoDb(MongoConfig {
                     server,
                     srv: self.srv,
+                    login_database: self.login_database.clone(),
                     options: read(&self.options),
                 })
             }

@@ -33,7 +33,7 @@ use mongodb::error::{Error, ErrorKind};
 use mongodb::event::{EventHandler, sdam::SdamEvent};
 use mongodb::options::{ClientOptions, ConnectionString, HostInfo, ServerAddress, Tls, TlsOptions};
 use mongodb::{Client, ClientSession, Database};
-use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use time::OffsetDateTime;
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
@@ -54,16 +54,6 @@ pub(super) const DEFAULT_PORT: u16 = 27017;
 /// How long a connect waits for a server to answer, TLS and login included.
 /// The driver's own default is thirty seconds of "Connecting…".
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
-
-/// What ends or changes an option's value in a query string, escaped so a
-/// database name written into the options reads back as itself.
-const OPTION_VALUE: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'#')
-    .add(b'%')
-    .add(b'&')
-    .add(b'+')
-    .add(b'=');
 
 /// How many documents a structure is inferred from. A collection has no
 /// declared columns, so its shape is whatever this many of them say.
@@ -110,6 +100,12 @@ pub struct MongoConfig {
     /// (`tls*`, and `directConnection` through a tunnel) are refused here
     /// rather than quietly overridden.
     pub options: String,
+    /// The database the profile named before Select Database first moved it,
+    /// which stays the connection string's database: the driver authenticates
+    /// against that one unless `options` names an `authSource`, so a user
+    /// defined in one database can still log in once moved to another. `None`
+    /// until the first switch.
+    pub login_database: Option<String>,
 }
 
 impl MongoConfig {
@@ -125,33 +121,9 @@ impl MongoConfig {
     }
 
     /// Move onto `database`, keeping the login where it was.
-    ///
-    /// With no `authSource` the driver authenticates against the database the
-    /// connection string names, so a user defined in one database could not
-    /// log in once moved to another. The source it had is written into the
-    /// options, where the form shows it, before the database changes. Only for
-    /// a password mechanism: X.509, AWS, Kerberos and LDAP authenticate against
-    /// `$external` whatever the database.
     pub(super) fn set_database(&mut self, database: String) {
-        let options = self.options.trim().trim_start_matches('?');
-        let option = |name: &str| {
-            options.split('&').find_map(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                key.eq_ignore_ascii_case(name).then_some(value)
-            })
-        };
-        let password_login = option("authMechanism")
-            .is_none_or(|mechanism| mechanism.to_ascii_uppercase().starts_with("SCRAM-"));
-        if !self.server.user.is_empty() && password_login && option("authSource").is_none() {
-            let source = match self.server.database.as_str() {
-                "" => "admin".to_string(),
-                current => utf8_percent_encode(current, OPTION_VALUE).to_string(),
-            };
-            self.options = match options {
-                "" => format!("authSource={source}"),
-                options => format!("{options}&authSource={source}"),
-            };
-        }
+        self.login_database
+            .get_or_insert_with(|| self.server.database.clone());
         self.server.database = database;
     }
 }
@@ -247,6 +219,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
         },
         srv,
         options,
+        login_database: None,
     })
 }
 
@@ -311,7 +284,7 @@ fn connection_string(config: &MongoConfig) -> Result<String, DbError> {
     let options = config.options.trim().trim_start_matches('?');
     Ok(format!(
         "{scheme}://{credentials}{hosts}/{}?{options}",
-        encoded(&server.database)
+        encoded(config.login_database.as_deref().unwrap_or(&server.database))
     ))
 }
 
@@ -2472,6 +2445,7 @@ mod tests {
             },
             srv: false,
             options: "?authSource=admin&replicaSet=rs0".into(),
+            login_database: None,
         };
         let written = connection_string(&config).unwrap();
         let read = ConnectionString::parse(&written).unwrap();
@@ -2557,35 +2531,22 @@ mod tests {
 
     #[test]
     fn switching_database_keeps_the_login_where_it_was() {
-        let mut config = url("mongodb://u:p@h/dbdelve_dev");
+        let mut config = url("mongodb://u:p@h/r%26d?replicaSet=rs0");
         config.set_database("dbdelve_archive".into());
         assert_eq!(config.server.database, "dbdelve_archive");
-        assert_eq!(config.options, "authSource=dbdelve_dev");
-        // The second switch finds a source already written and leaves it.
-        config.set_database("other".into());
-        assert_eq!(config.options, "authSource=dbdelve_dev");
-
-        let mut blank = url("mongodb://u:p@h/?replicaSet=rs0");
-        blank.set_database("app".into());
-        assert_eq!(blank.options, "replicaSet=rs0&authSource=admin");
-
-        for unpinned in [
-            "mongodb://h/dbdelve_dev",
-            "mongodb://u:p@h/dbdelve_dev?authSource=admin",
-            "mongodb://u@h/dbdelve_dev?authMechanism=MONGODB-X509",
-        ] {
-            let mut config = url(unpinned);
-            let options = config.options.clone();
-            config.set_database("app".into());
-            assert_eq!(config.options, options, "{unpinned}");
-            assert_eq!(config.server.database, "app", "{unpinned}");
-        }
-        let mut scram = url("mongodb://u:p@h/r%26d?authMechanism=SCRAM-SHA-256");
-        scram.set_database("app".into());
+        // The user's own options are never written to.
+        assert_eq!(config.options, "replicaSet=rs0");
         assert_eq!(
-            scram.options,
-            "authMechanism=SCRAM-SHA-256&authSource=r%26d"
+            connection_string(&config).unwrap(),
+            "mongodb://u:p@h/r%26d?replicaSet=rs0"
         );
+        // The second switch keeps the first login.
+        config.set_database("other".into());
+        assert_eq!(config.login_database.as_deref(), Some("r&d"));
+
+        let mut blank = url("mongodb://u:p@h");
+        blank.set_database("app".into());
+        assert_eq!(connection_string(&blank).unwrap(), "mongodb://u:p@h/?");
     }
 
     #[test]
@@ -3910,6 +3871,7 @@ mod tests {
         let ConnectionConfig::MongoDb(config) = config else {
             unreachable!()
         };
+        assert_eq!(config.options, live_config().options);
         let catalog = Connection::open(&config)
             .expect("the switched profile should log in")
             .catalog()
