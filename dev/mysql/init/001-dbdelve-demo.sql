@@ -1,3 +1,6 @@
+-- MariaDB's client defaults to utf8mb3 here and turns the emoji below into NULL.
+SET NAMES utf8mb4;
+
 CREATE TABLE accounts (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     external_id CHAR(36) NOT NULL UNIQUE,
@@ -80,11 +83,6 @@ INSERT INTO accounts (
 
 -- Five thousand rows, so scrolling, sorting and the row-count chip have
 -- something to work against rather than a grid that fits on screen.
---
--- The recursive CTE needs its ceiling raised first: `cte_max_recursion_depth`
--- defaults to 1,000, and the failure is an error rather than a short table.
-SET SESSION cte_max_recursion_depth = 10000;
-
 CREATE TABLE measurements (
     id BIGINT PRIMARY KEY,
     recorded_at DATETIME(6) NOT NULL,
@@ -99,10 +97,15 @@ CREATE TABLE measurements (
 -- The `WITH` goes after `INSERT INTO`, which is the only place MySQL
 -- accepts one on an `INSERT ... SELECT`.
 INSERT INTO measurements
-WITH RECURSIVE series (sample) AS (
-    SELECT 1
+WITH RECURSIVE counter (n) AS (
+    SELECT 0
     UNION ALL
-    SELECT sample + 1 FROM series WHERE sample < 5000
+    SELECT n + 1 FROM counter WHERE n < 99
+),
+-- 100 x 50 rows from a 100-step recursion, because the default recursion
+-- ceilings differ between MySQL and MariaDB and no portable SET raises them.
+series (sample) AS (
+    SELECT hi.n * 50 + lo.n + 1 FROM counter AS hi JOIN counter AS lo ON lo.n < 50
 )
 SELECT
     sample,
@@ -135,7 +138,7 @@ INSERT INTO documents VALUES (
     1,
     'Multiline text',
     'first line\nsecond line\nthird line; with a semicolon',
-    JSON_OBJECT('kind', 'short', 'nested', JSON_OBJECT('null_value', CAST('null' AS JSON))),
+    JSON_OBJECT('kind', 'short', 'nested', JSON_OBJECT('null_value', JSON_EXTRACT('{"v": null}', '$.v'))),
     UNHEX('00010203feff')
 );
 
@@ -285,6 +288,8 @@ FROM (
 
 DROP TABLE seq10;
 
+-- ascii keeps the 66 varchar columns under MariaDB's 8126-byte InnoDB row limit,
+-- which counts utf8mb4 at four bytes a character; the values are all ASCII.
 CREATE TABLE wide_metrics (
     id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY,
     c001 bigint NOT NULL,
@@ -486,7 +491,7 @@ CREATE TABLE wide_metrics (
     c197 double NOT NULL,
     c198 varchar(32) NOT NULL,
     c199 bigint NOT NULL
-);
+) DEFAULT CHARACTER SET ascii;
 
 INSERT INTO wide_metrics (c001, c002, c003, c004, c005, c006, c007, c008, c009, c010, c011, c012, c013, c014, c015, c016, c017, c018, c019, c020, c021, c022, c023, c024, c025, c026, c027, c028, c029, c030, c031, c032, c033, c034, c035, c036, c037, c038, c039, c040, c041, c042, c043, c044, c045, c046, c047, c048, c049, c050, c051, c052, c053, c054, c055, c056, c057, c058, c059, c060, c061, c062, c063, c064, c065, c066, c067, c068, c069, c070, c071, c072, c073, c074, c075, c076, c077, c078, c079, c080, c081, c082, c083, c084, c085, c086, c087, c088, c089, c090, c091, c092, c093, c094, c095, c096, c097, c098, c099, c100, c101, c102, c103, c104, c105, c106, c107, c108, c109, c110, c111, c112, c113, c114, c115, c116, c117, c118, c119, c120, c121, c122, c123, c124, c125, c126, c127, c128, c129, c130, c131, c132, c133, c134, c135, c136, c137, c138, c139, c140, c141, c142, c143, c144, c145, c146, c147, c148, c149, c150, c151, c152, c153, c154, c155, c156, c157, c158, c159, c160, c161, c162, c163, c164, c165, c166, c167, c168, c169, c170, c171, c172, c173, c174, c175, c176, c177, c178, c179, c180, c181, c182, c183, c184, c185, c186, c187, c188, c189, c190, c191, c192, c193, c194, c195, c196, c197, c198, c199)
 WITH RECURSIVE n(i) AS (

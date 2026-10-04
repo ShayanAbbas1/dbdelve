@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{Imported, Report, Skipped, port, root_certificate};
 use crate::{
-    db::{ConnectionConfig, ServerConfig, SshTunnel, SslMode},
+    db::{ConnectionConfig, Engine, ServerConfig, SshTunnel, SslMode},
     store,
     theme::ConnectionColor,
 };
@@ -166,7 +166,12 @@ fn target(provider: &str, driver: &str) -> Result<Target, String> {
     match provider {
         // Redshift, Timescale, CockroachDB and the rest are drivers under it.
         "postgresql" => Ok(Target::Server(ConnectionConfig::Postgres)),
-        "mysql" | "mariadb" => Ok(Target::Server(ConnectionConfig::MySql)),
+        // DBeaver files its MariaDB driver under the MySQL provider too.
+        "mysql" if driver.eq_ignore_ascii_case("mariadb") => {
+            Ok(Target::Server(ConnectionConfig::MariaDb))
+        }
+        "mysql" => Ok(Target::Server(ConnectionConfig::MySql)),
+        "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb)),
         "sqlite" if driver == "sqlite_jdbc" => Ok(Target::File),
         "sqlite" => Err(format!("the {driver} driver isn't supported")),
         // DBeaver's own spelling of one of them.
@@ -222,7 +227,7 @@ fn import(
                 .or_else(|| field("password"))
                 .unwrap_or_default();
             let mut config = if by_url {
-                from_jdbc(url.as_deref().unwrap_or_default(), &user, &password)?
+                from_jdbc(url.as_deref().unwrap_or_default(), &user, &password, engine)?
             } else {
                 engine(ServerConfig {
                     host: field("host").ok_or("it has no host")?,
@@ -268,14 +273,18 @@ fn import(
 /// The three JDBC URLs that are the same URL as DBDelve's once `jdbc:` is
 /// off. The user and password go in from the credentials file, which is where
 /// DBeaver keeps them even for a URL connection.
-fn from_jdbc(url: &str, user: &str, password: &str) -> Result<ConnectionConfig, String> {
+fn from_jdbc(
+    url: &str,
+    user: &str,
+    password: &str,
+    engine: fn(ServerConfig) -> ConnectionConfig,
+) -> Result<ConnectionConfig, String> {
     const UNREADABLE: &str = "only a JDBC URL, which DBDelve can't read for this database";
     let url = match url
         .strip_prefix("jdbc:")
         .and_then(|url| url.split_once("://"))
     {
-        Some(("postgresql" | "mysql", _)) => url["jdbc:".len()..].to_string(),
-        Some(("mariadb", rest)) => format!("mysql://{rest}"),
+        Some(("postgresql" | "mysql" | "mariadb", _)) => url["jdbc:".len()..].to_string(),
         _ => return Err(UNREADABLE.into()),
     };
     let mut url = url::Url::parse(&url).map_err(|error| error.to_string())?;
@@ -288,6 +297,18 @@ fn from_jdbc(url: &str, user: &str, password: &str) -> Result<ConnectionConfig, 
         _ = url.set_username("user");
     }
     let mut config = ConnectionConfig::from_url(url.as_str())?;
+    // The driver says which of the two it is; a MariaDB driver is as often
+    // given a `jdbc:mysql://` URL as the other way round.
+    if matches!(
+        (config.engine(), engine(ServerConfig::default()).engine()),
+        (
+            Engine::MySql | Engine::MariaDb,
+            Engine::MySql | Engine::MariaDb
+        )
+    ) && let Some(server) = config.server()
+    {
+        config = engine(server.clone());
+    }
     if let Some(server) = config.server_mut() {
         if fill_user {
             server.user = user.to_string();
@@ -526,8 +547,8 @@ mod tests {
         assert_eq!(engine("postgresql", "postgres-jdbc"), Ok(Engine::Postgres));
         assert_eq!(engine("postgresql", "redshift"), Ok(Engine::Postgres));
         assert_eq!(engine("mysql", "mysql8"), Ok(Engine::MySql));
-        assert_eq!(engine("mysql", "mariaDB"), Ok(Engine::MySql));
-        assert_eq!(engine("mariadb", "mariaDB"), Ok(Engine::MySql));
+        assert_eq!(engine("mysql", "mariaDB"), Ok(Engine::MariaDb));
+        assert_eq!(engine("mariadb", "mariaDB"), Ok(Engine::MariaDb));
         assert_eq!(engine("sqlserver", "microsoft"), Ok(Engine::SqlServer));
         assert_eq!(engine("mssql", "jtds"), Ok(Engine::SqlServer));
         assert_eq!(
@@ -613,17 +634,18 @@ mod tests {
 
     #[test]
     fn url_connections_read_postgres_mysql_and_mariadb_urls() {
-        let by_url = |provider: &str, url: &str| {
+        let by_url_driver = |provider: &str, driver: &str, url: &str| {
             imported(
                 connection(
                     provider,
-                    "d",
+                    driver,
                     json!({ "url": url, "configurationType": "URL" }),
                 ),
                 Some(login("a@b", "p")),
             )
             .map(|imported| imported.config)
         };
+        let by_url = |provider: &str, url: &str| by_url_driver(provider, "d", url);
 
         let ConnectionConfig::Postgres(postgres) =
             by_url("postgresql", "jdbc:postgresql://db.example.com:5433/app").unwrap()
@@ -664,8 +686,13 @@ mod tests {
             ),
             ("a%40b", "p%41ss")
         );
+        // The driver wins over the URL's scheme for the MySQL family.
         assert!(matches!(
-            by_url("mysql", "jdbc:mariadb://h/app"),
+            by_url_driver("mysql", "mariaDB", "jdbc:mysql://h/app"),
+            Ok(ConnectionConfig::MariaDb(_))
+        ));
+        assert!(matches!(
+            by_url_driver("mysql", "mysql8", "jdbc:mariadb://h/app"),
             Ok(ConnectionConfig::MySql(_))
         ));
         assert_eq!(

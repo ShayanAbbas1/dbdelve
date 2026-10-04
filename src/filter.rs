@@ -136,6 +136,7 @@ impl Operator {
     /// Whether this engine can express the operator at all. Only the regex
     /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
     /// a syntax error until an application registers the function (spec §7).
+    /// SQL Server has none before 2025.
     pub(crate) fn on(self, engine: Engine) -> bool {
         self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
     }
@@ -442,6 +443,10 @@ pub(crate) fn filter_predicate(
         Operator::Regex => match engine {
             Engine::Postgres => comparison("~"),
             Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
+            // MariaDB has no `REGEXP_LIKE`, and its infix `REGEXP` is not in
+            // the grammar; `REGEXP_INSTR` is a plain function that matches
+            // anywhere in the value.
+            Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
             // SQL Server has no regex before 2025's `REGEXP_LIKE`.
             Engine::Sqlite | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
@@ -930,6 +935,11 @@ mod tests {
         assert!(Operator::Regex.on(Engine::Postgres));
         assert!(Operator::Regex.on(Engine::MySql));
         assert!(!Operator::Regex.on(Engine::Sqlite));
+        assert!(Operator::Regex.on(Engine::MariaDb));
+        assert_eq!(
+            predicate(Engine::MariaDb, Operator::Regex, "^a").as_deref(),
+            Some("REGEXP_INSTR(`state`, '^a') > 0")
+        );
         // The infix `REGEXP` MySQL documents is not in the grammar the gate
         // parses with, so the function form goes out instead.
         assert_eq!(

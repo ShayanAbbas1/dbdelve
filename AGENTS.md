@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, SQLite, Snowflake and SQL Server.
+speaking Postgres, MySQL, MariaDB, SQLite, Snowflake and SQL Server.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -97,7 +97,7 @@ require it, stop and raise it instead.
    there: no trait, no plugin surface. A UI that knows which engine it is
    talking to grows an engine-shaped special case in every view, and those are
    the special cases nobody ever removes. An enum rather than a trait for the
-   same reason in miniature: five arms the compiler makes every match
+   same reason in miniature: six arms the compiler makes every match
    enumerate, instead of an open extension point.
 
    The one thing that crosses out is `db::Engine`, because DBDelve writes SQL
@@ -315,12 +315,14 @@ configured. The repository-owned development databases accept:
 ```text
 postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
+mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev   # MariaDB
 mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
 ```
 
-The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT` and
-`DBDELVE_MSSQL_PORT`. The SQL Server image is `linux/amd64` only, so on Apple
-silicon it runs under emulation and takes a while to come up.
+The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
+`DBDELVE_MARIADB_PORT` and `DBDELVE_MSSQL_PORT`. The SQL Server image is
+`linux/amd64` only, so on Apple silicon it runs under emulation and takes a
+while to come up.
 Pick the engine in the form's Engine dropdown first; it decides which fields exist.
 Then paste a URL and choose **Use URL**, or fill the fields in. **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
@@ -373,8 +375,8 @@ cargo test -- --include-ignored --skip snowflake::tests::live_ # plus the live_ 
 ```
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
-`PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MSSQL_URL`,
-`dbdelve_SQLITE_PATH` and `dbdelve_SSH_CONFIG` (the
+`PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MARIADB_URL`,
+`dbdelve_MSSQL_URL`, `dbdelve_SQLITE_PATH` and `dbdelve_SSH_CONFIG` (the
 lowercase prefix is what they read; the last points `live_ssh_*` at the
 config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
 string); the `tests` job in `ci.yml` has the values
@@ -481,6 +483,11 @@ clearing quarantine by hand:
 
 Decided, and not to be re-litigated:
 
+- **MariaDB is an `Engine` of its own on the MySQL driver.** `mysql.rs` serves
+  both and is told which at `open`; what this section says of MySQL holds for
+  MariaDB unless a bullet names it. A profile stored before it existed says
+  `mysql` and stays MySQL. The `live_` tests in `mysql.rs` run once per server
+  (`on_mysql::`, `on_mariadb::`).
 - **Nine functions generate SQL, and every one quotes through `Engine`:**
   `explorer::preview_sql`, `explorer::probe_sql` (the reference arrow's
   `SELECT 1 … LIMIT 1` per referencing relation), `explorer::count_sql` (the status bar's Count, a
@@ -534,8 +541,10 @@ Decided, and not to be re-litigated:
   `%`. **SQL Server has no default escape either**, but a bracket makes any
   character literal there, so its pattern brackets `%`, `_` and `[` (`[%]`)
   and keeps `LIKE`. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
-  (8.0.4 and later, so not MariaDB), and **omitted from the dropdown on
-  SQLite and SQL Server**, which ship no regex (SQL Server not before 2025).
+  (8.0.4 and later), MariaDB `REGEXP_INSTR(col, pattern) > 0` (it has no
+  `REGEXP_LIKE`, and its infix `REGEXP` is not in the grammar the gate
+  parses), and **omitted from the dropdown on SQLite and SQL Server**, which
+  ship no regex (SQL Server not before 2025).
 - **MySQL, SQLite and SQL Server bracket a generated multi-row batch** in
   `BEGIN`/`COMMIT` (`sql::update_batch`), because each commits every statement
   on its own where a Postgres `simple_query` submission is one implicit
@@ -605,12 +614,15 @@ Decided, and not to be re-litigated:
   each engine buys something different with it. Postgres's `statement_timeout`
   bounds any statement; MySQL's `max_execution_time` bounds read-only `SELECT`s
   only, so a runaway `UPDATE` or `ALTER` there is Cancel's problem alone, and a
-  server older than 5.7.8 (or MariaDB, which spells it differently) fails the
-  connect rather than the statement; SQLite has no such setting and gets a
-  wall-clock timer firing `sqlite3_interrupt`, which counts waiting on a lock
-  the same as scanning; SQL Server has none either and gets a timer around the
-  run, which stops the statement the way Cancel does. It goes in at connect and never into the user's
-  submission (hard rule 1, and on Postgres a `SET` inside their submission
+  server older than 5.7.8 fails the connect rather than the statement;
+  MariaDB's `max_statement_time` bounds any statement, as Postgres's does (an
+  interrupted `DO` there is only a warning, so its live test bounds a `SET`),
+  and a server older than 10.1 lacks it and fails the connect the same way;
+  SQLite has no such setting and gets a wall-clock timer firing
+  `sqlite3_interrupt`, which counts waiting on a lock the same as scanning; SQL
+  Server has none either and gets a timer around the run, which stops the
+  statement the way Cancel does. It goes in at connect and never into the
+  user's submission (hard rule 1, and on Postgres a `SET` inside their submission
   would be scoped to the implicit transaction around it). It therefore bounds
   DBDelve's own catalog and structure queries too, which is intended. On SQL
   Server the timer wraps the whole of `Session::trip`, so it bounds every round
@@ -640,12 +652,20 @@ Decided, and not to be re-litigated:
   batch, rolling back what it had open (`live_a_cancel_stops_the_statement_on_the_server_and_reconnects`
   proves the statement behind a `WAITFOR` never runs). The session does not
   survive, so the run reconnects and its error says what was lost.
-- **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL and
-  `EXPLAIN QUERY PLAN` on SQLite, which has no analyze form, so that mode is not
-  offered there (`Engine::explain_prefix` returns `None`). SQL Server offers
-  neither: its plans come from `SET SHOWPLAN_XML`, a session switch that must be
-  a batch of its own, which is not a prefix on a copy of the statement. Server versions are
-  not detected: an older server refuses the statement and says so.
+- **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL,
+  `EXPLAIN` / `ANALYZE` on MariaDB, and `EXPLAIN QUERY PLAN` on SQLite, which
+  has no analyze form, so that mode is not offered there
+  (`Engine::explain_prefix` returns `None`). MariaDB's `EXPLAIN` and `ANALYZE`
+  are tabular, so they render as the flat list MySQL's plain `EXPLAIN` already
+  does. SQL Server offers neither: its plans come from `SET SHOWPLAN_XML`, a
+  session switch that must be a batch of its own, which is not a prefix on a
+  copy of the statement. Server versions are not detected: an older server
+  refuses the statement and says so. `sqlparser`
+  cannot read MariaDB's `ANALYZE <statement>`, so on MariaDB `sql::classify`
+  reads it as `EXPLAIN ANALYZE <statement>`, classified by the statement it
+  runs as MySQL's is. Only when a `SELECT`, `WITH`, `INSERT`, `REPLACE`,
+  `UPDATE`, `DELETE` or `(` follows (after an optional `FORMAT=JSON`):
+  `ANALYZE TABLE t` would otherwise read as an `EXPLAIN` of the query `TABLE t`.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
 - **Read-only has no server-side backstop on SQLite, Snowflake or SQL Server.**
@@ -658,7 +678,7 @@ Decided, and not to be re-litigated:
   not even pretend: a `USE` comes back as "Command not supported by SQL API:
   USE", which `live_a_use_is_refused_rather_than_quietly_forgotten` pins. The database, warehouse, role, timeout and `MULTI_STATEMENT_COUNT`
   are fields of the request and never SQL — hard rule 1.
-- **Snowflake has no connection mutex**, alone among the five: there is no
+- **Snowflake has no connection mutex**, alone among the six: there is no
   socket to serialise, so a catalog load does not queue behind a slow query,
   and `snowflake::Connection::at_once` runs a structure load's four statements
   on four threads rather than one after another (1.3s against 3.6s, measured).
@@ -774,7 +794,7 @@ Decided, and not to be re-litigated:
   `mssql::collect` opens a set per description (`open_set`) rather than
   starting the kept one over, and `collected_sets` hands them back as the first
   carrying the others in `QueryResult::rest` — one level deep, a submission's
-  sets and never a tree, and empty on the other four engines, which have no
+  sets and never a tree, and empty on the other five engines, which have no
   second set to carry. `columns`, `rows`, `bytes`, `rows_affected` and `edit`
   are each set's own; `elapsed` is the submission's, and every set carries it.
   `Collected::sets` is still the count, and still decides both the
@@ -850,6 +870,11 @@ Decided, and not to be re-litigated:
   rather than poisoning the mutex.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
+- **MariaDB's `JSON` is a `longtext` with a `json_valid` check**, and is shown
+  as the server reports it: `longtext` on the Structure tab, `text` in the
+  grid, never special-cased into a JSON type. Its catalog also
+  reports what MySQL 8 no longer does, `bigint(20)`'s display width and a
+  nullable column's default as the text `NULL`, and both are shown as they come.
 
 ### SSH tunnels
 

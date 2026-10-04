@@ -1,7 +1,7 @@
 # DBDelve
 
-A fast, native database client for Postgres, MySQL, SQLite, Snowflake and SQL
-Server, on macOS, Linux and Windows. Written in Rust with GPUI, with no
+A fast, native database client for Postgres, MySQL, MariaDB, SQLite, Snowflake
+and SQL Server, on macOS, Linux and Windows. Written in Rust with GPUI, with no
 Electron and no JVM, so it starts quickly, uses little memory and keeps
 scrolling smoothly through a million-row table.
 
@@ -21,6 +21,7 @@ I wanted something which is performant, modern and consumes little ram. The exis
 
 - **Postgres:** supported
 - **MySQL:** supported
+- **MariaDB:** supported
 - **SQLite:** supported
 - **Snowflake:** supported, without in-line editing since Snowflake doesn't
   enforce primary keys. See [docs/snowflake.md](docs/snowflake.md) for setup.

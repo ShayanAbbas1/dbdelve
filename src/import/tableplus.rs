@@ -294,7 +294,7 @@ fn target(driver: &str) -> Result<Target, String> {
             Ok(Target::Server(ConnectionConfig::Postgres, POSTGRES_TLS))
         }
         "mysql" => Ok(Target::Server(ConnectionConfig::MySql, MYSQL_TLS)),
-        "mariadb" => Ok(Target::Server(ConnectionConfig::MySql, MARIADB_TLS)),
+        "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb, MARIADB_TLS)),
         "sqlite" => Ok(Target::File),
         "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
         // Only the first entry of its dropdown is known, so any other comes in
@@ -596,7 +596,7 @@ mod tests {
             assert_eq!(engine(driver), Ok(Engine::Postgres), "{driver}");
         }
         assert_eq!(engine("MySQL"), Ok(Engine::MySql));
-        assert_eq!(engine("MariaDB"), Ok(Engine::MySql));
+        assert_eq!(engine("MariaDB"), Ok(Engine::MariaDb));
         assert_eq!(engine("sqlite"), Ok(Engine::Sqlite));
         for driver in ["MicrosoftSQLServer", "SQLServer", "Microsoft SQL Server"] {
             assert_eq!(engine(driver), Ok(Engine::SqlServer), "{driver}");

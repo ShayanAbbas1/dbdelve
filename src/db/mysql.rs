@@ -301,18 +301,27 @@ fn open(server: &ServerConfig, options: impl Fn() -> OptsBuilder) -> Result<Conn
 }
 
 /// The connection a profile keeps.
-fn connect(server: &ServerConfig, dial: Option<SocketAddr>) -> Result<Conn, DbError> {
+fn connect(
+    server: &ServerConfig,
+    engine: Engine,
+    dial: Option<SocketAddr>,
+) -> Result<Conn, DbError> {
     open(server, || match server.statement_timeout {
         0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
-        // what this does and does not bound. `max_execution_time` counts
-        // milliseconds, and a server too old to know the variable fails the
-        // connect here rather than the statement later.
-        seconds => base_options(server, dial).init(vec![format!(
-            "SET SESSION max_execution_time = {}",
-            u64::from(seconds) * 1_000
-        )]),
+        // what this does and does not bound. MySQL's `max_execution_time`
+        // counts milliseconds and MariaDB's `max_statement_time` seconds, and a
+        // server too old to know the variable fails the connect here rather
+        // than the statement later.
+        seconds => base_options(server, dial).init(vec![if engine == Engine::MariaDb {
+            format!("SET SESSION max_statement_time = {seconds}")
+        } else {
+            format!(
+                "SET SESSION max_execution_time = {}",
+                u64::from(seconds) * 1_000
+            )
+        }]),
     })
 }
 
@@ -346,27 +355,34 @@ pub struct Connection {
     /// than asked for from above because nothing above `src/db/` may learn that
     /// MySQL is the engine needing a second socket (AGENTS.md, hard rule 4).
     server: ServerConfig,
+    /// MySQL or MariaDB, which differ in how a statement timeout is spelled.
+    engine: Engine,
     /// What the cancel socket dials too, and held so ssh runs as long as any
     /// clone does.
     tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
-    pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
+    pub fn open(server: &ServerConfig, engine: Engine) -> Result<Self, DbError> {
         // Before the tunnel, which may have cost a hardware-key touch.
         if server.ssh.is_some() && server.sslmode == SslMode::VerifyFull {
-            return Err(unverifiable_through_a_tunnel(server));
+            return Err(unverifiable_through_a_tunnel(server, engine));
         }
         tunnelled(server, DEFAULT_PORT, |tunnel| {
             let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
-            let connection = connect(server, dial)?;
+            let connection = connect(server, engine, dial)?;
             Ok(Self {
                 connection_id: connection.connection_id(),
                 server: server.clone(),
+                engine,
                 connection: Arc::new(Mutex::new(connection)),
                 tunnel,
             })
         })
+    }
+
+    pub fn engine(&self) -> Engine {
+        self.engine
     }
 
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
@@ -540,10 +556,11 @@ impl Connection {
     /// table for its statistics never holds the mutex a user's query waits on.
     /// The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let connection = connect(&self.server, self.dial()?)?;
+        let connection = connect(&self.server, self.engine, self.dial()?)?;
         let side = Self {
             connection_id: connection.connection_id(),
             server: self.server.clone(),
+            engine: self.engine,
             connection: Arc::new(Mutex::new(connection)),
             tunnel: self.tunnel.clone(),
         };
@@ -824,11 +841,12 @@ fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
 /// The driver checks the certificate's name against the address it dials and
 /// offers no way to name another, so through a tunnel verify-full could only
 /// ever check the name against the loopback address (AGENTS.md, hard rule 7).
-fn unverifiable_through_a_tunnel(server: &ServerConfig) -> DbError {
+fn unverifiable_through_a_tunnel(server: &ServerConfig, engine: Engine) -> DbError {
     plain_error(format!(
-        "sslmode=verify-full cannot be honoured through an SSH tunnel on MySQL: \
+        "sslmode=verify-full cannot be honoured through an SSH tunnel on {}: \
          the driver checks the certificate against the address it dials, which is \
          the tunnel's loopback address rather than {}.",
+        engine.label(),
         server.host
     ))
 }
@@ -912,16 +930,27 @@ mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, ForeignKey, RelationKind, RoutineKind};
 
-    /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL`.
-    fn live() -> Connection {
-        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
-        let config = config_from_url(&url).expect("dbdelve_MYSQL_URL should parse");
-        Connection::open(&ServerConfig {
-            // The compose database speaks no TLS, and these tests are the one
-            // place a plaintext connection is the point.
-            sslmode: SslMode::Disable,
-            ..config
-        })
+    /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
+    /// `dbdelve_MARIADB_URL`.
+    fn live_config(engine: Engine) -> ServerConfig {
+        let variable = match engine {
+            Engine::MariaDb => "dbdelve_MARIADB_URL",
+            _ => "dbdelve_MYSQL_URL",
+        };
+        let url = std::env::var(variable).unwrap_or_else(|_| panic!("{variable} is required"));
+        config_from_url(&url).unwrap_or_else(|_| panic!("{variable} should parse"))
+    }
+
+    fn live(engine: Engine) -> Connection {
+        Connection::open(
+            &ServerConfig {
+                // The compose database speaks no TLS, and these tests are the one
+                // place a plaintext connection is the point.
+                sslmode: SslMode::Disable,
+                ..live_config(engine)
+            },
+            engine,
+        )
         .expect("connection should open")
     }
 
@@ -1171,7 +1200,7 @@ mod tests {
             }),
             ..ServerConfig::default()
         };
-        let Err(error) = Connection::open(&server) else {
+        let Err(error) = Connection::open(&server, Engine::MySql) else {
             panic!("verify-full through a tunnel connected");
         };
         assert!(
@@ -1232,7 +1261,8 @@ mod tests {
     #[test]
     #[ignore = "requires the dev bastions and MySQL configured through dbdelve_SSH_CONFIG and dbdelve_MYSQL_URL"]
     fn live_ssh_a_query_and_a_cancel_run_through_the_bastion() {
-        let connection = Connection::open(&live_tunnelled()).expect("connection should open");
+        let connection =
+            Connection::open(&live_tunnelled(), Engine::MySql).expect("connection should open");
         let result = connection
             .query("SELECT 1 AS one")
             .expect("query should succeed");
@@ -1255,13 +1285,11 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_cancel_stops_a_running_statement_without_closing_the_session() {
+    fn live_a_cancel_stops_a_running_statement_without_closing_the_session(engine: Engine) {
         // The connection id has to have been read in `open`: asking the live
         // connection for it here would want the mutex the sleeping statement is
         // holding, and this would hang rather than fail.
-        let connection = live();
+        let connection = live(engine);
         let canceller = connection.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(500));
@@ -1280,16 +1308,16 @@ mod tests {
         assert!(connection.query("SELECT 1").is_ok());
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_statement_timeout_bounds_a_select_and_nothing_else() {
-        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
-        let config = config_from_url(&url).expect("dbdelve_MYSQL_URL should parse");
-        let connection = Connection::open(&ServerConfig {
-            sslmode: SslMode::Disable,
-            statement_timeout: 1,
-            ..config
-        })
+    fn live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb(engine: Engine) {
+        let config = live_config(engine);
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                statement_timeout: 1,
+                ..config
+            },
+            engine,
+        )
         .expect("connection should open");
 
         let error = connection
@@ -1297,16 +1325,24 @@ mod tests {
             .expect_err("a read-only SELECT should time out");
         assert!(error.message.contains("exceeded"), "{}", error.message);
 
-        // The asymmetry `ServerConfig::statement_timeout` names: the same wait
-        // inside a statement that writes is not bounded at all, and Cancel is
-        // the only thing that reaches it.
-        assert!(
-            connection
-                .query("DO SLEEP(2)")
-                .expect("a non-SELECT is not bounded")
-                .rows
-                .is_empty()
-        );
+        // The asymmetry `ServerConfig::statement_timeout` names: on MySQL the
+        // same wait inside a statement that is not a `SELECT` is not bounded at
+        // all, and Cancel is the only thing that reaches it.
+        if engine == Engine::MariaDb {
+            // Not `DO`, which MariaDB lets off with a warning when interrupted.
+            let error = connection
+                .query(&format!("SET @bounded = ({LIVE_SLOW_SELECT})"))
+                .expect_err("MariaDB bounds every statement");
+            assert!(error.message.contains("exceeded"), "{}", error.message);
+        } else {
+            assert!(
+                connection
+                    .query("DO SLEEP(2)")
+                    .expect("a non-SELECT is not bounded")
+                    .rows
+                    .is_empty()
+            );
+        }
     }
 
     /// What each mode does against the compose server, which speaks TLS with a
@@ -1317,16 +1353,16 @@ mod tests {
     /// certificate they cannot check is not their business. The two verifying
     /// rungs refuse it and say TLS was the reason, rather than quietly
     /// connecting anyway.
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_only_the_modes_that_tolerate_an_unchecked_certificate_connect() {
-        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
-        let base = config_from_url(&url).expect("dbdelve_MYSQL_URL should parse");
+    fn live_only_the_modes_that_tolerate_an_unchecked_certificate_connect(engine: Engine) {
+        let base = live_config(engine);
         let connect = |sslmode| {
-            Connection::open(&ServerConfig {
-                sslmode,
-                ..base.clone()
-            })
+            Connection::open(
+                &ServerConfig {
+                    sslmode,
+                    ..base.clone()
+                },
+                engine,
+            )
         };
 
         for mode in [SslMode::Disable, SslMode::Prefer, SslMode::Require] {
@@ -1346,39 +1382,35 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_the_development_database_is_fully_seeded() {
+    fn live_the_development_database_is_fully_seeded(engine: Engine) {
         // The seed is applied by a tool outside this test suite, and a seed that
         // half-applied still leaves something to connect to -- the MySQL
         // container reports itself healthy either way. So the volume table is
         // checked by count rather than assumed.
-        let result = live()
+        let result = live(engine)
             .query("SELECT count(*) AS rows_seeded FROM measurements")
             .expect("query should succeed");
 
         assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_the_databases_list_flags_the_one_connected_to() {
-        let databases = live().databases().expect("databases should list");
+    fn live_the_databases_list_flags_the_one_connected_to(engine: Engine) {
+        let databases = live(engine).databases().expect("databases should list");
 
         assert!(databases.names.contains(&"dbdelve_dev".to_string()));
         assert!(databases.names.contains(&"information_schema".to_string()));
         assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_blank_database_connects_to_none() {
-        let url = std::env::var("dbdelve_MYSQL_URL").expect("dbdelve_MYSQL_URL is required");
-        let databases = Connection::open(&ServerConfig {
-            database: String::new(),
-            sslmode: SslMode::Disable,
-            ..config_from_url(&url).expect("dbdelve_MYSQL_URL should parse")
-        })
+    fn live_a_blank_database_connects_to_none(engine: Engine) {
+        let databases = Connection::open(
+            &ServerConfig {
+                database: String::new(),
+                sslmode: SslMode::Disable,
+                ..live_config(engine)
+            },
+            engine,
+        )
         .expect("a blank database should connect")
         .databases()
         .expect("databases should list");
@@ -1387,10 +1419,8 @@ mod tests {
         assert!(databases.names.contains(&"dbdelve_dev".to_string()));
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_query_round_trip() {
-        let result = live()
+    fn live_query_round_trip(engine: Engine) {
+        let result = live(engine)
             .query("SELECT 1 AS id, 'alpha' AS label UNION ALL SELECT 2, NULL")
             .expect("query should succeed");
 
@@ -1406,10 +1436,8 @@ mod tests {
         assert_eq!(result.bytes, 7);
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_multi_statement_selection_keeps_one_result_shape() {
-        let connection = live();
+    fn live_a_multi_statement_selection_keeps_one_result_shape(engine: Engine) {
+        let connection = live(engine);
 
         let result = connection
             .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d")
@@ -1433,10 +1461,8 @@ mod tests {
         assert!(empty.rows.is_empty());
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_column_is_tagged_with_the_type_the_server_would_name() {
-        let result = live()
+    fn live_a_column_is_tagged_with_the_type_the_server_would_name(engine: Engine) {
+        let result = live(engine)
             .query("SELECT id, name, email FROM accounts")
             .expect("query should succeed");
 
@@ -1449,10 +1475,8 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_catalog_round_trip() {
-        let connection = live();
+    fn live_catalog_round_trip(engine: Engine) {
+        let connection = live(engine);
         let mut catalog = connection.catalog().expect("catalog should load");
         catalog.merge(connection.routines().expect("routines should load"));
         let schema = catalog
@@ -1506,22 +1530,27 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_structure_round_trip() {
-        let structure = live()
+    fn live_structure_round_trip(engine: Engine) {
+        let structure = live(engine)
             .structure("dbdelve_dev", "accounts")
             .expect("structure should load");
 
-        assert!(structure.columns.contains(&ColumnDefinition {
-            name: "id".into(),
-            data_type: "bigint".into(),
-            nullable: false,
-            // Not the empty default `COLUMN_DEFAULT` reports: the server
-            // supplies this one, and saying otherwise would tell the user they
-            // have to.
-            default: Some("AUTO_INCREMENT".into()),
-        }));
+        assert!(
+            structure.columns.contains(&ColumnDefinition {
+                name: "id".into(),
+                // MariaDB still reports the display width MySQL 8 dropped.
+                data_type: match engine {
+                    Engine::MariaDb => "bigint(20)",
+                    _ => "bigint",
+                }
+                .into(),
+                nullable: false,
+                // Not the empty default `COLUMN_DEFAULT` reports: the server
+                // supplies this one, and saying otherwise would tell the user they
+                // have to.
+                default: Some("AUTO_INCREMENT".into()),
+            })
+        );
         assert!(
             structure
                 .columns
@@ -1537,10 +1566,8 @@ mod tests {
         assert!(!structure.indexes.is_empty(), "the primary key is an index");
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_single_table_select_is_editable_by_its_primary_key() {
-        let edit = live()
+    fn live_a_single_table_select_is_editable_by_its_primary_key(engine: Engine) {
+        let edit = live(engine)
             .query("SELECT name, id FROM accounts")
             .expect("query should succeed")
             .edit
@@ -1555,10 +1582,8 @@ mod tests {
         assert_eq!(edit.keys, vec![1]);
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_an_aliased_or_computed_column_reports_what_the_table_calls_it() {
-        let edit = live()
+    fn live_an_aliased_or_computed_column_reports_what_the_table_calls_it(engine: Engine) {
+        let edit = live(engine)
             .query("SELECT id AS ident, upper(name) AS shouted, name FROM accounts")
             .expect("query should succeed")
             .edit
@@ -1571,10 +1596,8 @@ mod tests {
         assert_eq!(edit.keys, vec![0]);
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_join_an_aggregate_or_a_missing_key_is_not_editable() {
-        let connection = live();
+    fn live_a_join_an_aggregate_or_a_missing_key_is_not_editable(engine: Engine) {
+        let connection = live(engine);
 
         for sql in [
             "SELECT accounts.id, locations.name
@@ -1595,13 +1618,11 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_the_foreign_key_fixtures_are_seeded() {
+    fn live_the_foreign_key_fixtures_are_seeded(engine: Engine) {
         // The foreign-key tests have nothing to read unless the reseed that
         // added `orders`, `order_items` and the `dbdelve_archive` database has
         // actually been applied.
-        let connection = live();
+        let connection = live(engine);
 
         let items = connection
             .query("SELECT count(*) AS rows_seeded FROM order_items")
@@ -1614,10 +1635,8 @@ mod tests {
         assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order() {
-        let structure = live()
+    fn live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order(engine: Engine) {
+        let structure = live(engine)
             .structure("dbdelve_dev", "order_items")
             .expect("structure should load");
 
@@ -1640,10 +1659,8 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_foreign_key_across_databases_names_the_database_it_references() {
-        let structure = live()
+    fn live_a_foreign_key_across_databases_names_the_database_it_references(engine: Engine) {
+        let structure = live(engine)
             .structure("dbdelve_archive", "closed_accounts")
             .expect("structure should load");
 
@@ -1658,20 +1675,16 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_a_table_referencing_nothing_reports_no_foreign_keys() {
-        let structure = live()
+    fn live_a_table_referencing_nothing_reports_no_foreign_keys(engine: Engine) {
+        let structure = live(engine)
             .structure("dbdelve_dev", "accounts")
             .expect("structure should load");
 
         assert!(structure.foreign_keys.is_empty());
     }
 
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
-    fn live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form() {
-        let structure = live()
+    fn live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form(engine: Engine) {
+        let structure = live(engine)
             .structure("dbdelve_dev", "order_items")
             .expect("structure should load");
 
@@ -1685,4 +1698,53 @@ mod tests {
             structure.constraints
         );
     }
+
+    /// Each `live_` body above, run once against each server the driver
+    /// speaks to.
+    macro_rules! on_both_servers {
+        ($($name:ident),* $(,)?) => {
+            mod on_mysql {
+                use crate::db::Engine;
+                $(
+                    #[test]
+                    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
+                    fn $name() {
+                        super::$name(Engine::MySql)
+                    }
+                )*
+            }
+            mod on_mariadb {
+                use crate::db::Engine;
+                $(
+                    #[test]
+                    #[ignore = "requires the repository development database configured through dbdelve_MARIADB_URL"]
+                    fn $name() {
+                        super::$name(Engine::MariaDb)
+                    }
+                )*
+            }
+        };
+    }
+
+    on_both_servers!(
+        live_a_cancel_stops_a_running_statement_without_closing_the_session,
+        live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb,
+        live_only_the_modes_that_tolerate_an_unchecked_certificate_connect,
+        live_the_development_database_is_fully_seeded,
+        live_the_databases_list_flags_the_one_connected_to,
+        live_a_blank_database_connects_to_none,
+        live_query_round_trip,
+        live_a_multi_statement_selection_keeps_one_result_shape,
+        live_a_column_is_tagged_with_the_type_the_server_would_name,
+        live_catalog_round_trip,
+        live_structure_round_trip,
+        live_a_single_table_select_is_editable_by_its_primary_key,
+        live_an_aliased_or_computed_column_reports_what_the_table_calls_it,
+        live_a_join_an_aggregate_or_a_missing_key_is_not_editable,
+        live_the_foreign_key_fixtures_are_seeded,
+        live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order,
+        live_a_foreign_key_across_databases_names_the_database_it_references,
+        live_a_table_referencing_nothing_reports_no_foreign_keys,
+        live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form,
+    );
 }
