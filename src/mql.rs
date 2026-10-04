@@ -18,6 +18,10 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use time::format_description::BorrowedFormatItem;
+use time::macros::format_description;
+use time::parsing::Parsed;
+use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::sql::{Destructive, Mode, Verdict};
@@ -1266,105 +1270,44 @@ fn iso_date(text: &str) -> Result<Value, String> {
         .ok_or_else(|| format!("`{text}` is not an ISO-8601 date"))
 }
 
+/// The forms mongosh's `ISODate` takes: a date, optionally a time to the
+/// minute, second or fraction (`T`, `t` or a space between), and optionally an
+/// offset (`Z`, `±HH`, `±HHMM` or `±HH:MM`).
+const ISO_8601: &[BorrowedFormatItem] = format_description!(
+    version = 2,
+    "[year]-[month]-[day][optional [[first [T][t][ ]][hour]:[minute]\
+     [optional [:[second][optional [.[subsecond]]]]]\
+     [optional [[first [Z][z][[offset_hour sign:mandatory][optional [[optional [:]][offset_minute]]]]]]]]]"
+);
+
 fn iso_millis(text: &str) -> Option<i64> {
-    let field = |range: Range<usize>| -> Option<i64> {
-        let digits = text.get(range)?;
-        digits
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| digits.parse().ok())?
+    let mut parsed = Parsed::new();
+    if !parsed
+        .parse_items(text.as_bytes(), ISO_8601)
+        .ok()?
+        .is_empty()
+    {
+        return None;
+    }
+    let date = Date::try_from(parsed).ok()?;
+    let time = match parsed.hour_24() {
+        Some(hour) => Time::from_hms_nano(
+            hour,
+            parsed.minute()?,
+            parsed.second().unwrap_or(0),
+            parsed.subsecond().unwrap_or(0),
+        )
+        .ok()?,
+        None => Time::MIDNIGHT,
     };
-    let separated = |at: usize, c: u8| text.as_bytes().get(at) == Some(&c);
-    if !(separated(4, b'-') && separated(7, b'-')) {
-        return None;
-    }
-    let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
-    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
-        return None;
-    }
-    let mut millis = days_from_civil(year, month, day) * 86_400_000;
-    let rest = &text[10..];
-    if rest.is_empty() {
-        return Some(millis);
-    }
-    let time = rest.strip_prefix(['T', 't', ' '])?;
-    let text = time;
-    let separated = |at: usize, c: u8| text.as_bytes().get(at) == Some(&c);
-    let field = |range: Range<usize>| -> Option<i64> {
-        let digits = text.get(range)?;
-        digits
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| digits.parse().ok())?
+    let offset = match parsed.offset_hour() {
+        Some(_) => UtcOffset::try_from(parsed).ok()?,
+        None => UtcOffset::UTC,
     };
-    if !separated(2, b':') {
-        return None;
-    }
-    let (hour, minute) = (field(0..2)?, field(3..5)?);
-    let mut at = 5;
-    let mut second = 0;
-    if separated(5, b':') {
-        second = field(6..8)?;
-        at = 8;
-    }
-    if hour > 23 || minute > 59 || second > 59 {
-        return None;
-    }
-    millis += ((hour * 60 + minute) * 60 + second) * 1000;
-    if separated(at, b'.') {
-        let digits = text[at + 1..]
-            .find(|c: char| !c.is_ascii_digit())
-            .map_or(text.len(), |n| at + 1 + n);
-        let fraction = &text[at + 1..digits];
-        if fraction.is_empty() {
-            return None;
-        }
-        millis += format!("{fraction:0<3}")[..3].parse::<i64>().ok()?;
-        at = digits;
-    }
-    let offset = match &text[at..] {
-        "" | "Z" | "z" => 0,
-        zone => {
-            let sign = match zone.as_bytes()[0] {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let zone = &zone[1..];
-            let (hours, minutes) = match zone.len() {
-                2 => (zone, "00"),
-                4 => zone.split_at(2),
-                5 if zone.as_bytes()[2] == b':' => (&zone[..2], &zone[3..]),
-                _ => return None,
-            };
-            let (hours, minutes): (i64, i64) = (hours.parse().ok()?, minutes.parse().ok()?);
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            sign * (hours * 60 + minutes) * 60_000
-        }
-    };
-    Some(millis - offset)
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-/// Days from 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
-/// `days_from_civil`).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    let nanos = PrimitiveDateTime::new(date, time)
+        .assume_offset(offset)
+        .unix_timestamp_nanos();
+    i64::try_from(nanos.div_euclid(1_000_000)).ok()
 }
 
 const WRAPPERS: [&str; 13] = [
@@ -2154,6 +2097,9 @@ mod tests {
         assert_eq!(date("2024-01-15 09:30"), Some(1_705_311_000_000));
         assert_eq!(date("2024-01-15T10:30:00+01:00"), Some(1_705_311_000_000));
         assert_eq!(date("2024-01-15T04:00:00-0530"), Some(1_705_311_000_000));
+        assert_eq!(date("2024-01-15T11:30+02"), Some(1_705_311_000_000));
+        assert_eq!(date("2024-01-15t09:30:00z"), Some(1_705_311_000_000));
+        assert_eq!(date("1969-12-31T23:59:59.9995Z"), Some(-1));
         assert_eq!(date("2024-01-15T09:30:00.1Z"), Some(1_705_311_000_100));
         assert_eq!(date("2024-01-15T09:30:00.123456Z"), Some(1_705_311_000_123));
         assert_eq!(date("1969-12-31T23:59:59.999Z"), Some(-1));

@@ -184,6 +184,13 @@ serde_json = "1"
 toml = "0.9"
 url = "2"
 
+# ISO-8601 dates in mongosh statements (`ISODate(…)`, `{"$date": …}`), for
+# `mql.rs`. Already in the graph through gpui's platform crates; pinned to the
+# version the lockfile already holds so naming it links no second copy.
+# Default features off: `parsing` and the `format_description!` macro are all
+# it reads with.
+time = { version = "=0.3.55", default-features = false, features = ["parsing", "macros"] }
+
 # Classification only, for `sql::classify`: the mode check reads a typed
 # `Statement` so it cannot mistake one statement for another. tree-sitter-sequel
 # recovers `GRANT SELECT ON t TO u` as a `select` node, and a gate that reads a
