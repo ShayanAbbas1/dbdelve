@@ -11,7 +11,7 @@ mod tableplus;
 use serde::Deserialize;
 
 use crate::{
-    db::{ConnectionConfig, Engine, SslMode},
+    db::{ConnectionConfig, Engine, MongoConfig, ServerConfig, SslMode},
     theme::ConnectionColor,
 };
 
@@ -72,6 +72,35 @@ impl Source {
             Self::TablePlus => tableplus::read(),
         }
     }
+}
+
+/// A MongoDB profile from what a client keeps for a server engine. Neither
+/// client has a field for the options a connection string carries, so none come
+/// with it, and a `mongodb+srv` name only comes in through [`mongo_url`].
+pub(super) fn mongo(server: ServerConfig) -> ConnectionConfig {
+    ConnectionConfig::MongoDb(MongoConfig {
+        server,
+        ..MongoConfig::default()
+    })
+}
+
+/// A connection string a client stored where it keeps a host or a URL, with
+/// the login it kept elsewhere put in where the string has none.
+pub(super) fn mongo_url(url: &str, user: &str, password: &str) -> Result<ConnectionConfig, String> {
+    let url = url.strip_prefix("jdbc:").unwrap_or(url);
+    let mut config = ConnectionConfig::from_url(url)?;
+    if config.engine() != Engine::MongoDb {
+        return Err("its URL isn't a MongoDB one".into());
+    }
+    if let Some(server) = config.server_mut() {
+        if server.user.is_empty() {
+            server.user = user.to_string();
+        }
+        if server.password.is_empty() {
+            server.password = password.to_string();
+        }
+    }
+    Ok(config)
 }
 
 /// Blank is the default port. Anything else that isn't one is left blank too,

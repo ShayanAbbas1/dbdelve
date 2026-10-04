@@ -11,7 +11,7 @@ use std::{
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use serde_json::Value;
 
-use super::{Imported, Report, Skipped, port, root_certificate};
+use super::{Imported, Report, Skipped, mongo, mongo_url, port, root_certificate};
 use crate::{
     db::{ConnectionConfig, Engine, ServerConfig, SshTunnel, SslMode},
     store,
@@ -172,6 +172,9 @@ fn target(provider: &str, driver: &str) -> Result<Target, String> {
         }
         "mysql" => Ok(Target::Server(ConnectionConfig::MySql)),
         "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb)),
+        // Only DBeaver's paid editions have MongoDB, and this is the provider
+        // id its documentation gives; it is unverified against a real file.
+        "mongodb" => Ok(Target::Server(mongo)),
         "sqlite" if driver == "sqlite_jdbc" => Ok(Target::File),
         "sqlite" => Err(format!("the {driver} driver isn't supported")),
         // DBeaver's own spelling of one of them.
@@ -240,6 +243,15 @@ fn import(
             };
             let microsoft = matches!(config, ConnectionConfig::SqlServer(_))
                 && !driver.to_ascii_lowercase().contains("jtds");
+            if matches!(config, ConnectionConfig::MongoDb(_))
+                && configuration["properties"]
+                    .as_object()
+                    .is_some_and(|properties| !properties.is_empty())
+            {
+                // Which of them are MongoDB's options, and how DBeaver
+                // spells them, is unverified, so none are carried over.
+                notes.push("driver properties left off".into());
+            }
             if let Some(server) = config.server_mut() {
                 let ssh_login =
                     credentials.and_then(|credentials| credentials.get("network/ssh_tunnel"));
@@ -280,6 +292,9 @@ fn from_jdbc(
     engine: fn(ServerConfig) -> ConnectionConfig,
 ) -> Result<ConnectionConfig, String> {
     const UNREADABLE: &str = "only a JDBC URL, which DBDelve can't read for this database";
+    if engine(ServerConfig::default()).engine() == Engine::MongoDb {
+        return mongo_url(url, user, password);
+    }
     let url = match url
         .strip_prefix("jdbc:")
         .and_then(|url| url.split_once("://"))
@@ -523,6 +538,61 @@ mod tests {
         let mut configuration = manual("db.example.com", "5432", "app");
         configuration["handlers"] = handlers;
         connection("postgresql", "postgres-jdbc", configuration)
+    }
+
+    #[test]
+    fn a_mongodb_connection_takes_its_fields_and_login_like_the_others() {
+        let mongo = imported(
+            connection("mongodb", "mongo", manual("db.example.com", "27018", "app")),
+            Some(login("alice", "s3cret")),
+        )
+        .unwrap();
+        let ConnectionConfig::MongoDb(config) = &mongo.config else {
+            panic!("{:?}", mongo.config)
+        };
+        assert_eq!(
+            (
+                config.server.host.as_str(),
+                config.server.port,
+                config.server.database.as_str()
+            ),
+            ("db.example.com", Some(27018), "app")
+        );
+        assert_eq!(
+            (config.server.user.as_str(), config.server.password.as_str()),
+            ("alice", "s3cret")
+        );
+        assert!(!config.srv);
+        assert!(mongo.notes.is_empty(), "{:?}", mongo.notes);
+    }
+
+    #[test]
+    fn a_mongodb_url_connection_reads_srv_and_options_and_takes_the_login_from_credentials() {
+        let url = json!({
+            "url": "mongodb+srv://cluster0.example.mongodb.net/app?authSource=admin&tls=true",
+            "configurationType": "URL",
+        });
+        let mongo = imported(connection("mongodb", "mongo", url), None).unwrap();
+        let ConnectionConfig::MongoDb(config) = &mongo.config else {
+            panic!("{:?}", mongo.config)
+        };
+        assert!(config.srv);
+        assert_eq!(config.server.host, "cluster0.example.mongodb.net");
+        assert_eq!(config.options, "authSource=admin");
+        assert_eq!(config.server.sslmode, SslMode::VerifyFull);
+
+        let jdbc = json!({ "url": "jdbc:mongodb://h:27017/app", "configurationType": "URL" });
+        assert!(imported(connection("mongodb", "mongo", jdbc), None).is_ok());
+        let wrong = json!({ "url": "jdbc:postgresql://h/app", "configurationType": "URL" });
+        assert!(imported(connection("mongodb", "mongo", wrong), None).is_err());
+    }
+
+    #[test]
+    fn mongodb_driver_properties_are_left_off_and_said() {
+        let mut configuration = manual("h", "27017", "app");
+        configuration["properties"] = json!({ "authSource": "admin" });
+        let mongo = imported(connection("mongodb", "mongo", configuration), None).unwrap();
+        assert_eq!(mongo.notes, ["driver properties left off"]);
     }
 
     #[test]
