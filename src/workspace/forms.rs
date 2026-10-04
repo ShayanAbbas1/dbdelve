@@ -1248,15 +1248,12 @@ impl Workspace {
         let panel = self.switcher_open.then(|| {
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
-            let expanded = self.expanded_group.as_ref().map(Option::as_deref);
-            let profile_rows = self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(_, profile)| {
-                    self.projects.is_empty() || expanded == Some(self.group_of(&profile.id))
-                })
-                .map(|(index, profile)| {
+            let mut profile_rows = HashMap::<Option<String>, Vec<AnyElement>>::new();
+            for (index, profile) in self.profiles.iter().enumerate().filter(|(_, profile)| {
+                self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
+            }) {
+                let group = self.group_of(&profile.id).map(str::to_string);
+                let row = {
                     let in_project = self.group_of(&profile.id).is_some();
                     let activate_workspace = workspace.clone();
                     let leave_workspace = workspace.clone();
@@ -1475,8 +1472,9 @@ impl Workspace {
                         .child(row)
                         .children(choices.into_iter().flatten())
                         .into_any_element()
-                })
-                .collect::<Vec<_>>();
+                };
+                profile_rows.entry(group).or_default().push(row);
+            }
             let groups = self.render_project_groups(profile_rows, cx);
 
             div()
@@ -1524,7 +1522,7 @@ impl Workspace {
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
                                 let mut form = ConnectionForm::new(None, window, cx);
-                                form.project = match &workspace.expanded_group {
+                                form.project = match workspace.expanded_groups.last() {
                                     Some(group) => group.clone(),
                                     None => workspace.current_group().map(str::to_string),
                                 };
@@ -1613,8 +1611,8 @@ impl Workspace {
                                 workspace.project_name = None;
                                 workspace.renaming_project = None;
                                 workspace.assigning_project = None;
-                                workspace.expanded_group =
-                                    Some(workspace.current_group().map(str::to_string));
+                                workspace.expanded_groups =
+                                    vec![workspace.current_group().map(str::to_string)];
                                 cx.notify();
                             });
                         })
@@ -1629,7 +1627,7 @@ impl Workspace {
     /// there is nothing to group, and the members are listed bare.
     fn render_project_groups(
         &self,
-        members: Vec<AnyElement>,
+        mut members: HashMap<Option<String>, Vec<AnyElement>>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = *theme(cx);
@@ -1644,18 +1642,19 @@ impl Workspace {
                     .child(section_label(t, "Connections"))
                     .into_any_element(),
             );
-            rows.extend(members);
+            rows.extend(members.remove(&None).unwrap_or_default());
         } else {
-            let mut members = Some(members);
-            let mut group_body = || {
-                let members = members.take().unwrap_or_default();
+            let mut group_body = |group: Option<&str>, id: usize| {
+                let members = members
+                    .remove(&group.map(str::to_string))
+                    .unwrap_or_default();
                 div()
                     .pl(px(layout::SPACE_MD))
                     .flex()
                     .flex_col()
                     .when(members.is_empty(), |body| {
                         body.child(
-                            switcher_row("empty-group", t)
+                            switcher_row(("empty-group", id), t)
                                 .text_color(t.text_faint)
                                 .child("No connections yet"),
                         )
@@ -1664,7 +1663,7 @@ impl Workspace {
                     .into_any_element()
             };
 
-            let expanded = self.expanded_group == Some(None);
+            let expanded = self.is_expanded(None);
             let ungrouped = self
                 .profiles
                 .iter()
@@ -1683,13 +1682,12 @@ impl Workspace {
                         .into_any_element(),
                 );
                 if expanded {
-                    rows.push(group_body());
+                    rows.push(group_body(None, usize::MAX));
                 }
             }
 
             for (index, project) in self.projects.iter().enumerate() {
-                let expanded = self.expanded_group.as_ref().map(Option::as_deref)
-                    == Some(Some(project.name.as_str()));
+                let expanded = self.is_expanded(Some(&project.name));
                 let is_current = current.as_deref() == Some(project.name.as_str());
                 if self.renaming_project.as_deref() == Some(project.name.as_str())
                     && let Some(input) = &self.project_name
@@ -1699,7 +1697,7 @@ impl Workspace {
                     rows.push(self.project_header(index, project, is_current, expanded, cx));
                 }
                 if expanded {
-                    rows.push(group_body());
+                    rows.push(group_body(Some(&project.name), index));
                 }
             }
         }

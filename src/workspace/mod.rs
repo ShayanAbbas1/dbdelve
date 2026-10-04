@@ -83,10 +83,10 @@ pub(crate) struct Workspace {
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
-    /// The group expanded in the switcher -- `Some(None)` is No project --
-    /// or `None` with every group folded. Looking inside a group switches
-    /// nothing, so this is apart from the group of the connection in front.
-    pub(crate) expanded_group: Option<Option<String>>,
+    /// The groups expanded in the switcher, `None` being No project, in the
+    /// order they were expanded. Looking inside a group switches nothing, so
+    /// this is apart from the group of the connection in front.
+    pub(crate) expanded_groups: Vec<Option<String>>,
     /// The connection whose "Add to a project" choices are unfolded in the
     /// switcher, by id.
     pub(crate) assigning_project: Option<String>,
@@ -180,7 +180,7 @@ impl Workspace {
             project_name: None,
             renaming_project: None,
             project_name_needs_focus: false,
-            expanded_group: None,
+            expanded_groups: Vec::new(),
             assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),

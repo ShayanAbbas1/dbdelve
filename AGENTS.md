@@ -937,7 +937,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Which project you are in is derived from the connection in front
   (`Workspace::current_group`), never stored: it is what the titlebar names
   and what the palette and next/previous connection keep to. Expanding a
-  group in the switcher is only looking (`expanded_group`) and switches
+  group in the switcher is only looking (`expanded_groups`) and switches
   nothing. Tabs, saved queries and history stay per profile, which is what
   keeps projects from mixing state. A new connection joins the project its
   form was opened for (`ConnectionForm::project`).

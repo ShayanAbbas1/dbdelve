@@ -33,15 +33,21 @@ impl Workspace {
             .collect()
     }
 
+    pub(crate) fn is_expanded(&self, group: Option<&str>) -> bool {
+        self.expanded_groups
+            .iter()
+            .any(|expanded| expanded.as_deref() == group)
+    }
+
     /// A click on a group's header in the switcher: expands it to look
-    /// inside, folding whichever was expanded, or folds it if it already was.
-    /// Nothing is switched to; that takes a click on a connection.
+    /// inside, or folds it. Nothing is switched to; that takes a click on a
+    /// connection.
     pub(crate) fn toggle_group(&mut self, group: Option<String>, cx: &mut Context<Self>) {
-        self.expanded_group = if self.expanded_group.as_ref() == Some(&group) {
-            None
+        if self.is_expanded(group.as_deref()) {
+            self.expanded_groups.retain(|expanded| expanded != &group);
         } else {
-            Some(group)
-        };
+            self.expanded_groups.push(group);
+        }
         cx.notify();
     }
 
@@ -91,8 +97,10 @@ impl Workspace {
         if name.is_empty() || (name != old && self.name_taken(&name, cx)) {
             return;
         }
-        if self.expanded_group == Some(Some(old.to_string())) {
-            self.expanded_group = Some(Some(name.clone()));
+        for expanded in self.expanded_groups.iter_mut().flatten() {
+            if expanded == old {
+                *expanded = name.clone();
+            }
         }
         if let Some(project) = self.projects.iter_mut().find(|project| project.name == old) {
             project.name = name;
@@ -108,7 +116,7 @@ impl Workspace {
             return;
         }
         self.project_name = None;
-        self.expanded_group = Some(Some(name.clone()));
+        self.expanded_groups.push(Some(name.clone()));
         self.projects.push(store::StoredProject {
             name,
             ..Default::default()
