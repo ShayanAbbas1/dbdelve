@@ -1090,13 +1090,19 @@ impl<'s> Walk<'s> {
 
     /// A string's value, read through its escapes as JavaScript reads them. A
     /// template literal counts only without substitutions, since one with them
-    /// is code. Built as UTF-16 because that is what a `😀` pair
-    /// spells.
+    /// is code. Built as UTF-16 because that is what a `\uD83D\uDE00` pair
+    /// spells. A template's line breaks are read as JavaScript reads them:
+    /// CRLF and a lone CR are both LF.
     fn string(&self, node: Node) -> Result<String, ParseError> {
         let mut units: Vec<u16> = Vec::new();
         for part in parts(node) {
             let text = self.text(part);
             match part.kind() {
+                "string_fragment" if node.kind() == "template_string" => units.extend(
+                    text.replace("\r\n", "\n")
+                        .replace('\r', "\n")
+                        .encode_utf16(),
+                ),
                 "string_fragment" => units.extend(text.encode_utf16()),
                 "escape_sequence" => {
                     escape(text, &mut units).map_err(|m| error(part.start_byte(), m))?
@@ -1147,7 +1153,8 @@ fn escape(sequence: &str, units: &mut Vec<u16>) -> Result<(), String> {
         Some('f') => 0x0C,
         Some('v') => 0x0B,
         Some('0') if body.len() == 1 => 0,
-        Some('0'..='9') => return Err(format!("`{sequence}` is an octal escape")),
+        Some('0'..='7') => return Err(format!("`{sequence}` is an octal escape")),
+        Some('8' | '9') => return Err(format!("`{sequence}` is not a valid escape")),
         Some('x' | 'u') => {
             let digits = body[1..].trim_start_matches('{').trim_end_matches('}');
             let width = body[1..].starts_with('{')
@@ -1218,6 +1225,10 @@ fn constructor_value(
             let text = match value {
                 Value::String(text) => text.clone(),
                 Value::Int32(n) => n.to_string(),
+                Value::Double(n) if n.is_nan() => "NaN".to_owned(),
+                Value::Double(n) if n.is_infinite() => {
+                    format!("{}Infinity", if *n < 0.0 { "-" } else { "" })
+                }
                 Value::Double(n) => n.to_string(),
                 _ => return Err(takes("a decimal number, as a string")),
             };
@@ -1257,11 +1268,36 @@ fn constructor_value(
         ("RegExp", _) => return Err(takes("a pattern string and optional flags")),
         ("Code", [Value::String(code)]) => Value::Code(code.clone()),
         ("Code", _) => return Err(takes("its JavaScript as a string")),
-        (
-            "NumberInt" | "Int32" | "NumberLong" | "Long" | "NumberDecimal" | "Decimal128"
-            | "Double" | "Timestamp" | "MinKey" | "MaxKey",
-            _,
-        ) => return Err(takes("a different number of arguments")),
+        ("NumberInt" | "Int32" | "NumberLong" | "Long", _) => {
+            return Err(takes(&format!(
+                "one whole number, and was given {}",
+                given(&args)
+            )));
+        }
+        ("NumberDecimal" | "Decimal128", _) => {
+            return Err(takes(&format!(
+                "one decimal number, and was given {}",
+                given(&args)
+            )));
+        }
+        ("Double", _) => {
+            return Err(takes(&format!(
+                "one number, and was given {}",
+                given(&args)
+            )));
+        }
+        ("Timestamp", _) => {
+            return Err(takes(&format!(
+                "`t` and `i`, or `{{ t: …, i: … }}`, and was given {}",
+                given(&args)
+            )));
+        }
+        ("MinKey" | "MaxKey", _) => {
+            return Err(takes(&format!(
+                "no arguments, and was given {}",
+                given(&args)
+            )));
+        }
         (other, _) => {
             return Err(error(
                 at,
@@ -1270,6 +1306,37 @@ fn constructor_value(
         }
     };
     Ok(value)
+}
+
+/// What a constructor was handed, for a message saying why it refused.
+fn given(args: &[Value]) -> String {
+    match args {
+        [] => "none".to_owned(),
+        [value] => kind(value).to_owned(),
+        many => format!("{} arguments", many.len()),
+    }
+}
+
+fn kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Int32(_) => "an int",
+        Value::Int64(_) => "a long",
+        Value::Double(_) => "a double",
+        Value::Decimal128(_) => "a decimal",
+        Value::String(_) => "a string",
+        Value::ObjectId(_) => "an ObjectId",
+        Value::Date(_) => "a date",
+        Value::Binary { .. } => "binary data",
+        Value::Timestamp { .. } => "a timestamp",
+        Value::Regex { .. } => "a regex",
+        Value::Code(_) => "code",
+        Value::MinKey => "MinKey",
+        Value::MaxKey => "MaxKey",
+        Value::Document(_) => "a document",
+        Value::Array(_) => "an array",
+    }
 }
 
 /// mongosh's rule, which is js-bson's: every number is a JavaScript double,
@@ -2008,7 +2075,6 @@ mod tests {
         assert_eq!(fails("db.c.find(").at, 10);
         assert_eq!(fails("db.c.find({a: 1)").message, "Expected `}` here");
         assert_eq!(fails("db.c.find({a: 1)").at, 15);
-        assert!(fails("db.c.find({a: 1)").message.starts_with("Expected"));
         let after = fails("db.a.find() db.b.find()");
         assert_eq!(after.at, 12);
         assert_eq!(after.message, "Unexpected `db`");
@@ -2118,8 +2184,8 @@ mod tests {
         assert_eq!(string(r"'it\'s'"), "it's");
         assert_eq!(string(r#""say \"hi\"""#), "say \"hi\"");
         assert_eq!(string(r#""back\\slash\/""#), "back\\slash/");
-        assert_eq!(string(r#""\x41é\u{1F600}""#), "Aé😀");
-        assert_eq!(string(r#""😀""#), "😀");
+        assert_eq!(string(r#""\x41\u00e9\u{1F600}""#), "Aé😀");
+        assert_eq!(string(r#""\uD83D\uDE00""#), "😀");
         assert_eq!(string("\"one \\\ntwo\""), "one two");
         assert_eq!(string(r#""\b\f\v\0""#), "\u{8}\u{c}\u{b}\0");
         assert_eq!(string(r#""\q""#), "q");
@@ -2127,6 +2193,12 @@ mod tests {
         assert_eq!(string(r#""""#), "");
         assert!(literal_fails(r#""\uD83D""#).contains("surrogate"));
         assert!(literal_fails(r#""\12""#).contains("octal"));
+        assert_eq!(literal_fails(r#""\8""#), r"`\8` is not a valid escape");
+        assert_eq!(
+            value("`one\r\ntwo\rthree`"),
+            Value::String("one\ntwo\nthree".into())
+        );
+        assert_eq!(value("`kept\\r`"), Value::String("kept\r".into()));
         fails("db.c.insertOne({a: 'open})");
     }
 
@@ -2300,7 +2372,30 @@ mod tests {
             literal_fails("Frobnicate(1)"),
             "`Frobnicate` is not a constructor DBDelve reads"
         );
-        assert!(literal_fails("MinKey(1)").contains("number of arguments"));
+        assert_eq!(
+            literal_fails("MinKey(1)"),
+            "`MinKey` takes no arguments, and was given an int"
+        );
+        assert_eq!(
+            literal_fails("Double(NumberLong(5))"),
+            "`Double` takes one number, and was given a long"
+        );
+        assert_eq!(
+            literal_fails("NumberInt(1, 2)"),
+            "`NumberInt` takes one whole number, and was given 2 arguments"
+        );
+        assert_eq!(
+            literal_fails("Timestamp('x')"),
+            "`Timestamp` takes `t` and `i`, or `{ t: …, i: … }`, and was given a string"
+        );
+        assert_eq!(
+            value("NumberDecimal(Infinity)"),
+            Value::Decimal128("Infinity".into())
+        );
+        assert_eq!(
+            value("NumberDecimal(-Infinity)"),
+            Value::Decimal128("-Infinity".into())
+        );
     }
 
     #[test]
