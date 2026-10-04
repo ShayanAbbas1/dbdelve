@@ -19,6 +19,7 @@ use gpui_component::{
 use std::collections::HashMap;
 
 use crate::{
+    actions::RefreshConnection,
     db::{RelationKind, RoutineKind},
     explorer::ObjectKind,
     icons::icon,
@@ -95,6 +96,14 @@ pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
         .size(px(layout::SPACE_XS + 2.))
         .rounded_full()
         .bg(fill)
+}
+
+/// The way back from a failed or dropped connection, wherever that failure is
+/// on screen: beside the status bar's message and under a query's error.
+pub(crate) fn reconnect_button(id: &'static str, t: Theme) -> Button {
+    button(id, "Reconnect", Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
+        window.dispatch_action(Box::new(RefreshConnection), cx);
+    })
 }
 
 /// What this connection is allowed to do, drawn beside its name because "which

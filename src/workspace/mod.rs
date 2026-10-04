@@ -789,39 +789,6 @@ impl Render for Workspace {
             unreachable!("the connection form is open when there are no profiles");
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
-        // Above the pane rather than in the status bar's red text alone: a run
-        // on a dead session otherwise reads as one more query error, and
-        // nothing else on screen offers the way back.
-        let connection_banner = match &profile.state {
-            ProfileState::Failed(message) => Some(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(layout::SPACE_SM))
-                    .px(px(layout::SPACE_MD))
-                    .py(px(layout::SPACE_XS))
-                    .border_b_1()
-                    .border_color(t.border)
-                    .text_size(px(layout::TEXT_SM))
-                    .child(ui::status_dot(t, &profile.state))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.danger)
-                            .child(message.clone()),
-                    )
-                    .child(
-                        button("reconnect", "Reconnect", Tone::Quiet, Control::Compact, t)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(RefreshConnection), cx);
-                            }),
-                    ),
-            ),
-            _ => None,
-        };
         let status = match &profile.state {
             ProfileState::Idle => "Connection is idle.".to_string(),
             ProfileState::Connecting => format!("Connecting to {}…", profile.config.endpoint()),
@@ -1011,7 +978,14 @@ impl Render for Workspace {
                     .whitespace_nowrap()
                     .text_color(if failed { t.danger } else { t.text_muted })
                     .child(status),
-            );
+            )
+            .when(failed, |group| {
+                group.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(ui::reconnect_button("reconnect", t)),
+                )
+            });
         let (sidebar_status, inline_status) = if self.sidebar_hidden {
             (None, Some(status_group))
         } else {
@@ -1399,7 +1373,6 @@ impl Render for Workspace {
                     .into_any_element(),
                 ],
             ))
-            .children(connection_banner)
             .child(div().flex_1().min_h_0().child(main_pane))
             .children(self.render_apply_review(cx))
             .children(self.render_close_confirmation(cx))

@@ -1036,8 +1036,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   After a run fails, `Connection::is_lost` asks the driver whether the
   session survived (Postgres's closed flag, MySQL/MariaDB's `COM_PING`; the
   other engines redial on their own and answer `false`). A lost one sets
-  `ProfileState::Failed`, which the banner above the main pane shows with a
-  Reconnect button (`Workspace::reconnect`). `ui::status_dot` draws a
+  `ProfileState::Failed`. A failed profile offers `ui::reconnect_button`
+  (dispatching `RefreshConnection`) beside the status bar's message and under
+  a query's error, where the failure is already being read. `ui::status_dot` draws a
   profile's state the same way in the status bar and on each switcher row.
 - **A profile's database is the one it opens, and Select Database moves it.**
   On an engine where `Engine::switches_database`, `Workspace::set_database`
