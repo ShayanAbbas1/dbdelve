@@ -7,8 +7,8 @@
 //! up looking like two different applications.
 
 use gpui::{
-    AnyElement, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled, div,
-    prelude::FluentBuilder, px,
+    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled,
+    div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     InteractiveElementExt,
@@ -19,10 +19,12 @@ use gpui_component::{
 use std::collections::HashMap;
 
 use crate::{
+    actions::RefreshConnection,
     db::{RelationKind, RoutineKind},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
+    session::ProfileState,
     sql::Mode,
     theme::{self, ConnectionColor, Theme, layout},
 };
@@ -76,6 +78,32 @@ pub(crate) fn row_icon_tinted(
     icon(path)
         .size(px(layout::ICON_SIZE))
         .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
+}
+
+/// A connection's state as one dot, the same in the status bar and the
+/// switcher: faint idle, muted while connecting, green connected, red failed
+/// or lost. Never the connection's own colour: a red one would read as lost,
+/// and a gray one as idle.
+pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
+    let fill = match state {
+        ProfileState::Idle => t.text_faint,
+        ProfileState::Connecting => t.text_muted,
+        ProfileState::Connected(_) => t.success,
+        ProfileState::Failed(_) => t.danger,
+    };
+    div()
+        .flex_shrink_0()
+        .size(px(layout::SPACE_XS + 2.))
+        .rounded_full()
+        .bg(fill)
+}
+
+/// The way back from a failed or dropped connection, wherever that failure is
+/// on screen: beside the status bar's message and under a query's error.
+pub(crate) fn reconnect_button(id: &'static str, t: Theme) -> Button {
+    button(id, "Reconnect", Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
+        window.dispatch_action(Box::new(RefreshConnection), cx);
+    })
 }
 
 /// What this connection is allowed to do, drawn beside its name because "which

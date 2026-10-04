@@ -1196,6 +1196,20 @@ impl Connection {
         }
     }
 
+    /// Whether the session behind a failed statement is gone, so nothing sent
+    /// on it again can succeed. Asked only after a failure.
+    ///
+    /// Only the engines with one long-lived session can lose it: SQL Server
+    /// reconnects inside its next run, MongoDB's driver redials from its pool,
+    /// Snowflake speaks HTTP, and a SQLite file has no socket.
+    pub fn is_lost(&self) -> bool {
+        match self {
+            Self::Postgres(connection) => connection.is_lost(),
+            Self::MySql(connection) => connection.is_lost(),
+            Self::SqlServer(_) | Self::Sqlite(_) | Self::Snowflake(_) | Self::MongoDb(_) => false,
+        }
+    }
+
     /// Ask the server to hold this session to reads, or let go of that hold.
     ///
     /// Defence in depth, not a privilege boundary: this is a session setting,

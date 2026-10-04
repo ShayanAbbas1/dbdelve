@@ -1032,6 +1032,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.
+- **A dropped session turns the profile `Failed`, not just the statement.**
+  After a run fails, `Connection::is_lost` asks the driver whether the
+  session survived (Postgres's closed flag, MySQL/MariaDB's `COM_PING`; the
+  other engines redial on their own and answer `false`). A lost one sets
+  `ProfileState::Failed`. A failed profile offers `ui::reconnect_button`
+  (dispatching `RefreshConnection`) beside the status bar's message and under
+  a query's error, where the failure is already being read. `ui::status_dot` draws a
+  profile's state the same way in the status bar and on each switcher row.
 - **A profile's database is the one it opens, and Select Database moves it.**
   On an engine where `Engine::switches_database`, `Workspace::set_database`
   writes the picked name into the profile's config, persists it and

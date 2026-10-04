@@ -41,7 +41,7 @@ use crate::{
     result_grid::ResultGrid,
     scroller::{SmoothScrollable, smooth, smooth_for, smooth_scoped},
     session::{
-        CloseTarget, Explained, ObjectBody, ObjectTab, Profile, QueryState, QueryTab,
+        CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
         StructureState, Tab, query_label, result_pane_is_expanded,
     },
     tab_drag::{DragTab, TabStrip},
@@ -51,7 +51,8 @@ use crate::{
     },
     ui::{
         Control, Tone, button, button_label, compact_count, dialog, group_thousands, icon_button,
-        key_hint, keycap_for, keycap_text, kind_color, object_icon, row_icon, section_label,
+        key_hint, keycap_for, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
+        section_label,
     },
     workspace::{
         EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, SettingsTab, editor_zoom_percent,
@@ -87,6 +88,7 @@ pub fn render_main_content(
             tab,
             &profile.id,
             profile.config.engine(),
+            matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile
                 .session
@@ -215,6 +217,7 @@ fn render_query_surface(
         Some(explained) => render_plan(explained, plan_copied, &scope, cx),
         None => render_results(
             profile.config.engine(),
+            matches!(profile.state, ProfileState::Failed(_)),
             shown_state,
             shown_grid,
             Some(tab),
@@ -531,6 +534,7 @@ fn render_object(
     tab: &ObjectTab,
     profile_id: &str,
     engine: Engine,
+    disconnected: bool,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
     cx: &mut Context<Workspace>,
@@ -576,6 +580,7 @@ fn render_object(
         ))
         .child(div().flex_1().min_h_0().child(render_results(
             engine,
+            disconnected,
             query,
             results,
             None,
@@ -1000,6 +1005,9 @@ fn clock(elapsed: std::time::Duration) -> String {
 #[allow(clippy::too_many_arguments)]
 fn render_results(
     engine: Engine,
+    // A failure on a connection that is gone is answered by reconnecting,
+    // not by editing the statement.
+    disconnected: bool,
     query: &QueryState,
     results: &Entity<TableState<ResultGrid>>,
     query_tab: Option<&QueryTab>,
@@ -1155,6 +1163,13 @@ fn render_results(
                                     },
                                 )),
                             ),
+                        )
+                    })
+                    .when(disconnected, |pane| {
+                        pane.child(
+                            div()
+                                .flex()
+                                .child(reconnect_button("reconnect-from-error", t)),
                         )
                     })
                     .into_any_element(),

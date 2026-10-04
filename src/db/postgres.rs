@@ -542,6 +542,11 @@ impl Connection {
         })
     }
 
+    /// A poisoned mutex counts: every later statement would fail on it too.
+    pub fn is_lost(&self) -> bool {
+        self.client.lock().map_or(true, |client| client.is_closed())
+    }
+
     /// Cancellation is advisory and racy by the driver's own admission: the
     /// server reports nothing about whether the request landed, and it may
     /// arrive after the statement has already finished. So `Ok` here means the
@@ -1656,6 +1661,33 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1").is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_terminated_session_is_lost_and_a_failed_statement_is_not() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .query("BEGIN")
+            .expect("the transaction should open");
+        assert!(connection.query("SELECT broken").is_err());
+        assert!(
+            !connection.is_lost(),
+            "an aborted transaction is still a session"
+        );
+        connection
+            .query("ROLLBACK")
+            .expect("the session should still answer");
+
+        let pid = connection.query("SELECT pg_backend_pid()").unwrap().rows[0][0]
+            .clone()
+            .unwrap();
+        Connection::open(&live_config())
+            .expect("a second connection should open")
+            .query(&format!("SELECT pg_terminate_backend({pid})"))
+            .expect("the terminate should run");
+        assert!(connection.query("SELECT 1").is_err());
+        assert!(connection.is_lost());
     }
 
     #[test]

@@ -385,6 +385,15 @@ impl Connection {
         self.engine
     }
 
+    /// A round trip, unlike Postgres's check: the driver keeps no closed flag.
+    /// `COM_PING` is answered inside a failed transaction too, so a statement
+    /// that merely errored is not mistaken for a dropped session.
+    pub fn is_lost(&self) -> bool {
+        self.connection
+            .lock()
+            .map_or(true, |mut connection| connection.ping().is_err())
+    }
+
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
         self.tunnel.as_deref().map(Tunnel::dial).transpose()
     }
@@ -1285,6 +1294,15 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
+    fn live_a_killed_session_is_lost_and_a_failed_statement_is_not(engine: Engine) {
+        let connection = live(engine);
+        assert!(connection.query("SELECT broken").is_err());
+        assert!(!connection.is_lost());
+
+        assert!(connection.query("KILL CONNECTION_ID()").is_err());
+        assert!(connection.is_lost());
+    }
+
     fn live_a_cancel_stops_a_running_statement_without_closing_the_session(engine: Engine) {
         // The connection id has to have been read in `open`: asking the live
         // connection for it here would want the mutex the sleeping statement is
@@ -1727,6 +1745,7 @@ mod tests {
     }
 
     on_both_servers!(
+        live_a_killed_session_is_lost_and_a_failed_statement_is_not,
         live_a_cancel_stops_a_running_statement_without_closing_the_session,
         live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb,
         live_only_the_modes_that_tolerate_an_unchecked_certificate_connect,

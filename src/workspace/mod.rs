@@ -789,25 +789,21 @@ impl Render for Workspace {
             unreachable!("the connection form is open when there are no profiles");
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
-        let (status, status_color) = match &profile.state {
-            ProfileState::Idle => ("Connection is idle.".to_string(), t.text_muted),
-            ProfileState::Connecting => (
-                format!("Connecting to {}…", profile.config.endpoint()),
-                t.text_muted,
-            ),
+        let status = match &profile.state {
+            ProfileState::Idle => "Connection is idle.".to_string(),
+            ProfileState::Connecting => format!("Connecting to {}…", profile.config.endpoint()),
             // Connected is the one state worth spending on decoration: every
             // other one is news, and news beats where the connection points.
             // Its name is already on the switcher in the titlebar.
-            ProfileState::Connected(_) => (
+            ProfileState::Connected(_) => {
                 match profile.config.server().map(|server| &server.database) {
                     Some(database) if !database.is_empty() => {
                         format!("{} / {database}", profile.config.endpoint())
                     }
                     _ => profile.config.endpoint(),
-                },
-                profile.color.map_or(t.success, ConnectionColor::swatch),
-            ),
-            ProfileState::Failed(message) => (message.clone(), t.danger),
+                }
+            }
+            ProfileState::Failed(message) => message.clone(),
         };
 
         // The rows the grid actually holds, which is fewer than the result had
@@ -973,13 +969,7 @@ impl Render for Workspace {
             .items_center()
             .gap(px(layout::SPACE_SM))
             .min_w_0()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .size(px(layout::SPACE_XS + 2.))
-                    .rounded_full()
-                    .bg(status_color),
-            )
+            .child(ui::status_dot(t, &profile.state))
             .child(
                 div()
                     .min_w_0()
@@ -988,7 +978,14 @@ impl Render for Workspace {
                     .whitespace_nowrap()
                     .text_color(if failed { t.danger } else { t.text_muted })
                     .child(status),
-            );
+            )
+            .when(failed, |group| {
+                group.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(ui::reconnect_button("reconnect", t)),
+                )
+            });
         let (sidebar_status, inline_status) = if self.sidebar_hidden {
             (None, Some(status_group))
         } else {

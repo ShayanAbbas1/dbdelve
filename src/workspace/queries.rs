@@ -1374,14 +1374,16 @@ impl Workspace {
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
         let query_task = cx.background_executor().spawn(async move {
-            match generated {
+            let result = match generated {
                 true => connection.generated(&sql, &cancel),
                 false => connection.query(&sql, &cancel),
-            }
+            };
+            let lost = result.is_err() && connection.is_lost();
+            (result, lost)
         });
 
         cx.spawn(async move |workspace, cx| {
-            let result = query_task.await;
+            let (result, lost) = query_task.await;
             workspace
                 .update(cx, |workspace, cx| {
                     // The plan is carried out of this block rather than stored
@@ -1396,6 +1398,25 @@ impl Workspace {
                         // this field -- but the mode a result lands under has to
                         // be the mode at landing time, not a stale default.
                         let mode = profile.mode;
+                        // Before `slot`: a tab closed mid-run still ran on the
+                        // session that died.
+                        if lost {
+                            profile.state = ProfileState::Failed(format!(
+                                "Connection to {} was lost.",
+                                profile.config.endpoint()
+                            ));
+                            // Nothing left in the queue can run on a dead
+                            // session, so it ends here rather than asking
+                            // whether to Continue into "not open".
+                            if let Tab::Query(query) = tab
+                                && let Some(queue) = profile
+                                    .session
+                                    .query_tab_mut(query)
+                                    .and_then(|query| query.queue.as_mut())
+                            {
+                                queue.remaining.clear();
+                            }
+                        }
                         let Some((state, results)) = profile.session.slot(tab) else {
                             return;
                         };
