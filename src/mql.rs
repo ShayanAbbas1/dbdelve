@@ -1814,6 +1814,7 @@ fn command_verdict(command: &Value) -> Option<Verdict> {
             Some(_) => Verdict::destroys(Destructive::Drop),
         },
         "insert" | "update" | "findAndModify" | "createIndexes" | "create" => Verdict::WRITE,
+        "aggregate" => out_verdict(command),
         _ => return command_reads(command).then_some(Verdict::READ),
     };
     Some(verdict)
@@ -1865,11 +1866,23 @@ fn command_reads(command: &Value) -> bool {
     }
 }
 
-/// What a `$out` or `$merge` anywhere in `value` writes.
+/// What a `$out` or `$merge` anywhere in `value` does. `$out` replaces its
+/// target collection whole, as `CREATE OR REPLACE TABLE … AS SELECT` does, so
+/// it is a drop; `$merge` writes into what is there.
 fn out_verdict(value: &Value) -> Verdict {
-    match writes_out(value) {
-        true => Verdict::WRITE,
-        false => Verdict::READ,
+    match value {
+        Value::Document(fields) => fields.iter().fold(Verdict::READ, |verdict, (key, value)| {
+            let stage = match key.as_str() {
+                "$out" => Verdict::destroys(Destructive::Drop),
+                "$merge" => Verdict::WRITE,
+                _ => Verdict::READ,
+            };
+            verdict.max(stage).max(out_verdict(value))
+        }),
+        Value::Array(values) => values.iter().fold(Verdict::READ, |verdict, value| {
+            verdict.max(out_verdict(value))
+        }),
+        _ => Verdict::READ,
     }
 }
 
@@ -3247,7 +3260,7 @@ mod tests {
         }
         // A quoted key's escapes are a string's, and decode as JavaScript's do.
         let quoted = format!("db.c.aggregate([{{'{}out': 'd'}}])", u("0024"));
-        assert_eq!(classify(&quoted), Verdict::WRITE);
+        assert_eq!(classify(&quoted), destroys(Destructive::Drop));
     }
 
     #[test]
@@ -3841,11 +3854,10 @@ mod tests {
             "db.c.renameCollection('d', false)",
             "db.createCollection('c')",
             "db.createView('v', 'c', [])",
-            "db.c.aggregate([{$match: {}}, {$out: 'd'}])",
             "db.c.aggregate([{$merge: {into: 'd'}}])",
             "db.c.aggregate([{'$merge': 'd'}]).explain()",
-            "db.c.aggregate([{\"\\u0024out\": 'd'}])",
-            "db.c.aggregate([{$facet: {x: [{$out: 'd'}]}}])",
+            "db.c.aggregate([{$facet: {x: [{$merge: 'd'}]}}])",
+            "db.runCommand({aggregate: 'c', pipeline: [{$merge: {into: 'd'}}]})",
         ] {
             assert_eq!(classify(text), Verdict::WRITE, "{text}");
         }
@@ -3854,6 +3866,12 @@ mod tests {
     #[test]
     fn drops_classify_as_destructive() {
         for text in [
+            "db.c.aggregate([{$match: {}}, {$out: 'd'}])",
+            "db.c.aggregate([{\"\\u0024out\": 'd'}])",
+            "db.c.aggregate([{$facet: {x: [{$out: 'd'}]}}])",
+            "db.c.aggregate([{$merge: 'e'}, {$out: 'd'}])",
+            "db.runCommand({aggregate: 'c', pipeline: [{$out: 'd'}], cursor: {}})",
+            "db.getSiblingDB('x').runCommand({aggregate: 'c', pipeline: [{$out: 'd'}]})",
             "db.c.drop()",
             "db.dropDatabase()",
             "db.getSiblingDB('prod').dropDatabase()",
@@ -3916,8 +3934,6 @@ mod tests {
             "db.runCommand(null)",
             "db.runCommand([{ping: 1}])",
             "db.runCommand({ping: 1, ping2: {$out: 'x'}})",
-            "db.runCommand({aggregate: 'c', pipeline: [{$out: 'd'}], cursor: {}})",
-            "db.runCommand({aggregate: 'c', pipeline: [{$merge: {into: 'd'}}]})",
             "db.runCommand({explain: {delete: 'c', deletes: []}})",
             "db.runCommand({explain: 'drop'})",
             "db.runCommand({explain: {explain: {drop: 'c'}}})",
@@ -3941,7 +3957,7 @@ mod tests {
             "db.stats({x: {$out: 'd'}})",
         ] {
             let verdict = classify(text);
-            assert_eq!(verdict, Verdict::WRITE, "{text}");
+            assert_eq!(verdict, destroys(Destructive::Drop), "{text}");
             assert!(
                 crate::sql::gate(&verdict, Mode::ReadOnly, &[]).is_some(),
                 "{text}"
