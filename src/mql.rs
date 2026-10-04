@@ -1191,7 +1191,17 @@ fn constructor_value(
             ));
         }
         ("Date", []) => now(),
-        ("Date", [Value::String(text)]) => iso_date(text).map_err(|m| error(at, m))?,
+        ("Date", [Value::String(text)]) => match iso_millis(text) {
+            Some((_, true)) => {
+                return Err(error(
+                    at,
+                    format!(
+                        "`{text}` has a time and no UTC offset, which `new Date` reads in the machine's own time zone"
+                    ),
+                ));
+            }
+            _ => iso_date(text).map_err(|m| error(at, m))?,
+        },
         ("Date", [millis]) if integer(millis).is_some() => {
             Value::Date(integer(millis).expect("checked"))
         }
@@ -1367,7 +1377,7 @@ fn now() -> Value {
 /// offset is UTC, never the machine's own zone.
 fn iso_date(text: &str) -> Result<Value, String> {
     iso_millis(text)
-        .map(Value::Date)
+        .map(|(millis, _)| Value::Date(millis))
         .ok_or_else(|| format!("`{text}` is not an ISO-8601 date"))
 }
 
@@ -1381,7 +1391,9 @@ const ISO_8601: &[BorrowedFormatItem] = format_description!(
      [optional [[first [Z][z][[offset_hour sign:mandatory][optional [[optional [:]][offset_minute]]]]]]]]]"
 );
 
-fn iso_millis(text: &str) -> Option<i64> {
+/// Milliseconds since 1970, and whether the text gives a time with no offset:
+/// UTC to `ISODate`, local time to JavaScript's `Date`.
+fn iso_millis(text: &str) -> Option<(i64, bool)> {
     let mut parsed = Parsed::new();
     if !parsed
         .parse_items(text.as_bytes(), ISO_8601)
@@ -1401,6 +1413,8 @@ fn iso_millis(text: &str) -> Option<i64> {
         .ok()?,
         None => Time::MIDNIGHT,
     };
+    let zoneless =
+        parsed.hour_24().is_some() && parsed.offset_hour().is_none() && !text.ends_with(['Z', 'z']);
     let offset = match parsed.offset_hour() {
         Some(_) => UtcOffset::try_from(parsed).ok()?,
         None => UtcOffset::UTC,
@@ -1408,7 +1422,8 @@ fn iso_millis(text: &str) -> Option<i64> {
     let nanos = PrimitiveDateTime::new(date, time)
         .assume_offset(offset)
         .unix_timestamp_nanos();
-    i64::try_from(nanos.div_euclid(1_000_000)).ok()
+    let millis = i64::try_from(nanos.div_euclid(1_000_000)).ok()?;
+    Some((millis, zoneless))
 }
 
 const WRAPPERS: [&str; 13] = [
@@ -2197,6 +2212,27 @@ mod tests {
         assert!(matches!(value("new Date"), Value::Date(n) if n > 1_700_000_000_000));
         assert!(matches!(value("ISODate()"), Value::Date(n) if n > 1_700_000_000_000));
         assert!(literal_fails("Date()").contains("without `new`"));
+        assert_eq!(
+            literal_fails("new Date('2024-01-15T09:30:00')"),
+            "`2024-01-15T09:30:00` has a time and no UTC offset, which `new Date` reads in the machine's own time zone"
+        );
+        assert!(literal_fails("new Date('2024-01-15 09:30')").contains("no UTC offset"));
+        assert_eq!(
+            value("new Date('2024-01-15')"),
+            Value::Date(1_705_276_800_000)
+        );
+        assert_eq!(
+            value("new Date('2024-01-15T10:30:00+01:00')"),
+            Value::Date(1_705_311_000_000)
+        );
+        assert_eq!(
+            value("ISODate('2024-01-15T09:30:00')"),
+            Value::Date(1_705_311_000_000)
+        );
+        assert_eq!(
+            value("{$date: '2024-01-15T09:30:00'}"),
+            Value::Date(1_705_311_000_000)
+        );
         assert!(literal_fails("ISODate('soon')").contains("ISO-8601"));
 
         assert_eq!(value("NumberInt(5)"), Value::Int32(5));
@@ -2269,7 +2305,7 @@ mod tests {
 
     #[test]
     fn iso_dates_take_offsets_and_reject_impossible_dates() {
-        let date = |text: &str| iso_millis(text);
+        let date = |text: &str| iso_millis(text).map(|(millis, _)| millis);
         assert_eq!(date("1970-01-01"), Some(0));
         assert_eq!(date("2024-02-29T00:00:00Z"), Some(1_709_164_800_000));
         assert_eq!(date("2024-01-15 09:30"), Some(1_705_311_000_000));
