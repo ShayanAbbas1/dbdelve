@@ -1530,7 +1530,11 @@ impl Workspace {
                                 workspace.step_search_selection(1, cx);
                             });
                         })
-                        .child(name_field(input))
+                        .px(px(layout::SPACE_XS))
+                        .py(px(layout::SPACE_XS))
+                        .child(gpui_component::Sizable::small(
+                            Input::new(input).prefix(row_icon(t, icon::SEARCH)),
+                        ))
                 }))
                 .children(groups)
                 .child(div().my(px(layout::SPACE_XS)).h(px(1.)).bg(t.border))

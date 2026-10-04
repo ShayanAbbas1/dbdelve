@@ -60,7 +60,7 @@ impl Workspace {
         self.assigning_project = None;
         self.expanded_groups = vec![self.current_group().map(str::to_string)];
         self.search_selection = 0;
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(
             &input,
             window,
