@@ -1816,14 +1816,11 @@ impl Workspace {
                         .child("Add connection")
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
-                                let mut form = ConnectionForm::new(None, window, cx);
-                                form.project = match workspace.expanded_groups.last() {
+                                let project = match workspace.expanded_groups.last() {
                                     Some(group) => group.clone(),
                                     None => workspace.current_group().map(str::to_string),
                                 };
-                                workspace.form = Some(form);
-                                workspace.switcher_open = false;
-                                cx.notify();
+                                workspace.new_connection_in(project, window, cx);
                             });
                         }),
                 )
@@ -1957,10 +1954,19 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .when(members.is_empty(), |body| {
+                        let add_workspace = workspace.clone();
+                        let project = group.map(str::to_string);
                         body.child(
                             switcher_row(("empty-group", id), t)
                                 .text_color(t.text_faint)
-                                .child("No connections yet"),
+                                .hover(|style| style.bg(t.element_hover).text_color(t.text_muted))
+                                .child(row_icon(t, icon::PLUS))
+                                .child("Add a connection")
+                                .on_click(move |_, window, cx| {
+                                    _ = add_workspace.update(cx, |workspace, cx| {
+                                        workspace.new_connection_in(project.clone(), window, cx);
+                                    });
+                                }),
                         )
                     })
                     .children(members)
