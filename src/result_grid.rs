@@ -707,13 +707,20 @@ impl ResultGrid {
 /// is why every one of these is computable without a window.
 impl ResultGrid {
     /// The active cell's column when the grid has been laid out at a new
-    /// `width`, and `None` while it holds: scrolling on every frame would
-    /// notify on every frame.
-    fn relaid_out(&mut self, width: Pixels) -> Option<usize> {
-        if std::mem::replace(&mut self.laid_out_width, width) == width {
+    /// `width`, scrolled `offset_x` (zero or negative), and the cell showed at
+    /// least partly at the old one. `None` while the width holds, since
+    /// scrolling on every frame would notify on every frame, and `None` for a
+    /// cell already scrolled out of sight, which a resize must not jump back to.
+    /// Both widths are the scrolling columns' viewport, the gutter excluded.
+    fn relaid_out(&mut self, width: Pixels, offset_x: Pixels) -> Option<usize> {
+        let was = std::mem::replace(&mut self.laid_out_width, width);
+        if was == width {
             return None;
         }
-        self.active.map(|(_, col)| col)
+        let (_, col) = self.active?;
+        let left: Pixels = self.columns.get(..col)?.iter().map(|c| c.width).sum();
+        let right = left + self.columns.get(col)?.width;
+        (right + offset_x > Pixels::ZERO && left + offset_x < was).then_some(col)
     }
 
     /// The cell `Enter` acts on, if the user has reached one. `None` on a
@@ -1326,7 +1333,8 @@ pub(crate) fn keep_active_in_view(
     cx: &mut Context<TableState<ResultGrid>>,
 ) {
     let width = table.horizontal_scroll_handle.bounds().size.width;
-    if let Some(col) = table.delegate_mut().relaid_out(width) {
+    let offset_x = table.horizontal_scroll_handle.offset().x;
+    if let Some(col) = table.delegate_mut().relaid_out(width, offset_x) {
         table.scroll_to_col(col + GUTTER, cx);
     }
 }
@@ -3057,12 +3065,18 @@ mod tests {
 
     #[test]
     fn the_active_cell_is_scrolled_back_only_when_the_grid_is_relaid_out_at_a_new_width() {
+        // Three columns of 180: the active one spans 360..540.
         let mut grid = editable_grid();
-        assert_eq!(grid.relaid_out(px(800.)), None);
+        assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
         grid.set_active(0, 2);
-        assert_eq!(grid.relaid_out(px(800.)), None);
-        assert_eq!(grid.relaid_out(px(500.)), Some(2));
-        assert_eq!(grid.relaid_out(px(500.)), None);
+        assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
+        assert_eq!(grid.relaid_out(px(500.), px(0.)), Some(2));
+        assert_eq!(grid.relaid_out(px(500.), px(0.)), None);
+        // Off the right edge of the old 300 viewport, then off its left edge
+        // once scrolled 540 along: scrolled away from, so left where it is.
+        assert_eq!(grid.relaid_out(px(300.), px(0.)), Some(2));
+        assert_eq!(grid.relaid_out(px(250.), px(0.)), None);
+        assert_eq!(grid.relaid_out(px(300.), px(-540.)), None);
     }
 
     #[test]
