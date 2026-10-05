@@ -868,6 +868,24 @@ impl Sorting {
             Self::Server => None,
         }
     }
+
+    /// Switch between the server and memory, carrying across `shown`, the
+    /// keys the rows on screen are in. Into memory they become the sort; into
+    /// the server they come back as what it must now be asked for, `None`
+    /// when there are none and nothing needs to run.
+    pub(crate) fn switch(&mut self, client: bool, shown: Vec<SortKey>) -> Option<Vec<SortKey>> {
+        match (client, &*self) {
+            (true, Self::Server) => {
+                *self = Self::Client(shown);
+                None
+            }
+            (false, Self::Client(_)) => {
+                *self = Self::Server;
+                (!shown.is_empty()).then_some(shown)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// One query buffer, and everything that belongs to it.
@@ -1661,6 +1679,33 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn switching_sorting_carries_the_sort_on_screen_across() {
+        let shown = vec![SortKey::new("\"name\"", false)];
+
+        // Into memory: what the server sorted by becomes the sort.
+        let mut sorting = Sorting::Server;
+        assert_eq!(sorting.switch(true, shown.clone()), None);
+        assert_eq!(sorting, Sorting::Client(shown.clone()));
+        // Already there: nothing changes.
+        assert_eq!(sorting.switch(true, Vec::new()), None);
+        assert_eq!(sorting, Sorting::Client(shown.clone()));
+
+        // Out of memory: the server is asked for what is on screen, which
+        // leaves behind a key whose column a re-run dropped.
+        let mut stale = Sorting::Client(vec![SortKey::new("\"gone\"", true), shown[0].clone()]);
+        assert_eq!(stale.switch(false, shown.clone()), Some(shown.clone()));
+        assert_eq!(stale, Sorting::Server);
+
+        // Nothing sorted, nothing to ask for; and the server staying the
+        // server runs nothing.
+        let mut unsorted = Sorting::Client(Vec::new());
+        assert_eq!(unsorted.switch(false, Vec::new()), None);
+        assert_eq!(unsorted, Sorting::Server);
+        assert_eq!(unsorted.switch(false, shown), None);
+        assert_eq!(unsorted, Sorting::Server);
+    }
 
     #[test]
     fn a_scroll_scope_tells_apart_tabs_that_share_an_id() {

@@ -1875,9 +1875,10 @@ fn render_structure(
         .into_any_element()
 }
 
-/// The preview's row limit and pager, centred in the status bar: what the
-/// relation's rows were asked for, and the way to the ones after them. `None`
-/// on anything but a relation's rows.
+/// The preview's row limit and pager, and who sorts the view in front,
+/// centred in the status bar: what the relation's rows were asked for, and
+/// the way to the ones after them. `None` where there are no rows to page or
+/// sort.
 pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let t = *theme(cx);
     let session = &profile.session;
@@ -1985,7 +1986,42 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
         })
     });
 
-    preview.map(|_| {
+    // Who orders this view's rows, on any grid with columns to click. Beside
+    // the pager because a sort in memory is a sort of this page.
+    let client = match session.active {
+        Tab::Object(_) => preview.and(session.sorting(session.active)),
+        Tab::Query(_) => session
+            .active_results()
+            .filter(|results| !results.read(cx).delegate().columns().is_empty())
+            .and(session.sorting(session.active)),
+    }
+    .map(|sorting| sorting.client_keys().is_some());
+    let sorting = client.map(|client| {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .child(
+                div()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_faint)
+                    .child("Sort"),
+            )
+            .children(
+                [(false, "Server"), (true, "Client")].map(|(choice, label)| {
+                    settings_chip(
+                        ("view-sorting", choice as usize),
+                        label,
+                        choice == client,
+                        cx,
+                        move |workspace, window, cx| workspace.set_view_sorting(choice, window, cx),
+                    )
+                }),
+            )
+    });
+
+    (preview.is_some() || sorting.is_some()).then(|| {
         div()
             .flex_shrink_0()
             .flex()
@@ -1993,6 +2029,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
             .gap(px(layout::SPACE_MD))
             .children(row_limit)
             .children(pager)
+            .children(sorting)
             .into_any_element()
     })
 }

@@ -400,6 +400,89 @@ impl Workspace {
         });
     }
 
+    /// The status bar's Server and Client chips: who orders the rows of the
+    /// view in front. The sort on screen carries across. Into memory, the
+    /// statement keeps its `ORDER BY`; into the server, the keys go the way a
+    /// header click's do, refusals included, and a refused query tab stays
+    /// sorted in memory, since those are still the rows on screen.
+    pub(crate) fn set_view_sorting(
+        &mut self,
+        client: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let engine = self.engine();
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let tab = profile.session.active;
+        // On a queue the two differ. Into memory, what gets sorted is the
+        // result in front; into the server, the keys are spliced into the
+        // statement behind the tab's own slot, so they must name its columns.
+        let source = match client {
+            true => profile.session.active_results(),
+            false => profile.session.results(tab),
+        };
+        let Some(results) = source.cloned() else {
+            return;
+        };
+        let (order, shown) = {
+            let grid = results.read(cx).delegate();
+            let shown: Vec<SortKey> = grid
+                .sort()
+                .iter()
+                .filter_map(|&(column, ascending)| {
+                    Some(SortKey::new(
+                        sort_expression(engine, grid.columns(), column)?,
+                        ascending,
+                    ))
+                })
+                .collect();
+            (grid.sort().to_vec(), shown)
+        };
+        let Some(sorting) = profile.session.sorting_mut(tab) else {
+            return;
+        };
+        let before = sorting.clone();
+        let entering = client && sorting.client_keys().is_none();
+        let ask = sorting.switch(client, shown);
+        if entering {
+            // Already in this order, from the server. Sorted again so every
+            // header takes a click and ties fall back to the order they came in.
+            results.update(cx, |table, cx| {
+                table.delegate_mut().sort_in_memory(order);
+                table.clear_selection(cx);
+                cx.notify();
+            });
+        }
+        if let Some(keys) = ask {
+            match tab {
+                Tab::Object(id) => self.requery_relation(
+                    id,
+                    move |_, sort, _, offset| {
+                        *sort = keys;
+                        // As a header click's: page five of one sort is not
+                        // page five of another.
+                        *offset = 0;
+                        true
+                    },
+                    cx,
+                ),
+                Tab::Query(_) => {
+                    if !self.reorder_query(|existing| *existing = keys, window, cx)
+                        && let Some(sorting) = self
+                            .profile_mut()
+                            .and_then(|profile| profile.session.sorting_mut(tab))
+                    {
+                        *sorting = before;
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Sorting a query the user wrote: the `ORDER BY` goes into their statement,
     /// where they can see it, edit it and undo it. dbdelve changes SQL only when
     /// asked, and a header click is the ask (`AGENTS.md`, rule 1).
@@ -410,17 +493,42 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let engine = self.engine();
-        let Some(profile) = self.profile() else {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .map(|tab| tab.results.clone())
+        else {
             return;
         };
-        let Some(tab) = profile.session.active_query_tab() else {
+        let Some(expression) =
+            sort_expression(engine, results.read(cx).delegate().columns(), column)
+        else {
             return;
+        };
+        self.reorder_query(|keys| cycle(keys, &expression), window, cx);
+    }
+
+    /// Give the statement behind the query tab's grid the `ORDER BY` that
+    /// `change` makes of the one it has, in the buffer, and run it. A header
+    /// click and a switch to server sorting both come through here, so both
+    /// meet the same refusals. `false` when nothing ran.
+    pub(crate) fn reorder_query(
+        &mut self,
+        change: impl FnOnce(&mut Vec<SortKey>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let engine = self.engine();
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        let Some(tab) = profile.session.active_query_tab() else {
+            return false;
         };
         let tab_id = tab.id;
         let editor = tab.editor.clone();
-        let results = tab.results.clone();
         let Some(last_query) = tab.last_query.clone() else {
-            return;
+            return false;
         };
         // A sort re-runs the statement behind the grid, and one that writes
         // would write again.
@@ -430,14 +538,8 @@ impl Workspace {
                     .into(),
                 cx,
             );
-            return;
+            return false;
         }
-
-        let Some(expression) =
-            sort_expression(engine, results.read(cx).delegate().columns(), column)
-        else {
-            return;
-        };
 
         let (text, cursor) = {
             let editor = editor.read(cx);
@@ -450,7 +552,7 @@ impl Workspace {
                 "The statement behind these rows is no longer in the editor.".into(),
                 cx,
             );
-            return;
+            return false;
         };
         let statement = &text[range.clone()];
 
@@ -462,21 +564,22 @@ impl Workspace {
                 ),
                 cx,
             );
-            return;
+            return false;
         };
-        cycle(&mut keys, &expression);
+        change(&mut keys);
         let Some(sorted) = sql::with_order_by(engine, statement, &keys) else {
             self.note(
                 format!("This statement cannot carry {}.", engine.sort_clause()),
                 cx,
             );
-            return;
+            return false;
         };
 
         let mut replaced = text.clone();
         replaced.replace_range(range, &sorted);
         editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
         self.execute_sql(sorted, Tab::Query(tab_id), cx);
+        true
     }
 
     /// `Enter` on the active cell opens an input on it. Everything after this

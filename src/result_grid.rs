@@ -345,6 +345,10 @@ impl ResultGrid {
         self
     }
 
+    pub fn sort(&self) -> &[(usize, bool)] {
+        &self.sort
+    }
+
     /// A grid read back from a snapshot.
     ///
     /// The edit target and column types come back with it, so it can be
