@@ -6,7 +6,9 @@ and keeps scrolling smoothly through a million-row table.
 
 > Early days. Everything listed below works today.
 
-![DBDelve](assets/screenshot.png)
+![DBDelve, dark theme](assets/screenshotglass.png)
+
+![DBDelve, light theme](assets/screenshotlight.png)
 
 A table of a million rows, scrolling at speed with quick tab switches.
 
