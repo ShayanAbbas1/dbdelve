@@ -1881,6 +1881,24 @@ impl ResultGrid {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |table, event: &gpui::MouseDownEvent, window, cx| {
+                    // A click on the cell being edited belongs to its input.
+                    // `click_row` would focus the table and strand the input
+                    // without the keyboard. Refocused explicitly because a
+                    // click in the padding around the text misses the input's
+                    // own hitbox, and `prevent_default` keeps the table's
+                    // tracked focus from taking it back after this listener.
+                    if let Some(editing) = table
+                        .delegate()
+                        .editing
+                        .as_ref()
+                        .filter(|editing| (editing.row, editing.col) == (row_ix, col_ix))
+                    {
+                        if let Some(input) = editing.input.clone() {
+                            input.focus_handle(cx).focus(window, cx);
+                        }
+                        window.prevent_default();
+                        return;
+                    }
                     table.delegate_mut().set_active(row_ix, col_ix);
                     click_row(table, row_ix, event, window, cx);
                 }),
@@ -1906,6 +1924,9 @@ impl ResultGrid {
                             .text_size(px(layout::TEXT_MD)),
                     ),
                 )
+                // The library's row click would reselect the row under the
+                // caret, the same reason the read-only cell stops it.
+                .on_click(|_, _, cx| cx.stop_propagation())
                 // The input has focus, so both keystrokes arrive here on their
                 // way out of it. Consumed rather than propagated: `escape`
                 // otherwise reaches the workspace and moves focus to the editor.
