@@ -249,7 +249,7 @@ impl ListDelegate for Palette {
                 .rounded(px(layout::RADIUS_CONTROL))
                 // As in the explorer tree: `ListItem`'s own text size is in
                 // `rems` and would otherwise ignore dbdelve's type scale.
-                .text_size(px(layout::TEXT_MD))
+                .text_size(px(layout::chrome(layout::TEXT_MD)))
                 .child(
                     div()
                         .flex()
@@ -270,7 +270,7 @@ impl ListDelegate for Palette {
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(layout::TEXT_XS))
+                                .text_size(px(layout::chrome(layout::TEXT_XS)))
                                 .text_color(t.text_faint)
                                 .child(item.hint.clone()),
                         ),

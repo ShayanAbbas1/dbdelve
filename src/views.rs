@@ -26,9 +26,8 @@ use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
         AddFilter, CancelQuery, ExplainQuery, FormatQuery, NewQuery, NewRow, NextPage,
-        PreviousPage, RemoveFilter, ResetEditorZoom, RunQuery, SaveQuery, SetFilterColumn,
-        SetFilterOperator, SetFilterRaw, SetRowLimit, ToggleFilterJoin, ToggleNextJoin,
-        ToggleRowPanel, ZoomEditorIn, ZoomEditorOut,
+        PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetFilterColumn, SetFilterOperator,
+        SetFilterRaw, SetRowLimit, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -54,10 +53,7 @@ use crate::{
         key_hint, keycap_for, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
         section_label,
     },
-    workspace::{
-        EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, SettingsTab, editor_zoom_percent,
-        error_in_buffer,
-    },
+    workspace::{FONT_SIZE_STEP, SettingsTab, error_in_buffer, font_size_range},
 };
 
 /// What the row panel needs that is not part of any one tab: whether it is
@@ -78,6 +74,7 @@ pub struct RowPanel {
 pub fn render_main_content(
     profile: &Profile,
     editor_font_size: f32,
+    zoom: (u32, u32, u32),
     row_panel: &RowPanel,
     plan_copied: bool,
     strip: &TabStrip,
@@ -106,7 +103,7 @@ pub fn render_main_content(
         .flex_col()
         // Chrome, so the strip reads as the frame the surfaces sit in --
         // and chrome is the frost, which is already painted beneath it.
-        .child(render_tab_strip(profile, editor_font_size, strip, cx))
+        .child(render_tab_strip(profile, zoom, strip, cx))
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
@@ -200,7 +197,7 @@ fn render_query_surface(
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(layout::TEXT_SM))
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
             .text_color(t.text_faint)
             .child("Open a table from the sidebar, or start a new query.")
             .into_any_element();
@@ -359,7 +356,7 @@ fn render_plan(
                     )
                     .children(node.detail.iter().map(|line| {
                         div()
-                            .text_size(px(layout::TEXT_XS))
+                            .text_size(px(layout::chrome(layout::TEXT_XS)))
                             .text_color(t.text_muted)
                             .child(clip_label(line))
                     }))
@@ -368,7 +365,7 @@ fn render_plan(
                             .flex()
                             .flex_wrap()
                             .gap(px(layout::SPACE_MD))
-                            .text_size(px(layout::TEXT_XS))
+                            .text_size(px(layout::chrome(layout::TEXT_XS)))
                             // The estimate and the measurement are deliberately
                             // side by side and differently coloured: the gap
                             // between what the planner expected and what it got
@@ -410,7 +407,7 @@ fn render_plan(
         .flex()
         .flex_col()
         .font_family(code)
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         // The header says what was asked and of what, because a plan read an
         // hour later is otherwise a page of numbers about nothing in
         // particular -- and because `Analyze` means the statement was run.
@@ -421,12 +418,12 @@ fn render_plan(
                 .items_center()
                 .gap(px(layout::SPACE_SM))
                 .px(px(layout::SPACE_LG))
-                .h(px(layout::TAB_HEIGHT))
+                .h(px(layout::chrome(layout::TAB_HEIGHT)))
                 .border_b_1()
                 .border_color(t.border)
                 .child(
                     icon(icon::PLAN)
-                        .size(px(layout::ICON_SIZE))
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
                         .text_color(t.text_faint),
                 )
                 .child(
@@ -448,7 +445,7 @@ fn render_plan(
                         .flex_shrink_0()
                         .flex()
                         .gap(px(layout::SPACE_XS))
-                        .text_size(px(layout::TEXT_XS))
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .child(div().text_color(t.text_faint).child(label.clone()))
                         .child(div().text_color(t.text).child(value.clone()))
                 }))
@@ -461,7 +458,7 @@ fn render_plan(
                         .justify_center()
                         .child(
                             icon(icon::CHECK)
-                                .size(px(layout::ICON_SIZE))
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
                                 .text_color(t.success),
                         )
                         .with_animation(
@@ -648,7 +645,7 @@ fn render_filter_bar(
                     // button's content carries one.
                     .child(
                         icon(icon::CHEVRON_DOWN)
-                            .size(px(layout::ICON_SIZE))
+                            .size(px(layout::chrome(layout::ICON_SIZE)))
                             .text_color(t.text_faint),
                     )
                     // The grid's own column names, because the preview is
@@ -698,7 +695,7 @@ fn render_filter_bar(
                     )
                     .child(
                         icon(icon::CHEVRON_DOWN)
-                            .size(px(layout::ICON_SIZE))
+                            .size(px(layout::chrome(layout::ICON_SIZE)))
                             .text_color(t.text_faint),
                     )
                     .dropdown_menu({
@@ -772,7 +769,7 @@ fn join_button(id: impl Into<gpui::ElementId>, conjunction: Conjunction, t: Them
 fn filter_bar_row() -> gpui::Div {
     div()
         .w_full()
-        .h(px(layout::TAB_HEIGHT))
+        .h(px(layout::chrome(layout::TAB_HEIGHT)))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -819,7 +816,7 @@ fn render_new_row_panel(
                         )
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_XS))
+                                .text_size(px(layout::chrome(layout::TEXT_XS)))
                                 .text_color(t.text_faint)
                                 .child(field.data_type.clone()),
                         )
@@ -864,7 +861,7 @@ fn render_new_row_panel(
         // three-way rule is invisible otherwise.
         .child(
             div()
-                .text_size(px(layout::TEXT_SM))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
                 .child("A field left blank is left out, so the column keeps its default."),
         )
@@ -945,7 +942,7 @@ fn render_routine(tab: &ObjectTab, scope: &str, cx: &mut Context<Workspace>) -> 
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .text_size(px(layout::TEXT_LG))
+                        .text_size(px(layout::chrome(layout::TEXT_LG)))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{}.{}", tab.schema, tab.name)),
                 )
@@ -953,7 +950,7 @@ fn render_routine(tab: &ObjectTab, scope: &str, cx: &mut Context<Workspace>) -> 
                     div()
                         .flex()
                         .gap(px(layout::SPACE_LG))
-                        .text_size(px(layout::TEXT_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .text_color(t.text_muted)
                         .child(kind)
                         .child(format!("Language: {}", routine.language))
@@ -1033,7 +1030,7 @@ fn render_results(
     };
     let quiet_line = |line: String| {
         div()
-            .text_size(px(layout::TEXT_SM))
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
             .text_color(t.text_muted)
             .child(line)
             .into_any_element()
@@ -1206,7 +1203,7 @@ fn render_results(
         .children(
             (matches!(query, QueryState::Running { .. }) && has_rows).then(|| {
                 div()
-                    .h(px(layout::TAB_HEIGHT))
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
                     .flex_shrink_0()
                     .px(px(layout::SPACE_SM))
                     .flex()
@@ -1238,6 +1235,7 @@ fn render_results(
                 .min_h_0()
                 .min_w_0()
                 .font_family(grid)
+                .text_size(px(layout::grid(layout::BODY_FONT_SIZE)))
                 // The grid's own delegate has no key hook and the
                 // focused element is the table root, so `enter` is
                 // caught here on its way out of the Table context.
@@ -1254,7 +1252,15 @@ fn render_results(
                 .on_action(cx.listener(Workspace::follow_foreign_key))
                 .on_action(cx.listener(Workspace::open_reference))
                 .on_action(cx.listener(Workspace::show_references))
-                .child(DataTable::new(results).bordered(false).stripe(false))
+                // The library's medium row, held in proportion to the grid's text.
+                .child(
+                    DataTable::new(results)
+                        .bordered(false)
+                        .stripe(false)
+                        .with_size(gpui_component::Size::Size(px(layout::grid(
+                            gpui_component::Size::Medium.table_row_height().into(),
+                        )))),
+                )
                 .on_prepaint({
                     let (results, rows_scroll) = (results.clone(), rows_scroll.clone());
                     move |_, window, cx| {
@@ -1395,7 +1401,7 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
     Some(
         div()
             .id("query-results")
-            .h(px(layout::TAB_HEIGHT))
+            .h(px(layout::chrome(layout::TAB_HEIGHT)))
             .flex_shrink_0()
             .px(px(layout::SPACE_SM))
             .flex()
@@ -1434,10 +1440,10 @@ fn result_chip(
         .flex_shrink_0()
         .items_center()
         .gap(px(layout::SPACE_XS))
-        .h(px(24.))
+        .h(px(layout::chrome(24.)))
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .whitespace_nowrap()
         .map(|chip| {
             if selected {
@@ -1512,7 +1518,7 @@ fn render_row_inspector(
                 .border_color(t.border)
                 .child(
                     div()
-                        .h(px(layout::TAB_HEIGHT))
+                        .h(px(layout::chrome(layout::TAB_HEIGHT)))
                         .flex()
                         .items_center()
                         .child(fold("show-row-inspector", "Show the row panel", cx)),
@@ -1532,14 +1538,14 @@ fn render_row_inspector(
             // over the window instead of a panel inside it.
             .child(
                 div()
-                    .h(px(layout::TAB_HEIGHT))
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
                     .px(px(layout::SPACE_SM))
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_SM))
                     .child(
                         div()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_muted)
                             .child(format!(
                                 "Row {} of {}",
@@ -1591,7 +1597,7 @@ fn render_row_inspector(
                                     .justify_center()
                                     .child(
                                         icon(icon::CHECK)
-                                            .size(px(layout::ICON_SIZE))
+                                            .size(px(layout::chrome(layout::ICON_SIZE)))
                                             .text_color(t.success),
                                     )
                                     .with_animation(
@@ -1637,7 +1643,7 @@ fn render_row_inspector(
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
-                                            .text_size(px(layout::TEXT_SM))
+                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .text_color(t.text_muted)
                                             .child(field.name),
                                     )
@@ -1653,7 +1659,7 @@ fn render_row_inspector(
                                             .gap(px(layout::SPACE_XS))
                                             .children(field.data_type.map(|data_type| {
                                                 div()
-                                                    .text_size(px(layout::TEXT_XS))
+                                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
                                                     .text_color(t.text_faint)
                                                     .child(data_type)
                                             }))
@@ -1663,7 +1669,7 @@ fn render_row_inspector(
                             .child(
                                 div()
                                     .font_family(grid.clone())
-                                    .text_size(px(layout::TEXT_SM))
+                                    .text_size(px(layout::grid(layout::TEXT_SM)))
                                     .map(|value| match field.value {
                                         Some(text) => value.text_color(t.text).child(text),
                                         None if field.missing => value,
@@ -1700,10 +1706,10 @@ fn preview_tab(
         .flex()
         .items_center()
         .gap(px(layout::SPACE_XS))
-        .h(px(24.))
+        .h(px(layout::chrome(24.)))
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .map(|tab| {
             if selected {
                 tab.bg(t.element_active).text_color(t.text)
@@ -1713,7 +1719,7 @@ fn preview_tab(
             }
         })
         .child(
-            icon(path).size(px(12.)).text_color(
+            icon(path).size(px(layout::chrome(12.))).text_color(
                 kind_color(path)
                     .map(crate::theme::ConnectionColor::swatch)
                     .unwrap_or(if selected { t.text } else { t.text_faint }),
@@ -1733,10 +1739,10 @@ fn row_limit_chip(rows: usize, selected: bool, cx: &mut Context<Workspace>) -> A
         .id(("row-limit", rows))
         .flex()
         .items_center()
-        .h(px(24.))
+        .h(px(layout::chrome(24.)))
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .map(|chip| {
             if selected {
                 chip.bg(t.element_active).text_color(t.text)
@@ -1910,7 +1916,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
             .gap(px(layout::SPACE_XS))
             .child(
                 div()
-                    .text_size(px(layout::TEXT_SM))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .text_color(t.text_faint)
                     .child("Rows"),
             )
@@ -1945,8 +1951,8 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                     // which stacks to a black slab on this strip. A wash lets
                     // the glass through and is a faint step on opaque themes.
                     div()
-                        .h(px(layout::CONTROL_HEIGHT_COMPACT))
-                        .w(px(44.))
+                        .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
+                        .w(px(layout::chrome(44.)))
                         .px(px(layout::SPACE_SM))
                         .flex()
                         .items_center()
@@ -1956,14 +1962,14 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                         // the wash alone is close to the strip behind it.
                         .border_1()
                         .border_color(t.border_strong)
-                        .text_size(px(layout::TEXT_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .text_color(t.text)
                         .child(
                             Input::new(&session.page_input)
                                 .appearance(false)
                                 .px_0()
                                 .h_full()
-                                .text_size(px(layout::TEXT_SM)),
+                                .text_size(px(layout::chrome(layout::TEXT_SM))),
                         ),
                 )
                 .children(full_page.then(|| {
@@ -2001,7 +2007,7 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
 /// state.
 fn render_tab_strip(
     profile: &Profile,
-    editor_font_size: f32,
+    (chrome_zoom, editor_zoom, grid_zoom): (u32, u32, u32),
     strip: &TabStrip,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -2014,7 +2020,7 @@ fn render_tab_strip(
 
     let chip = |active: bool| {
         div()
-            .h(px(layout::TAB_CHIP_HEIGHT))
+            .h(px(layout::chrome(layout::TAB_CHIP_HEIGHT)))
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -2267,7 +2273,7 @@ fn render_tab_strip(
                     .px(px(layout::SPACE_XS))
                     .rounded(px(layout::RADIUS_CONTROL))
                     .bg(t.element_active)
-                    .text_size(px(layout::TEXT_XS))
+                    .text_size(px(layout::chrome(layout::TEXT_XS)))
                     .text_color(t.text_muted)
                     .overflow_hidden()
                     .text_ellipsis()
@@ -2432,7 +2438,17 @@ fn render_tab_strip(
             )
         });
 
-    let zoom = editor_zoom_percent(editor_font_size);
+    // 100% is not information; a pane's readout appears only once its zoom
+    // has somewhere to return to.
+    let zoom: Vec<String> = [
+        ("Chrome", chrome_zoom, true),
+        ("Editor", editor_zoom, runnable),
+        ("Grid", grid_zoom, session.active_results().is_some()),
+    ]
+    .into_iter()
+    .filter(|&(_, percent, shown)| shown && percent != 100)
+    .map(|(pane, percent, _)| format!("{pane} {percent}%"))
+    .collect();
     let named = on_query_tab && session.open_query().is_some();
     let new_workspace = workspace.clone();
     let save_workspace = workspace.clone();
@@ -2440,7 +2456,7 @@ fn render_tab_strip(
     let run_workspace = workspace.clone();
 
     div()
-        .h(px(layout::TAB_HEIGHT))
+        .h(px(layout::chrome(layout::TAB_HEIGHT)))
         .w_full()
         .flex_shrink_0()
         .flex()
@@ -2450,7 +2466,7 @@ fn render_tab_strip(
         // Between the tabs and whatever is under them, the filters or the grid.
         .border_b_1()
         .border_color(t.border)
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .child(
             div()
                 .id("query-tabs-scroll")
@@ -2506,13 +2522,15 @@ fn render_tab_strip(
         .children(structure_toggle)
         .children(plan_toggle)
         .children(new_row)
-        // 100% is not information; the readout appears only once the zoom
-        // has somewhere to return to.
-        .children((runnable && zoom != 100).then(|| {
+        .children((!zoom.is_empty()).then(|| {
             div()
                 .flex_shrink_0()
                 .text_color(t.text_faint)
-                .child(format!("{zoom}% · {} resets", keycap_text("secondary-0")))
+                .child(format!(
+                    "{} · {} resets",
+                    zoom.join(" · "),
+                    keycap_text("secondary-0")
+                ))
         }))
         .children(naming)
         // A named query is already written to disk on every swap, so there
@@ -2656,12 +2674,11 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
         .into_any_element()
 }
 
-/// The Theme / Editor zoom / Fonts / Default limit sections -- unchanged from
+/// The Theme / Opacity / Fonts / Default limit sections -- unchanged from
 /// before the Keybindings tab existed, just no longer the whole modal.
 fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let t = *theme(cx);
     let families = fonts(cx).clone();
-    let font_size = workspace.settings.editor_font_size;
     let preview_rows = workspace.settings.preview_rows;
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
@@ -2671,41 +2688,6 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let theme_picker = settings_chip("theme", t.name, true, cx, |workspace, window, cx| {
         workspace.open_palette(PaletteMode::Theme, window, cx);
     });
-
-    // Disabled at the ends rather than clamped again here: `adjust_editor_zoom`
-    // already refuses to go past them, and a button that looks live and does
-    // nothing is worse than one that says it cannot.
-    let zoom = div()
-        .flex()
-        .items_center()
-        .gap(px(layout::SPACE_SM))
-        .child(
-            button("zoom-out", "−", Tone::Quiet, Control::Compact, t)
-                .disabled(font_size <= EDITOR_FONT_SIZE_MIN)
-                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    workspace.zoom_editor_out(&ZoomEditorOut, window, cx);
-                })),
-        )
-        .child(
-            div()
-                .min_w(px(40.))
-                .text_size(px(layout::TEXT_SM))
-                .child(format!("{}%", editor_zoom_percent(font_size))),
-        )
-        .child(
-            button("zoom-in", "+", Tone::Quiet, Control::Compact, t)
-                .disabled(font_size >= EDITOR_FONT_SIZE_MAX)
-                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    workspace.zoom_editor_in(&ZoomEditorIn, window, cx);
-                })),
-        )
-        .child(
-            button("zoom-reset", "Reset", Tone::Quiet, Control::Compact, t).on_click(cx.listener(
-                |workspace, _: &ClickEvent, window, cx| {
-                    workspace.reset_editor_zoom(&ResetEditorZoom, window, cx);
-                },
-            )),
-        );
 
     // Disabled wholesale on an opaque theme rather than hidden: the setting is
     // still remembered, it is just that a theme which paints its own chrome
@@ -2737,7 +2719,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         )
         .child(
             div()
-                .text_size(px(layout::TEXT_SM))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
                 .child("%"),
         )
@@ -2768,14 +2750,65 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     .enumerate()
     .map(|(index, (label, slot))| {
         let family = families.family(slot).clone();
+        let size = workspace.settings.font_size(slot);
+        let (min, default, max) = font_size_range(slot);
+        // Disabled at the ends rather than clamped again here:
+        // `step_font_size` already refuses to go past them, and a button that
+        // looks live and does nothing is worse than one that says it cannot.
+        let stepper = div()
+            .flex()
+            .items_center()
+            .child(
+                button(
+                    ("font-smaller", index),
+                    "−",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .disabled(size <= min)
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.step_font_size(slot, -FONT_SIZE_STEP, cx);
+                })),
+            )
+            // The readout is the reset: clicking a size that is not the default
+            // puts it back.
+            .child(
+                button(
+                    ("font-size", index),
+                    format!("{size}"),
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .min_w(px(layout::chrome(32.)))
+                .disabled(size == default)
+                .tooltip(format!("Reset to {default}"))
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.set_font_size(slot, default, cx);
+                })),
+            )
+            .child(
+                button(
+                    ("font-larger", index),
+                    "+",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .disabled(size >= max)
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.step_font_size(slot, FONT_SIZE_STEP, cx);
+                })),
+            );
         div()
             .flex()
             .items_center()
-            .justify_between()
             .gap(px(layout::SPACE_MD))
             .child(
                 div()
-                    .text_size(px(layout::TEXT_SM))
+                    .flex_1()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .text_color(t.text_muted)
                     .child(label),
             )
@@ -2788,6 +2821,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                     workspace.open_palette(PaletteMode::Font(slot), window, cx);
                 },
             ))
+            .child(stepper)
             .into_any_element()
     })
     .collect();
@@ -2824,7 +2858,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 .child(transparency)
                 .child(
                     div()
-                        .text_size(px(layout::TEXT_XS))
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child(
                             "Everything else is relative to this. The chrome, \
@@ -2834,7 +2868,6 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                         ),
                 ),
         ))
-        .child(settings_section(t, "Editor zoom", zoom))
         .child(settings_section(
             t,
             "Fonts",
@@ -2869,7 +2902,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 ))
                 .child(
                     div()
-                        .text_size(px(layout::TEXT_XS))
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child(
                             "One request to GitHub at launch to see whether a \
@@ -2898,7 +2931,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 ))
                 .child(
                     div()
-                        .text_size(px(layout::TEXT_XS))
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child("Paint the titlebar in the connection's color."),
                 ),
@@ -2939,7 +2972,7 @@ fn chord_caps(
     let chords = keybindings::chords_for(spec, overrides);
     if chords.is_empty() {
         return div()
-            .text_size(px(layout::TEXT_XS))
+            .text_size(px(layout::chrome(layout::TEXT_XS)))
             .text_color(t.text_faint)
             .child("Unbound")
             .into_any_element();
@@ -2976,7 +3009,7 @@ fn render_keybinding_row(
             .flex()
             .items_center()
             .gap(px(layout::SPACE_SM))
-            .text_size(px(layout::TEXT_XS))
+            .text_size(px(layout::chrome(layout::TEXT_XS)))
             .text_color(t.text_faint)
             .child("Press any key… (Esc to cancel)")
             .into_any_element()
@@ -3021,7 +3054,7 @@ fn render_keybinding_row(
         .gap(px(layout::SPACE_MD))
         .child(
             div()
-                .text_size(px(layout::TEXT_SM))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text)
                 .child(spec.label),
         )
@@ -3053,10 +3086,10 @@ fn settings_chip(
         .id(id)
         .flex()
         .items_center()
-        .h(px(24.))
+        .h(px(layout::chrome(24.)))
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .whitespace_nowrap()
         .map(|chip| {
             if selected {

@@ -135,9 +135,9 @@ registry! {
     ("command_palette", "Command Palette", None, ["secondary-shift-p"], CommandPalette),
     ("palette_previous", "Palette: Previous Row", Some("Palette > Input"), ["up"], PalettePrevious),
     ("palette_next", "Palette: Next Row", Some("Palette > Input"), ["down"], PaletteNext),
-    ("zoom_editor_in", "Zoom Editor In", None, ["secondary-+", "secondary-="], ZoomEditorIn),
-    ("zoom_editor_out", "Zoom Editor Out", None, ["secondary--"], ZoomEditorOut),
-    ("reset_editor_zoom", "Reset Editor Zoom", None, ["secondary-0"], ResetEditorZoom),
+    ("zoom_editor_in", "Zoom In", None, ["secondary-+", "secondary-="], ZoomEditorIn),
+    ("zoom_editor_out", "Zoom Out", None, ["secondary--"], ZoomEditorOut),
+    ("reset_editor_zoom", "Reset Zoom", None, ["secondary-0"], ResetEditorZoom),
     ("edit_cell", "Edit Cell", Some("DataTable"), ["enter"], EditCell),
     ("copy_cell", "Copy Cell", Some("DataTable"), ["secondary-c"], CopyCell),
     // Not the spreadsheet's `ctrl-shift-n`: off macOS that is New Connection's

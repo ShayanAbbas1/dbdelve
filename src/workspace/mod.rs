@@ -31,7 +31,9 @@ use crate::*;
 /// the fonts stay in their globals -- every view reads those at render time,
 /// without a workspace to ask.
 pub(crate) struct Settings {
+    pub(crate) chrome_font_size: f32,
     pub(crate) editor_font_size: f32,
+    pub(crate) grid_font_size: f32,
     pub(crate) preview_rows: usize,
     /// How much of the window the desktop shows through. Lives here rather
     /// than on the theme the user picked, so it survives switching themes --
@@ -48,10 +50,22 @@ pub(crate) struct Settings {
     pub(crate) custom_keybindings: HashMap<String, String>,
 }
 
+impl Settings {
+    pub(crate) fn font_size(&self, slot: FontSlot) -> f32 {
+        match slot {
+            FontSlot::Chrome => self.chrome_font_size,
+            FontSlot::Editor => self.editor_font_size,
+            FontSlot::Grid => self.grid_font_size,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            chrome_font_size: layout::BODY_FONT_SIZE,
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
+            grid_font_size: layout::BODY_FONT_SIZE,
             preview_rows: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
             check_for_updates: true,
@@ -123,6 +137,12 @@ pub(crate) struct Workspace {
     /// Whether the explorer column is folded away. Not persisted: a hidden
     /// sidebar is a thing done for the next minute, not a preference.
     pub(crate) sidebar_hidden: bool,
+    /// Zoom over each font size, as a percentage. Not persisted: the sizes in
+    /// Settings are the preference, and a zoom is for the next screen share
+    /// or the one wide cell, with ⌘0 the way back.
+    pub(crate) chrome_zoom: u32,
+    pub(crate) editor_zoom: u32,
+    pub(crate) grid_zoom: u32,
     pub(crate) shell_split: Entity<ResizableState>,
     pub(crate) tab_strip: crate::tab_drag::TabStrip,
     /// Where the sidebar's edge is unless a drag has moved it. The library
@@ -224,6 +244,9 @@ impl Workspace {
             settings_tab: SettingsTab::default(),
             rebinding: None,
             sidebar_hidden: false,
+            chrome_zoom: 100,
+            editor_zoom: 100,
+            grid_zoom: 100,
             shell_split: cx.new(|_| ResizableState::default()),
             tab_strip: crate::tab_drag::TabStrip::default(),
             sidebar_width: std::cell::Cell::new(px(layout::SIDEBAR_DEFAULT_WIDTH)),
@@ -260,9 +283,19 @@ impl Workspace {
             Ok((profiles, active, stored_fonts, stored_settings, projects)) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
+                let stored_settings = stored_settings.unwrap_or_default();
+                // Ahead of the fonts and the theme, which size gpui-component's
+                // widgets off the chrome size as they install.
+                let chrome_font_size =
+                    restored_font_size(FontSlot::Chrome, stored_settings.chrome_font_size);
+                let grid_font_size =
+                    restored_font_size(FontSlot::Grid, stored_settings.grid_font_size);
+                workspace.settings.chrome_font_size = chrome_font_size;
+                workspace.settings.grid_font_size = grid_font_size;
+                layout::set_chrome_font_size(chrome_font_size);
+                layout::set_grid_font_size(grid_font_size);
                 let available = cx.text_system().all_font_names();
                 install_fonts(restored_fonts(stored_fonts, &available), cx);
-                let stored_settings = stored_settings.unwrap_or_default();
                 workspace.settings.opacity = restored_opacity(stored_settings.opacity);
                 install_theme(
                     restored_theme(stored_settings.theme.as_deref())
@@ -274,14 +307,16 @@ impl Workspace {
                 // with no app-wide value has one under whichever profile was in
                 // front -- and reading it there is what keeps a person's zoom
                 // across the upgrade instead of resetting it.
-                workspace.settings.editor_font_size =
-                    restored_editor_font_size(stored_settings.editor_font_size.or_else(|| {
+                workspace.settings.editor_font_size = restored_font_size(
+                    FontSlot::Editor,
+                    stored_settings.editor_font_size.or_else(|| {
                         profiles
                             .iter()
                             .find(|stored| Some(stored.id.as_str()) == active.as_deref())
                             .or_else(|| profiles.first())
                             .and_then(|stored| stored.editor_font_size)
-                    }));
+                    }),
+                );
                 // A hand-edited value outside the choices the controls offer
                 // is unreachable by the controls that set it, and leaves no
                 // chip highlighted either -- so it is rejected rather than
@@ -523,44 +558,151 @@ impl Workspace {
     pub(crate) fn zoom_editor_in(
         &mut self,
         _: &ZoomEditorIn,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_editor_zoom(EDITOR_FONT_SIZE_STEP, cx);
+        let slot = self.zoom_target(window, cx);
+        self.set_zoom(slot, self.zoom_step(slot, true), cx);
     }
 
     pub(crate) fn zoom_editor_out(
         &mut self,
         _: &ZoomEditorOut,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.adjust_editor_zoom(-EDITOR_FONT_SIZE_STEP, cx);
+        let slot = self.zoom_target(window, cx);
+        self.set_zoom(slot, self.zoom_step(slot, false), cx);
     }
 
     pub(crate) fn reset_editor_zoom(
         &mut self,
         _: &ResetEditorZoom,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_editor_zoom(EDITOR_FONT_SIZE_DEFAULT, cx);
+        let slot = self.zoom_target(window, cx);
+        self.set_zoom(slot, 100, cx);
     }
 
-    pub(crate) fn adjust_editor_zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let adjusted = adjusted_editor_font_size(self.settings.editor_font_size, delta);
-        self.set_editor_zoom(adjusted, cx);
+    pub(crate) fn zoom(&self, slot: FontSlot) -> u32 {
+        match slot {
+            FontSlot::Chrome => self.chrome_zoom,
+            FontSlot::Editor => self.editor_zoom,
+            FontSlot::Grid => self.grid_zoom,
+        }
     }
 
-    /// Written through to disk, because a zoom that resets on relaunch is a
+    /// The chrome's zoom stops where its size would leave the range Settings
+    /// offers, for the titlebar's sake; the editor and the grid have room to
+    /// take every level.
+    fn zoom_step(&self, slot: FontSlot, zoom_in: bool) -> u32 {
+        let next = stepped_zoom(self.zoom(slot), zoom_in);
+        if slot != FontSlot::Chrome {
+            return next;
+        }
+        let (min, _, max) = font_size_range(FontSlot::Chrome);
+        if (min..=max).contains(&zoomed(self.settings.chrome_font_size, next)) {
+            next
+        } else {
+            self.chrome_zoom
+        }
+    }
+
+    fn set_zoom(&mut self, slot: FontSlot, percent: u32, cx: &mut Context<Self>) {
+        match slot {
+            FontSlot::Chrome => {
+                self.chrome_zoom = percent;
+                self.apply_chrome_size(cx);
+            }
+            FontSlot::Editor => self.editor_zoom = percent,
+            FontSlot::Grid => {
+                self.grid_zoom = percent;
+                self.apply_grid_size(cx);
+            }
+        }
+        cx.refresh_windows();
+    }
+
+    fn apply_chrome_size(&self, cx: &mut App) {
+        layout::set_chrome_font_size(zoomed(self.settings.chrome_font_size, self.chrome_zoom));
+        let theme = *theme(cx);
+        theme.apply_to_components(cx);
+    }
+
+    /// The size the editor is drawn at: the saved size under the zoom.
+    pub(crate) fn editor_size(&self) -> f32 {
+        zoomed(self.settings.editor_font_size, self.editor_zoom)
+    }
+
+    fn apply_grid_size(&self, cx: &mut App) {
+        layout::set_grid_font_size(zoomed(self.settings.grid_font_size, self.grid_zoom));
+        // The table reads the gutter's width once and keeps it, so every grid
+        // open anywhere has to be told it changed.
+        for profile in &self.profiles {
+            for grid in profile.session.grids() {
+                grid.update(cx, |table, cx| table.refresh(cx));
+            }
+        }
+    }
+
+    /// Zoom acts on the pane the keyboard is in: the editor or the grid while
+    /// one holds focus, a cell being edited included, and the chrome
+    /// everywhere else.
+    fn zoom_target(&self, window: &Window, cx: &App) -> FontSlot {
+        // Settings and the palette float over the panes, and what is being
+        // read then is them, whichever pane kept focus underneath.
+        if self.settings_open || self.palette.is_some() {
+            return FontSlot::Chrome;
+        }
+        let Some(session) = self.profile().map(|profile| &profile.session) else {
+            return FontSlot::Chrome;
+        };
+        let holds_focus = |handle: FocusHandle| handle.contains_focused(window, cx);
+        if session
+            .editor(session.active)
+            .is_some_and(|editor| holds_focus(editor.focus_handle(cx)))
+        {
+            FontSlot::Editor
+        } else if session
+            .active_results()
+            .is_some_and(|results| holds_focus(results.focus_handle(cx)))
+        {
+            FontSlot::Grid
+        } else {
+            FontSlot::Chrome
+        }
+    }
+
+    pub(crate) fn step_font_size(&mut self, slot: FontSlot, delta: f32, cx: &mut Context<Self>) {
+        let adjusted = adjusted_font_size(slot, self.settings.font_size(slot), delta);
+        self.set_font_size(slot, adjusted, cx);
+    }
+
+    /// Written through to disk, because a size that resets on relaunch is a
     /// setting the user has to make again every morning.
-    pub(crate) fn set_editor_zoom(&mut self, font_size: f32, cx: &mut Context<Self>) {
-        if self.settings.editor_font_size == font_size {
+    pub(crate) fn set_font_size(&mut self, slot: FontSlot, size: f32, cx: &mut Context<Self>) {
+        if self.settings.font_size(slot) == size {
             return;
         }
-        self.settings.editor_font_size = font_size;
+        match slot {
+            // A zoom kept over a new chrome size could carry it past the
+            // titlebar's range, where no step back fits.
+            FontSlot::Chrome => {
+                self.settings.chrome_font_size = size;
+                self.chrome_zoom = 100;
+                self.apply_chrome_size(cx);
+            }
+            FontSlot::Editor => self.settings.editor_font_size = size,
+            FontSlot::Grid => {
+                self.settings.grid_font_size = size;
+                self.apply_grid_size(cx);
+            }
+        }
         self.remember_profiles(cx);
-        cx.notify();
+        // The whole window, not just this view: the grid is its own entity,
+        // and nothing about its rows changed to make it redraw.
+        cx.refresh_windows();
     }
 
     /// The default a relation tab opens with. Written through for the same
@@ -819,7 +961,7 @@ impl Render for Workspace {
                 .track_focus(&self.focus)
                 // Chrome, so the form's card is the raised plane on it.
                 .text_color(t.text)
-                .text_size(px(layout::TEXT_MD))
+                .text_size(px(layout::chrome(layout::TEXT_MD)))
                 .flex()
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
@@ -827,6 +969,9 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::palette_next))
                 .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
+                .on_action(cx.listener(Self::zoom_editor_in))
+                .on_action(cx.listener(Self::zoom_editor_out))
+                .on_action(cx.listener(Self::reset_editor_zoom))
                 .on_action(cx.listener(Self::previous_profile))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
@@ -846,7 +991,7 @@ impl Render for Workspace {
                 .size_full()
                 .track_focus(&self.focus)
                 .text_color(t.text)
-                .text_size(px(layout::TEXT_MD))
+                .text_size(px(layout::chrome(layout::TEXT_MD)))
                 .flex()
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
@@ -857,6 +1002,9 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(cx.listener(Self::zoom_editor_in))
+                .on_action(cx.listener(Self::zoom_editor_out))
+                .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
                 .children(self.settings_open.then(|| views::render_settings(self, cx)))
@@ -1105,11 +1253,11 @@ impl Render for Workspace {
 
         let results_status = bar_has_content.then(|| {
             div()
-                .h(px(layout::STATUS_HEIGHT))
+                .h(px(layout::chrome(layout::STATUS_HEIGHT)))
                 .flex_shrink_0()
                 .border_t_1()
                 .border_color(t.border)
-                .text_size(px(layout::TEXT_SM))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .min_w_0()
                 .flex()
                 .items_center()
@@ -1321,7 +1469,8 @@ impl Render for Workspace {
             .flex_col()
             .child(div().flex_1().min_h_0().child(views::render_main_content(
                 profile,
-                self.settings.editor_font_size,
+                self.editor_size(),
+                (self.chrome_zoom, self.editor_zoom, self.grid_zoom),
                 &self.row_panel,
                 self.plan_copied,
                 &self.tab_strip,
@@ -1356,14 +1505,14 @@ impl Render for Workspace {
                                 )
                                 .child(
                                     div()
-                                        .h(px(layout::STATUS_HEIGHT))
+                                        .h(px(layout::chrome(layout::STATUS_HEIGHT)))
                                         .flex_shrink_0()
                                         .flex()
                                         .items_center()
                                         .px(px(layout::SPACE_MD))
                                         .border_t_1()
                                         .border_color(t.border)
-                                        .text_size(px(layout::TEXT_SM))
+                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .overflow_hidden()
                                         .children(sidebar_status),
                                 ),
@@ -1436,7 +1585,7 @@ impl Render for Workspace {
             // laid down. The editor and the results step forward from it by
             // tone, and by letting less of the desktop through.
             .text_color(t.text)
-            .text_size(px(layout::TEXT_MD))
+            .text_size(px(layout::chrome(layout::TEXT_MD)))
             .flex()
             .flex_col()
             .child(titlebar(
@@ -1559,25 +1708,56 @@ pub(crate) const EDITOR_FONT_SIZE_MIN: f32 = 11.0;
 
 pub(crate) const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
-pub(crate) const EDITOR_FONT_SIZE_STEP: f32 = 1.0;
+pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
-pub(crate) fn adjusted_editor_font_size(current: f32, delta: f32) -> f32 {
-    (current + delta).clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX)
+/// The range the controls offer for a slot, and where Reset puts it. The
+/// chrome stops at 17 because the titlebar does not grow with it: the window
+/// buttons are placed against it once, when the window opens, and past 17 the
+/// controls in it would touch its edges.
+pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
+    match slot {
+        FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
+        FontSlot::Editor => (
+            EDITOR_FONT_SIZE_MIN,
+            EDITOR_FONT_SIZE_DEFAULT,
+            EDITOR_FONT_SIZE_MAX,
+        ),
+        FontSlot::Grid => (10.0, layout::BODY_FONT_SIZE, 20.0),
+    }
 }
 
-/// A zoom read back from disk. Clamped rather than trusted, because
+pub(crate) fn adjusted_font_size(slot: FontSlot, current: f32, delta: f32) -> f32 {
+    let (min, _, max) = font_size_range(slot);
+    (current + delta).clamp(min, max)
+}
+
+/// A size read back from disk. Clamped rather than trusted, because
 /// `profiles.toml` is a text file: a size outside the range the controls offer
 /// would otherwise be unreachable by the controls that set it. The finiteness
 /// check is not decoration -- `clamp` on a NaN returns the NaN.
-pub(crate) fn restored_editor_font_size(stored: Option<f32>) -> f32 {
+pub(crate) fn restored_font_size(slot: FontSlot, stored: Option<f32>) -> f32 {
+    let (min, default, max) = font_size_range(slot);
     stored
         .filter(|size| size.is_finite())
-        .map(|size| size.clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX))
-        .unwrap_or(EDITOR_FONT_SIZE_DEFAULT)
+        .map(|size| size.clamp(min, max))
+        .unwrap_or(default)
 }
 
-pub(crate) fn editor_zoom_percent(font_size: f32) -> u32 {
-    (font_size / EDITOR_FONT_SIZE_DEFAULT * 100.0).round() as u32
+/// The steps a browser zooms through, so ⌘+ and ⌘− land where people expect.
+pub(crate) const ZOOM_LEVELS: [u32; 11] = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
+
+/// The next level in or out from `current`, or `current` itself at either end.
+pub(crate) fn stepped_zoom(current: u32, zoom_in: bool) -> u32 {
+    let next = if zoom_in {
+        ZOOM_LEVELS.into_iter().find(|&level| level > current)
+    } else {
+        ZOOM_LEVELS.into_iter().rev().find(|&level| level < current)
+    };
+    next.unwrap_or(current)
+}
+
+pub(crate) fn zoomed(size: f32, percent: u32) -> f32 {
+    size * percent as f32 / 100.0
 }
 
 pub(crate) fn adjusted_opacity(current: f32, delta: f32) -> f32 {
@@ -1654,41 +1834,35 @@ mod tests {
     }
 
     #[test]
-    fn editor_zoom_stays_inside_its_readable_range() {
-        assert_eq!(
-            adjusted_editor_font_size(EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_STEP),
-            EDITOR_FONT_SIZE_MAX
-        );
-        assert_eq!(
-            adjusted_editor_font_size(EDITOR_FONT_SIZE_MIN, -EDITOR_FONT_SIZE_STEP),
-            EDITOR_FONT_SIZE_MIN
-        );
-        assert_eq!(
-            adjusted_editor_font_size(EDITOR_FONT_SIZE_DEFAULT, EDITOR_FONT_SIZE_STEP),
-            EDITOR_FONT_SIZE_DEFAULT + EDITOR_FONT_SIZE_STEP
-        );
+    fn a_font_size_stays_inside_its_slots_range() {
+        for slot in [FontSlot::Chrome, FontSlot::Editor, FontSlot::Grid] {
+            let (min, default, max) = font_size_range(slot);
+            assert_eq!(adjusted_font_size(slot, max, FONT_SIZE_STEP), max);
+            assert_eq!(adjusted_font_size(slot, min, -FONT_SIZE_STEP), min);
+            assert_eq!(
+                adjusted_font_size(slot, default, FONT_SIZE_STEP),
+                default + FONT_SIZE_STEP
+            );
+        }
     }
 
     #[test]
-    fn a_restored_zoom_is_clamped_rather_than_trusted() {
+    fn a_restored_font_size_is_clamped_rather_than_trusted() {
         // `profiles.toml` is a text file. A size outside the range the controls
-        // offer would be a zoom the zoom controls cannot undo, and a NaN would
-        // survive `clamp` and reach the text system.
-        assert_eq!(restored_editor_font_size(None), EDITOR_FONT_SIZE_DEFAULT);
-        assert_eq!(
-            restored_editor_font_size(Some(f32::NAN)),
-            EDITOR_FONT_SIZE_DEFAULT
-        );
-        assert_eq!(
-            restored_editor_font_size(Some(f32::INFINITY)),
-            EDITOR_FONT_SIZE_DEFAULT
-        );
-        assert_eq!(restored_editor_font_size(Some(900.0)), EDITOR_FONT_SIZE_MAX);
-        assert_eq!(restored_editor_font_size(Some(0.0)), EDITOR_FONT_SIZE_MIN);
-        assert_eq!(
-            restored_editor_font_size(Some(EDITOR_FONT_SIZE_DEFAULT + EDITOR_FONT_SIZE_STEP)),
-            EDITOR_FONT_SIZE_DEFAULT + EDITOR_FONT_SIZE_STEP
-        );
+        // offer would be one the controls cannot undo, and a NaN would survive
+        // `clamp` and reach the text system.
+        for slot in [FontSlot::Chrome, FontSlot::Editor, FontSlot::Grid] {
+            let (min, default, max) = font_size_range(slot);
+            assert_eq!(restored_font_size(slot, None), default);
+            assert_eq!(restored_font_size(slot, Some(f32::NAN)), default);
+            assert_eq!(restored_font_size(slot, Some(f32::INFINITY)), default);
+            assert_eq!(restored_font_size(slot, Some(900.0)), max);
+            assert_eq!(restored_font_size(slot, Some(0.0)), min);
+            assert_eq!(
+                restored_font_size(slot, Some(default + FONT_SIZE_STEP)),
+                default + FONT_SIZE_STEP
+            );
+        }
     }
 
     #[test]
@@ -1721,7 +1895,15 @@ mod tests {
     }
 
     #[test]
-    fn default_editor_size_is_reported_as_one_hundred_percent() {
-        assert_eq!(editor_zoom_percent(EDITOR_FONT_SIZE_DEFAULT), 100);
+    fn zoom_steps_through_the_levels_and_stops_at_either_end() {
+        assert_eq!(stepped_zoom(100, true), 110);
+        assert_eq!(stepped_zoom(100, false), 90);
+        assert_eq!(stepped_zoom(200, true), 200);
+        assert_eq!(stepped_zoom(50, false), 50);
+        let mut zoom = 50;
+        for level in ZOOM_LEVELS.into_iter().skip(1) {
+            zoom = stepped_zoom(zoom, true);
+            assert_eq!(zoom, level);
+        }
     }
 }

@@ -304,7 +304,11 @@ pub struct StoredSettings {
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
+    pub chrome_font_size: Option<f32>,
+    #[serde(default)]
     pub editor_font_size: Option<f32>,
+    #[serde(default)]
+    pub grid_font_size: Option<f32>,
     #[serde(default)]
     pub preview_rows: Option<usize>,
     #[serde(default)]
@@ -1776,7 +1780,9 @@ open_objects = []
             }),
             settings: Some(StoredSettings {
                 theme: Some("Dark".into()),
+                chrome_font_size: Some(14.0),
                 editor_font_size: Some(18.0),
+                grid_font_size: Some(12.0),
                 preview_rows: Some(500),
                 opacity: Some(0.8),
                 check_for_updates: Some(false),

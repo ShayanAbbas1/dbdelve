@@ -534,7 +534,7 @@ impl ResultGrid {
     /// both sides.
     fn gutter_width(&self) -> f32 {
         let digits = self.result.rows.len().max(1).to_string().len() as f32;
-        digits * DIGIT_WIDTH + 2.0 * layout::SPACE_SM
+        layout::grid(digits * DIGIT_WIDTH) + 2.0 * layout::SPACE_SM
     }
 
     /// Cells and the gutter share one anchor, so Shift can be pressed after
@@ -584,7 +584,7 @@ impl ResultGrid {
     fn key_icon(&self, col: usize, color: Srgb) -> Option<impl IntoElement> {
         self.primary_key.contains(&col).then(|| {
             icon(icon::PRIMARY_KEY)
-                .size(px(12.))
+                .size(px(layout::grid(12.)))
                 .flex_shrink_0()
                 .text_color(color)
         })
@@ -1575,7 +1575,7 @@ impl TableDelegate for ResultGrid {
                     // the left side reserves the same.
                     .pl(px(layout::SPACE_SM)
                         + gpui_component::Size::Medium.table_cell_padding().right)
-                    .text_size(px(layout::TEXT_SM))
+                    .text_size(px(layout::grid(layout::TEXT_SM)))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(faint)
                     .child("#")
@@ -1733,7 +1733,7 @@ impl ResultGrid {
             .gap(px(layout::SPACE_XS))
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(layout::TEXT_SM))
+            .text_size(px(layout::grid(layout::TEXT_SM)))
             .font_weight(gpui::FontWeight::MEDIUM)
             // Full strength whether or not this column is sorted. A header is
             // the only label for what is under it, and muted grey over a frosted
@@ -1760,7 +1760,7 @@ impl ResultGrid {
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(layout::TEXT_XS))
+                            .text_size(px(layout::grid(layout::TEXT_XS)))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(faint)
                             .child(data_type.to_uppercase())
@@ -1779,23 +1779,24 @@ impl ResultGrid {
                                 true => icon::SORT_UP,
                                 false => icon::SORT_DOWN,
                             })
-                            .size(px(12.))
+                            .size(px(layout::grid(12.)))
                             .text_color(text),
                         ),
                         // Faint rather than absent: a header that shows nothing
                         // until it is clicked does not read as clickable. And
                         // absent rather than faint where a click would do
                         // nothing, which is the same rule the other way round.
-                        None => control.children(
-                            self.sortable
-                                .then(|| icon(icon::SORTABLE).size(px(12.)).text_color(faint)),
-                        ),
+                        None => control.children(self.sortable.then(|| {
+                            icon(icon::SORTABLE)
+                                .size(px(layout::grid(12.)))
+                                .text_color(faint)
+                        })),
                     })
                     // Only worth saying which key this is when there is more
                     // than one of them.
                     .children(key.filter(|_| self.sort.len() > 1).map(|(position, _)| {
                         div()
-                            .text_size(px(layout::TEXT_XS))
+                            .text_size(px(layout::grid(layout::TEXT_XS)))
                             .text_color(muted)
                             .child((position + 1).to_string())
                     })),
@@ -1903,7 +1904,7 @@ impl ResultGrid {
                             // sized for a standalone field and overflows the
                             // row.
                             .h_full()
-                            .text_size(px(layout::TEXT_MD)),
+                            .text_size(px(layout::grid(layout::TEXT_MD))),
                     ),
                 )
                 // The input has focus, so both keystrokes arrive here on their
@@ -2064,7 +2065,7 @@ impl ResultGrid {
                     .justify_center()
                     .text_color(faint)
                     .hover(|button| button.text_color(text))
-                    .child(icon(icon::FOLLOW_KEY).size(px(14.)))
+                    .child(icon(icon::FOLLOW_KEY).size(px(layout::grid(14.))))
                     .on_click(cx.listener(move |table, _, window, cx| {
                         // The action follows the active cell, and this one is
                         // only hovered: without the move it would open the row

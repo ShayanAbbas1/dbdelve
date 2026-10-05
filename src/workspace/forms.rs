@@ -35,7 +35,7 @@ impl Workspace {
                 .gap(px(layout::SPACE_XS))
                 .child(
                     div()
-                        .text_size(px(layout::TEXT_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.text_muted)
                         .child(label),
@@ -82,7 +82,7 @@ impl Workspace {
                                     .flex_col()
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_LG))
+                                            .text_size(px(layout::chrome(layout::TEXT_LG)))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(if editing {
                                                 "Edit connection"
@@ -98,7 +98,7 @@ impl Workspace {
                                         (editing || form.engine.fields() != Fields::Account).then(
                                             || {
                                                 div()
-                                                    .text_size(px(layout::TEXT_SM))
+                                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                                                     .text_color(t.text_muted)
                                                     .child(if editing {
                                                         "Change where this connection points."
@@ -141,7 +141,7 @@ impl Workspace {
                                     .gap(px(layout::SPACE_XS))
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_SM))
+                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(t.text_muted)
                                             .child("Connection URL"),
@@ -177,7 +177,7 @@ impl Workspace {
                                     .child(hairline())
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_XS))
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
                                             .child("OR"),
                                     )
@@ -237,7 +237,7 @@ impl Workspace {
                             )
                             .children(form.engine.resolves_srv().then(|| {
                                 Checkbox::new("srv-host")
-                                    .text_size(px(layout::TEXT_SM))
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::MEDIUM)
                                     .label("Host is an SRV name (mongodb+srv)")
                                     .checked(form.srv)
@@ -268,7 +268,7 @@ impl Workspace {
                                     .gap(px(layout::SPACE_XS))
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_SM))
+                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(t.text_muted)
                                             .child("Encryption"),
@@ -281,7 +281,7 @@ impl Workspace {
                                     // between them.
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_XS))
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
                                             .child(form.sslmode.explanation()),
                                     ),
@@ -294,7 +294,7 @@ impl Workspace {
                             }))
                             .child(
                                 Checkbox::new("ssh-tunnel")
-                                    .text_size(px(layout::TEXT_SM))
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::MEDIUM)
                                     .label("Connect through an SSH tunnel")
                                     .checked(form.ssh)
@@ -320,7 +320,7 @@ impl Workspace {
                                     // machine's view of the network.
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_XS))
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .text_color(t.text_faint)
                                             .child(
                                                 "Host and Port are as the SSH host sees them: \
@@ -357,7 +357,7 @@ impl Workspace {
                     .child(self.form_field("Statement timeout", &form.statement_timeout, cx))
                     .children(message.map(|message| {
                         div()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.danger)
                             .child(message)
                     }))
@@ -372,7 +372,7 @@ impl Workspace {
                             ConnectionTest::Failed(message) => (t.danger, message.clone()),
                         };
                         div()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(color)
                             .child(text)
                     }))
@@ -450,21 +450,21 @@ impl Workspace {
                                 .child(icon_tile(t, path))
                                 .child(
                                     div()
-                                        .text_size(px(layout::TEXT_XS))
+                                        .text_size(px(layout::chrome(layout::TEXT_XS)))
                                         .text_color(t.text_faint)
                                         .child(hint),
                                 ),
                         )
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_MD))
+                                .text_size(px(layout::chrome(layout::TEXT_MD)))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(t.text)
                                 .child(title),
                         )
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(description),
                         ),
@@ -518,7 +518,7 @@ impl Workspace {
                             .child(hairline())
                             .child(
                                 div()
-                                    .text_size(px(layout::TEXT_XS))
+                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
                                     .text_color(t.text_faint)
                                     .child("OR IMPORT FROM"),
                             )
@@ -624,7 +624,7 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_faint)
                             .child("No connections yet"),
                     )
@@ -688,13 +688,13 @@ impl Workspace {
                                     .flex_col()
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_LG))
+                                            .text_size(px(layout::chrome(layout::TEXT_LG)))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Welcome to DBDelve"),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(layout::TEXT_SM))
+                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                                             .text_color(t.text_muted)
                                             .child(
                                                 "Start with a project to organize your \
@@ -708,13 +708,13 @@ impl Workspace {
                     .children(naming)
                     .children(self.project_name_error.clone().map(|message| {
                         div()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.danger)
                             .child(message)
                     }))
                     .children(self.welcome_notice.clone().map(|message| {
                         div()
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_muted)
                             .child(message)
                     }))
@@ -806,7 +806,7 @@ impl Workspace {
                         .child(section_label(t, &heading))
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child("Choose the project they join."),
                         )
@@ -872,7 +872,7 @@ impl Workspace {
             .gap(px(layout::SPACE_XS))
             .child(
                 div()
-                    .text_size(px(layout::TEXT_SM))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme(cx).text_muted)
                     .child(label),
@@ -950,7 +950,7 @@ impl Workspace {
                         return div()
                             .px(px(layout::SPACE_SM))
                             .py(px(layout::SPACE_XS))
-                            .text_size(px(layout::TEXT_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .child(div().text_color(t.text_muted).child(label.clone()))
                             .child(
                                 div()
@@ -964,7 +964,7 @@ impl Workspace {
                         .px(px(layout::SPACE_SM))
                         .py(px(layout::SPACE_XS))
                         .rounded(px(layout::RADIUS_CONTROL))
-                        .text_size(px(layout::TEXT_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                         .text_color(t.text)
                         .cursor_pointer()
                         .hover(|row| row.bg(t.element_hover))
@@ -1030,7 +1030,7 @@ impl Workspace {
                         .child(section_label(t, "Close tab"))
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 // The edits are held against the fetched rows
                                 // and never written to them, so closing the
@@ -1104,7 +1104,7 @@ impl Workspace {
                         .child(section_label(t, "Close query"))
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 // The whole point of the dialog: a saved query
                                 // is listed while its file exists, so closing
@@ -1242,7 +1242,7 @@ impl Workspace {
                         .child(section_label(t, title))
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(message),
                         )
@@ -1255,7 +1255,7 @@ impl Workspace {
                                 .p(px(layout::SPACE_SM))
                                 .rounded(px(layout::RADIUS_CONTROL))
                                 .bg(t.surface)
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text)
                                 .child(sql)
                         }))
@@ -1265,7 +1265,7 @@ impl Workspace {
                         .children(match stop {
                             Stop::Confirm(kind) if kind.suppressible() => Some(
                                 Checkbox::new("dont-ask-again")
-                                    .text_size(px(layout::TEXT_SM))
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .font_weight(FontWeight::BOLD)
                                     .label(format!(
                                         "Don't ask again for {} on {name}",
@@ -1367,13 +1367,13 @@ impl Workspace {
                         .child(section_label(t, "Run stopped"))
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(message),
                         )
                         .child(
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(
                                     "Stop leaves the results so far on screen and sends none of \
@@ -1464,7 +1464,7 @@ impl Workspace {
                         // it is what the question is about.
                         .children(editing.then(|| {
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(format!(
                                     "These rows were fetched {age} ago, before dbdelve was \
@@ -1481,7 +1481,7 @@ impl Workspace {
                                 .gap(px(layout::SPACE_XS))
                                 .children(editing.then(|| {
                                     div()
-                                        .text_size(px(layout::TEXT_SM))
+                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .text_color(t.text_muted)
                                         .child("Refresh runs:")
                                 }))
@@ -1490,14 +1490,14 @@ impl Workspace {
                                         .p(px(layout::SPACE_SM))
                                         .rounded(px(layout::RADIUS_CONTROL))
                                         .bg(t.surface)
-                                        .text_size(px(layout::TEXT_SM))
+                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .text_color(t.text)
                                         .child(sql),
                                 )
                         }))
                         .children(editing.then(|| {
                             Checkbox::new("dont-ask-stale")
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .font_weight(FontWeight::BOLD)
                                 .label("Don't ask again for this connection")
                                 .checked(dont_ask)
@@ -1619,14 +1619,14 @@ impl Workspace {
                                 .overflow_y_scroll()
                                 .smooth_scroll(&smooth_scoped("apply-review-sql", &scope, cx))
                                 .font_family(code)
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 // Line by line: a single child carrying newlines
                                 // is one run of text to the layout.
                                 .children(lines.into_iter().map(|line| div().child(line))),
                         )
                         .children(error.map(|message| {
                             div()
-                                .text_size(px(layout::TEXT_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.danger)
                                 .child(message)
                         }))
@@ -1723,7 +1723,7 @@ impl Workspace {
                     let row = div()
                         .id(("profile", index))
                         .group(format!("profile-row-{index}"))
-                        .h(px(30.))
+                        .h(px(layout::chrome(30.)))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -1886,7 +1886,7 @@ impl Workspace {
                         // checkmark, after the affordances, where the eye ends.
                         .children(active.then(|| {
                             icon(icon::CHECK)
-                                .size(px(layout::ICON_SIZE))
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
                                 .text_color(t.text_muted)
                         }))
                         .on_click(move |_, _, cx| {
@@ -1985,7 +1985,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("new-connection")
-                        .h(px(30.))
+                        .h(px(layout::chrome(30.)))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -2029,10 +2029,10 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_XS))
-                    .h(px(layout::CONTROL_HEIGHT_COMPACT))
+                    .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
                     .px(px(layout::SPACE_SM))
                     .rounded(px(layout::RADIUS_CONTROL))
-                    .text_size(px(layout::TEXT_SM))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .text_color(t.text_faint)
                     .hover(|style| style.bg(t.element_hover).text_color(t.text))
                     .when_some(project_name, |trigger, name| {
@@ -2357,7 +2357,7 @@ impl Workspace {
                                 label.to_uppercase().into(),
                                 ListItem::new(index)
                                     .text_color(t.text_faint)
-                                    .text_size(px(layout::TEXT_XS))
+                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
                                     .font_weight(FontWeight::MEDIUM),
                             ),
                         };
@@ -2374,7 +2374,7 @@ impl Workspace {
                             .rounded(px(layout::RADIUS_CONTROL))
                             // `ListItem` sizes its text in `rems`, which tracks
                             // the library's 16 rather than dbdelve's body size.
-                            .text_size(px(layout::TEXT_MD))
+                            .text_size(px(layout::chrome(layout::TEXT_MD)))
                             .pl(px(
                                 layout::SPACE_SM + entry.depth() as f32 * layout::SPACE_MD
                             ))
@@ -2401,7 +2401,7 @@ impl Workspace {
                                                 .flex_none()
                                                 .whitespace_nowrap()
                                                 .text_color(t.text_faint)
-                                                .text_size(px(layout::TEXT_XS))
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
                                                 .child(human_bytes(size)),
                                         )
                                     }),
@@ -2481,7 +2481,7 @@ impl Workspace {
                 // filter is the least interesting thing in it.
                 div()
                     .w_full()
-                    .h(px(layout::TAB_HEIGHT))
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -2510,7 +2510,7 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
     div()
         .px(px(layout::SPACE_SM))
         .py(px(layout::SPACE_XS))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .text_color(t.text_muted)
         .child(text)
         .into_any_element()
@@ -2520,7 +2520,7 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
 fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .h(px(30.))
+        .h(px(layout::chrome(30.)))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -2554,14 +2554,18 @@ fn group_header(
 /// The mark a card leads with: its icon, in the accent, on a tile.
 fn icon_tile(t: Theme, path: &'static str) -> gpui::Div {
     div()
-        .size(px(28.))
+        .size(px(layout::chrome(28.)))
         .flex_shrink_0()
         .rounded(px(layout::RADIUS_CONTROL))
         .bg(t.element_active)
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(path).size(px(layout::ICON_SIZE)).text_color(t.accent))
+        .child(
+            icon(path)
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.accent),
+        )
 }
 
 fn name_field(input: &Entity<InputState>) -> AnyElement {
