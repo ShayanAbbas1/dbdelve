@@ -431,9 +431,12 @@ impl Workspace {
                 .p(px(layout::SPACE_MD))
                 .border_1()
                 .border_color(t.border)
+                // Full height, or the button centres each tile's content on
+                // its own and a shorter description sits lower than its
+                // neighbour's.
                 .child(
                     div()
-                        .w_full()
+                        .size_full()
                         .flex()
                         .flex_col()
                         .gap(px(layout::SPACE_XS))
