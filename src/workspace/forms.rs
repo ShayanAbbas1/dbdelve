@@ -141,6 +141,11 @@ impl Workspace {
                             })
                             .child(labelled("Color", self.color_dropdown(cx))),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .child(labelled("Project", self.project_dropdown(cx))),
+                    )
                     // Snowflake has no connection URL: `Engine::fields()` is
                     // where that is decided, not a match on the engine here.
                     .when(form.engine.fields() != Fields::Account, |form_div| {
@@ -1632,8 +1637,11 @@ impl Workspace {
                                                 else {
                                                     return;
                                                 };
-                                                let form =
+                                                let mut form =
                                                     ConnectionForm::editing(profile, window, cx);
+                                                form.project = workspace
+                                                    .group_of(&profile.id)
+                                                    .map(str::to_string);
                                                 workspace.form = Some(form);
                                                 workspace.switcher_open = false;
                                                 cx.notify();

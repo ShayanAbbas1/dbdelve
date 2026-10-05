@@ -337,6 +337,24 @@ pub(crate) fn normalized_projects(
     projects
 }
 
+/// The project a saved connection form puts its connection in: the one named
+/// in its new-project field when that is open, which joins a project already
+/// called that rather than refusing the name, or else the one picked, unless
+/// it was deleted while the form sat open.
+pub(crate) fn chosen_project(
+    typed: Option<&str>,
+    picked: Option<&str>,
+    projects: &[store::StoredProject],
+) -> Result<Option<String>, String> {
+    match typed.map(str::trim) {
+        Some("") => Err("A project needs a name.".to_string()),
+        Some(name) => Ok(Some(name.to_string())),
+        None => Ok(picked
+            .filter(|picked| projects.iter().any(|project| project.name == *picked))
+            .map(str::to_string)),
+    }
+}
+
 /// The `(id, name, host)` connections whose name, host or project holds
 /// `query`, ignoring case, in the order the switcher lists them: No project
 /// first, then each project's.
@@ -406,6 +424,25 @@ mod tests {
                 project("Analytics", &["warehouse"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_form_puts_its_connection_in_the_project_typed_or_picked() {
+        let projects = [project("Billing", &[])];
+        assert_eq!(
+            chosen_project(Some("  Analytics "), Some("Billing"), &projects),
+            Ok(Some("Analytics".to_string()))
+        );
+        assert_eq!(
+            chosen_project(Some("Billing"), None, &projects),
+            Ok(Some("Billing".to_string()))
+        );
+        assert!(chosen_project(Some("  "), Some("Billing"), &projects).is_err());
+        assert_eq!(
+            chosen_project(None, Some("Billing"), &projects),
+            Ok(Some("Billing".to_string()))
+        );
+        assert_eq!(chosen_project(None, Some("Deleted"), &projects), Ok(None));
     }
 
     #[test]

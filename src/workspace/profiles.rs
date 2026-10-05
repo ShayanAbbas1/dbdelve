@@ -10,7 +10,7 @@ use crate::connection_form::{ConnectionTest, duplicate_profile_name};
 use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
-use crate::theme::color::Srgb;
+
 use std::path::Path;
 
 impl Workspace {
@@ -391,21 +391,24 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A field-shaped button that opens a menu of `options`: the engine, mode
-    /// and colour pickers on the connection form. `pick` writes the choice
-    /// into the form; `swatch` is the colour dot drawn before a label, if any.
-    pub(crate) fn form_dropdown<T: Copy + PartialEq + 'static>(
+    /// A field-shaped button that opens a menu of `groups` of options, with a
+    /// separator between groups: the engine, mode, colour and project pickers
+    /// on the connection form. `pick` writes the choice into the form;
+    /// `marker` is what is drawn before a label, if anything.
+    pub(crate) fn form_dropdown<T: Clone + PartialEq + 'static>(
         id: &'static str,
         selected: T,
-        options: Vec<T>,
-        label: fn(T) -> &'static str,
-        swatch: fn(T) -> Option<Srgb>,
-        pick: fn(&mut ConnectionForm, T),
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut ConnectionForm, T) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
-        let dot = |color: Srgb| div().size(px(layout::SPACE_SM)).rounded_full().bg(color);
+        let label = Rc::new(label);
+        let marker = Rc::new(marker);
+        let pick = Rc::new(pick);
         ui::control(id, Tone::Quiet, Control::Standard)
             .w_full()
             .px(px(layout::SPACE_SM))
@@ -419,33 +422,52 @@ impl Workspace {
                     .gap(px(layout::SPACE_XS))
                     .text_size(px(layout::TEXT_MD))
                     .text_color(t.text)
-                    .children(swatch(selected).map(dot))
-                    .child(div().flex_1().whitespace_nowrap().child(label(selected)))
+                    .children(marker(&selected))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(label(&selected)),
+                    )
                     .child(row_icon(t, icon::CHEVRON_DOWN)),
             )
             .dropdown_menu(move |menu, _, _| {
-                options.iter().copied().fold(menu, |menu, option| {
-                    let workspace = workspace.clone();
-                    menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(layout::SPACE_XS))
-                                .children(swatch(option).map(dot))
-                                .child(label(option))
+                groups
+                    .iter()
+                    .enumerate()
+                    .fold(menu, |menu, (index, group)| {
+                        let menu = if index > 0 { menu.separator() } else { menu };
+                        group.iter().fold(menu, |menu, option| {
+                            let workspace = workspace.clone();
+                            let (label, marker, pick) =
+                                (label.clone(), marker.clone(), pick.clone());
+                            let checked = *option == selected;
+                            let shown = option.clone();
+                            let option = option.clone();
+                            menu.item(
+                                PopupMenuItem::element(move |_, _| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(layout::SPACE_XS))
+                                        .children(marker(&shown))
+                                        .child(label(&shown))
+                                })
+                                .checked(checked)
+                                .on_click(move |_, _, cx| {
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        if let Some(form) = &mut workspace.form {
+                                            pick(form, option.clone());
+                                            cx.notify();
+                                        }
+                                    });
+                                }),
+                            )
                         })
-                        .checked(option == selected)
-                        .on_click(move |_, _, cx| {
-                            _ = workspace.update(cx, |workspace, cx| {
-                                if let Some(form) = &mut workspace.form {
-                                    pick(form, option);
-                                    cx.notify();
-                                }
-                            });
-                        }),
-                    )
-                })
+                    })
             })
             .into_any_element()
     }
@@ -457,8 +479,8 @@ impl Workspace {
         Self::form_dropdown(
             "engine",
             form.engine,
-            Engine::ALL.to_vec(),
-            Engine::label,
+            vec![Engine::ALL.to_vec()],
+            |engine| engine.label().into(),
             |_| None,
             |form, engine| {
                 // Only when the field set actually changes: Postgres and
@@ -492,8 +514,8 @@ impl Workspace {
         Self::form_dropdown(
             "mode",
             form.mode,
-            Mode::ALL.to_vec(),
-            Mode::label,
+            vec![Mode::ALL.to_vec()],
+            |mode| mode.label().into(),
             |_| None,
             |form, mode| {
                 form.mode = mode;
@@ -511,12 +533,92 @@ impl Workspace {
         Self::form_dropdown(
             "color",
             form.color,
-            std::iter::once(None)
-                .chain(ConnectionColor::ALL.map(Some))
-                .collect(),
-            |color| color.map_or("None", ConnectionColor::label),
-            |color| color.map(ConnectionColor::swatch),
+            vec![
+                std::iter::once(None)
+                    .chain(ConnectionColor::ALL.map(Some))
+                    .collect(),
+            ],
+            |color| color.map_or("None", ConnectionColor::label).into(),
+            |color| {
+                color.map(|color| {
+                    div()
+                        .size(px(layout::SPACE_SM))
+                        .rounded_full()
+                        .bg(color.swatch())
+                        .into_any_element()
+                })
+            },
             |form, color| form.color = color,
+            cx,
+        )
+    }
+
+    /// The project is made when the form is saved, so "New project…" only
+    /// swaps the list for a field to name it in.
+    pub(crate) fn project_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = *theme(cx);
+        let form = self.form.as_ref().expect("drawn only on the form");
+        if form.naming_project {
+            return div()
+                .flex()
+                .gap(px(layout::SPACE_SM))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&form.project_name).w_full()),
+                )
+                .child(
+                    icon_button(
+                        "choose-project",
+                        icon::CLOSE,
+                        Tone::Quiet,
+                        Control::Standard,
+                        t,
+                    )
+                    .tooltip("Choose an existing project")
+                    .on_click(cx.listener(|workspace, _, _, cx| {
+                        if let Some(form) = &mut workspace.form {
+                            form.naming_project = false;
+                            // The field going takes the focus with it.
+                            form.needs_focus = Some(form.name.clone());
+                            cx.notify();
+                        }
+                    })),
+                )
+                .into_any_element();
+        }
+        let existing = std::iter::once(ProjectChoice::In(None))
+            .chain(
+                self.projects
+                    .iter()
+                    .map(|project| ProjectChoice::In(Some(project.name.clone()))),
+            )
+            .collect();
+        Self::form_dropdown(
+            "project",
+            ProjectChoice::In(form.project.clone()),
+            vec![existing, vec![ProjectChoice::New]],
+            |choice| match choice {
+                ProjectChoice::In(None) => "No project".into(),
+                ProjectChoice::In(Some(name)) => name.clone().into(),
+                ProjectChoice::New => "New project…".into(),
+            },
+            move |choice| {
+                let path = match choice {
+                    ProjectChoice::In(None) => return None,
+                    ProjectChoice::In(Some(_)) => icon::PROJECT,
+                    ProjectChoice::New => icon::PLUS,
+                };
+                Some(row_icon(t, path).into_any_element())
+            },
+            |form, choice| match choice {
+                ProjectChoice::In(project) => form.project = project,
+                ProjectChoice::New => {
+                    form.naming_project = true;
+                    form.needs_focus = Some(form.project_name.clone());
+                }
+            },
             cx,
         )
     }
@@ -563,9 +665,16 @@ impl Workspace {
         let color = form.color;
         let mode = form.mode;
         let editing = form.editing.clone();
-        let project = form.project.clone();
-        let (name, config) = match form.config(cx) {
-            Ok(profile) => profile,
+        let typed = form
+            .naming_project
+            .then(|| form.project_name.read(cx).value().to_string());
+        let project =
+            projects::chosen_project(typed.as_deref(), form.project.as_deref(), &self.projects);
+        let ((name, config), project) = match form
+            .config(cx)
+            .and_then(|profile| project.map(|project| (profile, project)))
+        {
+            Ok(saved) => saved,
             Err(error) => {
                 if let Some(form) = &mut self.form {
                     form.error = Some(error);
@@ -576,8 +685,23 @@ impl Workspace {
         };
 
         self.form = None;
+        if let Some(new) = &project
+            && !self.projects.iter().any(|existing| &existing.name == new)
+        {
+            self.projects.push(store::StoredProject {
+                name: new.clone(),
+                ..Default::default()
+            });
+        }
         match editing {
-            Some(id) => self.save_profile(&id, name, config, color, window, cx),
+            Some(id) => {
+                self.save_profile(&id, name, config, color, window, cx);
+                if self.group_of(&id) != project.as_deref()
+                    && let Some(index) = self.profiles.iter().position(|profile| profile.id == id)
+                {
+                    self.move_to_project(index, project.as_deref(), cx);
+                }
+            }
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
@@ -1499,6 +1623,14 @@ impl Workspace {
         self.connect_active(cx);
         self.note(removal_note(&name, queries, removed_queries.err()), cx);
     }
+}
+
+/// An entry in the connection form's project list.
+#[derive(Clone, PartialEq)]
+enum ProjectChoice {
+    /// An existing project, or `None` for No project.
+    In(Option<String>),
+    New,
 }
 
 /// Whether picking `name` would leave the profile where it is. A blank
