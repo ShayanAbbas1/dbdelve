@@ -186,6 +186,7 @@ impl Workspace {
         self.renaming_project = renaming;
         self.project_name_needs_focus = true;
         self.project_name_error = None;
+        self.pending_project_deletion = None;
         cx.notify();
     }
 

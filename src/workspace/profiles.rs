@@ -1051,6 +1051,7 @@ impl Workspace {
         let mut form = ConnectionForm::new(None, window, cx);
         form.project = project;
         self.form = Some(form);
+        self.pending_project_deletion = None;
         self.switcher_open = false;
         // The form branch of `Render` returns before painting the modal, so a
         // flag left set would reappear the moment the form closes.
