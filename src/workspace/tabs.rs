@@ -234,6 +234,10 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.pending_import.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.project_name.is_some() {
             self.drop_project_name();
             cx.notify();

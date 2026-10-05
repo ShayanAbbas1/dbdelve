@@ -391,10 +391,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A field-shaped button that opens a menu of `groups` of options, with a
-    /// separator between groups: the engine, mode, colour and project pickers
-    /// on the connection form. `pick` writes the choice into the form;
-    /// `marker` is what is drawn before a label, if anything.
+    /// A dropdown on the connection form: `pick` writes the choice into it.
     pub(crate) fn form_dropdown<T: Clone + PartialEq + 'static>(
         id: &'static str,
         selected: T,
@@ -402,6 +399,34 @@ impl Workspace {
         label: impl Fn(&T) -> gpui::SharedString + 'static,
         marker: impl Fn(&T) -> Option<AnyElement> + 'static,
         pick: impl Fn(&mut ConnectionForm, T) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        Self::dropdown(
+            id,
+            selected,
+            groups,
+            label,
+            marker,
+            move |workspace, option| {
+                if let Some(form) = &mut workspace.form {
+                    pick(form, option);
+                }
+            },
+            cx,
+        )
+    }
+
+    /// A field-shaped button that opens a menu of `groups` of options, with a
+    /// separator between groups: the pickers on the connection form and the
+    /// import's project. `pick` makes the choice; `marker` is what is drawn
+    /// before a label, if anything.
+    pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
+        id: &'static str,
+        selected: T,
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut Self, T) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *theme(cx);
@@ -459,10 +484,8 @@ impl Workspace {
                                 .checked(checked)
                                 .on_click(move |_, _, cx| {
                                     _ = workspace.update(cx, |workspace, cx| {
-                                        if let Some(form) = &mut workspace.form {
-                                            pick(form, option.clone());
-                                            cx.notify();
-                                        }
+                                        pick(workspace, option.clone());
+                                        cx.notify();
                                     });
                                 }),
                             )
@@ -685,13 +708,8 @@ impl Workspace {
         };
 
         self.form = None;
-        if let Some(new) = &project
-            && !self.projects.iter().any(|existing| &existing.name == new)
-        {
-            self.projects.push(store::StoredProject {
-                name: new.clone(),
-                ..Default::default()
-            });
+        if let Some(project) = &project {
+            self.project_named(project);
         }
         match editing {
             Some(id) => {
@@ -1060,7 +1078,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.importing {
+        if self.importing || self.pending_import.is_some() {
             return;
         }
         self.importing = true;
@@ -1069,21 +1087,58 @@ impl Workspace {
             let report = read.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
                 workspace.importing = false;
-                let summary = match report {
-                    Ok(report) => workspace.add_imported(source, report, window, cx),
-                    Err(message) => message,
+                let report = match report {
+                    Ok(report) => report,
+                    Err(message) => return workspace.say_import(message, cx),
                 };
-                // A note on a profile is out of sight while the form covers it.
-                match &mut workspace.form {
-                    Some(form) => {
-                        form.error = Some(summary);
-                        cx.notify();
-                    }
-                    None => workspace.note(summary, cx),
+                let fresh = report
+                    .imported
+                    .iter()
+                    .filter(|imported| {
+                        !import::already_have(
+                            workspace.profiles.iter().map(|profile| &profile.config),
+                            &imported.config,
+                        )
+                    })
+                    .count();
+                // Nothing new to place, so nothing to ask: the summary says
+                // what was skipped and why.
+                if fresh == 0 {
+                    let summary = workspace.add_imported(source, report, None, window, cx);
+                    return workspace.say_import(summary, cx);
                 }
+                workspace.pending_import = Some(PendingImport {
+                    source,
+                    report,
+                    fresh,
+                    project: Some(format!("Imported from {}", source.label())),
+                });
+                cx.notify();
             });
         })
         .detach();
+    }
+
+    /// The import's question answered: its connections go into the project
+    /// picked, made if it is new.
+    pub(crate) fn confirm_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_import.take() else {
+            return;
+        };
+        let summary =
+            self.add_imported(pending.source, pending.report, pending.project, window, cx);
+        self.say_import(summary, cx);
+    }
+
+    fn say_import(&mut self, summary: String, cx: &mut Context<Self>) {
+        // A note on a profile is out of sight while the form covers it.
+        match &mut self.form {
+            Some(form) => {
+                form.error = Some(summary);
+                cx.notify();
+            }
+            None => self.note(summary, cx),
+        }
     }
 
     /// Returns the summary line.
@@ -1091,10 +1146,12 @@ impl Workspace {
         &mut self,
         source: Source,
         report: import::Report,
+        project: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> String {
         let had_none = self.profiles.is_empty();
+        let mut ids = Vec::new();
         let mut added = import::Report {
             skipped: report.skipped,
             notes: report.notes,
@@ -1148,8 +1205,17 @@ impl Workspace {
                 }
             }
             added.imported.push(imported);
+            ids.push(self.profiles[index].id.clone());
         }
 
+        if let Some(project) = &project
+            && !ids.is_empty()
+        {
+            // New profiles are in no project yet, so they join without
+            // leaving one.
+            self.project_named(project).connections.extend(ids);
+            self.remember_profiles(cx);
+        }
         if !added.imported.is_empty() {
             if self
                 .form

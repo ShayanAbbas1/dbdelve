@@ -207,6 +207,27 @@ impl Workspace {
         self.start_naming_project(None, window, cx);
     }
 
+    /// The project called `name`, made if there is none. Where a name comes
+    /// from a form or an import rather than the name field, a taken one is
+    /// joined rather than refused.
+    pub(crate) fn project_named(&mut self, name: &str) -> &mut store::StoredProject {
+        let at = match self
+            .projects
+            .iter()
+            .position(|project| project.name == name)
+        {
+            Some(at) => at,
+            None => {
+                self.projects.push(store::StoredProject {
+                    name: name.to_string(),
+                    ..Default::default()
+                });
+                self.projects.len() - 1
+            }
+        };
+        &mut self.projects[at]
+    }
+
     /// Whether `name` cannot be given to a project, saying why when it
     /// cannot. `keeping` is the project's current name on a rename, which it
     /// may keep.

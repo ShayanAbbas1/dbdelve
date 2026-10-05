@@ -15,7 +15,6 @@ use crate::{
     db::{
         ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
     },
-    import::Source,
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -89,9 +88,6 @@ pub(crate) struct ConnectionForm {
     /// when the form is saved, rather than the list of existing ones.
     pub(crate) naming_project: bool,
     pub(crate) project_name: Entity<InputState>,
-    /// The other clients installed here, looked for once as the form opens
-    /// rather than on every frame.
-    pub(crate) importable: Vec<Source>,
 }
 
 impl ConnectionForm {
@@ -274,10 +270,6 @@ impl ConnectionForm {
             project: None,
             naming_project: false,
             project_name,
-            importable: Source::ALL
-                .into_iter()
-                .filter(|source| source.found())
-                .collect(),
         }
     }
 

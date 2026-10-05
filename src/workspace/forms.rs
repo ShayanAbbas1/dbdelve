@@ -110,22 +110,6 @@ impl Workspace {
                                     ),
                             ),
                     )
-                    .when(!editing, |form_div| {
-                        form_div.children(form.importable.iter().map(|&source| {
-                            button(
-                                gpui::SharedString::from(format!("import-{}", source.label())),
-                                format!("Import from {}", source.label()),
-                                Tone::Quiet,
-                                Control::Standard,
-                                t,
-                            )
-                            .on_click(cx.listener(
-                                move |workspace, _, window, cx| {
-                                    workspace.import_connections(source, window, cx);
-                                },
-                            ))
-                        }))
-                    })
                     .child(
                         div()
                             .flex()
@@ -516,6 +500,48 @@ impl Workspace {
                     });
                 }),
             );
+        let hairline = || div().h(px(1.)).flex_1().bg(t.border);
+        let imports =
+            (!self.importable.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_SM))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(layout::SPACE_SM))
+                            .child(hairline())
+                            .child(
+                                div()
+                                    .text_size(px(layout::TEXT_XS))
+                                    .text_color(t.text_faint)
+                                    .child("OR IMPORT FROM"),
+                            )
+                            .child(hairline()),
+                    )
+                    .child(div().flex().gap(px(layout::SPACE_SM)).children(
+                        self.importable.iter().map(|&source| {
+                            button(
+                                gpui::SharedString::from(format!("import-{}", source.label())),
+                                source.label(),
+                                Tone::Quiet,
+                                Control::Standard,
+                                t,
+                            )
+                            .flex_1()
+                            .border_1()
+                            .border_color(t.border)
+                            .disabled(self.importing)
+                            .on_click(cx.listener(
+                                move |workspace, _, window, cx| {
+                                    workspace.import_connections(source, window, cx);
+                                },
+                            ))
+                        }),
+                    ))
+            });
         let naming = self
             .project_name
             .as_ref()
@@ -651,6 +677,7 @@ impl Workspace {
                     )
                     .child(tiles)
                     .children(naming)
+                    .children(imports)
                     .children(self.welcome_notice.clone().map(|message| {
                         div()
                             .text_size(px(layout::TEXT_SM))
@@ -672,6 +699,153 @@ impl Workspace {
                         )
                     }),
             )
+    }
+
+    /// Where an import's connections go, asked before any is added: a new
+    /// project named for the client by default, one already made, or none.
+    pub(crate) fn render_import_choice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let pending = self.pending_import.as_ref()?;
+        let source = pending.source.label();
+        let known = self
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect::<Vec<_>>();
+        let suggested = format!("Imported from {source}");
+        let mut groups = Vec::new();
+        if !known.contains(&suggested) {
+            groups.push(vec![Some(suggested)]);
+        }
+        if !known.is_empty() {
+            groups.push(known.iter().cloned().map(Some).collect());
+        }
+        groups.push(vec![None]);
+        let new = {
+            let known = known.clone();
+            move |project: &Option<String>| {
+                project.as_ref().is_some_and(|name| !known.contains(name))
+            }
+        };
+        let marked = new.clone();
+        let picker = Self::dropdown(
+            "import-project",
+            pending.project.clone(),
+            groups,
+            move |project| match project {
+                None => "No project".into(),
+                Some(name) if new(project) => format!("{name} (new project)").into(),
+                Some(name) => name.clone().into(),
+            },
+            move |project| {
+                let path = match project {
+                    None => return None,
+                    Some(_) if marked(project) => icon::PLUS,
+                    Some(_) => icon::PROJECT,
+                };
+                Some(row_icon(t, path).into_any_element())
+            },
+            |workspace, project| {
+                if let Some(pending) = &mut workspace.pending_import {
+                    pending.project = project;
+                }
+            },
+            cx,
+        );
+        let count = pending.fresh;
+        let heading = format!(
+            "Import {count} connection{} from {source}",
+            if count == 1 { "" } else { "s" }
+        );
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_MD))
+                                .child(icon_tile(t, icon::ADD_TO_PROJECT))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_size(px(layout::TEXT_LG))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(heading),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(layout::TEXT_SM))
+                                                .text_color(t.text_muted)
+                                                .child("Choose the project they join."),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_XS))
+                                .child(
+                                    div()
+                                        .text_size(px(layout::TEXT_SM))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(t.text_muted)
+                                        .child("Project"),
+                                )
+                                .child(picker),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    button(
+                                        "cancel-import",
+                                        "Cancel",
+                                        Tone::Quiet,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, _, cx| {
+                                            workspace.pending_import = None;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    button(
+                                        "confirm-import",
+                                        "Import",
+                                        Tone::Primary,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, window, cx| {
+                                            workspace.confirm_import(window, cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn form_field(

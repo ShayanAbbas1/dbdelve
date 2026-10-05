@@ -71,6 +71,17 @@ pub(crate) enum SettingsTab {
     Keybindings,
 }
 
+/// Connections read from another client, held while the user picks the
+/// project they go into.
+pub(crate) struct PendingImport {
+    pub(crate) source: crate::import::Source,
+    pub(crate) report: crate::import::Report,
+    /// How many are not here already, which is what the question counts.
+    pub(crate) fresh: usize,
+    /// `None` for No project.
+    pub(crate) project: Option<String>,
+}
+
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
     pub(crate) settings: Settings,
@@ -138,6 +149,10 @@ pub(crate) struct Workspace {
     /// An import's read is still out, so a second click doesn't start another
     /// round of Keychain prompts whose summary would say all were duplicates.
     pub(crate) importing: bool,
+    pub(crate) pending_import: Option<PendingImport>,
+    /// The other clients installed here, looked for once at launch rather
+    /// than on every frame of the welcome surface.
+    pub(crate) importable: Vec<crate::import::Source>,
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
@@ -216,6 +231,11 @@ impl Workspace {
             plan_copied: false,
             pending_removal: None,
             importing: false,
+            pending_import: None,
+            importable: crate::import::Source::ALL
+                .into_iter()
+                .filter(|source| source.found())
+                .collect(),
             welcome_notice: None,
             store_unreadable: false,
             next_generation: 0,
@@ -796,6 +816,7 @@ impl Render for Workspace {
                         .min_h_0()
                         .child(self.render_connection_form(cx)),
                 )
+                .children(self.render_import_choice(cx))
                 .children(self.render_palette(cx));
         }
         let Some(profile) = self.profile() else {
@@ -816,6 +837,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::import_from))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
+                .children(self.render_import_choice(cx))
                 .children(self.render_palette(cx));
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
@@ -1489,6 +1511,7 @@ impl Render for Workspace {
             .children(self.render_queue_failure(cx))
             .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
+            .children(self.render_import_choice(cx))
             .children(self.render_palette(cx))
             .children(self.render_reference_popup(cx))
     }

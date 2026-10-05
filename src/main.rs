@@ -290,15 +290,30 @@ fn main() {
                 Menu {
                     name: "File".into(),
                     disabled: false,
-                    items: vec![
+                    items: [
                         MenuItem::action("New Query", NewQuery),
                         MenuItem::action("New Connection", NewConnection),
                         MenuItem::action("New Project", NewProject),
+                    ]
+                    .into_iter()
+                    .chain(
+                        import::Source::ALL
+                            .into_iter()
+                            .filter(|source| source.found())
+                            .map(|source| {
+                                MenuItem::action(
+                                    format!("Import from {}…", source.label()),
+                                    ImportConnections { source },
+                                )
+                            }),
+                    )
+                    .chain([
                         MenuItem::separator(),
                         MenuItem::action("Save Query", SaveQuery),
                         MenuItem::separator(),
                         MenuItem::action("Close Tab", CloseTab),
-                    ],
+                    ])
+                    .collect(),
                 },
                 Menu {
                     name: "Query".into(),
