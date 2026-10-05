@@ -965,7 +965,7 @@ impl Workspace {
         if let Some(keys) = sorting.client_keys() {
             results.update(cx, |table, cx| {
                 let order = sort_columns(engine, keys, table.delegate().columns());
-                table.delegate_mut().sort_in_memory(order);
+                table.delegate_mut().sort_restored_in_memory(order);
                 cx.notify();
             });
         }

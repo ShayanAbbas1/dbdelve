@@ -992,6 +992,15 @@ impl ResultGrid {
         self.active = Some((row, col));
     }
 
+    /// `sort_in_memory` for rows a snapshot restored already in `keys`' order.
+    /// The sort is then a no-op on positions, so the restored ring still names
+    /// the cell it did.
+    pub fn sort_restored_in_memory(&mut self, keys: Vec<(usize, bool)>) {
+        let active = self.active;
+        self.sort_in_memory(keys);
+        self.active = active;
+    }
+
     /// Called whenever the connection's mode changes, so a grid that was
     /// built before the change does not go on answering `editable` from a
     /// stale cache. See `Workspace::set_mode`.
@@ -4208,5 +4217,19 @@ mod tests {
         assert_eq!(restored.result.rows, grid.result.rows);
         assert_eq!(restored.cell(0, 0), Some("3"));
         assert_eq!(restored.sort, vec![(0, false)]);
+    }
+
+    #[test]
+    fn re_sorting_restored_rows_keeps_the_active_cell() {
+        let mut grid = four_row_grid();
+        grid.sort_in_memory(vec![(0, false)]);
+        grid.set_active(2, 0);
+
+        let mut restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+        assert_eq!(restored.active(), Some((2, 0)));
+        restored.sort_restored_in_memory(vec![(0, false)]);
+
+        assert_eq!(restored.active(), Some((2, 0)));
+        assert_eq!(restored.result.rows, grid.result.rows);
     }
 }
