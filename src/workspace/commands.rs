@@ -157,6 +157,7 @@ impl Workspace {
             .update(cx, |input, cx| input.set_value(percent, window, cx));
         self.settings_open = false;
         self.rebinding = None;
+        self.refocus_front();
         cx.notify();
         true
     }

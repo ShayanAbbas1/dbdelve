@@ -856,8 +856,10 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::open_connection_form))
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
+                .on_action(cx.listener(Self::open_settings))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
+                .children(self.settings_open.then(|| views::render_settings(self, cx)))
                 .children(self.render_import_choice(cx))
                 .children(self.render_palette(cx));
         };
