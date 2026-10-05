@@ -9,6 +9,8 @@
 //! runs it through the same methods the buttons and keystrokes call, and the
 //! palette is gone by the time it happens.
 
+use std::collections::HashMap;
+
 use gpui::{App, Context, IntoElement, ParentElement, SharedString, Styled, Task, Window, div, px};
 use gpui_component::{
     IndexPath,
@@ -29,6 +31,7 @@ use crate::{
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
     ui::{chord_hint, object_icon, row_icon},
+    workspace::opacity_for,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +174,9 @@ pub struct Palette {
     /// The theme in force when the theme list opened, for a filter that
     /// matches nothing to fall back to.
     unpreviewed: Option<Theme>,
+    /// Opacity per theme as of opening, so a previewed theme paints at its own.
+    theme_opacity: HashMap<String, f32>,
+    fallback_opacity: f32,
 }
 
 impl Palette {
@@ -190,6 +196,8 @@ impl Palette {
             items,
             matcher: Matcher::new(Config::DEFAULT),
             unpreviewed: (mode == Mode::Theme).then(|| *theme(cx)),
+            theme_opacity: workspace.settings.theme_opacity.clone(),
+            fallback_opacity: workspace.settings.opacity,
         }
     }
 
@@ -302,7 +310,8 @@ impl ListDelegate for Palette {
             _ => self.unpreviewed,
         };
         if let Some(previewed) = previewed {
-            install_theme(previewed.with_opacity(theme(cx).opacity), window, cx);
+            let opacity = opacity_for(&self.theme_opacity, self.fallback_opacity, previewed.name);
+            install_theme(previewed.with_opacity(opacity), window, cx);
             cx.refresh_windows();
         }
     }

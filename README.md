@@ -38,9 +38,10 @@ time.
 
 ## What it does
 
-- **Make it yours.** A theme library with DBDelve's own Glass, Black, Dark and
-  Light alongside favorites like Catppuccin, Tokyo Night, Gruvbox and Dracula,
-  in dark, light and a translucent glass.
+- **Make it yours.** A theme library with DBDelve's own Dark, Light and Black,
+  the first two also in translucent glass, alongside favorites like Catppuccin,
+  Tokyo Night, Gruvbox and Dracula, each in dark and light, and each of those
+  in glass.
 - **Bring your connections with you.** Import every saved connection,
   passwords and SSH settings included, from DBeaver on macOS, Linux and
   Windows, or from TablePlus on macOS.

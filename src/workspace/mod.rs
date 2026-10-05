@@ -35,10 +35,13 @@ pub(crate) struct Settings {
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
     pub(crate) preview_rows: usize,
-    /// How much of the window the desktop shows through. Lives here rather
-    /// than on the theme the user picked, so it survives switching themes --
-    /// it is reapplied to whichever theme gets installed.
+    /// How much of the window the desktop shows through, for themes with no
+    /// entry in `theme_opacity`. Nothing writes it any more; it is what a
+    /// single shared value from before per-theme opacity restores as.
     pub(crate) opacity: f32,
+    /// Opacity per theme, keyed by theme name: light glass has a higher floor
+    /// than dark glass, so one shared value painted a different look on each.
+    pub(crate) theme_opacity: HashMap<String, f32>,
     /// One request to GitHub at launch. Off switch because local-first users
     /// get to say no to the only request DBDelve makes on its own.
     pub(crate) check_for_updates: bool,
@@ -68,11 +71,32 @@ impl Default for Settings {
             grid_font_size: layout::BODY_FONT_SIZE,
             preview_rows: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
+            theme_opacity: HashMap::new(),
             check_for_updates: true,
             color_titlebar: true,
             custom_keybindings: HashMap::new(),
         }
     }
+}
+
+impl Settings {
+    pub(crate) fn opacity_for(&self, theme_name: &str) -> f32 {
+        opacity_for(&self.theme_opacity, self.opacity, theme_name)
+    }
+
+    /// Clamped to the theme's own range, so what is stored is what it paints.
+    pub(crate) fn set_opacity_for(&mut self, theme: &Theme, opacity: f32) {
+        let opacity = opacity.clamp(theme.opacity_min(), theme::OPACITY_MAX);
+        self.theme_opacity.insert(theme.name.to_string(), opacity);
+    }
+}
+
+pub(crate) fn opacity_for(
+    theme_opacity: &HashMap<String, f32>,
+    fallback: f32,
+    theme_name: &str,
+) -> f32 {
+    theme_opacity.get(theme_name).copied().unwrap_or(fallback)
 }
 
 /// Which section of the Settings modal is in front. Transient like
@@ -297,9 +321,15 @@ impl Workspace {
                 let available = cx.text_system().all_font_names();
                 install_fonts(restored_fonts(stored_fonts, &available), cx);
                 workspace.settings.opacity = restored_opacity(stored_settings.opacity);
+                workspace.settings.theme_opacity = stored_settings
+                    .theme_opacity
+                    .iter()
+                    .flatten()
+                    .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
+                    .collect();
+                let restored = restored_theme(stored_settings.theme.as_deref());
                 install_theme(
-                    restored_theme(stored_settings.theme.as_deref())
-                        .with_opacity(workspace.settings.opacity),
+                    restored.with_opacity(workspace.settings.opacity_for(restored.name)),
                     window,
                     cx,
                 );
@@ -1760,8 +1790,10 @@ pub(crate) fn zoomed(size: f32, percent: u32) -> f32 {
     size * percent as f32 / 100.0
 }
 
-pub(crate) fn adjusted_opacity(current: f32, delta: f32) -> f32 {
-    (current + delta).clamp(theme::OPACITY_MIN, theme::OPACITY_MAX)
+/// `min` is the theme's own floor rather than the shared one: a step that
+/// lands under what light glass will paint would be a click that does nothing.
+pub(crate) fn adjusted_opacity(current: f32, delta: f32, min: f32) -> f32 {
+    (current + delta).clamp(min, theme::OPACITY_MAX)
 }
 
 /// An opacity read back from disk, clamped for the same reason the zoom is:
@@ -1789,14 +1821,14 @@ pub(crate) fn opacity_percent(opacity: f32) -> u32 {
 /// rather than recomputed: stepping lands on values like 0.77000004, whose
 /// percentage divides back to a different f32, and `set_opacity` would take
 /// that for a change and rewrite `profiles.toml`.
-pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
+pub(crate) fn opacity_from_percent_input(typed: &str, current: f32, min: f32) -> f32 {
     let Ok(percent) = typed.trim().trim_end_matches('%').trim().parse::<f32>() else {
         return current;
     };
     if !percent.is_finite() || percent.round() == opacity_percent(current) as f32 {
         return current;
     }
-    (percent / 100.0).clamp(theme::OPACITY_MIN, theme::OPACITY_MAX)
+    (percent / 100.0).clamp(min, theme::OPACITY_MAX)
 }
 
 #[cfg(test)]
@@ -1866,6 +1898,21 @@ mod tests {
     }
 
     #[test]
+    fn opacity_is_stored_per_theme() {
+        let [first, second, ..] = Theme::all();
+        let mut settings = Settings::default();
+        settings.set_opacity_for(&first, 0.9);
+        assert_eq!(settings.opacity_for(first.name), 0.9);
+        assert_eq!(settings.opacity_for(second.name), settings.opacity);
+        settings.set_opacity_for(&second, 0.6);
+        assert_eq!(settings.opacity_for(first.name), 0.9);
+        assert_eq!(
+            settings.opacity_for(second.name),
+            0.6_f32.max(second.opacity_min())
+        );
+    }
+
+    #[test]
     fn a_restored_opacity_is_clamped_rather_than_trusted() {
         assert_eq!(restored_opacity(None), theme::OPACITY_DEFAULT);
         assert_eq!(restored_opacity(Some(f32::NAN)), theme::OPACITY_DEFAULT);
@@ -1876,20 +1923,26 @@ mod tests {
 
     #[test]
     fn a_typed_opacity_is_clamped_rather_than_refused() {
-        assert_eq!(opacity_from_percent_input("80", 0.72), 0.8);
-        assert_eq!(opacity_from_percent_input("85%", 0.72), 0.85);
-        assert_eq!(opacity_from_percent_input("  85 % ", 0.72), 0.85);
-        assert_eq!(opacity_from_percent_input("120", 0.72), theme::OPACITY_MAX);
-        assert_eq!(opacity_from_percent_input("10", 0.72), theme::OPACITY_MIN);
+        let min = theme::OPACITY_MIN;
+        assert_eq!(opacity_from_percent_input("80", 0.72, min), 0.8);
+        assert_eq!(opacity_from_percent_input("85%", 0.72, min), 0.85);
+        assert_eq!(opacity_from_percent_input("  85 % ", 0.72, min), 0.85);
+        assert_eq!(
+            opacity_from_percent_input("120", 0.72, min),
+            theme::OPACITY_MAX
+        );
+        assert_eq!(opacity_from_percent_input("10", 0.72, min), min);
+        // A theme with a higher floor clamps to that floor instead.
+        assert_eq!(opacity_from_percent_input("50", 0.9, 0.79), 0.79);
         // Nothing to read is not a reason to change anything.
-        assert_eq!(opacity_from_percent_input("", 0.72), 0.72);
-        assert_eq!(opacity_from_percent_input("dark", 0.72), 0.72);
-        assert_eq!(opacity_from_percent_input("inf", 0.72), 0.72);
+        assert_eq!(opacity_from_percent_input("", 0.72, min), 0.72);
+        assert_eq!(opacity_from_percent_input("dark", 0.72, min), 0.72);
+        assert_eq!(opacity_from_percent_input("inf", 0.72, min), 0.72);
         // Retyping what the readout says must be the same f32 it was showing,
         // not the one the division would have produced.
-        let stepped = adjusted_opacity(theme::OPACITY_DEFAULT, theme::OPACITY_STEP);
+        let stepped = adjusted_opacity(theme::OPACITY_DEFAULT, theme::OPACITY_STEP, min);
         assert_eq!(
-            opacity_from_percent_input(&opacity_percent(stepped).to_string(), stepped),
+            opacity_from_percent_input(&opacity_percent(stepped).to_string(), stepped, min),
             stepped
         );
     }

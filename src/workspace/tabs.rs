@@ -156,7 +156,8 @@ impl Workspace {
     pub(crate) fn end_theme_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The snapshot predates any opacity change made while previewing.
         if let Some(theme) = self.theme_before_preview.take() {
-            install_theme(theme.with_opacity(self.settings.opacity), window, cx);
+            let opacity = self.settings.opacity_for(theme.name);
+            install_theme(theme.with_opacity(opacity), window, cx);
             cx.refresh_windows();
         }
     }
@@ -170,7 +171,11 @@ impl Workspace {
         if theme.name == theme::theme(cx).name {
             return;
         }
-        install_theme(theme.with_opacity(self.settings.opacity), window, cx);
+        let theme = theme.with_opacity(self.settings.opacity_for(theme.name));
+        install_theme(theme, window, cx);
+        let percent = opacity_percent(theme.painted_opacity()).to_string();
+        self.opacity_input
+            .update(cx, |input, cx| input.set_value(percent, window, cx));
         // The titlebar deliberately no longer names the theme -- permanent
         // chrome should not narrate a setting -- so the switch itself says
         // where it landed.
@@ -194,14 +199,24 @@ impl Workspace {
         // The field is rewritten before the early return, not after it: typing
         // 120 against a window already at the ceiling changes nothing, and the
         // number we refused would otherwise stay on screen as if it had taken.
-        let percent = opacity_percent(opacity).to_string();
-        self.opacity_input
-            .update(cx, |input, cx| input.set_value(percent, window, cx));
-        if self.settings.opacity == opacity {
+        //
+        // Both sides are compared as painted, in whole percents. A value that
+        // paints what is already painted is not a change: under light glass's
+        // floor it would only overwrite the setting dark glass reads back, and
+        // a stepped 0.77000004 against a typed 0.77 would rewrite
+        // `profiles.toml` for nothing.
+        let theme = *theme::theme(cx);
+        let painted = |opacity| opacity_percent(theme.with_opacity(opacity).painted_opacity());
+        let percent = painted(opacity);
+        self.opacity_input.update(cx, |input, cx| {
+            input.set_value(percent.to_string(), window, cx)
+        });
+        if percent == painted(self.settings.opacity_for(theme.name)) {
             return;
         }
-        self.settings.opacity = opacity;
-        install_theme(theme::theme(cx).with_opacity(opacity), window, cx);
+        self.settings.set_opacity_for(&theme, opacity);
+        let opacity = self.settings.opacity_for(theme.name);
+        install_theme(theme.with_opacity(opacity), window, cx);
         self.remember_profiles(cx);
         cx.refresh_windows();
     }
@@ -210,7 +225,9 @@ impl Workspace {
     /// the way out of the field -- enter and blur -- come through here.
     pub(crate) fn commit_opacity_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.opacity_input.read(cx).value();
-        let opacity = opacity_from_percent_input(&typed, self.settings.opacity);
+        let theme = theme::theme(cx);
+        let current = self.settings.opacity_for(theme.name);
+        let opacity = opacity_from_percent_input(&typed, current, theme.opacity_min());
         self.set_opacity(opacity, window, cx);
     }
 
@@ -220,7 +237,8 @@ impl Workspace {
     /// land on 77 and drop the 79 on the way.
     pub(crate) fn step_opacity(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_opacity_input(window, cx);
-        let stepped = adjusted_opacity(self.settings.opacity, delta);
+        let theme = theme::theme(cx);
+        let stepped = adjusted_opacity(theme.painted_opacity(), delta, theme.opacity_min());
         self.set_opacity(stepped, window, cx);
     }
 

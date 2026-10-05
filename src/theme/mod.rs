@@ -317,6 +317,18 @@ const HAIRLINE_LIGHT: f32 = 0.12;
 /// carrying text.
 pub const OPACITY_DEFAULT: f32 = 0.72;
 pub const OPACITY_MIN: f32 = 0.50;
+/// Light glass's own floor, and the frost clamps to it rather than the shared
+/// range moving, so a setting carried over from dark glass still means what it
+/// did there. A light frost has the opposite worst case: dark text over a dark
+/// desktop, where everything the frost lets through darkens the plane the text
+/// sits on. Under a black one — a full-screen terminal is enough — chrome is
+/// only `opacity` times its own tone, and 0.50 leaves dbdelve's own body text
+/// near 3.5:1. 0.79 is where every family holds body text at AA, and muted
+/// text, syntax and `danger` at AA large, on the planes each is shown on —
+/// GitHub Light's `danger` is the last to get there. It is above the default,
+/// so light glass at the default is already sitting on it. See
+/// `light_glass_text_holds_over_a_black_desktop_at_its_floor`.
+const LIGHT_GLASS_OPACITY_MIN: f32 = 0.79;
 /// Short of opaque, and that is a palette constraint rather than taste. What
 /// tells this theme's planes apart is mostly how much each lets through, not
 /// their tone — the steps between them are half of dark's. Shut the desktop
@@ -556,32 +568,39 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Every theme dbdelve ships, in the order the theme picker lists them. The
-    /// first is the default.
-    pub fn all() -> [Self; 22] {
+    /// Every theme dbdelve ships, in the order the theme picker lists them:
+    /// every dark theme, then every light one. The first is the default.
+    pub fn all() -> [Self; 29] {
         [
             Self::glass(),
             Self::black(),
             Self::dark(),
-            Self::light(),
             Self::gruvbox_dark(),
-            Self::gruvbox_light(),
-            Self::glassed(Self::gruvbox_dark(), "Gruvbox Glass"),
+            Self::gruvbox_dark().glassed("Gruvbox Dark Glass"),
             Self::catppuccin_mocha(),
-            Self::catppuccin_latte(),
-            Self::glassed(Self::catppuccin_mocha(), "Catppuccin Glass"),
+            Self::catppuccin_mocha().glassed("Catppuccin Mocha Glass"),
             Self::github_dark(),
-            Self::github_light(),
-            Self::glassed(Self::github_dark(), "GitHub Glass"),
+            Self::github_dark().glassed("GitHub Dark Glass"),
             Self::tokyo_night(),
-            Self::tokyo_night_day(),
-            Self::glassed(Self::tokyo_night(), "Tokyo Night Glass"),
+            Self::tokyo_night().glassed("Tokyo Night Glass"),
             Self::dracula(),
-            Self::dracula_light(),
-            Self::glassed(Self::dracula(), "Dracula Glass"),
+            Self::dracula().glassed("Dracula Glass"),
             Self::one_dark(),
+            Self::one_dark().glassed("One Dark Glass"),
+            Self::light(),
+            Self::light().glassed("DBDelve Light Glass"),
+            Self::gruvbox_light(),
+            Self::gruvbox_light().glassed("Gruvbox Light Glass"),
+            Self::catppuccin_latte(),
+            Self::catppuccin_latte().glassed("Catppuccin Latte Glass"),
+            Self::github_light(),
+            Self::github_light().glassed("GitHub Light Glass"),
+            Self::tokyo_night_day(),
+            Self::tokyo_night_day().glassed("Tokyo Night Day Glass"),
+            Self::dracula_light(),
+            Self::dracula_light().glassed("Dracula Light Glass"),
             Self::one_light(),
-            Self::glassed(Self::one_dark(), "One Dark Glass"),
+            Self::one_light().glassed("One Light Glass"),
         ]
     }
 
@@ -594,7 +613,23 @@ impl Theme {
     /// plane every other surface is layered on. Chrome — sidebar, titlebar, tab
     /// strip, status bar — paints nothing of its own and is this.
     pub fn frost(self) -> Rgba {
-        self.surface.alpha(self.tint(self.opacity))
+        self.surface.alpha(self.tint(self.painted_opacity()))
+    }
+
+    /// The frost's opacity as painted: the shared setting, raised to this
+    /// theme's floor.
+    pub fn painted_opacity(self) -> f32 {
+        self.opacity.max(self.opacity_min())
+    }
+
+    /// The lowest frost this theme will paint, whatever the shared setting
+    /// says — see [`LIGHT_GLASS_OPACITY_MIN`].
+    pub fn opacity_min(self) -> f32 {
+        if self.is_glass && self.appearance == Appearance::Light {
+            LIGHT_GLASS_OPACITY_MIN
+        } else {
+            OPACITY_MIN
+        }
     }
 
     /// The editor's page, as a tint over [`Theme::frost`].
@@ -859,39 +894,69 @@ impl Theme {
     /// opaque page reads as patchiness on a transparent one. What separates the
     /// planes here is mostly how much they let through — see [`OPACITY_DEFAULT`].
     pub fn glass() -> Self {
-        Self::glassed(Self::dark(), "DBDelve Glass")
+        Self::dark().glassed("DBDelve Dark Glass")
     }
 
-    /// `dark` re-toned as glass: each plane keeps its own hue and chroma and
-    /// takes the lightness the glass planes need, so a family's glass stays in
-    /// its family. Everything else carries over untouched.
-    fn glassed(dark: Self, name: &'static str) -> Self {
+    /// This theme re-toned as glass: each plane takes the lightness the glass
+    /// planes need and keeps its own hue, and as much of its chroma as sRGB
+    /// allows there, so a family's glass stays in its family. Everything else
+    /// carries over untouched.
+    fn glassed(self, name: &'static str) -> Self {
         let tone = |plane: Srgb, lightness: f32| {
             let own = Oklch::from_srgb(plane);
             Oklch::new(lightness, own.c, own.h).to_srgb()
         };
+        let (bg, panel, surface, overlay, control) = match self.appearance {
+            Appearance::Dark => (
+                // Chrome goes near-black and stays there — it is the plane
+                // with nothing to read on it, so it can afford to be mostly
+                // desktop. The two that carry text climb back out, because a
+                // tone below the frost's own composite reads as a hole punched
+                // in the window: the frost carries the desktop's light, and a
+                // tint darker than that subtracts it.
+                0.275, 0.215, 0.130,
+                // Below every plane it covers rather than above them: a modal
+                // is the one surface that is not part of the window's stack,
+                // and the way it says so here is by going darker than the
+                // chrome it floats over instead of lighter.
+                0.165, 0.340,
+            ),
+            Appearance::Light => (
+                // The same hole, from the other side: over a bright desktop
+                // a light frost composites lighter than its own tone, and a
+                // text plane tinted below that greys the window like a smudge.
+                // The floor caps how light that composite gets — about 0.96
+                // over white at 0.79 — so both text planes sit above it, and
+                // unlike dark glass the ramp never inverts. The results stop
+                // short of white: at 1.0 the darkest family ink lands outside
+                // `themes_are_comparable_not_mirrored`.
+                0.985, 0.970,
+                // Chrome is milk glass where dark's is smoke: near-white, one
+                // step under the editor. It carries the sidebar's text straight
+                // over the desktop, and every point of lightness given up here
+                // is opacity the floor has to take back — see
+                // [`LIGHT_GLASS_OPACITY_MIN`].
+                0.950,
+                // The results' tone, which is white less a trace: a modal is
+                // the one near-opaque plane, and at 1.0 every family's card
+                // would come out the same white.
+                0.985,
+                // Under every plane, as light's own button is, where dark
+                // glass's is over every plane: either way it sits outside the
+                // ramp, so a button reads as a key set into the frost rather
+                // than one more tint of it.
+                0.900,
+            ),
+        };
         Self {
             name,
             is_glass: true,
-
-            // Chrome goes near-black and stays there — it is the plane with
-            // nothing to read on it, so it can afford to be mostly desktop.
-            // The two that carry text climb back out, because a tone below the
-            // frost's own composite reads as a hole punched in the window: the
-            // frost carries the desktop's light, and a tint darker than that
-            // subtracts it.
-            bg: tone(dark.bg, 0.275),
-            panel: tone(dark.panel, 0.215),
-            surface: tone(dark.surface, 0.130),
-            // Below every plane it covers rather than above them: a modal is
-            // the one surface that is not part of the window's stack, and the
-            // way it says so here is by going darker than the chrome it
-            // floats over instead of lighter.
-            overlay: tone(dark.overlay, 0.165),
-
-            control: tone(dark.control, 0.340),
-
-            ..dark
+            bg: tone(self.bg, bg),
+            panel: tone(self.panel, panel),
+            surface: tone(self.surface, surface),
+            overlay: tone(self.overlay, overlay),
+            control: tone(self.control, control),
+            ..self
         }
     }
 
@@ -1523,12 +1588,25 @@ impl Theme {
     }
 }
 
+/// The glass themes renamed when light glass arrived, so a profile saved under
+/// the old name comes back on the same theme rather than the default.
+const RENAMED_THEMES: [(&str, &str); 4] = [
+    ("DBDelve Glass", "DBDelve Dark Glass"),
+    ("Gruvbox Glass", "Gruvbox Dark Glass"),
+    ("Catppuccin Glass", "Catppuccin Mocha Glass"),
+    ("GitHub Glass", "GitHub Dark Glass"),
+];
+
 /// A theme read back from disk, by name. An absent or unknown name is the
 /// default: a palette dropped from `all` between launches must not strand the
 /// app on a name nothing answers to. Case-blind because the names were
 /// once spelled "dbdelve Dark" and profiles written then still say so.
 pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
     name.and_then(|name| {
+        let name = RENAMED_THEMES
+            .iter()
+            .find(|(old, _)| old.eq_ignore_ascii_case(name))
+            .map_or(name, |(_, new)| new);
         Theme::all()
             .into_iter()
             .find(|theme| theme.name.eq_ignore_ascii_case(name))
@@ -1739,6 +1817,7 @@ mod tests {
             Theme::black(),
             Theme::dark(),
             Theme::light(),
+            Theme::light().glassed("DBDelve Light Glass"),
         ] {
             for color in ConnectionColor::ALL {
                 let fixed = match (t.is_glass, t.appearance) {
@@ -1850,7 +1929,10 @@ mod tests {
         // a dark desktop the planes compress toward each other; over a bright
         // one the step inverts and the editor lands darker than the sidebar it
         // is supposed to sit in front of. No palette fixes that, because the
-        // term that flips is the desktop. It is what vibrancy costs.
+        // term that flips is the desktop. It is what vibrancy costs. Light
+        // glass is the mirror, a dark desktop spreading its planes and a
+        // bright one closing them up, but its floor stops them short of
+        // crossing — see `light_glass_text_planes_never_sit_below_the_frost`.
         //
         // What still holds for glass is checked elsewhere: the tone ramp runs
         // the right way in `elevation_runs_the_right_way_in_every_theme`, and
@@ -1889,20 +1971,148 @@ mod tests {
     }
 
     #[test]
-    fn glass_is_dark_toned_onto_the_glass_planes() {
-        let glass = Theme::glass();
-        for (plane, lightness) in [
-            (glass.bg, 0.275),
-            (glass.panel, 0.215),
-            (glass.surface, 0.130),
-            (glass.overlay, 0.165),
-            (glass.control, 0.340),
-        ] {
-            let want = neutral(lightness);
-            for (got, want) in [(plane.r, want.r), (plane.g, want.g), (plane.b, want.b)] {
-                assert!((got - want).abs() < 1e-3, "{got} vs {want}");
+    fn glass_is_toned_onto_the_glass_planes() {
+        let planes = |t: Theme| [t.bg, t.panel, t.surface, t.overlay, t.control];
+        let all = Theme::all();
+        for glass in all.into_iter().filter(|t| t.is_glass) {
+            let base = all
+                .into_iter()
+                .find(|t| Some(t.name) == glass.name.strip_suffix(" Glass"))
+                .unwrap_or_else(|| panic!("{}: no base theme", glass.name));
+            let tones = match glass.appearance {
+                Appearance::Dark => [0.275, 0.215, 0.130, 0.165, 0.340],
+                Appearance::Light => [0.985, 0.970, 0.950, 0.985, 0.900],
+            };
+            for ((plane, own), lightness) in planes(glass).into_iter().zip(planes(base)).zip(tones)
+            {
+                let (got, own) = (Oklch::from_srgb(plane), Oklch::from_srgb(own));
+                assert!(
+                    (got.l - lightness).abs() < 1e-3,
+                    "{}: lightness {} vs {lightness}",
+                    glass.name,
+                    got.l
+                );
+                // A neutral plane has no hue to keep, and sRGB clipping at
+                // the new lightness can take chroma but not turn the hue.
+                if own.c > 0.02 && got.c > 0.02 {
+                    let turn = (got.h - own.h + 540.0) % 360.0 - 180.0;
+                    assert!(
+                        turn.abs() < 5.0,
+                        "{}: hue {} vs {}",
+                        glass.name,
+                        got.h,
+                        own.h
+                    );
+                }
             }
         }
+    }
+
+    fn light_glass() -> impl Iterator<Item = Theme> {
+        Theme::all()
+            .into_iter()
+            .filter(|t| t.is_glass && t.appearance == Appearance::Light)
+    }
+
+    #[test]
+    fn light_glass_text_holds_over_a_black_desktop_at_its_floor() {
+        // The raw-tint checks above say nothing about the desktop, and for
+        // light glass the desktop is the whole risk: dark text, and a dark
+        // wallpaper or terminal darkening the very plane it sits on. Black is
+        // the worst one there is. One tier below the raw-tint floors, since this
+        // is the worst case rather than the window as usually seen. Asked for
+        // at the shared minimum, so it is the clamp being graded.
+        //
+        // Two things are left out because no floor short of opaque holds them.
+        // `accent` sits under 4:1 on Catppuccin Latte's and One Light's raw
+        // tints, and over black it reaches 3.0 only at 0.94. Muted text on a
+        // coloured titlebar band likewise needs 0.94 (GitHub Light, Red), and
+        // a fainter band to buy it back stops standing apart from the pills
+        // on it — see `a_titlebar_pill_stands_off_every_band`.
+        for t in light_glass().map(|t| t.with_opacity(OPACITY_MIN)) {
+            let chrome = t.frost().flatten(BLACK);
+            let editor = t.panel_glass().flatten(chrome);
+            let results = t.data_glass().flatten(chrome);
+            for (plane, under) in [
+                ("chrome", chrome),
+                ("the editor", editor),
+                ("the results", results),
+            ] {
+                check(t, &format!("text on {plane}"), t.text, under, AA_TEXT);
+                check(
+                    t,
+                    &format!("muted on {plane}"),
+                    t.text_muted,
+                    under,
+                    AA_LARGE,
+                );
+            }
+            for (name, token) in [
+                ("comment", t.syntax_comment),
+                ("keyword", t.syntax_keyword),
+                ("string", t.syntax_string),
+                ("number", t.syntax_number),
+                ("function", t.syntax_function),
+                ("type", t.syntax_type),
+                ("variable", t.syntax_variable),
+                ("operator", t.syntax_operator),
+            ] {
+                check(t, &format!("{name} on the editor"), token, editor, AA_LARGE);
+            }
+            check(t, "danger on the editor", t.danger, editor, AA_LARGE);
+            check(t, "danger on the results", t.danger, results, AA_LARGE);
+            for color in ConnectionColor::ALL {
+                let band = color.band(t).flatten(chrome);
+                check(t, "the titlebar's text", t.text, band, AA_TEXT);
+            }
+        }
+    }
+
+    #[test]
+    fn light_glass_text_planes_never_sit_below_the_frost() {
+        // Over a white desktop the frost composites lighter than its own tone,
+        // and a text plane tinted under that composite greys the window. At the
+        // floor that composite has a ceiling, and both text planes clear it.
+        for t in light_glass().map(|t| t.with_opacity(OPACITY_MIN)) {
+            let chrome = t.frost().flatten(WHITE).relative_luminance();
+            for (plane, tone) in [("editor", t.panel), ("results", t.bg)] {
+                assert!(
+                    tone.relative_luminance() > chrome,
+                    "{}: the {plane} tint greys the frost over a white desktop",
+                    t.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_dark_theme_is_listed_before_every_light_one() {
+        assert_eq!(Theme::default().name, "DBDelve Dark Glass");
+        let first_light = Theme::all()
+            .iter()
+            .position(|t| t.appearance == Appearance::Light)
+            .unwrap();
+        assert!(
+            Theme::all()[first_light..]
+                .iter()
+                .all(|t| t.appearance == Appearance::Light)
+        );
+    }
+
+    #[test]
+    fn a_theme_stored_under_its_pre_light_glass_name_is_still_restored() {
+        // Asserted to exist by name too: an unknown name restores the default,
+        // which is what "DBDelve Glass" maps to, so restoring it alone proves
+        // nothing.
+        for (old, new) in RENAMED_THEMES {
+            assert!(Theme::all().iter().any(|t| t.name == new), "{new}");
+            assert_eq!(restored_theme(Some(old)).name, new);
+        }
+        assert_eq!(
+            restored_theme(Some("gruvbox glass")).name,
+            "Gruvbox Dark Glass"
+        );
+        assert_eq!(restored_theme(Some("Dracula Glass")).name, "Dracula Glass");
     }
 
     #[test]

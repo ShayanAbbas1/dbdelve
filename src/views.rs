@@ -44,16 +44,13 @@ use crate::{
         StructureState, Tab, query_label, result_pane_is_expanded,
     },
     tab_drag::{DragTab, TabStrip},
-    theme::{
-        FontSlot, OPACITY_DEFAULT, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
-        theme,
-    },
+    theme::{FontSlot, OPACITY_DEFAULT, OPACITY_MAX, OPACITY_STEP, Theme, fonts, layout, theme},
     ui::{
         Control, Tone, button, button_label, compact_count, dialog, group_thousands, icon_button,
         key_hint, keycap_for, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
         section_label,
     },
-    workspace::{FONT_SIZE_STEP, SettingsTab, error_in_buffer, font_size_range},
+    workspace::{FONT_SIZE_STEP, SettingsTab, error_in_buffer, font_size_range, opacity_percent},
 };
 
 /// What the row panel needs that is not part of any one tab: whether it is
@@ -2689,17 +2686,19 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         workspace.open_palette(PaletteMode::Theme, window, cx);
     });
 
+    // Whole percents, as the field reads: a step can land on 0.77000004, and
+    // comparing that f32 to a bound would leave a button live that does nothing.
+    let opacity = opacity_percent(t.painted_opacity());
     // Disabled wholesale on an opaque theme rather than hidden: the setting is
     // still remembered, it is just that a theme which paints its own chrome
     // has no desktop behind it for this to let through.
-    let opacity = workspace.settings.opacity;
     let transparency = div()
         .flex()
         .items_center()
         .gap(px(layout::SPACE_SM))
         .child(
             button("opacity-down", "−", Tone::Quiet, Control::Compact, t)
-                .disabled(!t.is_glass || opacity <= OPACITY_MIN)
+                .disabled(!t.is_glass || opacity <= opacity_percent(t.opacity_min()))
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                     workspace.step_opacity(-OPACITY_STEP, window, cx);
                 })),
@@ -2725,7 +2724,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         )
         .child(
             button("opacity-up", "+", Tone::Quiet, Control::Compact, t)
-                .disabled(!t.is_glass || opacity >= OPACITY_MAX)
+                .disabled(!t.is_glass || opacity >= opacity_percent(OPACITY_MAX))
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                     workspace.step_opacity(OPACITY_STEP, window, cx);
                 })),
