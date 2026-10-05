@@ -652,6 +652,7 @@ impl Workspace {
             .id("welcome-scroll")
             .size_full()
             .overflow_y_scroll()
+            .smooth_scroll(&smooth_scoped("welcome-scroll", "welcome", cx))
             .p(px(layout::SPACE_LG))
             .flex()
             .flex_col()
