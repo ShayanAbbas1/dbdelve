@@ -1255,6 +1255,10 @@ fn render_results(
                 .on_action(cx.listener(Workspace::open_reference))
                 .on_action(cx.listener(Workspace::show_references))
                 .child(DataTable::new(results).bordered(false).stripe(false))
+                .on_prepaint({
+                    let results = results.clone();
+                    move |_, _, cx| results.update(cx, result_grid::keep_active_in_view)
+                })
         })
         .into_any_element();
 
