@@ -339,8 +339,9 @@ cargo run
 ```
 
 Linux needs the system packages listed in `README.md` first (the same list CI
-installs). The app opens the connection form when no `PG*` environment is
-configured. The repository-owned development databases accept:
+installs). With no saved connection and no `PG*` environment configured, the
+app opens on its welcome surface, where New connection takes one of the URLs
+below. The repository-owned development databases accept:
 
 ```text
 postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
@@ -1037,8 +1038,23 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   project, every group with a match shows open, the rest hide, and up/down
   move a selection Enter opens (`searched_connections` lists matches in
   display order). Tabs, saved queries and history stay per
-  profile, which is what keeps projects from mixing state. A new connection joins the project its
-  form was opened for (`ConnectionForm::project`).
+  profile, which is what keeps projects from mixing state. A project may hold
+  no connections. The connection form's Project control
+  (`Workspace::project_dropdown`) picks the project, new and edit alike: a new
+  connection starts in the project its form was opened for
+  (`ConnectionForm::project`), an edited one in its own, and "New project…"
+  names one that saving makes, or joins if the name is taken
+  (`projects::chosen_project`). File → New Project (`NewProject`, no default
+  chord) names a project in the switcher, or on the welcome surface below
+  while there is no connection; an empty project in the switcher offers Add a
+  connection in place of members.
+- **No connection is a state, not a prompt.** With no profiles and no form
+  open, the window is the welcome surface (`Workspace::render_welcome`): New
+  project, New connection, and each project with an Add connection of its own.
+  Nothing forces a connection on a first launch, the form can always be
+  cancelled, and removing the last connection lands back there. `note` writes
+  to `welcome_notice` while it is in front, and the window's own focus is
+  taken back there whenever nothing in it holds any.
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.
