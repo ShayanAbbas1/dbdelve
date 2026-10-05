@@ -574,8 +574,16 @@ impl Workspace {
                 projects.push(name_field(input));
                 continue;
             }
-            let add_workspace = workspace.clone();
-            let name = project.name.clone();
+            let add = {
+                let workspace = workspace.clone();
+                let name = project.name.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.new_connection_in(Some(name.clone()), window, cx);
+                    });
+                }
+            };
+            let add_from_row = add.clone();
             projects.push(
                 switcher_row(("welcome-project", index), t)
                     .group(format!("project-row-{index}"))
@@ -611,11 +619,12 @@ impl Workspace {
                             t,
                         )
                         .on_click(move |_, window, cx| {
-                            _ = add_workspace.update(cx, |workspace, cx| {
-                                workspace.new_connection_in(Some(name.clone()), window, cx);
-                            });
+                            // The row would open the same form again.
+                            cx.stop_propagation();
+                            add(window, cx);
                         }),
                     )
+                    .on_click(move |_, window, cx| add_from_row(window, cx))
                     .into_any_element(),
             );
         }
