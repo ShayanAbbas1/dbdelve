@@ -681,7 +681,7 @@ impl Workspace {
                     .children(self.welcome_notice.clone().map(|message| {
                         div()
                             .text_size(px(layout::TEXT_SM))
-                            .text_color(t.danger)
+                            .text_color(t.text_muted)
                             .child(message)
                     }))
                     .when(!projects.is_empty(), |card| {
