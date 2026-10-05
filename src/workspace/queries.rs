@@ -313,6 +313,11 @@ impl Workspace {
             .profile()
             .map(|profile| profile.mode)
             .unwrap_or_default();
+        let client_keys = self
+            .profile()
+            .and_then(|profile| profile.session.sorting(tab))
+            .and_then(Sorting::client_keys)
+            .map(<[SortKey]>::to_vec);
         let (step, extra, dropped) = {
             let Some(profile) = self.profile_mut() else {
                 return;
@@ -386,11 +391,15 @@ impl Workspace {
         };
 
         for (grid, set) in extra {
-            // No sort and no layout to carry over: a header click reads the
-            // statement in the buffer, and this set is not the one the buffer
-            // names. A multi-set batch is uneditable, so there is no target.
+            // The server's sort is not carried over -- a header click reads
+            // the statement in the buffer, and this set is not the one the
+            // buffer names -- but the view's in-memory keys are, and there is
+            // no layout to carry. A multi-set batch is uneditable, so there is
+            // no target.
             grid.update(cx, |table, cx| {
-                *table.delegate_mut() = ResultGrid::new(set, mode).with_engine(engine);
+                *table.delegate_mut() = ResultGrid::new(set, mode)
+                    .with_engine(engine)
+                    .with_client_sort(client_keys.as_deref());
                 table.refresh(cx);
             });
         }
@@ -884,6 +893,7 @@ impl Workspace {
                 queued_results: 0,
             },
             self.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );
@@ -986,6 +996,7 @@ impl Workspace {
                 queued_results: 0,
             },
             self.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );
@@ -1399,6 +1410,14 @@ impl Workspace {
                         // this field -- but the mode a result lands under has to
                         // be the mode at landing time, not a stale default.
                         let mode = profile.mode;
+                        // Read before `slot` for the same reason. A view sorted
+                        // in memory is sorted again as its rows land: a page
+                        // turn or a re-run hands them back in the server's order.
+                        let client_keys = profile
+                            .session
+                            .sorting(tab)
+                            .and_then(Sorting::client_keys)
+                            .map(<[SortKey]>::to_vec);
                         // Before `slot`: a tab closed mid-run still ran on the
                         // session that died.
                         if lost {
@@ -1470,6 +1489,7 @@ impl Workspace {
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
                                         .with_engine(engine)
                                         .with_sort(sort, sortable)
+                                        .with_client_sort(client_keys.as_deref())
                                         .with_layout(names, widths);
                                     // Rows kept through a refresh kept their
                                     // selection too, and its index now names

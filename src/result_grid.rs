@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use gpui::{
@@ -18,7 +19,7 @@ use crate::{
     db::{self, EditTarget, QueryResult},
     export::{self, RowsAs},
     icons::icon,
-    sql::Mode,
+    sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
     theme::{ConnectionColor, color::Srgb, layout, theme},
     ui::{Control, Tone, icon_button},
@@ -83,13 +84,17 @@ pub struct ResultGrid {
     /// Per column, read for every visible cell on every frame, and
     /// `db::is_numeric_type` lowercases the type name to answer.
     numeric: Vec<bool>,
-    /// The `ORDER BY` the rows arrived in, as column indices: the server did
-    /// the sorting, so this is a readout of the statement that ran, not a state
-    /// the grid can change on its own.
+    /// The keys the rows are in order by, as column indices: a readout of the
+    /// statement's `ORDER BY` when the server sorted them, or the view's own
+    /// keys when `sort_in_memory` did.
     sort: Vec<(usize, bool)>,
     /// Whether a header click can sort this result at all. A control that does
     /// nothing is worse than no control.
     sortable: bool,
+    /// Where each row held sat in the result the server sent, for a sort in
+    /// memory to break ties by and to return to when its last key is clicked
+    /// away. Empty until the first such sort, which is every row where it was.
+    fetched: Vec<usize>,
     /// The cell a keystroke acts on. dbdelve's, not the library's: gpui-component
     /// tracks a selected row *or* a selected column as mutually exclusive
     /// modes and never a cell, so a coordinate has to be assembled here or
@@ -100,9 +105,10 @@ pub struct ResultGrid {
     /// How wide the scrolling columns were laid out last frame, for
     /// `keep_active_in_view`.
     laid_out_width: Pixels,
-    /// What the user has changed and not yet applied. `result.rows` is never
-    /// written, so the grid can always show pending against as-fetched and
-    /// discarding is dropping this.
+    /// What the user has changed and not yet applied. No value in
+    /// `result.rows` is ever written -- a sort in memory moves whole rows, and
+    /// these with them -- so the grid can always show pending against
+    /// as-fetched and discarding is dropping this.
     ///
     /// ponytail: a linear scan per visible cell per frame, over the handful of
     /// cells one person edits between applies. A map keyed by `(row, col)` is
@@ -190,6 +196,32 @@ pub enum NewValue {
     Default,
 }
 
+/// What a non-NULL cell sorts as. Numbers rank ahead of text, so a document
+/// field holding both, or a number column holding a value that does not read
+/// as one, still has one order to be put in.
+enum SortValue<'a> {
+    Number(f64),
+    Text(&'a str),
+}
+
+impl SortValue<'_> {
+    /// Total, as `sort_by` needs: `total_cmp` places NaN rather than refusing
+    /// to compare it.
+    fn order(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Number(a), Self::Number(b)) => a.total_cmp(b),
+            // Case folded, so a column of names does not put every capital
+            // ahead of every lowercase letter.
+            (Self::Text(a), Self::Text(b)) => a
+                .chars()
+                .flat_map(char::to_lowercase)
+                .cmp(b.chars().flat_map(char::to_lowercase)),
+            (Self::Number(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
 /// One changed cell, held beside the fetched value rather than over it.
 struct PendingEdit {
     row: usize,
@@ -260,6 +292,7 @@ impl ResultGrid {
             columns,
             sort: Vec::new(),
             sortable: false,
+            fetched: Vec::new(),
             result,
             numeric,
             active: None,
@@ -297,6 +330,23 @@ impl ResultGrid {
         self.sort = sort;
         self.sortable = sortable;
         self
+    }
+
+    /// A view's sort in memory, applied to rows that have just arrived. The
+    /// keys name columns as `filter::sort_expression` writes them, so each
+    /// finds its column in this result by name, and a key whose column is gone
+    /// orders nothing. `None` is a view the server sorts, which keeps the
+    /// readout `with_sort` gave it.
+    pub fn with_client_sort(mut self, keys: Option<&[SortKey]>) -> Self {
+        if let Some(keys) = keys {
+            let order = crate::filter::sort_columns(self.engine, keys, &self.result.columns);
+            self.sort_in_memory(order);
+        }
+        self
+    }
+
+    pub fn sort(&self) -> &[(usize, bool)] {
+        &self.sort
     }
 
     /// A grid read back from a snapshot.
@@ -402,6 +452,7 @@ impl ResultGrid {
             total_rows: self.total_rows(),
             sort: self.sort.clone(),
             order_by: Vec::new(),
+            client_sort: None,
             widths: self
                 .columns
                 .iter()
@@ -706,6 +757,109 @@ impl ResultGrid {
             })
             .collect()
     }
+
+    /// What a cell sorts as, `None` for a NULL or a missing field. A column
+    /// the server typed as a number, or a document's numeric field, sorts by
+    /// value; one typed as anything else sorts as its text, as the server's
+    /// own `ORDER BY` would; one nothing typed sorts by value wherever the
+    /// text reads as a number.
+    ///
+    /// Dates and times sort as text: every engine renders them year first and
+    /// zero-padded, so text order is time order.
+    ///
+    /// ponytail: not for BC dates or a column mixing UTC offsets, and `f64`
+    /// ties integers past 2^53 that differ only in their last digits (they
+    /// keep the server's order). Parse those properly if anyone sorts them in
+    /// memory.
+    fn sort_value(&self, row: usize, col: usize) -> Option<SortValue<'_>> {
+        let text = self.cell(row, col)?;
+        let tag = self
+            .result
+            .cell_types
+            .get(row)
+            .and_then(|types| types.get(col));
+        let numeric = match (tag, self.column_type(col)) {
+            (Some(tag), _) => db::is_numeric_type(tag),
+            (None, Some(_)) => self.is_numeric_column(col),
+            (None, None) => true,
+        };
+        if numeric && let Ok(number) = text.trim().parse() {
+            return Some(SortValue::Number(number));
+        }
+        Some(SortValue::Text(text))
+    }
+
+    /// Where the server put the row this grid now holds at `row`.
+    fn fetched_at(&self, row: usize) -> usize {
+        self.fetched.get(row).copied().unwrap_or(row)
+    }
+
+    /// The rows in `keys`' order, as indices into the rows as they stand.
+    /// Ties keep the order the server sent the rows in, and with no keys every
+    /// row does, which is how a sort clicked away undoes itself.
+    ///
+    /// NULL goes last whichever way a key points: an absent value is not a
+    /// small one, and a descending sort that opens on a screen of NULLs has
+    /// buried what it was asked for.
+    fn client_order(&self, keys: &[(usize, bool)]) -> Vec<usize> {
+        // Read once per row rather than once per comparison: parsing a number
+        // n log n times over is most of the cost of a sort.
+        let values: Vec<Vec<Option<SortValue<'_>>>> = (0..self.result.rows.len())
+            .map(|row| {
+                keys.iter()
+                    .map(|&(col, _)| self.sort_value(row, col))
+                    .collect()
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        order.sort_by(|&a, &b| {
+            keys.iter()
+                .zip(values[a].iter().zip(&values[b]))
+                .map(|(&(_, ascending), pair)| match pair {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Greater,
+                    (Some(_), None) => Ordering::Less,
+                    (Some(x), Some(y)) if ascending => x.order(y),
+                    (Some(x), Some(y)) => y.order(x),
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or_else(|| self.fetched_at(a).cmp(&self.fetched_at(b)))
+        });
+        order
+    }
+
+    /// Put the rows held here in `keys`' order. Nothing is fetched or run:
+    /// this is a view sorted in memory, which a header click there and every
+    /// result landing in it both come through.
+    ///
+    /// Pending edits move with their rows, since they are what the user typed
+    /// against those rows. The ring, the row selection and an open input are
+    /// dropped, as a sort the server runs drops them by replacing the grid:
+    /// each names a position, and a different row is there now.
+    pub fn sort_in_memory(&mut self, keys: Vec<(usize, bool)>) {
+        let order = self.client_order(&keys);
+        let mut moved_to = vec![0; order.len()];
+        for (to, &from) in order.iter().enumerate() {
+            moved_to[from] = to;
+        }
+        self.fetched = order.iter().map(|&row| self.fetched_at(row)).collect();
+        reorder(&mut self.result.rows, &order);
+        // All or none, as a snapshot restores them.
+        if self.result.cell_types.len() == order.len() {
+            reorder(&mut self.result.cell_types, &order);
+        }
+        for edit in &mut self.pending {
+            edit.row = moved_to[edit.row];
+        }
+        self.active = None;
+        self.editing = None;
+        self.pointer_row = None;
+        self.clear_row_selection();
+        self.sort = keys;
+        // A sort in memory asks nothing of the statement, so every header
+        // takes a click.
+        self.sortable = true;
+    }
 }
 
 /// The editing half of the grid: what the user has changed, and not one
@@ -816,10 +970,10 @@ impl ResultGrid {
 
     /// The same fold for a column change, keeping the row. A header click lands
     /// here too, and is deliberately not special-cased: on a sortable result
-    /// the sort re-runs and replaces this delegate wholesale, so the ring is
-    /// dropped either way, and on one that cannot be sorted the ring sitting at
-    /// the top of the column the user just pointed at is where their last
-    /// action was.
+    /// a sort drops the ring either way -- the server's by replacing this
+    /// delegate wholesale, one in memory in `sort_in_memory` -- and on one
+    /// that cannot be sorted the ring sitting at the top of the column the
+    /// user just pointed at is where their last action was.
     pub fn select_col(&mut self, col: usize) {
         self.set_active(self.active.map_or(0, |(row, _)| row), col);
     }
@@ -836,6 +990,15 @@ impl ResultGrid {
             self.editing = None;
         }
         self.active = Some((row, col));
+    }
+
+    /// `sort_in_memory` for rows a snapshot restored already in `keys`' order.
+    /// The sort is then a no-op on positions, so the restored ring still names
+    /// the cell it did.
+    pub fn sort_restored_in_memory(&mut self, keys: Vec<(usize, bool)>) {
+        let active = self.active;
+        self.sort_in_memory(keys);
+        self.active = active;
     }
 
     /// Called whenever the connection's mode changes, so a grid that was
@@ -1491,6 +1654,15 @@ fn clip_to(value: &str, limit: usize) -> String {
     }
 }
 
+/// `items` in `order`, where `order` holds each index exactly once.
+fn reorder<T: Default>(items: &mut Vec<T>, order: &[usize]) {
+    let mut taken = std::mem::take(items);
+    *items = order
+        .iter()
+        .map(|&index| std::mem::take(&mut taken[index]))
+        .collect();
+}
+
 impl TableDelegate for ResultGrid {
     fn columns_count(&self, _: &App) -> usize {
         self.columns.len() + GUTTER
@@ -1809,9 +1981,9 @@ impl ResultGrid {
                             .child((position + 1).to_string())
                     })),
             )
-            // The click goes to the workspace, which owns the statement: a sort
-            // is a change to the SQL and a re-run, not a reordering of rows the
-            // grid happens to be holding.
+            // The click goes to the workspace, which knows whether this view
+            // is sorted by the server -- a change to the SQL and a re-run --
+            // or in memory.
             .on_click(cx.listener(move |_, _, window, cx| {
                 window.dispatch_action(Box::new(crate::SortColumn { column: col_ix }), cx);
             }))
@@ -2142,10 +2314,6 @@ pub(crate) fn new_grid(
 ) -> Entity<TableState<ResultGrid>> {
     let grid = cx.new(|cx| {
         TableState::new(ResultGrid::empty(), window, cx)
-            // Sorting is the grid's own, over the rows it already holds. It
-            // never re-runs the statement, so the rows on screen stay the one
-            // snapshot the server sent.
-            .sortable(true)
             .col_movable(false)
             .col_resizable(true)
             .row_selectable(true)
@@ -2211,11 +2379,46 @@ mod tests {
         NewValue::Value(text.into())
     }
 
-    /// A grid over one column of cells, which is enough to order rows by.
+    #[test]
+    fn a_sort_in_memory_follows_its_column_by_name_into_the_next_result() {
+        // The re-run moved `b` to the front and dropped `c`: the key on `b`
+        // still finds it, and the one on `c` orders nothing rather than some
+        // other column that now sits where `c` was.
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("b", "int4"), typed("a", "int4")],
+                rows: vec![
+                    vec![Some("1".into()), Some("9".into())],
+                    vec![Some("2".into()), Some("8".into())],
+                ],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres)
+        .with_client_sort(Some(&[
+            SortKey::new("\"c\"", true),
+            SortKey::new("\"b\"", false),
+        ]));
+
+        assert_eq!(grid.sort, vec![(0, false)]);
+        assert_eq!(grid.cell(0, 0), Some("2"));
+        assert!(grid.sortable);
+    }
+
+    /// A grid over one column of untyped cells, which is enough to order rows by.
     fn grid_of(values: &[Option<&str>]) -> ResultGrid {
+        typed_column(None, values)
+    }
+
+    /// A grid over one column named `a`, typed `data_type`.
+    fn typed_column(data_type: Option<&str>, values: &[Option<&str>]) -> ResultGrid {
         ResultGrid::new(
             QueryResult {
-                columns: vec![column("a")],
+                columns: vec![DbColumn {
+                    name: "a".into(),
+                    data_type: data_type.map(str::to_string),
+                }],
                 rows: values
                     .iter()
                     .map(|value| vec![value.map(str::to_string)])
@@ -2224,6 +2427,127 @@ mod tests {
             },
             Mode::ReadWrite,
         )
+    }
+
+    /// Column 0's cells in the order `keys` puts the rows in.
+    fn sorted<'a>(grid: &'a ResultGrid, keys: &[(usize, bool)]) -> Vec<Option<&'a str>> {
+        grid.client_order(keys)
+            .into_iter()
+            .map(|row| grid.cell(row, 0))
+            .collect()
+    }
+
+    #[test]
+    fn a_number_column_sorts_by_value_and_a_text_column_by_its_text() {
+        let values = [Some("10"), Some("9"), Some("-2.5"), Some("100")];
+        let by_value = [Some("-2.5"), Some("9"), Some("10"), Some("100")];
+        assert_eq!(
+            sorted(&typed_column(Some("int4"), &values), &[(0, true)]),
+            by_value
+        );
+        // What the server's own ORDER BY on a text column would say.
+        assert_eq!(
+            sorted(&typed_column(Some("text"), &values), &[(0, true)]),
+            [Some("-2.5"), Some("10"), Some("100"), Some("9")]
+        );
+        // Nothing says what the column is, so a value that reads as a number is one.
+        assert_eq!(sorted(&typed_column(None, &values), &[(0, true)]), by_value);
+    }
+
+    #[test]
+    fn null_sorts_last_whichever_way_the_key_points() {
+        let grid = typed_column(Some("int4"), &[None, Some("2"), Some("1")]);
+        assert_eq!(sorted(&grid, &[(0, true)]), [Some("1"), Some("2"), None]);
+        assert_eq!(sorted(&grid, &[(0, false)]), [Some("2"), Some("1"), None]);
+    }
+
+    #[test]
+    fn text_sorts_without_regard_to_case_and_dates_sort_as_written() {
+        let names = typed_column(
+            Some("text"),
+            &[Some("beta"), Some("Alpha"), Some("alpha2"), Some("Gamma")],
+        );
+        assert_eq!(
+            sorted(&names, &[(0, true)]),
+            [Some("Alpha"), Some("alpha2"), Some("beta"), Some("Gamma")]
+        );
+
+        let times = typed_column(
+            Some("timestamptz"),
+            &[
+                Some("2024-10-02 09:00:00+00"),
+                Some("2023-12-31 23:59:59+00"),
+                Some("2024-10-02 10:00:00+00"),
+            ],
+        );
+        assert_eq!(
+            sorted(&times, &[(0, true)]),
+            [
+                Some("2023-12-31 23:59:59+00"),
+                Some("2024-10-02 09:00:00+00"),
+                Some("2024-10-02 10:00:00+00"),
+            ]
+        );
+    }
+
+    #[test]
+    fn special_floats_and_mixed_fields_still_have_one_order() {
+        // `sort_by` may panic on a comparison that is not a total order, and
+        // NaN is where a naive float comparison stops being one.
+        let floats = typed_column(
+            Some("float8"),
+            &[Some("NaN"), Some("1"), Some("-Infinity"), Some("Infinity")],
+        );
+        assert_eq!(
+            sorted(&floats, &[(0, true)]),
+            [Some("-Infinity"), Some("1"), Some("Infinity"), Some("NaN")]
+        );
+
+        // A document field: numbers by value first, then text, then the
+        // field a document does not have. The string "10" is text.
+        let field = ResultGrid::new(
+            QueryResult {
+                columns: vec![DbColumn {
+                    name: "v".into(),
+                    data_type: Some("mixed".into()),
+                }],
+                rows: vec![
+                    vec![Some("b".into())],
+                    vec![Some("10".into())],
+                    vec![None],
+                    vec![Some("9".into())],
+                    vec![Some("10".into())],
+                ],
+                cell_types: vec![
+                    vec!["string"],
+                    vec!["int"],
+                    vec![db::MISSING],
+                    vec!["double"],
+                    vec!["string"],
+                ],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert_eq!(field.client_order(&[(0, true)]), [3, 1, 4, 0, 2]);
+    }
+
+    #[test]
+    fn later_keys_break_earlier_ties_and_full_ties_keep_the_servers_order() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("team", "text"), typed("score", "int4")],
+                rows: [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
+                    .iter()
+                    .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
+                    .collect(),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        // Rows 1 and 3 tie on both keys, so they stay in the order they came.
+        assert_eq!(grid.client_order(&[(0, true), (1, false)]), [1, 3, 2, 0]);
+        assert_eq!(grid.client_order(&[]), [0, 1, 2, 3]);
     }
 
     /// A grid over `id, note, total` where `id` is the key, `note` is an alias
@@ -2630,6 +2954,7 @@ mod tests {
                 total_rows: 20_000,
                 sort: Vec::new(),
                 order_by: Vec::new(),
+                client_sort: None,
                 widths: Vec::new(),
                 active: None,
                 last_query: None,
@@ -3786,5 +4111,125 @@ mod tests {
             "row should be short, not padded"
         );
         assert!(grid.shown(9, 9).is_none());
+    }
+
+    #[test]
+    fn an_in_memory_sort_carries_pending_edits_with_their_rows() {
+        // The edit is what the user typed against id 7's row. Left at index
+        // 0 it would be applied to id 8, which the sort put there.
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(0, 1, value("changed")));
+
+        grid.sort_in_memory(vec![(0, false)]);
+
+        assert_eq!(grid.cell(0, 0), Some("8"));
+        assert_eq!(
+            grid.pending_at(1, 1).map(|edit| edit.value.clone()),
+            Some(value("changed"))
+        );
+        assert!(grid.pending_at(0, 1).is_none());
+        let updates = grid.pending_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].keys, vec![("id".to_string(), "7".to_string())]);
+    }
+
+    #[test]
+    fn clicking_the_last_key_away_puts_the_rows_back_in_the_order_they_came() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "int4"), typed("tag", "text")],
+                rows: [("2", "x"), ("3", "y"), ("1", "x")]
+                    .iter()
+                    .map(|(n, tag)| vec![Some(n.to_string()), Some(tag.to_string())])
+                    .collect(),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+
+        grid.sort_in_memory(vec![(1, true)]);
+        // The two `x` rows tie, and keep the server's order between them.
+        assert_eq!(column_values(&grid, 0), [Some("2"), Some("1"), Some("3")]);
+        grid.sort_in_memory(vec![(1, true), (0, false)]);
+        grid.sort_in_memory(Vec::new());
+        assert_eq!(column_values(&grid, 0), [Some("2"), Some("3"), Some("1")]);
+    }
+
+    /// One column's cells, top to bottom.
+    fn column_values(grid: &ResultGrid, col: usize) -> Vec<Option<&str>> {
+        (0..grid.result.rows.len())
+            .map(|row| grid.cell(row, col))
+            .collect()
+    }
+
+    #[test]
+    fn an_in_memory_sort_moves_each_cells_type_with_its_row() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![DbColumn {
+                    name: "v".into(),
+                    data_type: Some("mixed".into()),
+                }],
+                rows: vec![vec![None], vec![Some("1".into())]],
+                cell_types: vec![vec![db::MISSING], vec!["int"]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+
+        grid.sort_in_memory(vec![(0, true)]);
+
+        assert_eq!(grid.cell(0, 0), Some("1"));
+        assert!(!grid.missing(0, 0));
+        assert!(grid.missing(1, 0));
+    }
+
+    #[test]
+    fn an_in_memory_sort_drops_the_ring_and_the_selection_and_lights_every_header() {
+        // Each names a position, and a different row is there now -- the same
+        // reason a sort the server runs drops them by replacing the grid.
+        let mut grid = four_row_grid();
+        grid.set_active(2, 0);
+        grid.click_row(1, false, false);
+        grid.editing = Some(Editing {
+            row: 2,
+            col: 0,
+            input: None,
+        });
+
+        grid.sort_in_memory(vec![(0, false)]);
+
+        assert_eq!(grid.active, None);
+        assert!(grid.editing.is_none());
+        assert!(grid.selected_row_indices().is_empty());
+        assert_eq!(grid.sort, vec![(0, false)]);
+        assert!(grid.sortable);
+        assert_eq!(grid.cell(0, 0), Some("3"));
+    }
+
+    #[test]
+    fn a_snapshot_of_rows_sorted_in_memory_keeps_the_order_on_screen() {
+        let mut grid = four_row_grid();
+        grid.sort_in_memory(vec![(0, false)]);
+
+        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+
+        assert_eq!(restored.result.rows, grid.result.rows);
+        assert_eq!(restored.cell(0, 0), Some("3"));
+        assert_eq!(restored.sort, vec![(0, false)]);
+    }
+
+    #[test]
+    fn re_sorting_restored_rows_keeps_the_active_cell() {
+        let mut grid = four_row_grid();
+        grid.sort_in_memory(vec![(0, false)]);
+        grid.set_active(2, 0);
+
+        let mut restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+        assert_eq!(restored.active(), Some((2, 0)));
+        restored.sort_restored_in_memory(vec![(0, false)]);
+
+        assert_eq!(restored.active(), Some((2, 0)));
+        assert_eq!(restored.result.rows, grid.result.rows);
     }
 }

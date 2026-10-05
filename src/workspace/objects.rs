@@ -65,6 +65,7 @@ impl Workspace {
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let preview_rows = self.settings.preview_rows;
+        let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
         let profile = self.profile_mut()?;
         let existing = matching_tab(
@@ -99,6 +100,7 @@ impl Workspace {
                     results: result_grid::new_grid(window, cx),
                     query: QueryState::Idle,
                     sort: Vec::new(),
+                    sorting,
                     filter,
                     filters,
                     next_join: Conjunction::default(),
@@ -955,7 +957,18 @@ impl Workspace {
         else {
             return;
         };
-        show_snapshot(&results, &snapshot, mode, self.engine(), cx);
+        let engine = self.engine();
+        show_snapshot(&results, &snapshot, mode, engine, cx);
+        // The snapshot holds the rows already in this order. Sorted again so
+        // the headers take a click, which a restored grid's do not.
+        let sorting = Sorting::restored(snapshot.client_sort.as_deref());
+        if let Some(keys) = sorting.client_keys() {
+            results.update(cx, |table, cx| {
+                let order = sort_columns(engine, keys, table.delegate().columns());
+                table.delegate_mut().sort_restored_in_memory(order);
+                cx.notify();
+            });
+        }
         let preview_rows = self.settings.preview_rows;
         let Some(profile) = self.profile_mut() else {
             return;
@@ -1002,6 +1015,11 @@ impl Workspace {
                     *stale = true;
                 }
             }
+        }
+        // A snapshot from before views had a sorting reads as the server's,
+        // which is how that view sorted.
+        if let Some(view) = profile.session.sorting_mut(tab) {
+            *view = sorting;
         }
     }
 

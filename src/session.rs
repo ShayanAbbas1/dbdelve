@@ -357,12 +357,14 @@ pub(crate) enum StaleResume {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: String,
         stored_queries: Vec<store::StoredQueryTab>,
         stored_next_query_id: u64,
         pending_objects: Vec<store::StoredObject>,
         engine: Engine,
+        sorting: Sorting,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -427,7 +429,8 @@ impl Session {
         let queries = stored_queries
             .iter()
             .map(|stored| {
-                let (tab, failure) = QueryTab::restore(&id, stored, engine, window, cx);
+                let (tab, failure) =
+                    QueryTab::restore(&id, stored, engine, sorting.clone(), window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -625,6 +628,27 @@ impl Session {
         }
     }
 
+    /// Who orders one named tab's rows. `None` for a routine, which has none.
+    pub(crate) fn sorting(&self, tab: Tab) -> Option<&Sorting> {
+        match tab {
+            Tab::Query(id) => self.query_tab(id).map(|tab| &tab.sorting),
+            Tab::Object(id) => match &self.objects.iter().find(|tab| tab.id == id)?.body {
+                ObjectBody::Relation { sorting, .. } => Some(sorting),
+                ObjectBody::Routine(_) => None,
+            },
+        }
+    }
+
+    pub(crate) fn sorting_mut(&mut self, tab: Tab) -> Option<&mut Sorting> {
+        match tab {
+            Tab::Query(id) => self.query_tab_mut(id).map(|tab| &mut tab.sorting),
+            Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
+                ObjectBody::Relation { sorting, .. } => Some(sorting),
+                ObjectBody::Routine(_) => None,
+            },
+        }
+    }
+
     /// Every live grid this session holds, across both tab strips. `results`
     /// and `slot` reach one grid by tab; this reaches all of them, for a
     /// setting that belongs to the connection rather than to a run --
@@ -815,6 +839,75 @@ pub(crate) fn close_target(active: Tab, open_query: Option<&str>) -> CloseTarget
     }
 }
 
+/// Who orders a view's rows on a header click. Per view, because a table read
+/// a page at a time and a query whose rows are all here want different
+/// answers; a new view starts from the Default sorting setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sorting {
+    /// The click goes into the statement's `ORDER BY` and the statement runs
+    /// again, so the top of the sort is the table's, not the page's.
+    Server,
+    /// The click reorders the rows already held, by these keys: column
+    /// expressions as `filter::sort_expression` writes them, so they follow a
+    /// column by name into the next result. Nothing runs, and the statement
+    /// keeps whatever `ORDER BY` it had.
+    Client(Vec<SortKey>),
+}
+
+impl Sorting {
+    pub(crate) fn new(client: bool) -> Self {
+        match client {
+            true => Self::Client(Vec::new()),
+            false => Self::Server,
+        }
+    }
+
+    pub(crate) fn client_keys(&self) -> Option<&[SortKey]> {
+        match self {
+            Self::Client(keys) => Some(keys),
+            Self::Server => None,
+        }
+    }
+
+    /// Switch between the server and memory, carrying across `shown`, the
+    /// keys the rows on screen are in. Into memory they become the sort; into
+    /// the server they come back as what it must now be asked for, `None`
+    /// when there are none and nothing needs to run.
+    pub(crate) fn switch(&mut self, client: bool, shown: Vec<SortKey>) -> Option<Vec<SortKey>> {
+        match (client, &*self) {
+            (true, Self::Server) => {
+                *self = Self::Client(shown);
+                None
+            }
+            (false, Self::Client(_)) => {
+                *self = Self::Server;
+                (!shown.is_empty()).then_some(shown)
+            }
+            _ => None,
+        }
+    }
+
+    /// What a snapshot keeps: see `StoredGrid::client_sort`.
+    pub(crate) fn stored(&self) -> Option<Vec<(String, bool)>> {
+        self.client_keys().map(|keys| {
+            keys.iter()
+                .map(|key| (key.expression.clone(), key.ascending))
+                .collect()
+        })
+    }
+
+    pub(crate) fn restored(stored: Option<&[(String, bool)]>) -> Self {
+        match stored {
+            Some(keys) => Self::Client(
+                keys.iter()
+                    .map(|(expression, ascending)| SortKey::new(expression.clone(), *ascending))
+                    .collect(),
+            ),
+            None => Self::Server,
+        }
+    }
+}
+
 /// One query buffer, and everything that belongs to it.
 ///
 /// There used to be exactly one of these per profile, held directly on
@@ -874,6 +967,9 @@ pub(crate) struct QueryTab {
     /// user never looks at still reports what is on disk and keeps the prune
     /// off its files.
     pub(crate) queued_results: usize,
+    /// Who orders this tab's rows on a header click. Per tab rather than per
+    /// result: a queue's results are one view, read through one switcher.
+    pub(crate) sorting: Sorting,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
@@ -1005,6 +1101,7 @@ impl QueryTab {
         profile_id: &str,
         stored: &store::StoredQueryTab,
         engine: Engine,
+        sorting: Sorting,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1039,6 +1136,7 @@ impl QueryTab {
             // nothing of a run in flight is kept.
             queue: None,
             queued_results: stored.queued_results,
+            sorting,
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),
@@ -1270,6 +1368,10 @@ pub(crate) enum ObjectBody {
         /// The `ORDER BY` the header clicks have built up. dbdelve owns this
         /// statement, so sorting regenerates it rather than editing text.
         sort: Vec<SortKey>,
+        /// Who orders these rows on a header click. A sort in memory orders
+        /// this page alone, and is never written into `sort`, which is what
+        /// the statement is rebuilt from.
+        sorting: Sorting,
         /// The `WHERE` expression this preview narrows the relation by, without
         /// the keyword; empty means none. The fifth control of the same kind as
         /// the sort, the limit and the offset: a change regenerates the
@@ -1528,6 +1630,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             &store::query_grid_key(tab.id),
             &store::StoredGrid {
                 last_query: tab.last_query.clone(),
+                client_sort: tab.sorting.stored(),
                 ..grid
             },
         );
@@ -1538,6 +1641,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             results,
             query,
             sort,
+            sorting,
             filter,
             limit,
             showing_structure,
@@ -1564,6 +1668,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                     .iter()
                     .map(|key| (key.expression.clone(), key.ascending))
                     .collect(),
+                client_sort: sorting.stored(),
                 ..grid
             },
         );
@@ -1597,6 +1702,68 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn a_views_sorting_survives_its_snapshot_and_an_unsorted_client_view_stays_client() {
+        for sorting in [
+            Sorting::Server,
+            Sorting::Client(Vec::new()),
+            Sorting::Client(vec![
+                SortKey::new("\"name\"", false),
+                SortKey::new("2", true),
+            ]),
+        ] {
+            assert_eq!(Sorting::restored(sorting.stored().as_deref()), sorting);
+        }
+    }
+
+    #[test]
+    fn a_snapshot_and_settings_from_before_client_sorting_read_as_the_server() {
+        let grid: store::StoredGrid = serde_json::from_str(
+            r#"{"columns": ["id"], "rows": [["1"]], "total_rows": 1,
+                "sort": [[0, false]], "order_by": [["\"id\"", false]]}"#,
+        )
+        .expect("an older snapshot must still decode");
+        assert_eq!(
+            Sorting::restored(grid.client_sort.as_deref()),
+            Sorting::Server
+        );
+
+        let settings: store::StoredSettings =
+            toml::from_str("color_titlebar = true").expect("older settings must still decode");
+        assert_eq!(settings.client_sort, None);
+        assert_eq!(
+            Sorting::new(settings.client_sort.unwrap_or(false)),
+            Sorting::Server
+        );
+    }
+
+    #[test]
+    fn switching_sorting_carries_the_sort_on_screen_across() {
+        let shown = vec![SortKey::new("\"name\"", false)];
+
+        // Into memory: what the server sorted by becomes the sort.
+        let mut sorting = Sorting::Server;
+        assert_eq!(sorting.switch(true, shown.clone()), None);
+        assert_eq!(sorting, Sorting::Client(shown.clone()));
+        // Already there: nothing changes.
+        assert_eq!(sorting.switch(true, Vec::new()), None);
+        assert_eq!(sorting, Sorting::Client(shown.clone()));
+
+        // Out of memory: the server is asked for what is on screen, which
+        // leaves behind a key whose column a re-run dropped.
+        let mut stale = Sorting::Client(vec![SortKey::new("\"gone\"", true), shown[0].clone()]);
+        assert_eq!(stale.switch(false, shown.clone()), Some(shown.clone()));
+        assert_eq!(stale, Sorting::Server);
+
+        // Nothing sorted, nothing to ask for; and the server staying the
+        // server runs nothing.
+        let mut unsorted = Sorting::Client(Vec::new());
+        assert_eq!(unsorted.switch(false, Vec::new()), None);
+        assert_eq!(unsorted, Sorting::Server);
+        assert_eq!(unsorted.switch(false, shown), None);
+        assert_eq!(unsorted, Sorting::Server);
+    }
 
     #[test]
     fn a_scroll_scope_tells_apart_tabs_that_share_an_id() {
