@@ -1105,6 +1105,7 @@ impl Workspace {
                     let summary = workspace.add_imported(source, report, None, window, cx);
                     return workspace.note(summary, cx);
                 }
+                workspace.switcher_open = false;
                 workspace.pending_import = Some(PendingImport {
                     source,
                     report,

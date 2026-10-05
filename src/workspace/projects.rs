@@ -54,6 +54,11 @@ impl Workspace {
     /// Opens the switcher with only the group in front expanded, and its
     /// search field focused so typing filters straight away.
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The panel is deferred, so it would draw over the import's question
+        // and let the project it picked be renamed or deleted under it.
+        if self.pending_import.is_some() {
+            return;
+        }
         self.switcher_open = true;
         self.pending_removal = None;
         self.pending_project_deletion = None;
@@ -192,6 +197,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // As `open_switcher`: nothing is named while the import is asking.
+        if self.pending_import.is_some() {
+            return;
+        }
         self.close_settings(window, cx);
         // Opened afresh even when open, since a search hides the field.
         if !self.profiles.is_empty() {
