@@ -29,6 +29,10 @@ use crate::{
 /// megabytes for JSONB and PostGIS. The row inspector is where a whole value
 /// gets read; this is the visual-only clip the spec's §4.4 allows.
 const CELL_DISPLAY_LIMIT: usize = 300;
+/// How far `clip` reads into a value with line breaks before giving up on
+/// finding the rest of what it would show. Generous next to the limit, so an
+/// indented document still fills its cell.
+const CLIP_SCAN_LIMIT: usize = 16 * CELL_DISPLAY_LIMIT;
 
 /// ponytail: the inspector shows the value, not a column's worth of it -- but
 /// "the value" has to stop somewhere, because a multi-megabyte document laid
@@ -76,9 +80,9 @@ pub type RowKey = (String, String, Vec<(String, String)>);
 pub struct ResultGrid {
     columns: Vec<Column>,
     result: QueryResult,
-    /// Clipped, ref-counted copies built once per result set. `render_td` runs
-    /// for every visible cell on every frame, so it must not allocate.
-    display: Vec<Vec<Option<SharedString>>>,
+    /// Per column, read for every visible cell on every frame, and
+    /// `db::is_numeric_type` lowercases the type name to answer.
+    numeric: Vec<bool>,
     /// The `ORDER BY` the rows arrived in, as column indices: the server did
     /// the sorting, so this is a readout of the statement that ran, not a state
     /// the grid can change on its own.
@@ -104,8 +108,8 @@ pub struct ResultGrid {
     /// cells one person edits between applies. A map keyed by `(row, col)` is
     /// the upgrade path if that handful ever becomes thousands.
     pending: Vec<PendingEdit>,
-    /// The one cell showing an input, if any. At most one: every other cell
-    /// stays on the fast path that `display`'s no-allocation rule is about.
+    /// The one cell showing an input, if any. At most one: an input is a far
+    /// heavier thing to draw than the text every other cell paints.
     editing: Option<Editing>,
     /// When these rows were snapshotted, for a grid that came off disk.
     ///
@@ -135,8 +139,8 @@ pub struct ResultGrid {
     has_default: Vec<usize>,
     /// The hover group each key column's cells share, one per key column and
     /// built where the keys are marked. `render_td` runs for every visible cell
-    /// every frame under a no-allocation rule, and a group named there would be
-    /// a `format!` per cell per frame.
+    /// every frame, and a group named there would be a `format!` per cell per
+    /// frame.
     follow_groups: Vec<SharedString>,
     /// For each column another relation points at, the menu of those relations:
     /// an index into the structure's `referenced_by` and the label to show.
@@ -192,10 +196,10 @@ struct PendingEdit {
     col: usize,
     /// What will be written. Whole, because this is what the `UPDATE` carries.
     value: NewValue,
-    /// What the column paints, clipped for the same reason `display` is, and
-    /// absent for either keyword for the same reason a fetched NULL's display
-    /// cell is: the cell already paints the keyword in italics, and a second
-    /// spelling of it on screen is one too many.
+    /// What the column paints, clipped the way a fetched value is, and absent
+    /// for either keyword for the same reason a fetched NULL is: the cell
+    /// already paints the keyword in italics, and a second spelling of it on
+    /// screen is one too many.
     shown: Option<SharedString>,
 }
 
@@ -230,25 +234,10 @@ impl ResultGrid {
     }
 
     pub fn new(result: QueryResult, mode: Mode) -> Self {
-        let numeric: Vec<bool> = result
+        let numeric = result
             .columns
             .iter()
             .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
-            .collect();
-        let display: Vec<Vec<Option<SharedString>>> = result
-            .rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .map(|(col, cell)| {
-                        cell.as_deref().map(|value| match numeric.get(col) {
-                            Some(true) => clip(&grouped_digits(value)).into(),
-                            _ => clip(value).into(),
-                        })
-                    })
-                    .collect()
-            })
             .collect();
         let columns = result
             .columns
@@ -272,7 +261,7 @@ impl ResultGrid {
             sort: Vec::new(),
             sortable: false,
             result,
-            display,
+            numeric,
             active: None,
             laid_out_width: Pixels::ZERO,
             pending: Vec::new(),
@@ -655,6 +644,23 @@ impl ResultGrid {
         self.result.rows.get(row_ix)?.get(col_ix)?.as_deref()
     }
 
+    /// What a fetched cell paints, worked out as it is drawn rather than kept:
+    /// a clipped copy of every cell held a second copy of most of a result,
+    /// and cost a pass over all of it before the first frame, when only the
+    /// cells on screen are ever drawn.
+    ///
+    /// A number too long to show whole is left ungrouped: grouping copies the
+    /// entire value, and a `numeric` can run to 131,072 digits, which would be
+    /// copied again on every frame it is on screen.
+    fn shown(&self, row_ix: usize, col_ix: usize) -> Option<SharedString> {
+        let value = self.cell(row_ix, col_ix)?;
+        let shown = match self.is_numeric_column(col_ix) && value.len() <= CELL_DISPLAY_LIMIT {
+            true => clip(&grouped_digits(value)),
+            false => clip(value),
+        };
+        Some(shown.into())
+    }
+
     /// Whether the row has no such field at all: a document store's absent
     /// field, which paints as nothing rather than as a NULL it does not hold.
     fn missing(&self, row_ix: usize, col_ix: usize) -> bool {
@@ -730,7 +736,7 @@ impl ResultGrid {
     }
 
     /// What the server returned, whole: the rows an export writes out, and not
-    /// the clipped `display` strings the columns had room for. Pending edits are
+    /// the clipped strings the columns had room for. Pending edits are
     /// not folded in, because this is the result set, not the grid's view of it.
     pub fn result(&self) -> &QueryResult {
         &self.result
@@ -884,11 +890,7 @@ impl ResultGrid {
     }
 
     fn is_numeric_column(&self, col: usize) -> bool {
-        self.result
-            .columns
-            .get(col)
-            .and_then(|column| column.data_type.as_deref())
-            .is_some_and(db::is_numeric_type)
+        self.numeric.get(col).copied().unwrap_or(false)
     }
 
     /// Whether the cell menu offers each of the three staged values. Written
@@ -991,7 +993,7 @@ impl ResultGrid {
 
         // Bytes, not characters: it only has to be cheap and never under-count,
         // and `clip` is a no-op on anything that turns out to fit. Grouped the
-        // same way a fetched value is, on the same column check `display`
+        // same way a fetched value is, on the same column check `shown`
         // uses, so a pending edit does not stand out from the rows around it
         // by losing its separators -- the value staged for the `UPDATE` stays
         // exactly as typed, since this is what the cell paints and nothing else.
@@ -1366,7 +1368,7 @@ fn step_target(
 }
 
 /// A plain number with its integer digits in threes, `1723858791` as
-/// `1,723,858,791`, as the status bar groups its counts. Display only: `display` is what the cell paints and the
+/// `1,723,858,791`, as the status bar groups its counts. Display only: `shown` is what the cell paints and the
 /// copy, the inspector and every statement read the value as fetched. Anything
 /// that is not a bare decimal -- an exponent, a currency sign -- is left alone.
 fn grouped_digits(value: &str) -> String {
@@ -1399,10 +1401,12 @@ fn grouped_digits(value: &str) -> String {
 /// value itself is untouched: the inspector lays it out as it is, and a copy
 /// takes the original.
 ///
-/// Reads no further into the value than what it keeps, and the blank space it
-/// drops: a cell can hold a geometry of a couple of million characters, and
-/// every cell of a result is clipped on the frame thread. So only a break
-/// inside the part that shows flattens it -- one further in is past the `…`.
+/// Reads no further into the value than what it keeps, and a bounded run of the
+/// blank space it drops: a cell can hold a geometry of a couple of million
+/// characters, and every visible cell is clipped on every frame. So only a
+/// break inside the part that shows flattens it -- one further in is past the
+/// `…` -- and a value that is mostly blank past an early break is cut at
+/// [`CLIP_SCAN_LIMIT`] bytes rather than walked to its end.
 fn clip(value: &str) -> String {
     let shown = match value.char_indices().nth(CELL_DISPLAY_LIMIT) {
         Some((end, _)) => &value[..end],
@@ -1420,6 +1424,10 @@ fn clip(value: &str) -> String {
     let mut joined = false;
     let mut space_from = None;
     for (at, c) in value.char_indices() {
+        if at >= CLIP_SCAN_LIMIT {
+            flattened.push('…');
+            return flattened;
+        }
         if c == '\n' || c == '\r' {
             joined |= in_line;
             in_line = false;
@@ -1956,8 +1964,8 @@ impl ResultGrid {
                 ));
         }
 
-        // A pending value is painted from the pending set rather than by
-        // patching `display`, which stays exactly as fetched.
+        // A pending value is painted from the pending set; `result.rows`
+        // stays exactly as fetched.
         let pending = self.pending_at(row_ix, col_ix);
         // Which word the italic branch below paints. A staged keyword has no
         // `shown`, so it falls into the same branch a fetched NULL does while
@@ -1970,15 +1978,7 @@ impl ResultGrid {
         };
         let cell = match pending {
             Some(pending) => pending.shown.clone(),
-            // Rows are not guaranteed rectangular and an index can outlive the
-            // result set it was taken from. Indexing here would abort the
-            // process mid-paint and take the user's editor buffer with it.
-            None => self
-                .display
-                .get(row_ix)
-                .and_then(|row| row.get(col_ix))
-                .and_then(Option::as_ref)
-                .cloned(),
+            None => self.shown(row_ix, col_ix),
         };
 
         let follows_a_key = self.follows_a_key(col_ix)
@@ -2320,6 +2320,48 @@ mod tests {
     }
 
     #[test]
+    fn a_fetched_cell_paints_grouped_and_flattened_but_reads_as_fetched() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "int8"), column("ddl")],
+                rows: vec![vec![
+                    Some("1234567".into()),
+                    Some("CREATE\n  VIEW v".into()),
+                ]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+
+        assert_eq!(grid.shown(0, 0).as_deref(), Some("1,234,567"));
+        assert_eq!(grid.shown(0, 1).as_deref(), Some("CREATE VIEW v"));
+        assert_eq!(grid.cell(0, 0), Some("1234567"));
+        assert_eq!(grid.cell(0, 1), Some("CREATE\n  VIEW v"));
+    }
+
+    #[test]
+    fn a_cell_is_clipped_without_walking_a_huge_value_to_its_end() {
+        // Both run on every frame a cell is on screen, so neither may cost the
+        // size of the value: a blank tail after an early break stops at the scan
+        // limit, and a number too long to show is not grouped (which copies it).
+        let blank_tail = format!("x\n{}", " ".repeat(2_000_000));
+        assert_eq!(clip(&blank_tail), "x…");
+
+        let digits = "9".repeat(CELL_DISPLAY_LIMIT * 4);
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "numeric")],
+                rows: vec![vec![Some(digits.clone())]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        let shown = grid.shown(0, 0).unwrap();
+        assert!(!shown.contains(','));
+        assert_eq!(shown.as_ref(), clip(&digits));
+    }
+
+    #[test]
     fn digits_are_grouped_in_threes_and_only_when_the_value_is_a_plain_number() {
         for (value, shown) in [
             ("1723858791", "1,723,858,791"),
@@ -2378,10 +2420,7 @@ mod tests {
         assert!(grid.set_pending(0, 1, value("changed")));
 
         assert_eq!(grid.result.rows[0][1].as_deref(), Some("first"));
-        assert_eq!(
-            grid.display[0][1].as_ref().map(SharedString::as_ref),
-            Some("first")
-        );
+        assert_eq!(grid.shown(0, 1).as_deref(), Some("first"));
         assert_eq!(grid.cell(0, 1), Some("first"));
         assert!(grid.has_pending());
     }
@@ -3045,7 +3084,7 @@ mod tests {
 
     #[test]
     fn a_long_pending_value_is_clipped_for_the_column_but_not_for_the_update() {
-        // The same split as `display` against `cell`: the column paints what
+        // The same split as `shown` against `cell`: the column paints what
         // fits, the statement carries the value.
         let long = "x".repeat(CELL_DISPLAY_LIMIT * 2);
         let mut grid = editable_grid();
@@ -3062,7 +3101,7 @@ mod tests {
 
     #[test]
     fn a_pending_numeric_edit_is_shown_grouped_but_staged_raw() {
-        // `display` groups a fetched number's digits; a pending edit over one
+        // `shown` groups a fetched number's digits; a pending edit over one
         // must read the same way or it stands out from the rows around it --
         // but what the `UPDATE` carries is the value exactly as typed.
         let mut grid = marked_grid();
@@ -3245,10 +3284,7 @@ mod tests {
 
         grid.select_row(0);
         assert_eq!(grid.active_value(), Some(value.as_str()));
-        assert_ne!(
-            grid.display[0][0].as_ref().map(SharedString::as_ref),
-            Some(value.as_str())
-        );
+        assert_ne!(grid.shown(0, 0).as_deref(), Some(value.as_str()));
 
         // A NULL is an absent value, not the word the grid paints for one.
         grid.select_col(1);
@@ -3704,10 +3740,7 @@ mod tests {
         );
 
         assert_eq!(grid.cell(0, 0), Some(value.as_str()));
-        assert_ne!(
-            grid.display[0][0].as_ref().map(SharedString::as_ref),
-            Some(value.as_str())
-        );
+        assert_ne!(grid.shown(0, 0).as_deref(), Some(value.as_str()));
         // A NULL is an absent value, not the string the cell paints for one.
         assert_eq!(grid.cell(1, 0), None);
         assert_eq!(grid.cell(9, 9), None);
@@ -3725,8 +3758,11 @@ mod tests {
             Mode::ReadWrite,
         );
 
-        let row = &grid.display[0];
-        assert!(!row.is_empty());
-        assert!(row.get(1).is_none(), "row should be short, not padded");
+        assert_eq!(grid.shown(0, 0).as_deref(), Some("only one cell"));
+        assert!(
+            grid.shown(0, 1).is_none(),
+            "row should be short, not padded"
+        );
+        assert!(grid.shown(9, 9).is_none());
     }
 }
