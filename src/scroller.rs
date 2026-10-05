@@ -109,6 +109,21 @@ pub fn smooth_for(
     }
 }
 
+impl Smooth {
+    /// Glides the cross axis to `x` on the wheel's curve, for a scroll the
+    /// code asks for rather than the user. A wheel turn, a click or another
+    /// jump mid-glide stops it the way they stop a wheel's.
+    pub fn glide_across(&self, x: Pixels, window: &mut Window) {
+        let offset = self.across.offset();
+        {
+            let mut state = self.across_motion.borrow_mut();
+            state.stop(offset);
+            state.nudge(point(x, offset.y), max_offset(&*self.across));
+        }
+        schedule_frame(&self.across_motion, self.across.clone(), window);
+    }
+}
+
 #[derive(Default)]
 struct ScrollMotion {
     shown: Point<Pixels>,
@@ -482,6 +497,18 @@ mod tests {
         motion.sync(offset(-800.0), offset(1000.0));
         assert!(!motion.active);
         assert_eq!(motion.shown, offset(-800.0));
+    }
+
+    #[test]
+    fn a_glide_starts_from_where_the_offset_is_and_lands_on_its_target() {
+        let mut motion = ScrollMotion::new(offset(-300.0));
+        motion.stop(offset(0.0));
+        motion.nudge(offset(-200.0), offset(1000.0));
+        assert_eq!((motion.shown, motion.target), (offset(0.0), offset(-200.0)));
+        for _ in 0..120 {
+            motion.advance(Duration::from_millis(16), offset(1000.0));
+        }
+        assert_eq!(motion.shown, offset(-200.0));
     }
 
     #[test]

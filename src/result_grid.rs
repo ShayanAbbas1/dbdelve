@@ -1326,17 +1326,23 @@ pub(crate) fn step_pending(
 /// measured the grid before it narrowed, leaving a cell in the right-most
 /// columns under the panel.
 ///
-/// Run after the table's prepaint, the first point the new width is known, so
-/// the scroll lands a frame later.
+/// Run after the table's prepaint, the first point the new width is known.
+/// Answers the horizontal offset to glide to, leaving the offset where it was.
 pub(crate) fn keep_active_in_view(
     table: &mut TableState<ResultGrid>,
     cx: &mut Context<TableState<ResultGrid>>,
-) {
-    let width = table.horizontal_scroll_handle.bounds().size.width;
-    let offset_x = table.horizontal_scroll_handle.offset().x;
-    if let Some(col) = table.delegate_mut().relaid_out(width, offset_x) {
-        table.scroll_to_col(col + GUTTER, cx);
-    }
+) -> Option<Pixels> {
+    let handle = table.horizontal_scroll_handle.clone();
+    let from = handle.offset();
+    let col = table
+        .delegate_mut()
+        .relaid_out(handle.bounds().size.width, from.x)?;
+    // The library keeps the offset that brings a column into view private;
+    // jumping there is the only way to learn it, so jump back straight after.
+    table.scroll_to_col(col + GUTTER, cx);
+    let to = handle.offset().x;
+    handle.set_offset(from);
+    Some(to)
 }
 
 /// The cell one `step` from `from` in a `rows` by `cols` grid, or `None` at the
