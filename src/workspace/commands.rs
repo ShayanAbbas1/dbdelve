@@ -41,7 +41,7 @@ impl Workspace {
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
         // The theme picker is the one list reachable before any connection
-        // exists: the connection form is where a first launch lands.
+        // exists, from the welcome surface or the connection form.
         if showing == Some(mode) || (self.profile().is_none() && mode != PaletteMode::Theme) {
             self.close_palette(window, cx);
             return;

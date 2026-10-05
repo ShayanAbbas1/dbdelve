@@ -232,7 +232,7 @@ impl ConnectionForm {
         });
 
         Self {
-            // The form is the whole window on a first launch, and a window
+            // The form is the whole window while it is open, and a window
             // with nothing focused has no dispatch path -- every binding is
             // dead until a field is clicked. So the field the user is meant to
             // start in asks for focus the moment it is mounted.

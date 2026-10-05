@@ -897,8 +897,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let project = self.current_group().map(str::to_string);
+        self.new_connection_in(project, window, cx);
+    }
+
+    /// Opens the form for a new connection that joins `project`.
+    pub(crate) fn new_connection_in(
+        &mut self,
+        project: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut form = ConnectionForm::new(None, window, cx);
-        form.project = self.current_group().map(str::to_string);
+        form.project = project;
         self.form = Some(form);
         self.switcher_open = false;
         // The form branch of `Render` returns before painting the modal, so a
@@ -1439,12 +1450,7 @@ impl Workspace {
         self.cycle_profile(-1, cx);
     }
 
-    pub(crate) fn remove_profile(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.get(index) else {
             return;
         };
@@ -1488,13 +1494,10 @@ impl Workspace {
         }
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
-        if self.profiles.is_empty() {
-            self.form = Some(ConnectionForm::new(None, window, cx));
-        } else {
-            self.connect_active(cx);
-            self.note(removal_note(&name, queries, removed_queries.err()), cx);
-        }
-        cx.notify();
+        // The switcher lives in a titlebar the welcome surface does not have.
+        self.switcher_open &= !self.profiles.is_empty();
+        self.connect_active(cx);
+        self.note(removal_note(&name, queries, removed_queries.err()), cx);
     }
 }
 

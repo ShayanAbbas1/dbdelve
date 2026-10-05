@@ -138,6 +138,9 @@ pub(crate) struct Workspace {
     /// An import's read is still out, so a second click doesn't start another
     /// round of Keychain prompts whose summary would say all were duplicates.
     pub(crate) importing: bool,
+    /// What `note` says while there is no connection and no form to say it
+    /// on: the welcome surface's line.
+    pub(crate) welcome_notice: Option<String>,
     /// Whether `store::load_profiles` failed outright rather than finding no
     /// file. Set once at startup and never cleared, because the file it could
     /// not read is still sitting there -- and a session that never saw it must
@@ -213,6 +216,7 @@ impl Workspace {
             plan_copied: false,
             pending_removal: None,
             importing: false,
+            welcome_notice: None,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
@@ -326,12 +330,8 @@ impl Workspace {
             }
         }
 
-        if workspace.profiles.is_empty() && workspace.form.is_none() {
-            workspace.form = Some(ConnectionForm::new(None, window, cx));
-        }
-
-        // After the form exists, because with no profiles the form is the only
-        // surface a notice has.
+        // After the environment's form, which takes the notice over the
+        // welcome surface when there is one.
         if let Some(message) = load_failure {
             workspace.note(message, cx);
         }
@@ -473,6 +473,8 @@ impl Workspace {
             profile.session.notice = Some(message);
         } else if let Some(form) = &mut self.form {
             form.error = Some(message);
+        } else {
+            self.welcome_notice = Some(message);
         }
         cx.notify();
     }
@@ -637,9 +639,12 @@ impl Render for Workspace {
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
         // Every way the switcher closes ends here, so this is the one place
-        // its name field is put away -- before the focus handoff below.
+        // its name field is put away -- before the focus handoff below. The
+        // welcome surface has the field too, and keeps it while in front.
         if !self.switcher_open {
-            self.drop_project_name();
+            if !(self.profiles.is_empty() && self.form.is_none()) {
+                self.drop_project_name();
+            }
             self.drop_connection_search();
         }
         // Deferred to render for the `&mut Window` a background task does not
@@ -725,6 +730,14 @@ impl Render for Workspace {
         if let Some(input) = self.form.as_mut().and_then(|form| form.needs_focus.take()) {
             input.focus_handle(cx).focus(window, cx);
         }
+        // The welcome surface has no tab to hand focus to, and the form or
+        // name field that just closed over it took the focus away with it.
+        if self.profiles.is_empty()
+            && self.form.is_none()
+            && !self.focus.contains_focused(window, cx)
+        {
+            self.focus.focus(window, cx);
+        }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
         {
@@ -786,7 +799,23 @@ impl Render for Workspace {
                 .children(self.render_palette(cx));
         }
         let Some(profile) = self.profile() else {
-            unreachable!("the connection form is open when there are no profiles");
+            return div()
+                .id("welcome")
+                .size_full()
+                .track_focus(&self.focus)
+                .text_color(t.text)
+                .text_size(px(layout::TEXT_MD))
+                .flex()
+                .flex_col()
+                .on_action(cx.listener(Self::select_theme))
+                .on_action(cx.listener(Self::show_editor))
+                .on_action(cx.listener(Self::palette_next))
+                .on_action(cx.listener(Self::palette_previous))
+                .on_action(cx.listener(Self::open_connection_form))
+                .on_action(cx.listener(Self::import_from))
+                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
+                .children(self.render_palette(cx));
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {

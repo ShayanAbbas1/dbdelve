@@ -239,7 +239,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if self.form.is_some() && !self.profiles.is_empty() {
+        if self.form.is_some() {
             self.form = None;
             cx.notify();
             return;

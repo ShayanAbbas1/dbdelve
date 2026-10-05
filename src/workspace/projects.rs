@@ -180,6 +180,7 @@ impl Workspace {
         self.project_name = Some(input);
         self.renaming_project = renaming;
         self.project_name_needs_focus = true;
+        self.welcome_notice = None;
         cx.notify();
     }
 
@@ -239,6 +240,8 @@ impl Workspace {
         if self.project_name.take().is_none() {
             return;
         }
+        // Whatever it said was about the name just put away.
+        self.welcome_notice = None;
         if self.switcher_open && self.connection_search.is_some() {
             self.connection_search_needs_focus = true;
         } else if let Some(profile) = self.profile_mut() {
