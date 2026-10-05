@@ -120,8 +120,8 @@ impl Workspace {
         self.end_theme_preview(window, cx);
         if let Some(form) = self.form.as_mut() {
             form.needs_focus = Some(form.url.clone());
-        } else if let Some(profile) = self.profile_mut() {
-            profile.session.editor_needs_focus = true;
+        } else {
+            self.refocus_front();
         }
         cx.notify();
         true

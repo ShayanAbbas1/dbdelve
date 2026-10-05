@@ -159,6 +159,9 @@ pub(crate) struct Workspace {
     /// Whether that line refuses the project name being typed, and so goes
     /// when the name field does.
     pub(crate) welcome_notice_refuses_name: bool,
+    /// The welcome surface's half of `editor_needs_focus`: set when whatever
+    /// held focus over it has gone, applied on the next frame.
+    pub(crate) welcome_needs_focus: bool,
     /// Whether `store::load_profiles` failed outright rather than finding no
     /// file. Set at startup, because the file it could not read may still be
     /// sitting there -- and a session that never saw it must not be the one
@@ -242,6 +245,7 @@ impl Workspace {
                 .collect(),
             welcome_notice: None,
             welcome_notice_refuses_name: false,
+            welcome_needs_focus: true,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
@@ -492,6 +496,17 @@ impl Workspace {
     /// down by that refresh landing -- only if it is still what the status bar
     /// says.
     pub(crate) const REFRESHING: &str = "These rows are being refreshed.";
+
+    /// Hands focus back to what is in front once whatever held it has gone:
+    /// the tab, or the welcome surface when there is no connection. A field
+    /// unmounted with focus in it leaves the window focused on nothing, and
+    /// every keybinding dead.
+    pub(crate) fn refocus_front(&mut self) {
+        match self.profile_mut() {
+            Some(profile) => profile.session.editor_needs_focus = true,
+            None => self.welcome_needs_focus = true,
+        }
+    }
 
     pub(crate) fn note(&mut self, message: String, cx: &mut Context<Self>) {
         if let Some(profile) = self.profile_mut() {
@@ -756,11 +771,12 @@ impl Render for Workspace {
         if let Some(input) = self.form.as_mut().and_then(|form| form.needs_focus.take()) {
             input.focus_handle(cx).focus(window, cx);
         }
-        // The welcome surface has no tab to hand focus to, and the form or
-        // name field that just closed over it took the focus away with it.
-        if self.profiles.is_empty()
-            && self.form.is_none()
-            && !self.focus.contains_focused(window, cx)
+        // Asked for by name rather than read off what holds focus: that is
+        // checked against the last frame, where the field that just closed
+        // still sat inside this same floor.
+        if self.form.is_none()
+            && self.profiles.is_empty()
+            && std::mem::take(&mut self.welcome_needs_focus)
         {
             self.focus.focus(window, cx);
         }

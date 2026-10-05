@@ -255,6 +255,7 @@ impl Workspace {
         }
         if self.form.is_some() {
             self.form = None;
+            self.refocus_front();
             cx.notify();
             return;
         }

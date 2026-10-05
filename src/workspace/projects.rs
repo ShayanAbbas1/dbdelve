@@ -290,10 +290,8 @@ impl Workspace {
         }
         if self.switcher_open && self.connection_search.is_some() {
             self.connection_search_needs_focus = true;
-        } else if self.form.is_none()
-            && let Some(profile) = self.profile_mut()
-        {
-            profile.session.editor_needs_focus = true;
+        } else if self.form.is_none() {
+            self.refocus_front();
         }
     }
 

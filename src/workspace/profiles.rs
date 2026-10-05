@@ -1689,7 +1689,10 @@ impl Workspace {
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
         // The switcher lives in a titlebar the welcome surface does not have.
-        self.switcher_open &= !self.profiles.is_empty();
+        if self.profiles.is_empty() {
+            self.switcher_open = false;
+            self.refocus_front();
+        }
         self.connect_active(cx);
         self.note(removal_note(&name, queries, removed_queries.err()), cx);
     }
