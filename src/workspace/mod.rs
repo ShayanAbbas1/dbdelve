@@ -157,9 +157,10 @@ pub(crate) struct Workspace {
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
     /// Whether `store::load_profiles` failed outright rather than finding no
-    /// file. Set once at startup and never cleared, because the file it could
-    /// not read is still sitting there -- and a session that never saw it must
-    /// not be the one that overwrites it with an empty list.
+    /// file. Set at startup, because the file it could not read may still be
+    /// sitting there -- and a session that never saw it must not be the one
+    /// that overwrites it with an empty list. Cleared by the first save that
+    /// has a profile or a project of the user's own to write.
     pub(crate) store_unreadable: bool,
     pub(crate) next_generation: u64,
     /// The palette, built from scratch every time it opens. Its rows are a

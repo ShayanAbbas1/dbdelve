@@ -18,10 +18,14 @@ impl Workspace {
         // The file we could not read at startup is still the user's, and an
         // empty list is not what they have -- so a session that never managed
         // to read it must not flatten it the moment nothing has been loaded
-        // into `profiles` yet. Once a profile exists (including the last one
-        // being deliberately removed) this no longer applies.
-        if self.store_unreadable && self.profiles.is_empty() {
-            return;
+        // into `profiles` yet. Once a profile or a project exists, the user
+        // has started over on purpose, and from then on every save is theirs,
+        // the last one being deliberately removed included.
+        if self.store_unreadable {
+            if self.profiles.is_empty() && self.projects.is_empty() {
+                return;
+            }
+            self.store_unreadable = false;
         }
         let profiles = self
             .profiles
