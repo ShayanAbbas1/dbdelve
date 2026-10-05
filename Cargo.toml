@@ -289,6 +289,15 @@ libc = "=0.2.189"
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "=0.1.31"
 
+# gpui's Metal renderer, with one blend factor changed (see the `dbdelve patch`
+# notes in its metal_renderer.rs). Upstream sums alpha instead of compositing
+# it, so on a glass theme every tint laid over the frost -- the editor and the
+# results planes above all -- loses about a tenth of the desktop's light and
+# goes grey. Opaque windows keep alpha at 1 either way. Drop this once
+# upstream composites alpha with `over`; re-apply the two lines on a gpui bump.
+[patch.crates-io]
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
 # an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are
 # compiled optimized even in dev; DBDelve's own crate stays at opt-level 0, so
