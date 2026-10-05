@@ -156,6 +156,9 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    /// Whether that line refuses the project name being typed, and so goes
+    /// when the name field does.
+    pub(crate) welcome_notice_refuses_name: bool,
     /// Whether `store::load_profiles` failed outright rather than finding no
     /// file. Set at startup, because the file it could not read may still be
     /// sitting there -- and a session that never saw it must not be the one
@@ -238,6 +241,7 @@ impl Workspace {
                 .filter(|source| source.found())
                 .collect(),
             welcome_notice: None,
+            welcome_notice_refuses_name: false,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
@@ -496,6 +500,7 @@ impl Workspace {
             form.error = Some(message);
         } else {
             self.welcome_notice = Some(message);
+            self.welcome_notice_refuses_name = false;
         }
         cx.notify();
     }
