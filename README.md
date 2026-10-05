@@ -10,7 +10,7 @@ and keeps scrolling smoothly through a million-row table.
 
 ![DBDelve, light theme](assets/screenshotlight.png)
 
-DBDelve in action.
+DBDelve in action with 1M rows loaded.
 
 https://github.com/user-attachments/assets/ee555c10-4a18-4059-b451-bfadfc9f9ae0
 
