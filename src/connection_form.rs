@@ -15,7 +15,6 @@ use crate::{
     db::{
         ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
     },
-    import::Source,
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -83,11 +82,12 @@ pub(crate) struct ConnectionForm {
     pub(crate) test: Option<ConnectionTest>,
     /// The id of the profile being edited, or `None` for a new connection.
     pub(crate) editing: Option<String>,
-    /// The project a new connection joins, or `None` for No project.
+    /// The project the connection is saved into, or `None` for No project.
     pub(crate) project: Option<String>,
-    /// The other clients installed here, looked for once as the form opens
-    /// rather than on every frame.
-    pub(crate) importable: Vec<Source>,
+    /// Whether the project control is the name field for a new project, made
+    /// when the form is saved, rather than the list of existing ones.
+    pub(crate) naming_project: bool,
+    pub(crate) project_name: Entity<InputState>,
 }
 
 impl ConnectionForm {
@@ -219,6 +219,7 @@ impl ConnectionForm {
                 .placeholder("authSource=admin&replicaSet=rs0 (optional)")
                 .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
         });
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Seconds (0 for no limit)")
@@ -232,7 +233,7 @@ impl ConnectionForm {
         });
 
         Self {
-            // The form is the whole window on a first launch, and a window
+            // The form is the whole window while it is open, and a window
             // with nothing focused has no dispatch path -- every binding is
             // dead until a field is clicked. So the field the user is meant to
             // start in asks for focus the moment it is mounted.
@@ -267,10 +268,8 @@ impl ConnectionForm {
             test: None,
             editing: None,
             project: None,
-            importable: Source::ALL
-                .into_iter()
-                .filter(|source| source.found())
-                .collect(),
+            naming_project: false,
+            project_name,
         }
     }
 

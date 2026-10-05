@@ -75,21 +75,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(layout::SPACE_MD))
-                            .child(
-                                div()
-                                    .size(px(28.))
-                                    .flex_shrink_0()
-                                    .rounded(px(layout::RADIUS_CONTROL))
-                                    .bg(t.element_active)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        icon(icon::DATABASE)
-                                            .size(px(layout::ICON_SIZE))
-                                            .text_color(t.accent),
-                                    ),
-                            )
+                            .child(icon_tile(t, icon::DATABASE))
                             .child(
                                 div()
                                     .flex()
@@ -124,22 +110,6 @@ impl Workspace {
                                     ),
                             ),
                     )
-                    .when(!editing, |form_div| {
-                        form_div.children(form.importable.iter().map(|&source| {
-                            button(
-                                gpui::SharedString::from(format!("import-{}", source.label())),
-                                format!("Import from {}", source.label()),
-                                Tone::Quiet,
-                                Control::Standard,
-                                t,
-                            )
-                            .on_click(cx.listener(
-                                move |workspace, _, window, cx| {
-                                    workspace.import_connections(source, window, cx);
-                                },
-                            ))
-                        }))
-                    })
                     .child(
                         div()
                             .flex()
@@ -154,6 +124,11 @@ impl Workspace {
                                 row.child(labelled("Mode", self.mode_dropdown(cx)))
                             })
                             .child(labelled("Color", self.color_dropdown(cx))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .child(labelled("Project", self.project_dropdown(cx))),
                     )
                     // Snowflake has no connection URL: `Engine::fields()` is
                     // where that is decided, not a match on the engine here.
@@ -278,7 +253,7 @@ impl Workspace {
                             .child(self.form_field("Username", &form.user, cx))
                             .child(self.labelled_field(
                                 "Password",
-                                Input::new(&form.password).mask_toggle(),
+                                Input::new(&form.password).mask_toggle().w_full(),
                                 cx,
                             ))
                             .children(
@@ -405,16 +380,13 @@ impl Workspace {
                         div()
                             .flex()
                             .gap(px(layout::SPACE_SM))
-                            // `escape` is the other way out, and on the first
-                            // launch there is nowhere to back out to: the form
-                            // is the whole application until a profile exists.
-                            .children((editing || !self.profiles.is_empty()).then(|| {
+                            .child(
                                 button("cancel", "Cancel", Tone::Quiet, Control::Standard, t)
                                     .flex_1()
                                     .on_click(cx.listener(|workspace, _, window, cx| {
                                         workspace.show_editor(&ShowEditor, window, cx);
-                                    }))
-                            }))
+                                    })),
+                            )
                             .child(
                                 button(
                                     "test-connection",
@@ -441,16 +413,459 @@ impl Workspace {
             )
     }
 
+    /// What the window is with no connection to put in front: the two ways
+    /// to start, and the projects already made, waiting for theirs.
+    pub(crate) fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = *theme(cx);
+        let workspace = cx.entity().downgrade();
+        let overrides = &self.settings.custom_keybindings;
+        let tile = |id: &'static str,
+                    path: &'static str,
+                    title: &'static str,
+                    description: String,
+                    hint: String| {
+            ui::control(id, Tone::Quiet, Control::Standard)
+                .flex_1()
+                .min_w_0()
+                .h_auto()
+                .p(px(layout::SPACE_MD))
+                .border_1()
+                .border_color(t.border)
+                // Full height, or the button centres each tile's content on
+                // its own and a shorter description sits lower than its
+                // neighbour's.
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(layout::SPACE_XS))
+                        .whitespace_normal()
+                        .child(
+                            div()
+                                .mb(px(layout::SPACE_XS))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(icon_tile(t, path))
+                                .child(
+                                    div()
+                                        .text_size(px(layout::TEXT_XS))
+                                        .text_color(t.text_faint)
+                                        .child(hint),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_MD))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.text)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child(description),
+                        ),
+                )
+        };
+        let project_workspace = workspace.clone();
+        let connection_workspace = workspace.clone();
+        let tiles = div()
+            .flex()
+            .gap(px(layout::SPACE_SM))
+            .child(
+                tile(
+                    "welcome-new-project",
+                    icon::ADD_TO_PROJECT,
+                    "New project",
+                    "Group connections that belong together.".into(),
+                    ui::chord_hint("new_project", overrides),
+                )
+                .on_click(move |_, window, cx| {
+                    _ = project_workspace.update(cx, |workspace, cx| {
+                        workspace.start_naming_project(None, window, cx);
+                    });
+                }),
+            )
+            .child(
+                tile(
+                    "welcome-new-connection",
+                    icon::PLUS,
+                    "New connection",
+                    Engine::ALL.map(Engine::label).join(", "),
+                    ui::chord_hint("new_connection", overrides),
+                )
+                .on_click(move |_, window, cx| {
+                    _ = connection_workspace.update(cx, |workspace, cx| {
+                        workspace.new_connection_in(None, window, cx);
+                    });
+                }),
+            );
+        let hairline = || div().h(px(1.)).flex_1().bg(t.border);
+        let imports =
+            (!self.importable.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_SM))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(layout::SPACE_SM))
+                            .child(hairline())
+                            .child(
+                                div()
+                                    .text_size(px(layout::TEXT_XS))
+                                    .text_color(t.text_faint)
+                                    .child("OR IMPORT FROM"),
+                            )
+                            .child(hairline()),
+                    )
+                    .child(div().flex().gap(px(layout::SPACE_SM)).children(
+                        self.importable.iter().map(|&source| {
+                            button(
+                                gpui::SharedString::from(format!("import-{}", source.label())),
+                                source.label(),
+                                Tone::Quiet,
+                                Control::Standard,
+                                t,
+                            )
+                            .flex_1()
+                            .border_1()
+                            .border_color(t.border)
+                            .disabled(self.importing)
+                            .on_click(cx.listener(
+                                move |workspace, _, window, cx| {
+                                    workspace.import_connections(source, window, cx);
+                                },
+                            ))
+                        }),
+                    ))
+            });
+        let naming = self
+            .project_name
+            .as_ref()
+            .filter(|_| self.renaming_project.is_none())
+            .map(|input| {
+                let typed = input.clone();
+                div()
+                    .flex()
+                    .gap(px(layout::SPACE_SM))
+                    .child(div().flex_1().min_w_0().child(Input::new(input).w_full()))
+                    .child(
+                        button(
+                            "create-project",
+                            "Create",
+                            Tone::Primary,
+                            Control::Standard,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace, _, _, cx| {
+                                let name = typed.read(cx).value().trim().to_string();
+                                workspace.create_project(name, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        icon_button(
+                            "cancel-new-project",
+                            icon::CLOSE,
+                            Tone::Quiet,
+                            Control::Standard,
+                            t,
+                        )
+                        .tooltip("Cancel")
+                        .on_click(cx.listener(|workspace, _, _, cx| {
+                            workspace.drop_project_name();
+                            cx.notify();
+                        })),
+                    )
+            });
+        let mut projects = Vec::new();
+        for (index, project) in self.projects.iter().enumerate() {
+            if self.renaming_project.as_deref() == Some(project.name.as_str())
+                && let Some(input) = &self.project_name
+            {
+                projects.push(name_field(input));
+                continue;
+            }
+            let add = {
+                let workspace = workspace.clone();
+                let name = project.name.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.new_connection_in(Some(name.clone()), window, cx);
+                    });
+                }
+            };
+            let add_from_row = add.clone();
+            projects.push(
+                switcher_row(("welcome-project", index), t)
+                    .group(format!("project-row-{index}"))
+                    .child(row_icon(t, icon::PROJECT))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(project.name.clone()),
+                    )
+                    // Every project is empty here: with no connections at all
+                    // there is nothing for one to hold.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(layout::TEXT_SM))
+                            .text_color(t.text_faint)
+                            .child("No connections yet"),
+                    )
+                    .child(self.project_actions(index, &project.name, cx))
+                    .child(
+                        button(
+                            ("welcome-add-connection", index),
+                            "Add connection",
+                            Tone::Quiet,
+                            Control::Compact,
+                            t,
+                        )
+                        .on_click(move |_, window, cx| {
+                            // The row would open the same form again.
+                            cx.stop_propagation();
+                            add(window, cx);
+                        }),
+                    )
+                    .on_click(move |_, window, cx| add_from_row(window, cx))
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .id("welcome-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .smooth_scroll(&smooth_scoped("welcome-scroll", "welcome", cx))
+            .p(px(layout::SPACE_LG))
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    // Auto margins for the reason the connection form gives:
+                    // a long list of projects must scroll, not climb off the
+                    // top.
+                    .my_auto()
+                    .flex_shrink_0()
+                    .w(px(layout::DIALOG_WIDTH))
+                    .p(px(layout::SPACE_LG))
+                    .bg(t.panel)
+                    .border_1()
+                    .border_color(t.border)
+                    .rounded(px(layout::RADIUS_PANEL))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_MD))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(layout::SPACE_MD))
+                            .child(icon_tile(t, icon::DATABASE))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_size(px(layout::TEXT_LG))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Welcome to DBDelve"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(layout::TEXT_SM))
+                                            .text_color(t.text_muted)
+                                            .child(
+                                                "Start with a project to organize your \
+                                                 connections, or connect straight to a \
+                                                 database.",
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(tiles)
+                    .children(naming)
+                    .children(self.project_name_error.clone().map(|message| {
+                        div()
+                            .text_size(px(layout::TEXT_SM))
+                            .text_color(t.danger)
+                            .child(message)
+                    }))
+                    .children(self.welcome_notice.clone().map(|message| {
+                        div()
+                            .text_size(px(layout::TEXT_SM))
+                            .text_color(t.text_muted)
+                            .child(message)
+                    }))
+                    .children(imports)
+                    .when(!projects.is_empty(), |card| {
+                        card.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .px(px(layout::SPACE_SM))
+                                        .py(px(layout::SPACE_XS))
+                                        .child(section_label(t, "Projects")),
+                                )
+                                .children(projects),
+                        )
+                    }),
+            )
+    }
+
+    /// Where an import's connections go, asked before any is added: a new
+    /// project named for the client by default, one already made, or none.
+    pub(crate) fn render_import_choice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let pending = self.pending_import.as_ref()?;
+        let source = pending.source.label();
+        let known = self
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect::<Vec<_>>();
+        let suggested = format!("Imported from {source}");
+        let mut groups = Vec::new();
+        if !known.contains(&suggested) {
+            groups.push(vec![Some(suggested)]);
+        }
+        if !known.is_empty() {
+            groups.push(known.iter().cloned().map(Some).collect());
+        }
+        groups.push(vec![None]);
+        let new = {
+            let known = known.clone();
+            move |project: &Option<String>| {
+                project.as_ref().is_some_and(|name| !known.contains(name))
+            }
+        };
+        let marked = new.clone();
+        let picker = Self::dropdown(
+            "import-project",
+            pending.project.clone(),
+            groups,
+            move |project| match project {
+                None => "No project".into(),
+                Some(name) if new(project) => format!("{name} (new project)").into(),
+                Some(name) => name.clone().into(),
+            },
+            move |project| {
+                let path = match project {
+                    None => return None,
+                    Some(_) if marked(project) => icon::PLUS,
+                    Some(_) => icon::PROJECT,
+                };
+                Some(row_icon(t, path).into_any_element())
+            },
+            |workspace, project| {
+                if let Some(pending) = &mut workspace.pending_import {
+                    pending.project = project;
+                }
+            },
+            cx,
+        );
+        let count = pending.fresh;
+        let heading = format!(
+            "Import {count} connection{} from {source}",
+            if count == 1 { "" } else { "s" }
+        );
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, &heading))
+                        .child(
+                            div()
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child("Choose the project they join."),
+                        )
+                        .child(self.labelled_field("Project", picker, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    button(
+                                        "cancel-import",
+                                        "Cancel",
+                                        Tone::Quiet,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, _, cx| {
+                                            workspace.pending_import = None;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    button(
+                                        "confirm-import",
+                                        "Import",
+                                        Tone::Primary,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, window, cx| {
+                                            workspace.confirm_import(window, cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn form_field(
         &self,
         label: &'static str,
         input: &Entity<InputState>,
         cx: &App,
     ) -> impl IntoElement {
-        self.labelled_field(label, Input::new(input), cx)
+        self.labelled_field(label, Input::new(input).w_full(), cx)
     }
 
-    fn labelled_field(&self, label: &'static str, input: Input, cx: &App) -> impl IntoElement {
+    fn labelled_field(
+        &self,
+        label: &'static str,
+        control: impl IntoElement,
+        cx: &App,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -462,7 +877,7 @@ impl Workspace {
                     .text_color(theme(cx).text_muted)
                     .child(label),
             )
-            .child(input.w_full())
+            .child(control)
     }
 
     /// The palette, centred over everything else.
@@ -1404,8 +1819,11 @@ impl Workspace {
                                                 else {
                                                     return;
                                                 };
-                                                let form =
+                                                let mut form =
                                                     ConnectionForm::editing(profile, window, cx);
+                                                form.project = workspace
+                                                    .group_of(&profile.id)
+                                                    .map(str::to_string);
                                                 workspace.form = Some(form);
                                                 workspace.switcher_open = false;
                                                 cx.notify();
@@ -1452,13 +1870,13 @@ impl Workspace {
                                     })
                                     .tooltip("Remove connection")
                                     .on_click(
-                                        move |_, window, cx| {
+                                        move |_, _, cx| {
                                             // Likewise: activating clears
                                             // `pending_removal`, so the first
                                             // click would never leave it armed.
                                             cx.stop_propagation();
                                             _ = remove_workspace.update(cx, |workspace, cx| {
-                                                workspace.remove_profile(index, window, cx);
+                                                workspace.remove_profile(index, cx);
                                             });
                                         },
                                     ),
@@ -1580,14 +1998,11 @@ impl Workspace {
                         .child("Add connection")
                         .on_click(move |_, window, cx| {
                             _ = add_workspace.update(cx, |workspace, cx| {
-                                let mut form = ConnectionForm::new(None, window, cx);
-                                form.project = match workspace.expanded_groups.last() {
+                                let project = match workspace.expanded_groups.last() {
                                     Some(group) => group.clone(),
                                     None => workspace.current_group().map(str::to_string),
                                 };
-                                workspace.form = Some(form);
-                                workspace.switcher_open = false;
-                                cx.notify();
+                                workspace.new_connection_in(project, window, cx);
                             });
                         }),
                 )
@@ -1721,10 +2136,18 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .when(members.is_empty(), |body| {
+                        let add_workspace = workspace.clone();
+                        let project = group.map(str::to_string);
                         body.child(
                             switcher_row(("empty-group", id), t)
-                                .text_color(t.text_faint)
-                                .child("No connections yet"),
+                                .text_color(t.text_muted)
+                                .child(row_icon(t, icon::PLUS))
+                                .child("Add connection")
+                                .on_click(move |_, window, cx| {
+                                    _ = add_workspace.update(cx, |workspace, cx| {
+                                        workspace.new_connection_in(project.clone(), window, cx);
+                                    });
+                                }),
                         )
                     })
                     .children(members)
@@ -1804,12 +2227,7 @@ impl Workspace {
     ) -> AnyElement {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
-        let open_workspace = workspace.clone();
-        let rename_workspace = workspace.clone();
         let name = project.name.clone();
-        let rename_name = project.name.clone();
-        let delete_name = project.name.clone();
-        let pending = self.pending_project_deletion.as_deref() == Some(project.name.as_str());
         group_header(("project", index), selected, expanded, t)
             .group(format!("project-row-{index}"))
             .child(row_icon(t, icon::PROJECT))
@@ -1822,67 +2240,73 @@ impl Workspace {
                     .whitespace_nowrap()
                     .child(project.name.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(layout::SPACE_XS))
-                    .when(!pending, |actions| {
-                        actions
-                            .opacity(0.)
-                            .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
-                    })
-                    .child(
-                        icon_button(
-                            ("rename-project", index),
-                            icon::RENAME,
-                            Tone::Quiet,
-                            Control::Inline,
-                            t,
-                        )
-                        .tooltip("Rename project")
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            _ = rename_workspace.update(cx, |workspace, cx| {
-                                workspace.start_naming_project(
-                                    Some(rename_name.clone()),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }),
-                    )
-                    .child(
-                        icon_button(
-                            ("delete-project", index),
-                            icon::DELETE,
-                            if pending { Tone::Danger } else { Tone::Quiet },
-                            Control::Inline,
-                            t,
-                        )
-                        .when(pending, |armed| {
-                            armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                                "Delete?",
-                                Tone::Danger,
-                                Control::Inline,
-                                t,
-                            ))
-                        })
-                        .tooltip("Delete project (its connections are kept)")
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            _ = workspace.update(cx, |workspace, cx| {
-                                workspace.delete_project(&delete_name, cx);
-                            });
-                        }),
-                    ),
-            )
+            .child(self.project_actions(index, &project.name, cx))
             .on_click(move |_, _, cx| {
-                _ = open_workspace.update(cx, |workspace, cx| {
+                _ = workspace.update(cx, |workspace, cx| {
                     workspace.toggle_group(Some(name.clone()), cx);
                 });
             })
             .into_any_element()
+    }
+
+    /// Rename and delete, revealed by hovering a row grouped as
+    /// `project-row-{index}`, or held in view while the delete is armed.
+    fn project_actions(&self, index: usize, name: &str, cx: &mut Context<Self>) -> gpui::Div {
+        let t = *theme(cx);
+        let workspace = cx.entity().downgrade();
+        let rename_workspace = workspace.clone();
+        let rename_name = name.to_string();
+        let delete_name = name.to_string();
+        let pending = self.pending_project_deletion.as_deref() == Some(name);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .when(!pending, |actions| {
+                actions
+                    .opacity(0.)
+                    .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
+            })
+            .child(
+                icon_button(
+                    ("rename-project", index),
+                    icon::RENAME,
+                    Tone::Quiet,
+                    Control::Inline,
+                    t,
+                )
+                .tooltip("Rename project")
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    _ = rename_workspace.update(cx, |workspace, cx| {
+                        workspace.start_naming_project(Some(rename_name.clone()), window, cx);
+                    });
+                }),
+            )
+            .child(
+                icon_button(
+                    ("delete-project", index),
+                    icon::DELETE,
+                    if pending { Tone::Danger } else { Tone::Quiet },
+                    Control::Inline,
+                    t,
+                )
+                .when(pending, |armed| {
+                    armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
+                        "Delete?",
+                        Tone::Danger,
+                        Control::Inline,
+                        t,
+                    ))
+                })
+                .tooltip("Delete project (its connections are kept)")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.delete_project(&delete_name, cx);
+                    });
+                }),
+            )
     }
 
     pub(crate) fn render_explorer(
@@ -2125,6 +2549,19 @@ fn group_header(
                 icon::CHEVRON_RIGHT
             },
         ))
+}
+
+/// The mark a card leads with: its icon, in the accent, on a tile.
+fn icon_tile(t: Theme, path: &'static str) -> gpui::Div {
+    div()
+        .size(px(28.))
+        .flex_shrink_0()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .bg(t.element_active)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(path).size(px(layout::ICON_SIZE)).text_color(t.accent))
 }
 
 fn name_field(input: &Entity<InputState>) -> AnyElement {

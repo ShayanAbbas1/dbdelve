@@ -71,6 +71,17 @@ pub(crate) enum SettingsTab {
     Keybindings,
 }
 
+/// Connections read from another client, held while the user picks the
+/// project they go into.
+pub(crate) struct PendingImport {
+    pub(crate) source: crate::import::Source,
+    pub(crate) report: crate::import::Report,
+    /// How many are not here already, which is what the question counts.
+    pub(crate) fresh: usize,
+    /// `None` for No project.
+    pub(crate) project: Option<String>,
+}
+
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
     pub(crate) settings: Settings,
@@ -138,10 +149,24 @@ pub(crate) struct Workspace {
     /// An import's read is still out, so a second click doesn't start another
     /// round of Keychain prompts whose summary would say all were duplicates.
     pub(crate) importing: bool,
-    /// Whether `store::load_profiles` failed outright rather than finding no
-    /// file. Set once at startup and never cleared, because the file it could
-    /// not read is still sitting there -- and a session that never saw it must
-    /// not be the one that overwrites it with an empty list.
+    pub(crate) pending_import: Option<PendingImport>,
+    /// The other clients installed here, looked for once at launch rather
+    /// than on every frame of the welcome surface.
+    pub(crate) importable: Vec<crate::import::Source>,
+    /// What `note` says while there is no connection and no form to say it
+    /// on: the welcome surface's line.
+    pub(crate) welcome_notice: Option<String>,
+    /// Why the welcome surface's name field refused what was typed: a line
+    /// of its own, so a refusal never covers the notice, which may be the
+    /// only word that the profiles file failed to load.
+    pub(crate) project_name_error: Option<String>,
+    /// The welcome surface's half of `editor_needs_focus`: set when whatever
+    /// held focus over it has gone, applied on the next frame.
+    pub(crate) welcome_needs_focus: bool,
+    /// Whether `store::load_profiles` failed and could not move the file it
+    /// failed on aside. Set once at startup and never cleared: the file is
+    /// still sitting there, and a session that never saw it must not be the
+    /// one that overwrites it, whatever it has made since.
     pub(crate) store_unreadable: bool,
     pub(crate) next_generation: u64,
     /// The palette, built from scratch every time it opens. Its rows are a
@@ -213,6 +238,14 @@ impl Workspace {
             plan_copied: false,
             pending_removal: None,
             importing: false,
+            pending_import: None,
+            importable: crate::import::Source::ALL
+                .into_iter()
+                .filter(|source| source.found())
+                .collect(),
+            welcome_notice: None,
+            project_name_error: None,
+            welcome_needs_focus: true,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
@@ -285,9 +318,9 @@ impl Workspace {
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
             }
-            Err(message) => {
-                workspace.store_unreadable = true;
-                load_failure = Some(message);
+            Err(failure) => {
+                workspace.store_unreadable = !failure.moved_aside;
+                load_failure = Some(failure.message);
             }
         }
 
@@ -326,12 +359,8 @@ impl Workspace {
             }
         }
 
-        if workspace.profiles.is_empty() && workspace.form.is_none() {
-            workspace.form = Some(ConnectionForm::new(None, window, cx));
-        }
-
-        // After the form exists, because with no profiles the form is the only
-        // surface a notice has.
+        // After the environment's form, which takes the notice over the
+        // welcome surface when there is one.
         if let Some(message) = load_failure {
             workspace.note(message, cx);
         }
@@ -458,8 +487,9 @@ impl Workspace {
     /// a tab at startup — would otherwise clear a notice nobody has read yet,
     /// and one of those says the connection came up weaker than it asked for.
     pub(crate) fn clear_notice(&mut self) {
-        if let Some(profile) = self.profile_mut() {
-            profile.session.notice = None;
+        match self.profile_mut() {
+            Some(profile) => profile.session.notice = None,
+            None => self.welcome_notice = None,
         }
     }
 
@@ -468,11 +498,24 @@ impl Workspace {
     /// says.
     pub(crate) const REFRESHING: &str = "These rows are being refreshed.";
 
+    /// Hands focus back to what is in front once whatever held it has gone:
+    /// the tab, or the welcome surface when there is no connection. A field
+    /// unmounted with focus in it leaves the window focused on nothing, and
+    /// every keybinding dead.
+    pub(crate) fn refocus_front(&mut self) {
+        match self.profile_mut() {
+            Some(profile) => profile.session.editor_needs_focus = true,
+            None => self.welcome_needs_focus = true,
+        }
+    }
+
     pub(crate) fn note(&mut self, message: String, cx: &mut Context<Self>) {
         if let Some(profile) = self.profile_mut() {
             profile.session.notice = Some(message);
         } else if let Some(form) = &mut self.form {
             form.error = Some(message);
+        } else {
+            self.welcome_notice = Some(message);
         }
         cx.notify();
     }
@@ -637,9 +680,12 @@ impl Render for Workspace {
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
         // Every way the switcher closes ends here, so this is the one place
-        // its name field is put away -- before the focus handoff below.
+        // its name field is put away -- before the focus handoff below. The
+        // welcome surface has the field too, and keeps it while in front.
         if !self.switcher_open {
-            self.drop_project_name();
+            if !(self.profiles.is_empty() && self.form.is_none()) {
+                self.drop_project_name();
+            }
             self.drop_connection_search();
         }
         // Deferred to render for the `&mut Window` a background task does not
@@ -725,6 +771,15 @@ impl Render for Workspace {
         if let Some(input) = self.form.as_mut().and_then(|form| form.needs_focus.take()) {
             input.focus_handle(cx).focus(window, cx);
         }
+        // Asked for by name rather than read off what holds focus: that is
+        // checked against the last frame, where the field that just closed
+        // still sat inside this same floor.
+        if self.form.is_none()
+            && self.profiles.is_empty()
+            && std::mem::take(&mut self.welcome_needs_focus)
+        {
+            self.focus.focus(window, cx);
+        }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
         {
@@ -773,7 +828,6 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::previous_profile))
-                .on_action(cx.listener(Self::import_from))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
@@ -783,10 +837,31 @@ impl Render for Workspace {
                         .min_h_0()
                         .child(self.render_connection_form(cx)),
                 )
+                .children(self.render_import_choice(cx))
                 .children(self.render_palette(cx));
         }
         let Some(profile) = self.profile() else {
-            unreachable!("the connection form is open when there are no profiles");
+            return div()
+                .id("welcome")
+                .size_full()
+                .track_focus(&self.focus)
+                .text_color(t.text)
+                .text_size(px(layout::TEXT_MD))
+                .flex()
+                .flex_col()
+                .on_action(cx.listener(Self::select_theme))
+                .on_action(cx.listener(Self::show_editor))
+                .on_action(cx.listener(Self::palette_next))
+                .on_action(cx.listener(Self::palette_previous))
+                .on_action(cx.listener(Self::open_connection_form))
+                .on_action(cx.listener(Self::new_project))
+                .on_action(cx.listener(Self::import_from))
+                .on_action(cx.listener(Self::open_settings))
+                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
+                .children(self.settings_open.then(|| views::render_settings(self, cx)))
+                .children(self.render_import_choice(cx))
+                .children(self.render_palette(cx));
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {
@@ -1341,6 +1416,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::open_connection_form))
+            .on_action(cx.listener(Self::new_project))
             .on_action(cx.listener(Self::import_from))
             .on_action(cx.listener(Self::zoom_editor_in))
             .on_action(cx.listener(Self::zoom_editor_out))
@@ -1458,6 +1534,7 @@ impl Render for Workspace {
             .children(self.render_queue_failure(cx))
             .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
+            .children(self.render_import_choice(cx))
             .children(self.render_palette(cx))
             .children(self.render_reference_popup(cx))
     }

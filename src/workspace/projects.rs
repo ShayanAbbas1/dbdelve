@@ -54,6 +54,11 @@ impl Workspace {
     /// Opens the switcher with only the group in front expanded, and its
     /// search field focused so typing filters straight away.
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The panel is deferred, so it would draw over the import's question
+        // and let the project it picked be renamed or deleted under it.
+        if self.pending_import.is_some() {
+            return;
+        }
         self.switcher_open = true;
         self.pending_removal = None;
         self.pending_project_deletion = None;
@@ -180,7 +185,56 @@ impl Workspace {
         self.project_name = Some(input);
         self.renaming_project = renaming;
         self.project_name_needs_focus = true;
+        self.project_name_error = None;
+        self.pending_project_deletion = None;
         cx.notify();
+    }
+
+    /// Names a new project where projects are listed: the switcher, or the
+    /// welcome surface while there is no connection to have one.
+    pub(crate) fn new_project(
+        &mut self,
+        _: &NewProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // As `open_switcher`: nothing is named while the import is asking.
+        if self.pending_import.is_some() {
+            return;
+        }
+        self.close_settings(window, cx);
+        // Opened afresh even when open, since a search hides the field.
+        if !self.profiles.is_empty() {
+            self.open_switcher(window, cx);
+        }
+        // The name field is what was asked for, not the search, nor the
+        // editor a palette that ran this hands focus back to.
+        self.connection_search_needs_focus = false;
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
+        self.start_naming_project(None, window, cx);
+    }
+
+    /// The project called `name`, made if there is none. Where a name comes
+    /// from a form or an import rather than the name field, a taken one is
+    /// joined rather than refused.
+    pub(crate) fn project_named(&mut self, name: &str) -> &mut store::StoredProject {
+        let at = match self
+            .projects
+            .iter()
+            .position(|project| project.name == name)
+        {
+            Some(at) => at,
+            None => {
+                self.projects.push(store::StoredProject {
+                    name: name.to_string(),
+                    ..Default::default()
+                });
+                self.projects.len() - 1
+            }
+        };
+        &mut self.projects[at]
     }
 
     /// Whether `name` cannot be given to a project, saying why when it
@@ -195,7 +249,12 @@ impl Workspace {
         } else {
             return false;
         };
-        self.note(message, cx);
+        if self.profiles.is_empty() && self.form.is_none() {
+            self.project_name_error = Some(message);
+            cx.notify();
+        } else {
+            self.note(message, cx);
+        }
         true
     }
 
@@ -216,7 +275,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
         if self.name_refused(&name, None, cx) {
             return;
         }
@@ -233,16 +292,18 @@ impl Workspace {
     /// Puts the name field away. It held focus while open, and a field
     /// unmounted with focus in it takes every keybinding with it, so focus
     /// goes back to the search field if the switcher stays open, else to
-    /// whatever is in front.
+    /// whatever is in front -- unless that is a form, which hands focus to a
+    /// field of its own that the tab's focus, applied after it, would take.
     pub(crate) fn drop_project_name(&mut self) {
         self.renaming_project = None;
         if self.project_name.take().is_none() {
             return;
         }
+        self.project_name_error = None;
         if self.switcher_open && self.connection_search.is_some() {
             self.connection_search_needs_focus = true;
-        } else if let Some(profile) = self.profile_mut() {
-            profile.session.editor_needs_focus = true;
+        } else if self.form.is_none() {
+            self.refocus_front();
         }
     }
 
@@ -309,6 +370,24 @@ pub(crate) fn normalized_projects(
         }
     }
     projects
+}
+
+/// The project a saved connection form puts its connection in: the one named
+/// in its new-project field when that is open, which joins a project already
+/// called that rather than refusing the name, or else the one picked, unless
+/// it was deleted while the form sat open.
+pub(crate) fn chosen_project(
+    typed: Option<&str>,
+    picked: Option<&str>,
+    projects: &[store::StoredProject],
+) -> Result<Option<String>, String> {
+    match typed.map(str::trim) {
+        Some("") => Err("A project needs a name.".to_string()),
+        Some(name) => Ok(Some(name.to_string())),
+        None => Ok(picked
+            .filter(|picked| projects.iter().any(|project| project.name == *picked))
+            .map(str::to_string)),
+    }
 }
 
 /// The `(id, name, host)` connections whose name, host or project holds
@@ -380,6 +459,25 @@ mod tests {
                 project("Analytics", &["warehouse"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_form_puts_its_connection_in_the_project_typed_or_picked() {
+        let projects = [project("Billing", &[])];
+        assert_eq!(
+            chosen_project(Some("  Analytics "), Some("Billing"), &projects),
+            Ok(Some("Analytics".to_string()))
+        );
+        assert_eq!(
+            chosen_project(Some("Billing"), None, &projects),
+            Ok(Some("Billing".to_string()))
+        );
+        assert!(chosen_project(Some("  "), Some("Billing"), &projects).is_err());
+        assert_eq!(
+            chosen_project(None, Some("Billing"), &projects),
+            Ok(Some("Billing".to_string()))
+        );
+        assert_eq!(chosen_project(None, Some("Deleted"), &projects), Ok(None));
     }
 
     #[test]

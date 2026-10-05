@@ -41,7 +41,7 @@ impl Workspace {
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
         // The theme picker is the one list reachable before any connection
-        // exists: the connection form is where a first launch lands.
+        // exists, from the welcome surface or the connection form.
         if showing == Some(mode) || (self.profile().is_none() && mode != PaletteMode::Theme) {
             self.close_palette(window, cx);
             return;
@@ -120,8 +120,8 @@ impl Workspace {
         self.end_theme_preview(window, cx);
         if let Some(form) = self.form.as_mut() {
             form.needs_focus = Some(form.url.clone());
-        } else if let Some(profile) = self.profile_mut() {
-            profile.session.editor_needs_focus = true;
+        } else {
+            self.refocus_front();
         }
         cx.notify();
         true
@@ -157,6 +157,7 @@ impl Workspace {
             .update(cx, |input, cx| input.set_value(percent, window, cx));
         self.settings_open = false;
         self.rebinding = None;
+        self.refocus_front();
         cx.notify();
         true
     }
@@ -267,6 +268,7 @@ impl Workspace {
             Command::NextProfile => self.cycle_profile(1, cx),
             Command::PreviousProfile => self.cycle_profile(-1, cx),
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
+            Command::NewProject => self.new_project(&NewProject, window, cx),
             Command::ImportConnections(source) => self.import_connections(source, window, cx),
             Command::RefreshConnection => self.reconnect(self.active, cx),
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),

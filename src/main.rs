@@ -52,9 +52,9 @@ use gpui_component::{
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
     CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
-    FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewQuery, NewRow,
-    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext,
-    PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
+    FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewProject,
+    NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings,
+    PaletteNext, PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
     RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
     ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
     SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor,
@@ -258,8 +258,7 @@ fn main() {
             // here, rather than reused from `Workspace::new`'s own read of the
             // same file: nothing here can wait for a window and an entity to
             // exist first.
-            let overrides = store::load_profiles()
-                .ok()
+            let overrides = store::peek_profiles()
                 .and_then(|(_, _, _, settings, _)| settings)
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
@@ -290,14 +289,33 @@ fn main() {
                 Menu {
                     name: "File".into(),
                     disabled: false,
-                    items: vec![
+                    items: [
                         MenuItem::action("New Query", NewQuery),
                         MenuItem::action("New Connection", NewConnection),
+                        MenuItem::action("New Project", NewProject),
+                    ]
+                    .into_iter()
+                    .chain({
+                        let sources = import::Source::ALL
+                            .into_iter()
+                            .filter(|source| source.found())
+                            .map(|source| {
+                                MenuItem::action(
+                                    format!("Import from {}…", source.label()),
+                                    ImportConnections { source },
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let separator = (!sources.is_empty()).then(MenuItem::separator);
+                        separator.into_iter().chain(sources)
+                    })
+                    .chain([
                         MenuItem::separator(),
                         MenuItem::action("Save Query", SaveQuery),
                         MenuItem::separator(),
                         MenuItem::action("Close Tab", CloseTab),
-                    ],
+                    ])
+                    .collect(),
                 },
                 Menu {
                     name: "Query".into(),

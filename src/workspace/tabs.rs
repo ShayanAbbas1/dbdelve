@@ -234,13 +234,28 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.pending_import.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.project_name.is_some() {
             self.drop_project_name();
             cx.notify();
             return;
         }
-        if self.form.is_some() && !self.profiles.is_empty() {
+        // Backs out of naming a new project to the list, as its × does,
+        // rather than out of everything typed into the form.
+        if let Some(form) = &mut self.form
+            && form.naming_project
+        {
+            form.naming_project = false;
+            form.needs_focus = Some(form.name.clone());
+            cx.notify();
+            return;
+        }
+        if self.form.is_some() {
             self.form = None;
+            self.refocus_front();
             cx.notify();
             return;
         }
