@@ -1724,12 +1724,18 @@ mod tests {
                 "sort": [[0, false]], "order_by": [["\"id\"", false]]}"#,
         )
         .expect("an older snapshot must still decode");
-        assert_eq!(Sorting::restored(grid.client_sort.as_deref()), Sorting::Server);
+        assert_eq!(
+            Sorting::restored(grid.client_sort.as_deref()),
+            Sorting::Server
+        );
 
         let settings: store::StoredSettings =
             toml::from_str("color_titlebar = true").expect("older settings must still decode");
         assert_eq!(settings.client_sort, None);
-        assert_eq!(Sorting::new(settings.client_sort.unwrap_or(false)), Sorting::Server);
+        assert_eq!(
+            Sorting::new(settings.client_sort.unwrap_or(false)),
+            Sorting::Server
+        );
     }
 
     #[test]
