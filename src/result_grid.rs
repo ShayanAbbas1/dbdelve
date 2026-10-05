@@ -1333,16 +1333,21 @@ pub(crate) fn keep_active_in_view(
     cx: &mut Context<TableState<ResultGrid>>,
 ) -> Option<Pixels> {
     let handle = table.horizontal_scroll_handle.clone();
+    let width = handle.bounds().size.width;
+    // At no width `scroll_to_col` defers to the list's next layout, which the
+    // jump back below could not undo.
+    if width <= Pixels::ZERO {
+        return None;
+    }
     let from = handle.offset();
-    let col = table
-        .delegate_mut()
-        .relaid_out(handle.bounds().size.width, from.x)?;
+    let col = table.delegate_mut().relaid_out(width, from.x)?;
     // The library keeps the offset that brings a column into view private;
     // jumping there is the only way to learn it, so jump back straight after.
     table.scroll_to_col(col + GUTTER, cx);
     let to = handle.offset().x;
     handle.set_offset(from);
-    Some(to)
+    // A glide that goes nowhere would still stop a wheel's in flight.
+    (to != from.x).then_some(to)
 }
 
 /// The cell one `step` from `from` in a `rows` by `cols` grid, or `None` at the
