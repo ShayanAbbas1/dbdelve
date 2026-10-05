@@ -19,7 +19,7 @@ use crate::{
     db::{self, EditTarget, QueryResult},
     export::{self, RowsAs},
     icons::icon,
-    sql::Mode,
+    sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
     theme::{ConnectionColor, color::Srgb, layout, theme},
     ui::{Control, Tone, icon_button},
@@ -329,6 +329,19 @@ impl ResultGrid {
     pub fn with_sort(mut self, sort: Vec<(usize, bool)>, sortable: bool) -> Self {
         self.sort = sort;
         self.sortable = sortable;
+        self
+    }
+
+    /// A view's sort in memory, applied to rows that have just arrived. The
+    /// keys name columns as `filter::sort_expression` writes them, so each
+    /// finds its column in this result by name, and a key whose column is gone
+    /// orders nothing. `None` is a view the server sorts, which keeps the
+    /// readout `with_sort` gave it.
+    pub fn with_client_sort(mut self, keys: Option<&[SortKey]>) -> Self {
+        if let Some(keys) = keys {
+            let order = crate::filter::sort_columns(self.engine, keys, &self.result.columns);
+            self.sort_in_memory(order);
+        }
         self
     }
 
@@ -1954,9 +1967,9 @@ impl ResultGrid {
                             .child((position + 1).to_string())
                     })),
             )
-            // The click goes to the workspace, which owns the statement: a sort
-            // is a change to the SQL and a re-run, not a reordering of rows the
-            // grid happens to be holding.
+            // The click goes to the workspace, which knows whether this view
+            // is sorted by the server -- a change to the SQL and a re-run --
+            // or in memory.
             .on_click(cx.listener(move |_, _, window, cx| {
                 window.dispatch_action(Box::new(crate::SortColumn { column: col_ix }), cx);
             }))
@@ -2350,6 +2363,33 @@ mod tests {
 
     fn value(text: &str) -> NewValue {
         NewValue::Value(text.into())
+    }
+
+    #[test]
+    fn a_sort_in_memory_follows_its_column_by_name_into_the_next_result() {
+        // The re-run moved `b` to the front and dropped `c`: the key on `b`
+        // still finds it, and the one on `c` orders nothing rather than some
+        // other column that now sits where `c` was.
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("b", "int4"), typed("a", "int4")],
+                rows: vec![
+                    vec![Some("1".into()), Some("9".into())],
+                    vec![Some("2".into()), Some("8".into())],
+                ],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres)
+        .with_client_sort(Some(&[
+            SortKey::new("\"c\"", true),
+            SortKey::new("\"b\"", false),
+        ]));
+
+        assert_eq!(grid.sort, vec![(0, false)]);
+        assert_eq!(grid.cell(0, 0), Some("2"));
+        assert!(grid.sortable);
     }
 
     /// A grid over one column of untyped cells, which is enough to order rows by.

@@ -357,12 +357,14 @@ pub(crate) enum StaleResume {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: String,
         stored_queries: Vec<store::StoredQueryTab>,
         stored_next_query_id: u64,
         pending_objects: Vec<store::StoredObject>,
         engine: Engine,
+        sorting: Sorting,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -427,7 +429,8 @@ impl Session {
         let queries = stored_queries
             .iter()
             .map(|stored| {
-                let (tab, failure) = QueryTab::restore(&id, stored, engine, window, cx);
+                let (tab, failure) =
+                    QueryTab::restore(&id, stored, engine, sorting.clone(), window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -625,6 +628,27 @@ impl Session {
         }
     }
 
+    /// Who orders one named tab's rows. `None` for a routine, which has none.
+    pub(crate) fn sorting(&self, tab: Tab) -> Option<&Sorting> {
+        match tab {
+            Tab::Query(id) => self.query_tab(id).map(|tab| &tab.sorting),
+            Tab::Object(id) => match &self.objects.iter().find(|tab| tab.id == id)?.body {
+                ObjectBody::Relation { sorting, .. } => Some(sorting),
+                ObjectBody::Routine(_) => None,
+            },
+        }
+    }
+
+    pub(crate) fn sorting_mut(&mut self, tab: Tab) -> Option<&mut Sorting> {
+        match tab {
+            Tab::Query(id) => self.query_tab_mut(id).map(|tab| &mut tab.sorting),
+            Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
+                ObjectBody::Relation { sorting, .. } => Some(sorting),
+                ObjectBody::Routine(_) => None,
+            },
+        }
+    }
+
     /// Every live grid this session holds, across both tab strips. `results`
     /// and `slot` reach one grid by tab; this reaches all of them, for a
     /// setting that belongs to the connection rather than to a run --
@@ -815,6 +839,37 @@ pub(crate) fn close_target(active: Tab, open_query: Option<&str>) -> CloseTarget
     }
 }
 
+/// Who orders a view's rows on a header click. Per view, because a table read
+/// a page at a time and a query whose rows are all here want different
+/// answers; a new view starts from the Default sorting setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sorting {
+    /// The click goes into the statement's `ORDER BY` and the statement runs
+    /// again, so the top of the sort is the table's, not the page's.
+    Server,
+    /// The click reorders the rows already held, by these keys: column
+    /// expressions as `filter::sort_expression` writes them, so they follow a
+    /// column by name into the next result. Nothing runs, and the statement
+    /// keeps whatever `ORDER BY` it had.
+    Client(Vec<SortKey>),
+}
+
+impl Sorting {
+    pub(crate) fn new(client: bool) -> Self {
+        match client {
+            true => Self::Client(Vec::new()),
+            false => Self::Server,
+        }
+    }
+
+    pub(crate) fn client_keys(&self) -> Option<&[SortKey]> {
+        match self {
+            Self::Client(keys) => Some(keys),
+            Self::Server => None,
+        }
+    }
+}
+
 /// One query buffer, and everything that belongs to it.
 ///
 /// There used to be exactly one of these per profile, held directly on
@@ -874,6 +929,9 @@ pub(crate) struct QueryTab {
     /// user never looks at still reports what is on disk and keeps the prune
     /// off its files.
     pub(crate) queued_results: usize,
+    /// Who orders this tab's rows on a header click. Per tab rather than per
+    /// result: a queue's results are one view, read through one switcher.
+    pub(crate) sorting: Sorting,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
@@ -1005,6 +1063,7 @@ impl QueryTab {
         profile_id: &str,
         stored: &store::StoredQueryTab,
         engine: Engine,
+        sorting: Sorting,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1039,6 +1098,7 @@ impl QueryTab {
             // nothing of a run in flight is kept.
             queue: None,
             queued_results: stored.queued_results,
+            sorting,
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),
@@ -1270,6 +1330,10 @@ pub(crate) enum ObjectBody {
         /// The `ORDER BY` the header clicks have built up. dbdelve owns this
         /// statement, so sorting regenerates it rather than editing text.
         sort: Vec<SortKey>,
+        /// Who orders these rows on a header click. A sort in memory orders
+        /// this page alone, and is never written into `sort`, which is what
+        /// the statement is rebuilt from.
+        sorting: Sorting,
         /// The `WHERE` expression this preview narrows the relation by, without
         /// the keyword; empty means none. The fifth control of the same kind as
         /// the sort, the limit and the offset: a change regenerates the

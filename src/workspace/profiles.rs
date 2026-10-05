@@ -168,6 +168,7 @@ impl Workspace {
             stored.next_query_id.unwrap_or(0),
             stored.open_objects,
             config.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );
@@ -241,6 +242,7 @@ impl Workspace {
             0,
             Vec::new(),
             config.engine(),
+            Sorting::new(self.settings.client_sort),
             window,
             cx,
         );

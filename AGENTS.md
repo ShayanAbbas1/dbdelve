@@ -26,9 +26,11 @@ require it, stop and raise it instead.
    DBDelve _does_ write SQL when the user asks it to, and only then, always
    where the user can read it:
 
-   - A header click asking for a sort splices the `ORDER BY` into the
-     statement in the buffer, where it can be read, edited and undone; the
-     statement that runs is the statement on screen.
+   - On a view the server sorts, a header click asking for a sort splices the
+     `ORDER BY` into the statement in the buffer, where it can be read, edited
+     and undone; the statement that runs is the statement on screen. A view
+     sorted in memory reorders the rows it holds and writes nothing;
+     switching it to the server is an ask, and splices its keys the same way.
    - Grid edits on a query tab are appended to the buffer
      (`sql::appended_statement`) and run from there. On an object tab, which
      has no buffer, the statement is shown in a review dialog before it runs.
@@ -1133,6 +1135,18 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a grid edit on such a tab would land in `done` as another of the queue's
   statements. A restored queue has it false and `remaining` empty for the same
   reason: it is a strip to read, not a run to resume.
+- **A view's sorting is its own (`session::Sorting`).** `Server` is the header
+  click hard rule 1 describes. `Client(keys)` reorders the rows already held
+  (`ResultGrid::sort_in_memory`) and runs nothing, so a relation sorts only the
+  page on screen. A view starts from the Default sorting setting and is
+  switched from the status bar. Client keys are column expressions
+  (`filter::sort_expression`) resolved against each result as it lands
+  (`ResultGrid::with_client_sort`), so a page turn or a re-run comes back
+  sorted the same way. They are never written into a relation's `sort` or a
+  snapshot's `order_by`: those rebuild the statement, and an in-memory sort
+  must not reach the server unasked. Rows are reordered in place rather than
+  through a display permutation, so every row index in the grid names the row
+  on screen; pending edits move with their rows.
 - **`queries` can be empty.** Any buffer can be closed, the last one
   included, and a profile with no tab open shows an empty pane and relaunches
   that way. A new connection, and one written before buffers were tabs, opens

@@ -65,6 +65,7 @@ impl Workspace {
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let preview_rows = self.settings.preview_rows;
+        let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
         let profile = self.profile_mut()?;
         let existing = matching_tab(
@@ -99,6 +100,7 @@ impl Workspace {
                     results: result_grid::new_grid(window, cx),
                     query: QueryState::Idle,
                     sort: Vec::new(),
+                    sorting,
                     filter,
                     filters,
                     next_join: Conjunction::default(),

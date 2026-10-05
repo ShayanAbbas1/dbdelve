@@ -334,12 +334,12 @@ impl Workspace {
         }
     }
 
-    /// A column header was clicked: put that column into the statement's
-    /// `ORDER BY` and run it again.
+    /// A column header was clicked: move that column through the view's sort.
     ///
-    /// The sort is the server's, not the grid's. Ordering the rows already
-    /// fetched would sort one page of a table and call it sorted; asking the
-    /// database means the top of the sort is the table's, not the page's.
+    /// On a view the server sorts, the column goes into the statement's
+    /// `ORDER BY` and the statement runs again, so the top of the sort is the
+    /// table's, not the page's. On a view sorted in memory, the rows already
+    /// held are reordered and nothing runs.
     ///
     /// A click appends: a column that is not in the sort joins the end of it,
     /// one that is ascending turns around, and one that is descending drops
@@ -355,11 +355,49 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        let tab = profile.session.active;
+        if profile
+            .session
+            .sorting(tab)
+            .and_then(Sorting::client_keys)
+            .is_some()
+        {
+            self.sort_held_rows(tab, column, cx);
+            return;
+        }
 
-        match profile.session.active {
+        match tab {
             Tab::Object(id) => self.relation_sort(id, column, cx),
             Tab::Query(_) => self.query_sort(column, window, cx),
         }
+    }
+
+    /// A header click on a view sorted in memory: the grid in front, which on
+    /// a queue is the result its switcher is showing.
+    fn sort_held_rows(&mut self, tab: Tab, column: usize, cx: &mut Context<Self>) {
+        let engine = self.engine();
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(results) = profile.session.active_results().cloned() else {
+            return;
+        };
+        let columns = results.read(cx).delegate().columns().to_vec();
+        let Some(expression) = sort_expression(engine, &columns, column) else {
+            return;
+        };
+        let Some(Sorting::Client(keys)) = profile.session.sorting_mut(tab) else {
+            return;
+        };
+        cycle(keys, &expression);
+        let order = sort_columns(engine, keys, &columns);
+        results.update(cx, |table, cx| {
+            table.delegate_mut().sort_in_memory(order);
+            // The inspector reads the library's selected row, and that index
+            // now names whichever row the sort moved there.
+            table.clear_selection(cx);
+            cx.notify();
+        });
     }
 
     /// Sorting a query the user wrote: the `ORDER BY` goes into their statement,
