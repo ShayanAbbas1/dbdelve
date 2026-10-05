@@ -886,6 +886,26 @@ impl Sorting {
             _ => None,
         }
     }
+
+    /// What a snapshot keeps: see `StoredGrid::client_sort`.
+    pub(crate) fn stored(&self) -> Option<Vec<(String, bool)>> {
+        self.client_keys().map(|keys| {
+            keys.iter()
+                .map(|key| (key.expression.clone(), key.ascending))
+                .collect()
+        })
+    }
+
+    pub(crate) fn restored(stored: Option<&[(String, bool)]>) -> Self {
+        match stored {
+            Some(keys) => Self::Client(
+                keys.iter()
+                    .map(|(expression, ascending)| SortKey::new(expression.clone(), *ascending))
+                    .collect(),
+            ),
+            None => Self::Server,
+        }
+    }
 }
 
 /// One query buffer, and everything that belongs to it.
@@ -1610,6 +1630,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             &store::query_grid_key(tab.id),
             &store::StoredGrid {
                 last_query: tab.last_query.clone(),
+                client_sort: tab.sorting.stored(),
                 ..grid
             },
         );
@@ -1620,6 +1641,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             results,
             query,
             sort,
+            sorting,
             filter,
             limit,
             showing_structure,
@@ -1646,6 +1668,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                     .iter()
                     .map(|key| (key.expression.clone(), key.ascending))
                     .collect(),
+                client_sort: sorting.stored(),
                 ..grid
             },
         );
@@ -1679,6 +1702,20 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn a_views_sorting_survives_its_snapshot_and_an_unsorted_client_view_stays_client() {
+        for sorting in [
+            Sorting::Server,
+            Sorting::Client(Vec::new()),
+            Sorting::Client(vec![
+                SortKey::new("\"name\"", false),
+                SortKey::new("2", true),
+            ]),
+        ] {
+            assert_eq!(Sorting::restored(sorting.stored().as_deref()), sorting);
+        }
+    }
 
     #[test]
     fn switching_sorting_carries_the_sort_on_screen_across() {

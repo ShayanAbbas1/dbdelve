@@ -452,6 +452,7 @@ impl ResultGrid {
             total_rows: self.total_rows(),
             sort: self.sort.clone(),
             order_by: Vec::new(),
+            client_sort: None,
             widths: self
                 .columns
                 .iter()
@@ -2944,6 +2945,7 @@ mod tests {
                 total_rows: 20_000,
                 sort: Vec::new(),
                 order_by: Vec::new(),
+                client_sort: None,
                 widths: Vec::new(),
                 active: None,
                 last_query: None,
