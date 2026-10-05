@@ -1157,8 +1157,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   strip, which is why it takes a `&mut Window`: a grid per result cannot be
   built without one.
 - **`clip` reads only the window a cell shows, not the whole value.**
-  `ResultGrid::new` clips every cell on the frame thread, for a fresh result
-  and a restored snapshot alike. It used to scan each whole value for line
+  `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
+  every visible cell of every frame. Nothing clipped is kept: a stored second
+  copy of every cell (up to 300 characters each) was built for all of them
+  before the first frame. A line break early in a mostly blank value stops the
+  scan at `CLIP_SCAN_LIMIT` bytes, and a number longer than the limit is shown
+  ungrouped, so neither walks a whole value per frame. `clip` used to scan each whole value for line
   breaks before keeping `CELL_DISPLAY_LIMIT` (300) characters, so a result of
   large documents (5,000 rows of 51 columns, 206 MB, values up to 1.85 M
   characters) cost 11 s in a debug build and 0.15 s in release. `clip` now
@@ -1166,7 +1170,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `clip_to(value, 300)` unchanged if there is none, and otherwise a single
   streaming pass reproduces the old split/trim/drop-empty/join-with-space
   flattening and stops one character past the limit. The cost follows the
-  number of cells, not their size.
+  number of cells drawn, not their size.
 
 ### Completion
 
