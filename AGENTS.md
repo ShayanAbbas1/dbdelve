@@ -423,6 +423,12 @@ runs CI too, not only a change under `src/`.
 - **Storage** is decided in `store.rs`: Application Support on macOS,
   `XDG_DATA_HOME` (or `~/.local/share`) on Linux, `APPDATA` on Windows. Crash
   logs are state, not cache: `~/Library/Logs`, `XDG_STATE_HOME`, `LOCALAPPDATA`.
+  A `profiles.toml` that will not load, whether it would not read or would not
+  parse, is moved aside to `profiles.toml.broken` before anything can save
+  over it; if it cannot be moved, nothing is saved for the rest of the session
+  (`store_unreadable`). The keybinding read at launch uses `peek_profiles`,
+  which moves nothing, so the move and its notice belong to the workspace's
+  own load.
 - **Passwords** go through `keyring`, never into `profiles.toml`: Keychain on
   macOS, Secret Service on Linux, Credential Manager on Windows.
 - **Keybindings** are spelled `secondary-`, which GPUI reads as Cmd on macOS and
@@ -1052,14 +1058,24 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   open, the window is the welcome surface (`Workspace::render_welcome`): New
   project, New connection, and each project with an Add connection of its own.
   Importing from DBeaver or TablePlus starts there too, or from the File menu
-  and the palette once connections exist; before anything is added,
+  and the palette once connections exist, never from over the connection form
+  (its root does not answer `ImportConnections`, so nothing typed into it is
+  lost); before anything is added,
   `render_import_choice` asks which project the new connections join
   (`PendingImport`): "Imported from <client>" by default, made if it is new
-  and joined if not, an existing project, or none.
+  and joined if not, an existing project, or none. While it asks, the switcher
+  and New Project stay shut, since the switcher's panel draws over it.
   Nothing forces a connection on a first launch, the form can always be
-  cancelled, and removing the last connection lands back there. `note` writes
-  to `welcome_notice` while it is in front, and the window's own focus is
-  taken back there whenever nothing in it holds any.
+  cancelled, and removing the last connection lands back there. Settings opens
+  there too. `note` writes to `welcome_notice` while it is in front, and a
+  refused project name gets a line of its own (`project_name_error`) so it
+  never covers that notice.
+- **Whatever closes over a surface hands focus back by name**
+  (`Workspace::refocus_front`): `editor_needs_focus` for a tab,
+  `welcome_needs_focus` for the welcome surface. Reading what holds focus
+  instead does not work: that is checked against the last frame, where the
+  field that just closed still sat inside the same `track_focus` floor, and a
+  window left focused on a dead field has every binding dead.
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.
