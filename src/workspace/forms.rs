@@ -1958,8 +1958,7 @@ impl Workspace {
                         let project = group.map(str::to_string);
                         body.child(
                             switcher_row(("empty-group", id), t)
-                                .text_color(t.text_faint)
-                                .hover(|style| style.bg(t.element_hover).text_color(t.text_muted))
+                                .text_color(t.text_muted)
                                 .child(row_icon(t, icon::PLUS))
                                 .child("Add a connection")
                                 .on_click(move |_, window, cx| {
