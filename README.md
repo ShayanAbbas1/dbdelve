@@ -10,9 +10,9 @@ and keeps scrolling smoothly through a million-row table.
 
 ![DBDelve, light theme](assets/screenshotlight.png)
 
-A table of a million rows, scrolling at speed with quick tab switches.
+DBDelve in action.
 
-https://github.com/user-attachments/assets/c24c98d9-6ab8-45c4-974b-96822b5a3042
+https://github.com/user-attachments/assets/ee555c10-4a18-4059-b451-bfadfc9f9ae0
 
 ## Why
 
