@@ -127,6 +127,7 @@ actions!(
         NextTab,
         PreviousTab,
         NewConnection,
+        NewProject,
         ZoomEditorIn,
         ZoomEditorOut,
         ResetEditorZoom,

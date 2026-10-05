@@ -115,6 +115,7 @@ pub enum Command {
     NextProfile,
     PreviousProfile,
     NewConnection,
+    NewProject,
     ImportConnections(Source),
     RefreshConnection,
     /// Put the palette back up over the theme list.
@@ -770,6 +771,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         chord_hint("new_connection", overrides),
         icon::PLUS,
         Command::NewConnection,
+    ));
+    items.push(Item::command(
+        "New project",
+        chord_hint("new_project", overrides),
+        icon::ADD_TO_PROJECT,
+        Command::NewProject,
     ));
     if Source::DBeaver.found() {
         items.push(Item::command(

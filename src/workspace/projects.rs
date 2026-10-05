@@ -184,6 +184,29 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Names a new project where projects are listed: the switcher, or the
+    /// welcome surface while there is no connection to have one.
+    pub(crate) fn new_project(
+        &mut self,
+        _: &NewProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.form = None;
+        self.close_settings(window, cx);
+        // Opened afresh even when open, since a search hides the field.
+        if !self.profiles.is_empty() {
+            self.open_switcher(window, cx);
+        }
+        // The name field is what was asked for, not the search, nor the
+        // editor a palette that ran this hands focus back to.
+        self.connection_search_needs_focus = false;
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
+        self.start_naming_project(None, window, cx);
+    }
+
     /// Whether `name` cannot be given to a project, saying why when it
     /// cannot. `keeping` is the project's current name on a rename, which it
     /// may keep.

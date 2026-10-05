@@ -52,9 +52,9 @@ use gpui_component::{
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
     CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
-    FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewQuery, NewRow,
-    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext,
-    PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
+    FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewProject,
+    NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings,
+    PaletteNext, PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
     RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
     ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
     SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor,
@@ -293,6 +293,7 @@ fn main() {
                     items: vec![
                         MenuItem::action("New Query", NewQuery),
                         MenuItem::action("New Connection", NewConnection),
+                        MenuItem::action("New Project", NewProject),
                         MenuItem::separator(),
                         MenuItem::action("Save Query", SaveQuery),
                         MenuItem::separator(),
