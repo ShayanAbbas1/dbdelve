@@ -48,6 +48,10 @@ pub(crate) struct Settings {
     /// Some people want the connection colour on the switcher only, not a
     /// painted band across the window.
     pub(crate) color_titlebar: bool,
+    /// Whether a new tab sorts on a header click by reordering the rows it
+    /// holds rather than by asking the server again. Off by default, which is
+    /// how every tab sorted before this was a choice.
+    pub(crate) client_sort: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -74,6 +78,7 @@ impl Default for Settings {
             theme_opacity: HashMap::new(),
             check_for_updates: true,
             color_titlebar: true,
+            client_sort: false,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -366,6 +371,7 @@ impl Workspace {
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
+                workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -770,6 +776,17 @@ impl Workspace {
             return;
         }
         self.settings.color_titlebar = color;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    /// The sorting a new tab starts with. Not applied to the tabs already
+    /// open, for the reason `set_preview_rows` is not: each holds its own.
+    pub(crate) fn set_client_sort(&mut self, client: bool, cx: &mut Context<Self>) {
+        if self.settings.client_sort == client {
+            return;
+        }
+        self.settings.client_sort = client;
         self.remember_profiles(cx);
         cx.notify();
     }

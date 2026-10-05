@@ -2679,6 +2679,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     let preview_rows = workspace.settings.preview_rows;
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
+    let client_sort = workspace.settings.client_sort;
 
     // Like the font rows below: the palette lists the themes, and moving
     // through it previews each one on this card.
@@ -2934,6 +2935,37 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .text_color(t.text_faint)
                         .child("Paint the titlebar in the connection's color."),
+                ),
+        ))
+        .child(settings_section(
+            t,
+            "Default sorting",
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .child(div().flex().gap(px(layout::SPACE_XS)).children(
+                    [(false, "Server"), (true, "Client")].map(|(client, label)| {
+                        settings_chip(
+                            ("default-sorting", client as usize),
+                            label,
+                            client == client_sort,
+                            cx,
+                            move |workspace, _, cx| workspace.set_client_sort(client, cx),
+                        )
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                        .text_color(t.text_faint)
+                        .child(
+                            "How a new tab sorts on a header click. Server runs \
+                             the query again, sorted by the database; Client \
+                             reorders the rows already loaded, so a table sorts \
+                             only the page on screen. Each tab can be switched \
+                             from its status bar.",
+                        ),
                 ),
         ))
         .into_any_element()
