@@ -3000,8 +3000,8 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                             "How a new tab sorts on a header click. Server runs \
                              the query again, sorted by the database; Client \
                              reorders the rows already loaded, so a table sorts \
-                             only the page on screen. Each tab can be switched \
-                             from its status bar.",
+                             only the page on screen. Tabs already open keep \
+                             theirs; each can be switched from its status bar.",
                         ),
                 ),
         ))
