@@ -156,9 +156,10 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
-    /// Whether that line refuses the project name being typed, and so goes
-    /// when the name field does.
-    pub(crate) welcome_notice_refuses_name: bool,
+    /// Why the welcome surface's name field refused what was typed: a line
+    /// of its own, so a refusal never covers the notice, which may be the
+    /// only word that the profiles file failed to load.
+    pub(crate) project_name_error: Option<String>,
     /// The welcome surface's half of `editor_needs_focus`: set when whatever
     /// held focus over it has gone, applied on the next frame.
     pub(crate) welcome_needs_focus: bool,
@@ -243,7 +244,7 @@ impl Workspace {
                 .filter(|source| source.found())
                 .collect(),
             welcome_notice: None,
-            welcome_notice_refuses_name: false,
+            project_name_error: None,
             welcome_needs_focus: true,
             store_unreadable: false,
             next_generation: 0,
@@ -514,7 +515,6 @@ impl Workspace {
             form.error = Some(message);
         } else {
             self.welcome_notice = Some(message);
-            self.welcome_notice_refuses_name = false;
         }
         cx.notify();
     }

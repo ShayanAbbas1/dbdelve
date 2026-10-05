@@ -180,6 +180,7 @@ impl Workspace {
         self.project_name = Some(input);
         self.renaming_project = renaming;
         self.project_name_needs_focus = true;
+        self.project_name_error = None;
         cx.notify();
     }
 
@@ -238,8 +239,12 @@ impl Workspace {
         } else {
             return false;
         };
-        self.note(message, cx);
-        self.welcome_notice_refuses_name = self.profiles.is_empty() && self.form.is_none();
+        if self.profiles.is_empty() && self.form.is_none() {
+            self.project_name_error = Some(message);
+            cx.notify();
+        } else {
+            self.note(message, cx);
+        }
         true
     }
 
@@ -284,9 +289,7 @@ impl Workspace {
         if self.project_name.take().is_none() {
             return;
         }
-        if std::mem::take(&mut self.welcome_notice_refuses_name) {
-            self.welcome_notice = None;
-        }
+        self.project_name_error = None;
         if self.switcher_open && self.connection_search.is_some() {
             self.connection_search_needs_focus = true;
         } else if self.form.is_none() {

@@ -686,6 +686,12 @@ impl Workspace {
                     )
                     .child(tiles)
                     .children(naming)
+                    .children(self.project_name_error.clone().map(|message| {
+                        div()
+                            .text_size(px(layout::TEXT_SM))
+                            .text_color(t.danger)
+                            .child(message)
+                    }))
                     .children(imports)
                     .children(self.welcome_notice.clone().map(|message| {
                         div()
