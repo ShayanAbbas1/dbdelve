@@ -310,7 +310,7 @@ impl ListDelegate for Palette {
             _ => self.unpreviewed,
         };
         if let Some(previewed) = previewed {
-            let opacity = opacity_for(&self.theme_opacity, self.fallback_opacity, previewed.name);
+            let opacity = opacity_for(&self.theme_opacity, self.fallback_opacity, &previewed);
             install_theme(previewed.with_opacity(opacity), window, cx);
             cx.refresh_windows();
         }

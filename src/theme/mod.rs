@@ -314,21 +314,23 @@ const HAIRLINE_LIGHT: f32 = 0.12;
 /// tint over the frost, so turning this dial slides the whole window against
 /// the desktop with the relationships between the planes intact — there is no
 /// second value to keep in step with it. The floor is where the tone stops
-/// carrying text.
+/// carrying text, and what that is depends on the theme — see
+/// [`LIGHT_GLASS_OPACITY_DEFAULT`] for light glass, which is free to go lower
+/// and shows the result live.
 pub const OPACITY_DEFAULT: f32 = 0.72;
 pub const OPACITY_MIN: f32 = 0.50;
-/// Light glass's own floor, and the frost clamps to it rather than the shared
-/// range moving, so a setting carried over from dark glass still means what it
-/// did there. A light frost has the opposite worst case: dark text over a dark
-/// desktop, where everything the frost lets through darkens the plane the text
-/// sits on. Under a black one — a full-screen terminal is enough — chrome is
-/// only `opacity` times its own tone, and 0.50 leaves dbdelve's own body text
-/// near 3.5:1. 0.79 is where every family holds body text at AA, and muted
-/// text, syntax and `danger` at AA large, on the planes each is shown on —
-/// GitHub Light's `danger` is the last to get there. It is above the default,
-/// so light glass at the default is already sitting on it. See
-/// `light_glass_text_holds_over_a_black_desktop_at_its_floor`.
-const LIGHT_GLASS_OPACITY_MIN: f32 = 0.79;
+/// Light glass's own default, in place of the shared one, so a setting carried
+/// over from dark glass does not decide how light glass first looks. A light
+/// frost has the opposite worst case: dark text over a dark desktop, where
+/// everything the frost lets through darkens the plane the text sits on. Under
+/// a black one — a full-screen terminal is enough — chrome is only `opacity`
+/// times its own tone, and 0.50 leaves dbdelve's own body text near 3.5:1.
+/// 0.79 is where every family holds body text at AA, and muted text, syntax
+/// and `danger` at AA large, on the planes each is shown on — GitHub Light's
+/// `danger` is the last to get there. It is a default, not a limit: someone
+/// can go lower and sees the result live. See
+/// `light_glass_text_holds_over_a_black_desktop_at_its_default`.
+const LIGHT_GLASS_OPACITY_DEFAULT: f32 = 0.79;
 /// Short of opaque, and that is a palette constraint rather than taste. What
 /// tells this theme's planes apart is mostly how much each lets through, not
 /// their tone — the steps between them are half of dark's. Shut the desktop
@@ -613,22 +615,16 @@ impl Theme {
     /// plane every other surface is layered on. Chrome — sidebar, titlebar, tab
     /// strip, status bar — paints nothing of its own and is this.
     pub fn frost(self) -> Rgba {
-        self.surface.alpha(self.tint(self.painted_opacity()))
+        self.surface.alpha(self.tint(self.opacity))
     }
 
-    /// The frost's opacity as painted: the shared setting, raised to this
-    /// theme's floor.
-    pub fn painted_opacity(self) -> f32 {
-        self.opacity.max(self.opacity_min())
-    }
-
-    /// The lowest frost this theme will paint, whatever the shared setting
-    /// says — see [`LIGHT_GLASS_OPACITY_MIN`].
-    pub fn opacity_min(self) -> f32 {
+    /// The opacity this theme starts at when nothing is stored for it, and
+    /// what Reset returns to.
+    pub fn default_opacity(self) -> f32 {
         if self.is_glass && self.appearance == Appearance::Light {
-            LIGHT_GLASS_OPACITY_MIN
+            LIGHT_GLASS_OPACITY_DEFAULT
         } else {
-            OPACITY_MIN
+            OPACITY_DEFAULT
         }
     }
 
@@ -925,7 +921,7 @@ impl Theme {
                 // The same hole, from the other side: over a bright desktop
                 // a light frost composites lighter than its own tone, and a
                 // text plane tinted below that greys the window like a smudge.
-                // The floor caps how light that composite gets — about 0.96
+                // The default caps how light that composite gets — about 0.96
                 // over white at 0.79 — so both text planes sit above it, and
                 // unlike dark glass the ramp never inverts. The results stop
                 // short of white: at 1.0 the darkest family ink lands outside
@@ -934,8 +930,8 @@ impl Theme {
                 // Chrome is milk glass where dark's is smoke: near-white, one
                 // step under the editor. It carries the sidebar's text straight
                 // over the desktop, and every point of lightness given up here
-                // is opacity the floor has to take back — see
-                // [`LIGHT_GLASS_OPACITY_MIN`].
+                // is opacity the default has to take back — see
+                // [`LIGHT_GLASS_OPACITY_DEFAULT`].
                 0.950,
                 // The results' tone, which is white less a trace: a modal is
                 // the one near-opaque plane, and at 1.0 every family's card
@@ -2015,21 +2011,21 @@ mod tests {
     }
 
     #[test]
-    fn light_glass_text_holds_over_a_black_desktop_at_its_floor() {
+    fn light_glass_text_holds_over_a_black_desktop_at_its_default() {
         // The raw-tint checks above say nothing about the desktop, and for
         // light glass the desktop is the whole risk: dark text, and a dark
         // wallpaper or terminal darkening the very plane it sits on. Black is
         // the worst one there is. One tier below the raw-tint floors, since this
         // is the worst case rather than the window as usually seen. Asked for
-        // at the shared minimum, so it is the clamp being graded.
+        // at the default; lower is the user's call and nothing here promises it.
         //
-        // Two things are left out because no floor short of opaque holds them.
+        // Two things are left out because no opacity short of opaque holds them.
         // `accent` sits under 4:1 on Catppuccin Latte's and One Light's raw
         // tints, and over black it reaches 3.0 only at 0.94. Muted text on a
         // coloured titlebar band likewise needs 0.94 (GitHub Light, Red), and
         // a fainter band to buy it back stops standing apart from the pills
         // on it — see `a_titlebar_pill_stands_off_every_band`.
-        for t in light_glass().map(|t| t.with_opacity(OPACITY_MIN)) {
+        for t in light_glass().map(|t| t.with_opacity(t.default_opacity())) {
             let chrome = t.frost().flatten(BLACK);
             let editor = t.panel_glass().flatten(chrome);
             let results = t.data_glass().flatten(chrome);
@@ -2072,8 +2068,9 @@ mod tests {
     fn light_glass_text_planes_never_sit_below_the_frost() {
         // Over a white desktop the frost composites lighter than its own tone,
         // and a text plane tinted under that composite greys the window. At the
-        // floor that composite has a ceiling, and both text planes clear it.
-        for t in light_glass().map(|t| t.with_opacity(OPACITY_MIN)) {
+        // default that composite has a ceiling, and both text planes clear it;
+        // scoped to the default because the claim is not held below it.
+        for t in light_glass().map(|t| t.with_opacity(t.default_opacity())) {
             let chrome = t.frost().flatten(WHITE).relative_luminance();
             for (plane, tone) in [("editor", t.panel), ("results", t.bg)] {
                 assert!(

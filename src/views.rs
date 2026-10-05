@@ -44,7 +44,7 @@ use crate::{
         StructureState, Tab, query_label, result_pane_is_expanded,
     },
     tab_drag::{DragTab, TabStrip},
-    theme::{FontSlot, OPACITY_DEFAULT, OPACITY_MAX, OPACITY_STEP, Theme, fonts, layout, theme},
+    theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, theme},
     ui::{
         Control, Tone, button, button_label, compact_count, dialog, group_thousands, icon_button,
         key_hint, keycap_for, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
@@ -2688,7 +2688,8 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
 
     // Whole percents, as the field reads: a step can land on 0.77000004, and
     // comparing that f32 to a bound would leave a button live that does nothing.
-    let opacity = opacity_percent(t.painted_opacity());
+    let opacity = opacity_percent(t.opacity);
+    let default_opacity = t.default_opacity();
     // Disabled wholesale on an opaque theme rather than hidden: the setting is
     // still remembered, it is just that a theme which paints its own chrome
     // has no desktop behind it for this to let through.
@@ -2698,7 +2699,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         .gap(px(layout::SPACE_SM))
         .child(
             button("opacity-down", "−", Tone::Quiet, Control::Compact, t)
-                .disabled(!t.is_glass || opacity <= opacity_percent(t.opacity_min()))
+                .disabled(!t.is_glass || opacity <= opacity_percent(OPACITY_MIN))
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                     workspace.step_opacity(-OPACITY_STEP, window, cx);
                 })),
@@ -2732,8 +2733,8 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         .child(
             button("opacity-reset", "Reset", Tone::Quiet, Control::Compact, t)
                 .disabled(!t.is_glass)
-                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    workspace.set_opacity(OPACITY_DEFAULT, window, cx);
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                    workspace.set_opacity(default_opacity, window, cx);
                 })),
         );
 
