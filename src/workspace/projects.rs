@@ -274,7 +274,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
         if self.name_refused(&name, None, cx) {
             return;
         }

@@ -550,10 +550,26 @@ impl Workspace {
             .as_ref()
             .filter(|_| self.renaming_project.is_none())
             .map(|input| {
+                let typed = input.clone();
                 div()
                     .flex()
                     .gap(px(layout::SPACE_SM))
                     .child(div().flex_1().min_w_0().child(Input::new(input).w_full()))
+                    .child(
+                        button(
+                            "create-project",
+                            "Create",
+                            Tone::Primary,
+                            Control::Standard,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace, _, _, cx| {
+                                let name = typed.read(cx).value().trim().to_string();
+                                workspace.create_project(name, cx);
+                            },
+                        )),
+                    )
                     .child(
                         icon_button(
                             "cancel-new-project",
@@ -695,13 +711,13 @@ impl Workspace {
                             .text_color(t.danger)
                             .child(message)
                     }))
-                    .children(imports)
                     .children(self.welcome_notice.clone().map(|message| {
                         div()
                             .text_size(px(layout::TEXT_SM))
                             .text_color(t.text_muted)
                             .child(message)
                     }))
+                    .children(imports)
                     .when(!projects.is_empty(), |card| {
                         card.child(
                             div()
