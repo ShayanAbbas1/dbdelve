@@ -278,7 +278,8 @@ impl Workspace {
     /// Puts the name field away. It held focus while open, and a field
     /// unmounted with focus in it takes every keybinding with it, so focus
     /// goes back to the search field if the switcher stays open, else to
-    /// whatever is in front.
+    /// whatever is in front -- unless that is a form, which hands focus to a
+    /// field of its own that the tab's focus, applied after it, would take.
     pub(crate) fn drop_project_name(&mut self) {
         self.renaming_project = None;
         if self.project_name.take().is_none() {
@@ -288,7 +289,9 @@ impl Workspace {
         self.welcome_notice = None;
         if self.switcher_open && self.connection_search.is_some() {
             self.connection_search_needs_focus = true;
-        } else if let Some(profile) = self.profile_mut() {
+        } else if self.form.is_none()
+            && let Some(profile) = self.profile_mut()
+        {
             profile.session.editor_needs_focus = true;
         }
     }
