@@ -363,34 +363,68 @@ struct ProfileFile {
     profiles: Vec<StoredProfile>,
 }
 
+/// Why the profile list could not be loaded, and whether the file that would
+/// not load is out of the way of the next save.
+#[derive(Debug)]
+pub struct LoadFailure {
+    pub message: String,
+    pub moved_aside: bool,
+}
+
 /// The profile list and the id of the one that was last in front. A missing
 /// file is the first run, and reads as an empty list. Every other failure is
 /// reported, an unreachable data directory included -- `save_profiles` refuses
 /// on that too, and an empty list here is what the next save writes back.
-pub fn load_profiles() -> Result<Restored, String> {
-    let path = dbdelve_directory()?.join(PROFILES_FILE);
-    // A file we could not read is not renamed: nothing is recovered by moving
-    // it, so the overwrite hazard below technically remains. A directory we
-    // cannot read is one we almost certainly cannot write either.
-    let Some(text) = read_file(&path)? else {
-        return Ok((Vec::new(), None, None, None, Vec::new()));
+pub fn load_profiles() -> Result<Restored, LoadFailure> {
+    let path = dbdelve_directory()
+        .map_err(|message| LoadFailure {
+            message,
+            moved_aside: false,
+        })?
+        .join(PROFILES_FILE);
+    let (what, error) = match read_profiles(&path) {
+        Ok(restored) => return Ok(restored),
+        Err(failure) => failure,
     };
-    decode_profiles(&text).map_err(|error| {
-        // The next save rewrites this path, so moving the unparsable file aside
-        // first is what keeps a profile list a single bad byte would cost.
-        let kept = path.with_file_name(format!("{PROFILES_FILE}.broken"));
-        match fs::rename(&path, &kept) {
-            Ok(()) => format!(
-                "Could not read {} as TOML, and it has been kept as {}: {error}",
+    // The next save rewrites this path, so moving the file aside first is
+    // what keeps a profile list a bad byte or a bad permission would cost.
+    let kept = path.with_file_name(format!("{PROFILES_FILE}.broken"));
+    Err(match fs::rename(&path, &kept) {
+        Ok(()) => LoadFailure {
+            message: format!(
+                "Could not read {}{what}, and it has been kept as {}: {error}",
                 path.display(),
                 kept.display()
             ),
-            Err(rename_error) => format!(
-                "Could not read {} as TOML, and it could not be moved aside ({rename_error}): {error}",
+            moved_aside: true,
+        },
+        Err(rename_error) => LoadFailure {
+            message: format!(
+                "Could not read {}{what}, and it could not be moved aside ({rename_error}), \
+                 so nothing will be saved until dbdelve is restarted: {error}",
                 path.display()
             ),
-        }
+            moved_aside: false,
+        },
     })
+}
+
+/// The profile file without `load_profiles`' moving it aside on a failure,
+/// for a read that only peeks, ahead of the one that reports.
+pub fn peek_profiles() -> Option<Restored> {
+    read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE)).ok()
+}
+
+/// A failure is what could not be read -- `" as TOML"` for a file that could
+/// -- and why.
+fn read_profiles(path: &Path) -> Result<Restored, (&'static str, String)> {
+    match fs::read_to_string(path) {
+        Ok(text) => decode_profiles(&text).map_err(|error| (" as TOML", error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok((Vec::new(), None, None, None, Vec::new()))
+        }
+        Err(error) => Err(("", error.to_string())),
+    }
 }
 
 fn decode_profiles(text: &str) -> Result<Restored, String> {

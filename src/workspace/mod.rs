@@ -162,11 +162,10 @@ pub(crate) struct Workspace {
     /// The welcome surface's half of `editor_needs_focus`: set when whatever
     /// held focus over it has gone, applied on the next frame.
     pub(crate) welcome_needs_focus: bool,
-    /// Whether `store::load_profiles` failed outright rather than finding no
-    /// file. Set at startup, because the file it could not read may still be
-    /// sitting there -- and a session that never saw it must not be the one
-    /// that overwrites it with an empty list. Cleared by the first save that
-    /// has a profile or a project of the user's own to write.
+    /// Whether `store::load_profiles` failed and could not move the file it
+    /// failed on aside. Set once at startup and never cleared: the file is
+    /// still sitting there, and a session that never saw it must not be the
+    /// one that overwrites it, whatever it has made since.
     pub(crate) store_unreadable: bool,
     pub(crate) next_generation: u64,
     /// The palette, built from scratch every time it opens. Its rows are a
@@ -318,9 +317,9 @@ impl Workspace {
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
             }
-            Err(message) => {
-                workspace.store_unreadable = true;
-                load_failure = Some(message);
+            Err(failure) => {
+                workspace.store_unreadable = !failure.moved_aside;
+                load_failure = Some(failure.message);
             }
         }
 

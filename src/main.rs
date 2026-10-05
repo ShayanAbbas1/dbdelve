@@ -258,8 +258,7 @@ fn main() {
             // here, rather than reused from `Workspace::new`'s own read of the
             // same file: nothing here can wait for a window and an entity to
             // exist first.
-            let overrides = store::load_profiles()
-                .ok()
+            let overrides = store::peek_profiles()
                 .and_then(|(_, _, _, settings, _)| settings)
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
