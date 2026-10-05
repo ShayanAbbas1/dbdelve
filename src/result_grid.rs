@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use gpui::{
@@ -90,6 +91,10 @@ pub struct ResultGrid {
     /// Whether a header click can sort this result at all. A control that does
     /// nothing is worse than no control.
     sortable: bool,
+    /// Where each row held sat in the result the server sent, for a sort in
+    /// memory to break ties by and to return to when its last key is clicked
+    /// away. Empty until the first such sort, which is every row where it was.
+    fetched: Vec<usize>,
     /// The cell a keystroke acts on. dbdelve's, not the library's: gpui-component
     /// tracks a selected row *or* a selected column as mutually exclusive
     /// modes and never a cell, so a coordinate has to be assembled here or
@@ -190,6 +195,32 @@ pub enum NewValue {
     Default,
 }
 
+/// What a non-NULL cell sorts as. Numbers rank ahead of text, so a document
+/// field holding both, or a number column holding a value that does not read
+/// as one, still has one order to be put in.
+enum SortValue<'a> {
+    Number(f64),
+    Text(&'a str),
+}
+
+impl SortValue<'_> {
+    /// Total, as `sort_by` needs: `total_cmp` places NaN rather than refusing
+    /// to compare it.
+    fn order(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Number(a), Self::Number(b)) => a.total_cmp(b),
+            // Case folded, so a column of names does not put every capital
+            // ahead of every lowercase letter.
+            (Self::Text(a), Self::Text(b)) => a
+                .chars()
+                .flat_map(char::to_lowercase)
+                .cmp(b.chars().flat_map(char::to_lowercase)),
+            (Self::Number(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
 /// One changed cell, held beside the fetched value rather than over it.
 struct PendingEdit {
     row: usize,
@@ -260,6 +291,7 @@ impl ResultGrid {
             columns,
             sort: Vec::new(),
             sortable: false,
+            fetched: Vec::new(),
             result,
             numeric,
             active: None,
@@ -705,6 +737,76 @@ impl ResultGrid {
                 }),
             })
             .collect()
+    }
+
+    /// What a cell sorts as, `None` for a NULL or a missing field. A column
+    /// the server typed as a number, or a document's numeric field, sorts by
+    /// value; one typed as anything else sorts as its text, as the server's
+    /// own `ORDER BY` would; one nothing typed sorts by value wherever the
+    /// text reads as a number.
+    ///
+    /// Dates and times sort as text: every engine renders them year first and
+    /// zero-padded, so text order is time order.
+    ///
+    /// ponytail: not for BC dates or a column mixing UTC offsets, and `f64`
+    /// ties integers past 2^53 that differ only in their last digits (they
+    /// keep the server's order). Parse those properly if anyone sorts them in
+    /// memory.
+    fn sort_value(&self, row: usize, col: usize) -> Option<SortValue<'_>> {
+        let text = self.cell(row, col)?;
+        let tag = self
+            .result
+            .cell_types
+            .get(row)
+            .and_then(|types| types.get(col));
+        let numeric = match (tag, self.column_type(col)) {
+            (Some(tag), _) => db::is_numeric_type(tag),
+            (None, Some(_)) => self.is_numeric_column(col),
+            (None, None) => true,
+        };
+        if numeric && let Ok(number) = text.trim().parse() {
+            return Some(SortValue::Number(number));
+        }
+        Some(SortValue::Text(text))
+    }
+
+    /// Where the server put the row this grid now holds at `row`.
+    fn fetched_at(&self, row: usize) -> usize {
+        self.fetched.get(row).copied().unwrap_or(row)
+    }
+
+    /// The rows in `keys`' order, as indices into the rows as they stand.
+    /// Ties keep the order the server sent the rows in, and with no keys every
+    /// row does, which is how a sort clicked away undoes itself.
+    ///
+    /// NULL goes last whichever way a key points: an absent value is not a
+    /// small one, and a descending sort that opens on a screen of NULLs has
+    /// buried what it was asked for.
+    fn client_order(&self, keys: &[(usize, bool)]) -> Vec<usize> {
+        // Read once per row rather than once per comparison: parsing a number
+        // n log n times over is most of the cost of a sort.
+        let values: Vec<Vec<Option<SortValue<'_>>>> = (0..self.result.rows.len())
+            .map(|row| {
+                keys.iter()
+                    .map(|&(col, _)| self.sort_value(row, col))
+                    .collect()
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        order.sort_by(|&a, &b| {
+            keys.iter()
+                .zip(values[a].iter().zip(&values[b]))
+                .map(|(&(_, ascending), pair)| match pair {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Greater,
+                    (Some(_), None) => Ordering::Less,
+                    (Some(x), Some(y)) if ascending => x.order(y),
+                    (Some(x), Some(y)) => y.order(x),
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or_else(|| self.fetched_at(a).cmp(&self.fetched_at(b)))
+        });
+        order
     }
 }
 
@@ -2211,11 +2313,19 @@ mod tests {
         NewValue::Value(text.into())
     }
 
-    /// A grid over one column of cells, which is enough to order rows by.
+    /// A grid over one column of untyped cells, which is enough to order rows by.
     fn grid_of(values: &[Option<&str>]) -> ResultGrid {
+        typed_column(None, values)
+    }
+
+    /// A grid over one column named `a`, typed `data_type`.
+    fn typed_column(data_type: Option<&str>, values: &[Option<&str>]) -> ResultGrid {
         ResultGrid::new(
             QueryResult {
-                columns: vec![column("a")],
+                columns: vec![DbColumn {
+                    name: "a".into(),
+                    data_type: data_type.map(str::to_string),
+                }],
                 rows: values
                     .iter()
                     .map(|value| vec![value.map(str::to_string)])
@@ -2224,6 +2334,127 @@ mod tests {
             },
             Mode::ReadWrite,
         )
+    }
+
+    /// Column 0's cells in the order `keys` puts the rows in.
+    fn sorted<'a>(grid: &'a ResultGrid, keys: &[(usize, bool)]) -> Vec<Option<&'a str>> {
+        grid.client_order(keys)
+            .into_iter()
+            .map(|row| grid.cell(row, 0))
+            .collect()
+    }
+
+    #[test]
+    fn a_number_column_sorts_by_value_and_a_text_column_by_its_text() {
+        let values = [Some("10"), Some("9"), Some("-2.5"), Some("100")];
+        let by_value = [Some("-2.5"), Some("9"), Some("10"), Some("100")];
+        assert_eq!(
+            sorted(&typed_column(Some("int4"), &values), &[(0, true)]),
+            by_value
+        );
+        // What the server's own ORDER BY on a text column would say.
+        assert_eq!(
+            sorted(&typed_column(Some("text"), &values), &[(0, true)]),
+            [Some("-2.5"), Some("10"), Some("100"), Some("9")]
+        );
+        // Nothing says what the column is, so a value that reads as a number is one.
+        assert_eq!(sorted(&typed_column(None, &values), &[(0, true)]), by_value);
+    }
+
+    #[test]
+    fn null_sorts_last_whichever_way_the_key_points() {
+        let grid = typed_column(Some("int4"), &[None, Some("2"), Some("1")]);
+        assert_eq!(sorted(&grid, &[(0, true)]), [Some("1"), Some("2"), None]);
+        assert_eq!(sorted(&grid, &[(0, false)]), [Some("2"), Some("1"), None]);
+    }
+
+    #[test]
+    fn text_sorts_without_regard_to_case_and_dates_sort_as_written() {
+        let names = typed_column(
+            Some("text"),
+            &[Some("beta"), Some("Alpha"), Some("alpha2"), Some("Gamma")],
+        );
+        assert_eq!(
+            sorted(&names, &[(0, true)]),
+            [Some("Alpha"), Some("alpha2"), Some("beta"), Some("Gamma")]
+        );
+
+        let times = typed_column(
+            Some("timestamptz"),
+            &[
+                Some("2024-10-02 09:00:00+00"),
+                Some("2023-12-31 23:59:59+00"),
+                Some("2024-10-02 10:00:00+00"),
+            ],
+        );
+        assert_eq!(
+            sorted(&times, &[(0, true)]),
+            [
+                Some("2023-12-31 23:59:59+00"),
+                Some("2024-10-02 09:00:00+00"),
+                Some("2024-10-02 10:00:00+00"),
+            ]
+        );
+    }
+
+    #[test]
+    fn special_floats_and_mixed_fields_still_have_one_order() {
+        // `sort_by` may panic on a comparison that is not a total order, and
+        // NaN is where a naive float comparison stops being one.
+        let floats = typed_column(
+            Some("float8"),
+            &[Some("NaN"), Some("1"), Some("-Infinity"), Some("Infinity")],
+        );
+        assert_eq!(
+            sorted(&floats, &[(0, true)]),
+            [Some("-Infinity"), Some("1"), Some("Infinity"), Some("NaN")]
+        );
+
+        // A document field: numbers by value first, then text, then the
+        // field a document does not have. The string "10" is text.
+        let field = ResultGrid::new(
+            QueryResult {
+                columns: vec![DbColumn {
+                    name: "v".into(),
+                    data_type: Some("mixed".into()),
+                }],
+                rows: vec![
+                    vec![Some("b".into())],
+                    vec![Some("10".into())],
+                    vec![None],
+                    vec![Some("9".into())],
+                    vec![Some("10".into())],
+                ],
+                cell_types: vec![
+                    vec!["string"],
+                    vec!["int"],
+                    vec![db::MISSING],
+                    vec!["double"],
+                    vec!["string"],
+                ],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert_eq!(field.client_order(&[(0, true)]), [3, 1, 4, 0, 2]);
+    }
+
+    #[test]
+    fn later_keys_break_earlier_ties_and_full_ties_keep_the_servers_order() {
+        let grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("team", "text"), typed("score", "int4")],
+                rows: [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
+                    .iter()
+                    .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
+                    .collect(),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        // Rows 1 and 3 tie on both keys, so they stay in the order they came.
+        assert_eq!(grid.client_order(&[(0, true), (1, false)]), [1, 3, 2, 0]);
+        assert_eq!(grid.client_order(&[]), [0, 1, 2, 3]);
     }
 
     /// A grid over `id, note, total` where `id` is the key, `note` is an alias
