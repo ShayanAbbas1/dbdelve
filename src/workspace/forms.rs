@@ -253,7 +253,7 @@ impl Workspace {
                             .child(self.form_field("Username", &form.user, cx))
                             .child(self.labelled_field(
                                 "Password",
-                                Input::new(&form.password).mask_toggle(),
+                                Input::new(&form.password).mask_toggle().w_full(),
                                 cx,
                             ))
                             .children(
@@ -783,46 +783,14 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
+                        .child(section_label(t, &heading))
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap(px(layout::SPACE_MD))
-                                .child(icon_tile(t, icon::ADD_TO_PROJECT))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .text_size(px(layout::TEXT_LG))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(heading),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(layout::TEXT_SM))
-                                                .text_color(t.text_muted)
-                                                .child("Choose the project they join."),
-                                        ),
-                                ),
+                                .text_size(px(layout::TEXT_SM))
+                                .text_color(t.text_muted)
+                                .child("Choose the project they join."),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(layout::SPACE_XS))
-                                .child(
-                                    div()
-                                        .text_size(px(layout::TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(t.text_muted)
-                                        .child("Project"),
-                                )
-                                .child(picker),
-                        )
+                        .child(self.labelled_field("Project", picker, cx))
                         .child(
                             div()
                                 .flex()
@@ -869,10 +837,15 @@ impl Workspace {
         input: &Entity<InputState>,
         cx: &App,
     ) -> impl IntoElement {
-        self.labelled_field(label, Input::new(input), cx)
+        self.labelled_field(label, Input::new(input).w_full(), cx)
     }
 
-    fn labelled_field(&self, label: &'static str, input: Input, cx: &App) -> impl IntoElement {
+    fn labelled_field(
+        &self,
+        label: &'static str,
+        control: impl IntoElement,
+        cx: &App,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -884,7 +857,7 @@ impl Workspace {
                     .text_color(theme(cx).text_muted)
                     .child(label),
             )
-            .child(input.w_full())
+            .child(control)
     }
 
     /// The palette, centred over everything else.
