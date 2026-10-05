@@ -422,7 +422,7 @@ impl Workspace {
         let tile = |id: &'static str,
                     path: &'static str,
                     title: &'static str,
-                    description: &'static str,
+                    description: String,
                     hint: String| {
             ui::control(id, Tone::Quiet, Control::Standard)
                 .flex_1()
@@ -480,7 +480,7 @@ impl Workspace {
                     "welcome-new-project",
                     icon::ADD_TO_PROJECT,
                     "New project",
-                    "Group connections that belong together.",
+                    "Group connections that belong together.".into(),
                     ui::chord_hint("new_project", overrides),
                 )
                 .on_click(move |_, window, cx| {
@@ -494,7 +494,7 @@ impl Workspace {
                     "welcome-new-connection",
                     icon::PLUS,
                     "New connection",
-                    "Postgres, MySQL, SQLite, SQL Server, Snowflake, MongoDB…",
+                    Engine::ALL.map(Engine::label).join(", "),
                     ui::chord_hint("new_connection", overrides),
                 )
                 .on_click(move |_, window, cx| {
@@ -697,7 +697,7 @@ impl Workspace {
                                             .text_size(px(layout::TEXT_SM))
                                             .text_color(t.text_muted)
                                             .child(
-                                                "Start with a project to organise your \
+                                                "Start with a project to organize your \
                                                  connections, or connect straight to a \
                                                  database.",
                                             ),
@@ -2142,7 +2142,7 @@ impl Workspace {
                             switcher_row(("empty-group", id), t)
                                 .text_color(t.text_muted)
                                 .child(row_icon(t, icon::PLUS))
-                                .child("Add a connection")
+                                .child("Add connection")
                                 .on_click(move |_, window, cx| {
                                     _ = add_workspace.update(cx, |workspace, cx| {
                                         workspace.new_connection_in(project.clone(), window, cx);

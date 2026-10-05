@@ -295,8 +295,8 @@ fn main() {
                         MenuItem::action("New Project", NewProject),
                     ]
                     .into_iter()
-                    .chain(
-                        import::Source::ALL
+                    .chain({
+                        let sources = import::Source::ALL
                             .into_iter()
                             .filter(|source| source.found())
                             .map(|source| {
@@ -304,8 +304,11 @@ fn main() {
                                     format!("Import from {}…", source.label()),
                                     ImportConnections { source },
                                 )
-                            }),
-                    )
+                            })
+                            .collect::<Vec<_>>();
+                        let separator = (!sources.is_empty()).then(MenuItem::separator);
+                        separator.into_iter().chain(sources)
+                    })
                     .chain([
                         MenuItem::separator(),
                         MenuItem::action("Save Query", SaveQuery),

@@ -1046,7 +1046,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   names one that saving makes, or joins if the name is taken
   (`projects::chosen_project`). File → New Project (`NewProject`, no default
   chord) names a project in the switcher, or on the welcome surface below
-  while there is no connection; an empty project in the switcher offers Add a
+  while there is no connection; an empty project in the switcher offers Add
   connection in place of members.
 - **No connection is a state, not a prompt.** With no profiles and no form
   open, the window is the welcome surface (`Workspace::render_welcome`): New
