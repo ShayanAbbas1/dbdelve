@@ -191,7 +191,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.form = None;
         self.close_settings(window, cx);
         // Opened afresh even when open, since a search hides the field.
         if !self.profiles.is_empty() {
