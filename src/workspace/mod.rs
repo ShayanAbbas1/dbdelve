@@ -828,7 +828,6 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::previous_profile))
-                .on_action(cx.listener(Self::import_from))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))

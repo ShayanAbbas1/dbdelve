@@ -1093,7 +1093,7 @@ impl Workspace {
                 workspace.importing = false;
                 let report = match report {
                     Ok(report) => report,
-                    Err(message) => return workspace.say_import(message, cx),
+                    Err(message) => return workspace.note(message, cx),
                 };
                 let fresh = report
                     .imported
@@ -1109,7 +1109,7 @@ impl Workspace {
                 // what was skipped and why.
                 if fresh == 0 {
                     let summary = workspace.add_imported(source, report, None, window, cx);
-                    return workspace.say_import(summary, cx);
+                    return workspace.note(summary, cx);
                 }
                 workspace.pending_import = Some(PendingImport {
                     source,
@@ -1131,18 +1131,7 @@ impl Workspace {
         };
         let summary =
             self.add_imported(pending.source, pending.report, pending.project, window, cx);
-        self.say_import(summary, cx);
-    }
-
-    fn say_import(&mut self, summary: String, cx: &mut Context<Self>) {
-        // A note on a profile is out of sight while the form covers it.
-        match &mut self.form {
-            Some(form) => {
-                form.error = Some(summary);
-                cx.notify();
-            }
-            None => self.note(summary, cx),
-        }
+        self.note(summary, cx);
     }
 
     /// Returns the summary line.
@@ -1220,20 +1209,11 @@ impl Workspace {
             self.project_named(project).connections.extend(ids);
             self.remember_profiles(cx);
         }
-        if !added.imported.is_empty() {
-            if self
-                .form
-                .as_ref()
-                .is_some_and(|form| form.editing.is_none())
-            {
-                self.form = None;
-            }
-            // A first launch has nothing in front yet. Otherwise the
-            // connection in front stays there rather than a batch of new ones
-            // each connecting in turn.
-            if had_none {
-                self.activate(0, cx);
-            }
+        // A first launch has nothing in front yet. Otherwise the connection
+        // in front stays there rather than a batch of new ones each
+        // connecting in turn.
+        if had_none && !added.imported.is_empty() {
+            self.activate(0, cx);
         }
         added.summary(source)
     }
