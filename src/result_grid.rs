@@ -54,9 +54,6 @@ const GUTTER: usize = 1;
 /// One digit's advance in the grid's monospaced face, near enough to size the
 /// row-number column to its widest number.
 const DIGIT_WIDTH: f32 = 8.0;
-/// The empty strip the library leaves after the last column, sized here
-/// rather than by the library's own `w_3` so a row's width can count it.
-const TRAILING_GAP: f32 = 12.0;
 
 /// A gutter cell: the row number's box, evenly padded. It draws no divider of
 /// its own -- the library closes a fixed column with one.
@@ -96,6 +93,9 @@ pub struct ResultGrid {
     /// keys reach it through `select_row` and `select_col`. Both paths end in
     /// `set_active`, so there is one answer to where the user is.
     active: Option<(usize, usize)>,
+    /// How wide the scrolling columns were laid out last frame, for
+    /// `keep_active_in_view`.
+    laid_out_width: Pixels,
     /// What the user has changed and not yet applied. `result.rows` is never
     /// written, so the grid can always show pending against as-fetched and
     /// discarding is dropping this.
@@ -274,6 +274,7 @@ impl ResultGrid {
             result,
             display,
             active: None,
+            laid_out_width: Pixels::ZERO,
             pending: Vec::new(),
             editing: None,
             captured: None,
@@ -705,6 +706,23 @@ impl ResultGrid {
 /// statement of SQL. Generating and running that is the workspace's job, which
 /// is why every one of these is computable without a window.
 impl ResultGrid {
+    /// The active cell's column when the grid has been laid out at a new
+    /// `width`, scrolled `offset_x` (zero or negative), and the cell showed at
+    /// least partly at the old one. `None` while the width holds, since
+    /// scrolling on every frame would notify on every frame, and `None` for a
+    /// cell already scrolled out of sight, which a resize must not jump back to.
+    /// Both widths are the scrolling columns' viewport, the gutter excluded.
+    fn relaid_out(&mut self, width: Pixels, offset_x: Pixels) -> Option<usize> {
+        let was = std::mem::replace(&mut self.laid_out_width, width);
+        if was == width {
+            return None;
+        }
+        let (_, col) = self.active?;
+        let left: Pixels = self.columns.get(..col)?.iter().map(|c| c.width).sum();
+        let right = left + self.columns.get(col)?.width;
+        (right + offset_x > Pixels::ZERO && left + offset_x < was).then_some(col)
+    }
+
     /// The cell `Enter` acts on, if the user has reached one. `None` on a
     /// result set nobody has touched yet, and on every new one.
     pub fn active(&self) -> Option<(usize, usize)> {
@@ -1302,6 +1320,36 @@ pub(crate) fn step_pending(
     table.scroll_to_col(col + GUTTER, cx);
 }
 
+/// Scroll the active cell back into view when the grid's width changes under
+/// it. The row panel is what usually changes it: the click that selects a row
+/// opens the panel beside the grid, and any scroll into view that click caused
+/// measured the grid before it narrowed, leaving a cell in the right-most
+/// columns under the panel.
+///
+/// Run after the table's prepaint, the first point the new width is known.
+/// Answers the horizontal offset to glide to, leaving the offset where it was.
+pub(crate) fn keep_active_in_view(
+    table: &mut TableState<ResultGrid>,
+    cx: &mut Context<TableState<ResultGrid>>,
+) -> Option<Pixels> {
+    let handle = table.horizontal_scroll_handle.clone();
+    let width = handle.bounds().size.width;
+    // At no width `scroll_to_col` defers to the list's next layout, which the
+    // jump back below could not undo.
+    if width <= Pixels::ZERO {
+        return None;
+    }
+    let from = handle.offset();
+    let col = table.delegate_mut().relaid_out(width, from.x)?;
+    // The library keeps the offset that brings a column into view private;
+    // jumping there is the only way to learn it, so jump back straight after.
+    table.scroll_to_col(col + GUTTER, cx);
+    let to = handle.offset().x;
+    handle.set_offset(from);
+    // A glide that goes nowhere would still stop a wheel's in flight.
+    (to != from.x).then_some(to)
+}
+
 /// The cell one `step` from `from` in a `rows` by `cols` grid, or `None` at the
 /// edge the step points off.
 fn step_target(
@@ -1475,8 +1523,7 @@ impl TableDelegate for ResultGrid {
                 .columns
                 .iter()
                 .map(|column| f32::from(column.width))
-                .sum::<f32>()
-            + TRAILING_GAP;
+                .sum::<f32>();
         let row = div()
             .id(("row", row_ix))
             .relative()
@@ -1487,12 +1534,15 @@ impl TableDelegate for ResultGrid {
         row.child(div().absolute().size_full().bg(t.selection))
     }
 
+    /// Nothing, where the library leaves an empty strip: that strip is inside
+    /// every row, so the row's selection wash, hover and hairline ran on past
+    /// the last column over it.
     fn render_last_empty_col(
         &mut self,
         _window: &mut Window,
         _cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        div().w(px(TRAILING_GAP)).h_full().flex_shrink_0()
+        div()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -3022,6 +3072,22 @@ mod tests {
         assert_eq!(pending.shown.as_deref(), Some("7,654,321"));
         assert_eq!(pending.value, value("7654321"));
         assert_eq!(grid.pending_updates()[0].sets[0].1, value("7654321"));
+    }
+
+    #[test]
+    fn the_active_cell_is_scrolled_back_only_when_the_grid_is_relaid_out_at_a_new_width() {
+        // Three columns of 180: the active one spans 360..540.
+        let mut grid = editable_grid();
+        assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
+        grid.set_active(0, 2);
+        assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
+        assert_eq!(grid.relaid_out(px(500.), px(0.)), Some(2));
+        assert_eq!(grid.relaid_out(px(500.), px(0.)), None);
+        // Off the right edge of the old 300 viewport, then off its left edge
+        // once scrolled 540 along: scrolled away from, so left where it is.
+        assert_eq!(grid.relaid_out(px(300.), px(0.)), Some(2));
+        assert_eq!(grid.relaid_out(px(250.), px(0.)), None);
+        assert_eq!(grid.relaid_out(px(300.), px(-540.)), None);
     }
 
     #[test]

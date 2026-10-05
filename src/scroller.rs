@@ -109,11 +109,29 @@ pub fn smooth_for(
     }
 }
 
+impl Smooth {
+    /// Glides the cross axis to `x` on the wheel's curve, for a scroll the
+    /// code asks for rather than the user. A wheel turn, a click or another
+    /// jump mid-glide stops it the way they stop a wheel's.
+    pub fn glide_across(&self, x: Pixels, window: &mut Window) {
+        let offset = self.across.offset();
+        self.across_motion.borrow_mut().glide_to(
+            offset,
+            point(x, offset.y),
+            max_offset(&*self.across),
+        );
+        schedule_frame(&self.across_motion, self.across.clone(), window);
+    }
+}
+
 #[derive(Default)]
 struct ScrollMotion {
     shown: Point<Pixels>,
     target: Point<Pixels>,
     active: bool,
+    /// The motion is a `glide_across` rather than a wheel's, so a click lands
+    /// it instead of stopping it short of where it was sent.
+    glide: bool,
     frame_pending: bool,
     last_frame: Option<Instant>,
 }
@@ -125,6 +143,7 @@ impl ScrollMotion {
             shown: offset,
             target: offset,
             active: false,
+            glide: false,
             frame_pending: false,
             last_frame: None,
         }
@@ -134,7 +153,33 @@ impl ScrollMotion {
         self.shown = offset;
         self.target = offset;
         self.active = false;
+        self.glide = false;
         self.last_frame = None;
+    }
+
+    /// Already moving, only the target changes: a glide asked for again every
+    /// frame of a resize would otherwise restart its clock each time and trail
+    /// the layout.
+    fn glide_to(&mut self, offset: Point<Pixels>, target: Point<Pixels>, maximum: Point<Pixels>) {
+        if self.active {
+            self.target = clamp_offset(target, maximum);
+        } else {
+            self.stop(offset);
+            self.nudge(target, maximum);
+        }
+        self.glide = self.active;
+    }
+
+    /// Where a click leaves the motion: a glide lands on its target, and a
+    /// wheel's stops where it is.
+    fn interrupt(&mut self, offset: Point<Pixels>) -> Point<Pixels> {
+        let at = if self.active && self.glide {
+            self.target
+        } else {
+            offset
+        };
+        self.stop(at);
+        at
     }
 
     fn sync(&mut self, offset: Point<Pixels>, maximum: Point<Pixels>) {
@@ -144,6 +189,7 @@ impl ScrollMotion {
     }
 
     fn nudge(&mut self, offset: Point<Pixels>, maximum: Point<Pixels>) {
+        self.glide = false;
         let delta = offset - self.shown;
         let from = if self.active { self.target } else { self.shown };
         self.target = clamp_offset(from + delta, maximum);
@@ -344,9 +390,19 @@ pub trait SmoothScrollable: StatefulInteractiveElement + ParentElement + Sized {
             let scroll = scroll.clone();
             let across_motion = across_motion.clone();
             let across = across.clone();
-            move |_, _, _| {
-                motion.borrow_mut().stop(scroll.offset());
-                across_motion.borrow_mut().stop(across.offset());
+            move |_, window, _| {
+                let mut landed = false;
+                for (motion, handle) in [(&motion, &scroll), (&across_motion, &across)] {
+                    let offset = handle.offset();
+                    let at = motion.borrow_mut().interrupt(offset);
+                    if at != offset {
+                        handle.set_offset(at);
+                        landed = true;
+                    }
+                }
+                if landed {
+                    window.refresh();
+                }
             }
         })
         .child({
@@ -482,6 +538,35 @@ mod tests {
         motion.sync(offset(-800.0), offset(1000.0));
         assert!(!motion.active);
         assert_eq!(motion.shown, offset(-800.0));
+    }
+
+    #[test]
+    fn a_glide_starts_from_where_the_offset_is_and_lands_on_its_target() {
+        let mut motion = ScrollMotion::new(offset(-300.0));
+        motion.stop(offset(0.0));
+        motion.nudge(offset(-200.0), offset(1000.0));
+        assert_eq!((motion.shown, motion.target), (offset(0.0), offset(-200.0)));
+        for _ in 0..120 {
+            motion.advance(Duration::from_millis(16), offset(1000.0));
+        }
+        assert_eq!(motion.shown, offset(-200.0));
+    }
+
+    #[test]
+    fn a_glide_asked_for_again_mid_flight_keeps_its_clock_and_a_click_lands_it() {
+        let mut motion = ScrollMotion::new(offset(0.0));
+        motion.glide_to(offset(0.0), offset(-200.0), offset(1000.0));
+        motion.advance(Duration::from_millis(16), offset(1000.0));
+        motion.last_frame = Some(Instant::now());
+        let shown = motion.shown;
+        motion.glide_to(offset(-999.0), offset(-300.0), offset(1000.0));
+        assert_eq!((motion.shown, motion.target), (shown, offset(-300.0)));
+        assert!(motion.last_frame.is_some());
+        assert_eq!(motion.interrupt(shown), offset(-300.0));
+        assert!(!motion.active);
+
+        motion.nudge(offset(-400.0), offset(1000.0));
+        assert_eq!(motion.interrupt(offset(-310.0)), offset(-310.0));
     }
 
     #[test]

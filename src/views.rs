@@ -1255,6 +1255,14 @@ fn render_results(
                 .on_action(cx.listener(Workspace::open_reference))
                 .on_action(cx.listener(Workspace::show_references))
                 .child(DataTable::new(results).bordered(false).stripe(false))
+                .on_prepaint({
+                    let (results, rows_scroll) = (results.clone(), rows_scroll.clone());
+                    move |_, window, cx| {
+                        if let Some(x) = results.update(cx, result_grid::keep_active_in_view) {
+                            rows_scroll.glide_across(x, window);
+                        }
+                    }
+                })
         })
         .into_any_element();
 
