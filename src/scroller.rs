@@ -391,11 +391,18 @@ pub trait SmoothScrollable: StatefulInteractiveElement + ParentElement + Sized {
             let across_motion = across_motion.clone();
             let across = across.clone();
             move |_, window, _| {
-                let at = motion.borrow_mut().interrupt(scroll.offset());
-                scroll.set_offset(at);
-                let at = across_motion.borrow_mut().interrupt(across.offset());
-                across.set_offset(at);
-                window.refresh();
+                let mut landed = false;
+                for (motion, handle) in [(&motion, &scroll), (&across_motion, &across)] {
+                    let offset = handle.offset();
+                    let at = motion.borrow_mut().interrupt(offset);
+                    if at != offset {
+                        handle.set_offset(at);
+                        landed = true;
+                    }
+                }
+                if landed {
+                    window.refresh();
+                }
             }
         })
         .child({
