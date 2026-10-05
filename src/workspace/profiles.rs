@@ -41,7 +41,9 @@ impl Workspace {
                     .name
                     .to_string(),
             ),
+            chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
+            grid_font_size: Some(self.settings.grid_font_size),
             preview_rows: Some(self.settings.preview_rows),
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
@@ -443,7 +445,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_XS))
-                    .text_size(px(layout::TEXT_MD))
+                    .text_size(px(layout::chrome(layout::TEXT_MD)))
                     .text_color(t.text)
                     .children(marker(&selected))
                     .child(
@@ -651,10 +653,10 @@ impl Workspace {
             .id(mode.as_str())
             .flex()
             .items_center()
-            .h(px(24.))
+            .h(px(layout::chrome(24.)))
             .px(px(layout::SPACE_SM))
             .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::TEXT_SM))
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
             .whitespace_nowrap()
             .map(|chip| {
                 if selected {

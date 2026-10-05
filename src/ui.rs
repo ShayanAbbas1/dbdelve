@@ -76,7 +76,7 @@ pub(crate) fn row_icon_tinted(
     color: Option<ConnectionColor>,
 ) -> impl IntoElement {
     icon(path)
-        .size(px(layout::ICON_SIZE))
+        .size(px(layout::chrome(layout::ICON_SIZE)))
         .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
 }
 
@@ -134,7 +134,7 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
                 .flex()
                 .items_center()
                 .gap(px(layout::SPACE_XS))
-                .text_size(px(layout::TEXT_SM))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text)
                 .font_weight(FontWeight::MEDIUM)
                 .child(row_icon_tinted(t, path, Some(color)))
@@ -153,7 +153,7 @@ pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
                 .flex()
                 .items_center()
                 .gap(px(layout::SPACE_XS))
-                .text_size(px(layout::TEXT_XS))
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
                 .text_color(t.text_muted)
                 .child(format!("DBDelve {version} available"))
                 .child(row_icon(t, icon::CHEVRON_DOWN)),
@@ -246,7 +246,11 @@ fn caption_buttons(t: Theme) -> impl IntoElement {
             .justify_center()
             .window_control_area(area)
             .hover(move |style| style.bg(hover))
-            .child(icon(path).size(px(layout::ICON_SIZE)).text_color(t.text))
+            .child(
+                icon(path)
+                    .size(px(layout::chrome(layout::ICON_SIZE)))
+                    .text_color(t.text),
+            )
     };
     div()
         .h_full()
@@ -327,11 +331,11 @@ impl Tone {
 
 impl Control {
     pub(crate) fn height(self) -> f32 {
-        match self {
+        layout::chrome(match self {
             Control::Standard => layout::CONTROL_HEIGHT,
             Control::Compact => layout::CONTROL_HEIGHT_COMPACT,
             Control::Inline => layout::CONTROL_HEIGHT_INLINE,
-        }
+        })
     }
 
     /// The same air on the sides as above and below the label: what is left of
@@ -341,10 +345,10 @@ impl Control {
     }
 
     pub(crate) fn text_size(self) -> f32 {
-        match self {
+        layout::chrome(match self {
             Control::Standard => layout::TEXT_MD,
             Control::Compact | Control::Inline => layout::TEXT_SM,
-        }
+        })
     }
 }
 
@@ -386,7 +390,7 @@ pub(crate) fn icon_button(
 ) -> Button {
     control(id, tone, size).w(px(size.height())).p_0().child(
         icon(path)
-            .size(px(layout::ICON_SIZE))
+            .size(px(layout::chrome(layout::ICON_SIZE)))
             .text_color(tone.ink(t)),
     )
 }
@@ -429,7 +433,7 @@ pub(crate) fn control(id: impl Into<gpui::ElementId>, tone: Tone, size: Control)
 /// names under it are what the eye lands on first.
 pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {
     div()
-        .text_size(px(layout::TEXT_XS))
+        .text_size(px(layout::chrome(layout::TEXT_XS)))
         .font_weight(FontWeight::MEDIUM)
         .text_color(t.text_faint)
         .child(label.to_uppercase())
@@ -487,7 +491,7 @@ pub(crate) fn key_hint(
         .flex()
         .items_center()
         .gap(px(layout::SPACE_SM))
-        .text_size(px(layout::TEXT_SM))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
         .text_color(t.text_faint)
         .child(keycap(stroke))
         .child(explanation)

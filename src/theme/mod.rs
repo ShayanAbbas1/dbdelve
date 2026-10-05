@@ -36,6 +36,8 @@ use std::sync::Arc;
 /// Layout scale. Deliberately tiny — four spacing values and three radii.
 /// An arbitrary one-off pixel value in a component is a code review failure.
 pub mod layout {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;
     pub const SPACE_MD: f32 = 12.0;
@@ -115,6 +117,36 @@ pub mod layout {
     /// An anchored menu, capped so a wide relation's column list scrolls rather
     /// than running off the window.
     pub const MENU_MAX_HEIGHT: f32 = 320.0;
+
+    /// The body size the chrome and the grid are drawn at by default. Every
+    /// other size on those surfaces is held in proportion to it.
+    pub const BODY_FONT_SIZE: f32 = TEXT_MD;
+
+    // Process-wide rather than a gpui `Global`: `ui::Control` measures its box
+    // with no `cx` in reach, and every view would otherwise need one threaded
+    // through just to size a label. One app, one setting.
+    static CHROME_SCALE: AtomicU32 = AtomicU32::new(1f32.to_bits());
+    static GRID_SCALE: AtomicU32 = AtomicU32::new(1f32.to_bits());
+
+    pub fn set_chrome_font_size(size: f32) {
+        CHROME_SCALE.store((size / BODY_FONT_SIZE).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_grid_font_size(size: f32) {
+        GRID_SCALE.store((size / BODY_FONT_SIZE).to_bits(), Ordering::Relaxed);
+    }
+
+    /// A chrome text size, icon or control height at the picked chrome size.
+    /// Spacing and the titlebar stay put: the window buttons are placed
+    /// against the titlebar once, when the window opens.
+    pub fn chrome(size: f32) -> f32 {
+        size * f32::from_bits(CHROME_SCALE.load(Ordering::Relaxed))
+    }
+
+    /// The same for the results grid: its text, its row height and its gutter.
+    pub fn grid(size: f32) -> f32 {
+        size * f32::from_bits(GRID_SCALE.load(Ordering::Relaxed))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -616,11 +648,13 @@ impl Theme {
         // `Root` feeds this to `window.set_rem_size`, so it is the unit for
         // every `rems()` dimension inside gpui-component -- not just a text
         // size. dbdelve's own tree never reads it: every `text_size` here is an
-        // absolute `layout::TEXT_*`. Left at the library's 16 so the widgets it
-        // draws for us keep the proportions they were designed at; the
-        // completion popup in particular hardcodes `text_xs()`, which at 13
-        // resolved to a 9.75px row.
-        component.font_size = gpui::px(16.0);
+        // absolute `layout::TEXT_*`. The library's 16 at the default chrome
+        // size, so the widgets it draws for us keep the proportions they were
+        // designed at -- the completion popup in particular hardcodes
+        // `text_xs()`, which at 13 resolved to a 9.75px row -- and scaled with
+        // the chrome size, so its fields and menus grow with the labels beside
+        // them.
+        component.font_size = gpui::px(layout::chrome(16.0));
         component.mono_font_size = gpui::px(layout::TEXT_MD);
         component.font_family = fonts.chrome;
         // Kept on the editor's family so that whatever inside gpui-component
