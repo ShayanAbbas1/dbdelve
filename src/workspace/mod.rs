@@ -1112,6 +1112,7 @@ impl Render for Workspace {
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
         let paging = views::render_paging(profile, cx);
+        let view_sorting = views::render_view_sorting(profile, cx);
         let relation = profile
             .session
             .active_object()
@@ -1301,6 +1302,7 @@ impl Render for Workspace {
             || count_control.is_some()
             || notice.is_some()
             || paging.is_some()
+            || view_sorting.is_some()
             || query_status.is_some()
             || refreshable_snapshot
             || has_results
@@ -1327,6 +1329,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(view_sorting)
                         .children(left_stats.map(|stats| {
                             div()
                                 .flex_shrink_0()

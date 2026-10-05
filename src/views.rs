@@ -41,7 +41,7 @@ use crate::{
     scroller::{SmoothScrollable, smooth, smooth_for, smooth_scoped},
     session::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
-        StructureState, Tab, query_label, result_pane_is_expanded,
+        Session, StructureState, Tab, query_label, result_pane_is_expanded,
     },
     tab_drag::{DragTab, TabStrip},
     theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, theme},
@@ -1875,17 +1875,11 @@ fn render_structure(
         .into_any_element()
 }
 
-/// The preview's row limit and pager, and who sorts the view in front,
-/// centred in the status bar: what the relation's rows were asked for, and
-/// the way to the ones after them. `None` where there are no rows to page or
-/// sort.
-pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> Option<AnyElement> {
-    let t = *theme(cx);
-    let session = &profile.session;
-    // What the preview asked the server for, and the only control over it.
-    // Shown only while the rows are: it is a property of these rows, not of
-    // the window.
-    let preview = session.active_object().and_then(|tab| match &tab.body {
+/// What the preview in front asked the server for: its limit, its offset, and
+/// whether a page may follow. Only while its rows are shown: it is a property
+/// of these rows, not of the window.
+fn relation_preview(session: &Session) -> Option<(usize, usize, bool)> {
+    session.active_object().and_then(|tab| match &tab.body {
         ObjectBody::Relation {
             limit,
             offset,
@@ -1901,7 +1895,16 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
             matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
         )),
         _ => None,
-    });
+    })
+}
+
+/// The preview's row limit and pager, centred in the status bar: what the
+/// relation's rows were asked for, and the way to the ones after them. `None`
+/// where there are no rows to page.
+pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let session = &profile.session;
+    let preview = relation_preview(session);
     let row_limit = preview.map(|(limit, _, _)| {
         let chips: Vec<_> = ROW_LIMITS
             .into_iter()
@@ -1986,17 +1989,35 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
         })
     });
 
-    // Who orders this view's rows, on any grid with columns to click. Beside
-    // the pager because a sort in memory is a sort of this page.
+    preview.map(|_| {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_MD))
+            .children(row_limit)
+            .children(pager)
+            .into_any_element()
+    })
+}
+
+/// Who orders the view in front, on any grid with columns to click. `None`
+/// where there is nothing to sort.
+pub(crate) fn render_view_sorting(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let session = &profile.session;
     let client = match session.active {
-        Tab::Object(_) => preview.and(session.sorting(session.active)),
+        Tab::Object(_) => relation_preview(session).and(session.sorting(session.active)),
         Tab::Query(_) => session
             .active_results()
             .filter(|results| !results.read(cx).delegate().columns().is_empty())
             .and(session.sorting(session.active)),
     }
     .map(|sorting| sorting.client_keys().is_some());
-    let sorting = client.map(|client| {
+    client.map(|client| {
         div()
             .flex_shrink_0()
             .flex()
@@ -2019,17 +2040,6 @@ pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> O
                     )
                 }),
             )
-    });
-
-    (preview.is_some() || sorting.is_some()).then(|| {
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(layout::SPACE_MD))
-            .children(row_limit)
-            .children(pager)
-            .children(sorting)
             .into_any_element()
     })
 }
