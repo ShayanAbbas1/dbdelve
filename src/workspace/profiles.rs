@@ -1080,6 +1080,7 @@ impl Workspace {
             return;
         }
         self.importing = true;
+        self.note(format!("Reading {} connections…", source.label()), cx);
         let read = cx.background_executor().spawn(async move { source.read() });
         cx.spawn_in(window, async move |workspace, cx| {
             let report = read.await;
@@ -1105,6 +1106,9 @@ impl Workspace {
                     let summary = workspace.add_imported(source, report, None, window, cx);
                     return workspace.note(summary, cx);
                 }
+                // The question takes the reading line's place, as a summary
+                // would.
+                workspace.clear_notice();
                 workspace.switcher_open = false;
                 workspace.pending_import = Some(PendingImport {
                     source,

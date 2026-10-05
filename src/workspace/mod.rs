@@ -487,8 +487,9 @@ impl Workspace {
     /// a tab at startup — would otherwise clear a notice nobody has read yet,
     /// and one of those says the connection came up weaker than it asked for.
     pub(crate) fn clear_notice(&mut self) {
-        if let Some(profile) = self.profile_mut() {
-            profile.session.notice = None;
+        match self.profile_mut() {
+            Some(profile) => profile.session.notice = None,
+            None => self.welcome_notice = None,
         }
     }
 
