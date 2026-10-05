@@ -1718,6 +1718,21 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_and_settings_from_before_client_sorting_read_as_the_server() {
+        let grid: store::StoredGrid = serde_json::from_str(
+            r#"{"columns": ["id"], "rows": [["1"]], "total_rows": 1,
+                "sort": [[0, false]], "order_by": [["\"id\"", false]]}"#,
+        )
+        .expect("an older snapshot must still decode");
+        assert_eq!(Sorting::restored(grid.client_sort.as_deref()), Sorting::Server);
+
+        let settings: store::StoredSettings =
+            toml::from_str("color_titlebar = true").expect("older settings must still decode");
+        assert_eq!(settings.client_sort, None);
+        assert_eq!(Sorting::new(settings.client_sort.unwrap_or(false)), Sorting::Server);
+    }
+
+    #[test]
     fn switching_sorting_carries_the_sort_on_screen_across() {
         let shown = vec![SortKey::new("\"name\"", false)];
 
