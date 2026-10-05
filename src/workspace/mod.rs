@@ -35,10 +35,13 @@ pub(crate) struct Settings {
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
     pub(crate) preview_rows: usize,
-    /// How much of the window the desktop shows through. Lives here rather
-    /// than on the theme the user picked, so it survives switching themes --
-    /// it is reapplied to whichever theme gets installed.
+    /// How much of the window the desktop shows through, for themes with no
+    /// entry in `theme_opacity`. Nothing writes it any more; it is what a
+    /// single shared value from before per-theme opacity restores as.
     pub(crate) opacity: f32,
+    /// Opacity per theme, keyed by theme name: light glass starts at its own
+    /// default, so one shared value painted a different look on each.
+    pub(crate) theme_opacity: HashMap<String, f32>,
     /// One request to GitHub at launch. Off switch because local-first users
     /// get to say no to the only request DBDelve makes on its own.
     pub(crate) check_for_updates: bool,
@@ -68,11 +71,40 @@ impl Default for Settings {
             grid_font_size: layout::BODY_FONT_SIZE,
             preview_rows: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
+            theme_opacity: HashMap::new(),
             check_for_updates: true,
             color_titlebar: true,
             custom_keybindings: HashMap::new(),
         }
     }
+}
+
+impl Settings {
+    pub(crate) fn opacity_for(&self, theme: &Theme) -> f32 {
+        opacity_for(&self.theme_opacity, self.opacity, theme)
+    }
+
+    pub(crate) fn set_opacity_for(&mut self, theme: &Theme, opacity: f32) {
+        let opacity = opacity.clamp(theme::OPACITY_MIN, theme::OPACITY_MAX);
+        self.theme_opacity.insert(theme.name.to_string(), opacity);
+    }
+}
+
+/// A stored entry wins. Without one, light glass starts at its own default
+/// rather than the shared `fallback`, which for an existing user came from
+/// dark glass; every other theme takes the fallback.
+pub(crate) fn opacity_for(
+    theme_opacity: &HashMap<String, f32>,
+    fallback: f32,
+    theme: &Theme,
+) -> f32 {
+    theme_opacity.get(theme.name).copied().unwrap_or_else(|| {
+        if theme.is_glass && theme.appearance == theme::Appearance::Light {
+            theme.default_opacity()
+        } else {
+            fallback
+        }
+    })
 }
 
 /// Which section of the Settings modal is in front. Transient like
@@ -297,9 +329,15 @@ impl Workspace {
                 let available = cx.text_system().all_font_names();
                 install_fonts(restored_fonts(stored_fonts, &available), cx);
                 workspace.settings.opacity = restored_opacity(stored_settings.opacity);
+                workspace.settings.theme_opacity = stored_settings
+                    .theme_opacity
+                    .iter()
+                    .flatten()
+                    .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
+                    .collect();
+                let restored = restored_theme(stored_settings.theme.as_deref());
                 install_theme(
-                    restored_theme(stored_settings.theme.as_deref())
-                        .with_opacity(workspace.settings.opacity),
+                    restored.with_opacity(workspace.settings.opacity_for(&restored)),
                     window,
                     cx,
                 );
@@ -1863,6 +1901,35 @@ mod tests {
                 default + FONT_SIZE_STEP
             );
         }
+    }
+
+    #[test]
+    fn opacity_is_stored_per_theme() {
+        let [first, second, ..] = Theme::all();
+        let mut settings = Settings::default();
+        settings.set_opacity_for(&first, 0.9);
+        assert_eq!(settings.opacity_for(&first), 0.9);
+        assert_eq!(settings.opacity_for(&second), settings.opacity);
+        settings.set_opacity_for(&second, 0.6);
+        assert_eq!(settings.opacity_for(&first), 0.9);
+        assert_eq!(settings.opacity_for(&second), 0.6);
+    }
+
+    #[test]
+    fn light_glass_without_an_entry_starts_at_its_default_not_the_shared_fallback() {
+        let settings = Settings {
+            opacity: 0.6,
+            ..Settings::default()
+        };
+        let light = Theme::all()
+            .into_iter()
+            .find(|t| t.is_glass && t.appearance == theme::Appearance::Light)
+            .unwrap();
+        assert_eq!(settings.opacity_for(&light), 0.79);
+        assert_eq!(settings.opacity_for(&Theme::glass()), 0.6);
+        let mut settings = settings;
+        settings.set_opacity_for(&light, 0.5);
+        assert_eq!(settings.opacity_for(&light), 0.5);
     }
 
     #[test]

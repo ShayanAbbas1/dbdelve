@@ -49,6 +49,7 @@ impl Workspace {
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
+            theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
         if let Err(message) = store::save_profiles(
             &profiles,

@@ -322,6 +322,10 @@ pub struct StoredSettings {
     /// everything else stays on whatever the running build defaults to.
     #[serde(default)]
     pub custom_keybindings: Option<HashMap<String, String>>,
+    /// Opacity per theme name. A table like `custom_keybindings`, so it stays
+    /// below the scalars.
+    #[serde(default)]
+    pub theme_opacity: Option<HashMap<String, f32>>,
 }
 
 /// A named collection of connections. A connection is listed by at most one
@@ -1791,6 +1795,7 @@ open_objects = []
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
                 )])),
+                theme_opacity: Some(HashMap::from([("Dark".to_string(), 0.6)])),
             }),
             projects: vec![
                 StoredProject {

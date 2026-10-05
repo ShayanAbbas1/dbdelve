@@ -136,7 +136,7 @@ impl Workspace {
         // Seeded on the way in rather than at startup: the opacity is restored
         // from disk well after the workspace is built, and this is the only
         // moment the field is about to be looked at.
-        let percent = opacity_percent(self.settings.opacity).to_string();
+        let percent = opacity_percent(theme::theme(cx).opacity).to_string();
         self.opacity_input
             .update(cx, |input, cx| input.set_value(percent, window, cx));
         self.settings_open = true;
@@ -151,8 +151,8 @@ impl Workspace {
         // leaves the tree on the next frame, which blurs it, and a blur
         // commits. Put the live value back first so that commit is a no-op --
         // otherwise escaping out of a half-typed `5` on the way to `50` leaves
-        // the window at the floor.
-        let percent = opacity_percent(self.settings.opacity).to_string();
+        // the window at 5 percent's clamp.
+        let percent = opacity_percent(theme::theme(cx).opacity).to_string();
         self.opacity_input
             .update(cx, |input, cx| input.set_value(percent, window, cx));
         self.settings_open = false;
