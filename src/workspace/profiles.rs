@@ -458,10 +458,9 @@ impl Workspace {
                     .child(row_icon(t, icon::CHEVRON_DOWN)),
             )
             .dropdown_menu(move |menu, _, _| {
-                groups
-                    .iter()
-                    .enumerate()
-                    .fold(menu, |menu, (index, group)| {
+                groups.iter().enumerate().fold(
+                    menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
+                    |menu, (index, group)| {
                         let menu = if index > 0 { menu.separator() } else { menu };
                         group.iter().fold(menu, |menu, option| {
                             let workspace = workspace.clone();
@@ -488,7 +487,8 @@ impl Workspace {
                                 }),
                             )
                         })
-                    })
+                    },
+                )
             })
             .into_any_element()
     }
