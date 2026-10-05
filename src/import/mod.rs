@@ -118,6 +118,26 @@ pub(super) fn port(label: &str, value: Option<String>, notes: &mut Vec<String>) 
     }
 }
 
+/// How many of `imported` an import adds: those `already_have` turns away
+/// neither for a profile here nor for one earlier in the same batch, which is
+/// how `add_imported` goes through them.
+pub(crate) fn fresh_count<'a>(
+    existing: &[&'a ConnectionConfig],
+    imported: &'a [Imported],
+) -> usize {
+    let mut seen = existing.to_vec();
+    imported
+        .iter()
+        .filter(|candidate| {
+            let fresh = !already_have(seen.iter().copied(), &candidate.config);
+            if fresh {
+                seen.push(&candidate.config);
+            }
+            fresh
+        })
+        .count()
+}
+
 /// Whether `candidate` points where an existing profile already does, so that
 /// running an import twice adds nothing the second time. A blank port is the
 /// default one, since DBeaver writes 5432 where the form leaves it blank.
@@ -218,6 +238,23 @@ mod tests {
             user: user.into(),
             ..ServerConfig::default()
         })
+    }
+
+    #[test]
+    fn a_batch_counts_a_connection_it_lists_twice_once() {
+        let imported = |config| Imported {
+            name: "app".into(),
+            config,
+            color: None,
+            notes: Vec::new(),
+        };
+        let here = postgres("db.example.com", None, "app", "alice");
+        let batch = [
+            imported(postgres("db.example.com", None, "app", "alice")),
+            imported(postgres("other.example.com", None, "app", "alice")),
+            imported(postgres("OTHER.example.com", Some(5432), "app", "alice")),
+        ];
+        assert_eq!(fresh_count(&[&here], &batch), 1);
     }
 
     #[test]

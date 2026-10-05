@@ -1090,16 +1090,12 @@ impl Workspace {
                     Ok(report) => report,
                     Err(message) => return workspace.note(message, cx),
                 };
-                let fresh = report
-                    .imported
+                let existing = workspace
+                    .profiles
                     .iter()
-                    .filter(|imported| {
-                        !import::already_have(
-                            workspace.profiles.iter().map(|profile| &profile.config),
-                            &imported.config,
-                        )
-                    })
-                    .count();
+                    .map(|profile| &profile.config)
+                    .collect::<Vec<_>>();
+                let fresh = import::fresh_count(&existing, &report.imported);
                 // Nothing new to place, so nothing to ask: the summary says
                 // what was skipped and why.
                 if fresh == 0 {
