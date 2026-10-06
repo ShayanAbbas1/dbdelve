@@ -443,7 +443,7 @@ runs CI too, not only a change under `src/`.
 
 ### Bundling (macOS)
 
-`dev/bundle.sh` builds `--release`, generates the icon, writes `Info.plist`
+`dev/bundle.sh` builds `--release`, copies in the icon, writes `Info.plist`
 and signs. It is the only way to get a real app rather than a binary. It
 builds **two variants from one script**, and neither of them installs:
 
