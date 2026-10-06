@@ -1978,10 +1978,20 @@ fn render_structure(
         .flex_col()
         .gap(px(layout::SPACE_XS))
         .child(heading("Columns"))
-        .children(structure.columns.iter().map(|column| {
+        .children(structure.columns.iter().enumerate().map(|(index, column)| {
+            let name = column.name.clone();
             div()
+                .id(("structure-column", index))
                 .flex()
                 .gap(px(layout::SPACE_MD))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .cursor_pointer()
+                .hover(|row| row.bg(t.element_hover))
+                // A column listed here is a way to its data: back to the
+                // rows, scrolled to it.
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                    workspace.reveal_column_named(&name, window, cx);
+                }))
                 .child(name_column(column.name.clone()))
                 .child(
                     div()

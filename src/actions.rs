@@ -187,6 +187,7 @@ actions!(
         NextEdit,
         PreviousEdit,
         FuzzyOpen,
+        GoToColumn,
         CommandPalette,
         PaletteNext,
         PalettePrevious,

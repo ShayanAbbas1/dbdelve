@@ -1700,6 +1700,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reset_editor_zoom))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::fuzzy_open))
+            .on_action(cx.listener(Self::go_to_column))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::palette_next))
             .on_action(cx.listener(Self::palette_previous))
