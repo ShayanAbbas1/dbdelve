@@ -2,7 +2,7 @@
 
 A fast, native, cross-platform, multi-engine database client. Written in Rust
 with GPUI, with no Electron and no JVM, so it starts quickly, uses little memory
-and keeps scrolling smoothly through a million-row table.
+and keeps scrolling smoothly through large tables at which other clients crash or introduce limits.
 
 > Early days. Everything listed below works today.
 
