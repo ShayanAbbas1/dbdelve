@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -335,7 +334,12 @@ fn tls(server: &ServerConfig) -> Tls {
         ),
         SslMode::VerifyCa | SslMode::VerifyFull => Tls::Enabled(
             TlsOptions::builder()
-                .ca_file_path(server.root_certificate.as_deref().map(PathBuf::from))
+                .ca_file_path(
+                    server
+                        .root_certificate
+                        .as_deref()
+                        .map(crate::store::home_expanded),
+                )
                 .build(),
         ),
     }
@@ -2796,7 +2800,7 @@ mod tests {
             assert_eq!(options.allow_invalid_certificates, None, "{mode:?}");
             assert_eq!(
                 options.ca_file_path,
-                Some(PathBuf::from("/etc/ssl/ca.pem")),
+                Some(std::path::PathBuf::from("/etc/ssl/ca.pem")),
                 "{mode:?}"
             );
         }

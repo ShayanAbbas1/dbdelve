@@ -151,7 +151,7 @@ const TOKEN_LIFETIME: u64 = 59 * 60;
 /// `encryption` feature and a Keychain item for the passphrase.
 fn key_pair(config: &SnowflakeConfig) -> Result<RsaKeyPair, DbError> {
     let path = &config.private_key;
-    let text = std::fs::read_to_string(path).map_err(|error| {
+    let text = std::fs::read_to_string(crate::store::home_expanded(path)).map_err(|error| {
         plain_error(format!("The private key at {path} was not read: {error}."))
     })?;
     let source = format!("The private key at {path}");

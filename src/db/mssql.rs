@@ -445,7 +445,9 @@ fn config(server: &ServerConfig, encryption: EncryptionLevel) -> Config {
     config.authentication(AuthMethod::sql_server(&server.user, &server.password));
     config.encryption(encryption);
     match (server.sslmode, &server.root_certificate) {
-        (SslMode::VerifyCa | SslMode::VerifyFull, Some(path)) => config.trust_cert_ca(path),
+        (SslMode::VerifyCa | SslMode::VerifyFull, Some(path)) => {
+            config.trust_cert_ca(crate::store::home_expanded(path).display())
+        }
         (SslMode::VerifyCa | SslMode::VerifyFull, None) => {}
         (SslMode::Disable | SslMode::Prefer | SslMode::Require, _) => config.trust_cert(),
     }

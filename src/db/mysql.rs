@@ -19,7 +19,6 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -843,8 +842,8 @@ fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
         SslOpts::default().with_root_cert_path(
             server
                 .root_certificate
-                .as_ref()
-                .map(|path| PathBuf::from(path.as_str())),
+                .as_deref()
+                .map(crate::store::home_expanded),
         )
     };
 
