@@ -15,7 +15,6 @@
 //! there is no describe step and nothing here can disturb an open transaction.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -79,20 +78,10 @@ pub struct Connection {
     statement_timeout: Option<Duration>,
 }
 
-/// `~/x` as `x` under the home directory, the way a shell would have read it.
-/// A path typed into the form never passes through a shell, so left alone the
-/// `~` names a directory called `~` and the file is reported missing. Only the
-/// current user's `~/`: `~other/x` would need the password database, and is
-/// left as written along with everything else.
-fn home_expanded(path: &str, home: Option<&Path>) -> String {
-    match (path.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
-        _ => path.to_string(),
-    }
-}
-
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        let path = crate::store::home_expanded(path);
+        let shown = path.display();
         // Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an
         // empty database that opens successfully and then reports an empty
         // catalog, which reads as "this database has nothing in it" rather than
@@ -102,17 +91,15 @@ impl Connection {
         // `SQLITE_OPEN_URI` is off for the same reason: the path came out of the
         // URL already, and leaving URI parsing on would make a path containing
         // `?` mean something other than itself.
-        let expanded = home_expanded(path, std::env::home_dir().as_deref());
-        let path = expanded.as_str();
-        if !Path::new(path).exists() {
-            return Err(plain_error(format!("No database file at {path}")));
+        if !path.exists() {
+            return Err(plain_error(format!("No database file at {shown}")));
         }
 
         let connection = rusqlite::Connection::open_with_flags(
-            path,
+            &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|error| plain_error(format!("Cannot open {path}: {}", describe(&error))))?;
+        .map_err(|error| plain_error(format!("Cannot open {shown}: {}", describe(&error))))?;
 
         Ok(Self::wrap(connection, statement_timeout))
     }
@@ -901,22 +888,6 @@ fn describe(error: &rusqlite::Error) -> String {
 mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, RelationKind};
-
-    #[test]
-    fn a_leading_tilde_is_the_home_directory() {
-        let home = Path::new("/home/ada");
-        assert_eq!(
-            home_expanded("~/data/app.db", Some(home)),
-            "/home/ada/data/app.db"
-        );
-        // Only a leading `~/` is the shell's shorthand.
-        for path in ["/srv/app.db", "data/~/app.db", "~ada/app.db", "~"] {
-            assert_eq!(home_expanded(path, Some(home)), path);
-        }
-        // With no home directory to put in its place, the path is left as
-        // typed and fails as missing, rather than resolving somewhere else.
-        assert_eq!(home_expanded("~/app.db", None), "~/app.db");
-    }
 
     /// A connection over a database built in memory. Needs nothing external, so
     /// unlike the `live_` tests below these run everywhere.
