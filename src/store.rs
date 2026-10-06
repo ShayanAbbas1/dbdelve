@@ -944,6 +944,26 @@ pub(crate) fn home() -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{key} is not set."))
 }
 
+/// `~/x` as `x` under the home directory, the way a shell would have read it.
+/// A path typed into the form never passes through a shell, so left alone the
+/// `~` names a directory called `~` and the file is reported missing. Only the
+/// current user's `~/`: `~other/x` would need the password database, and is
+/// left as written along with everything else.
+pub(crate) fn home_expanded(path: &str) -> PathBuf {
+    expanded_against(path, home().ok().as_deref())
+}
+
+fn expanded_against(path: &str, home: Option<&Path>) -> PathBuf {
+    // `is_separator` is `/` everywhere and also `\` on Windows.
+    let rest = path
+        .strip_prefix('~')
+        .and_then(|rest| rest.strip_prefix(std::path::is_separator));
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
 fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
         return Err(format!("Profile id {reason}."));
@@ -1076,6 +1096,30 @@ fn secure(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::theme::ConnectionColor;
+
+    #[test]
+    fn a_leading_tilde_is_the_home_directory() {
+        let home = Path::new("/home/ada");
+        assert_eq!(
+            expanded_against("~/data/app.db", Some(home)),
+            Path::new("/home/ada/data/app.db")
+        );
+        for path in ["/srv/app.db", "data/~/app.db", "~ada/app.db", "~"] {
+            assert_eq!(expanded_against(path, Some(home)), Path::new(path));
+        }
+        // With no home directory to put in its place, the path is left as
+        // typed and fails as missing, rather than resolving somewhere else.
+        assert_eq!(expanded_against("~/app.db", None), Path::new("~/app.db"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_tilde_and_backslash_is_the_home_directory_on_windows() {
+        assert_eq!(
+            expanded_against(r"~\data\app.db", Some(Path::new(r"C:\Users\ada"))),
+            Path::new(r"C:\Users\ada\data\app.db")
+        );
+    }
 
     /// `HOME` is process-wide and the tests run in threads, so the ones that
     /// touch the disk take turns and each gets its own directory to be the

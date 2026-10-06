@@ -15,7 +15,6 @@
 //! there is no describe step and nothing here can disturb an open transaction.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,6 +80,8 @@ pub struct Connection {
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        let path = crate::store::home_expanded(path);
+        let shown = path.display();
         // Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an
         // empty database that opens successfully and then reports an empty
         // catalog, which reads as "this database has nothing in it" rather than
@@ -90,15 +91,15 @@ impl Connection {
         // `SQLITE_OPEN_URI` is off for the same reason: the path came out of the
         // URL already, and leaving URI parsing on would make a path containing
         // `?` mean something other than itself.
-        if !Path::new(path).exists() {
-            return Err(plain_error(format!("No database file at {path}")));
+        if !path.exists() {
+            return Err(plain_error(format!("No database file at {shown}")));
         }
 
         let connection = rusqlite::Connection::open_with_flags(
-            path,
+            &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|error| plain_error(format!("Cannot open {path}: {}", describe(&error))))?;
+        .map_err(|error| plain_error(format!("Cannot open {shown}: {}", describe(&error))))?;
 
         Ok(Self::wrap(connection, statement_timeout))
     }
