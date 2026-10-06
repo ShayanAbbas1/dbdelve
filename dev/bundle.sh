@@ -47,12 +47,10 @@ fi
 
 cargo build --release
 
-rm -rf "$APP" target/DBDelve.iconset
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swift dev/icon.swift target/DBDelve.iconset
-iconutil -c icns target/DBDelve.iconset -o "$APP/Contents/Resources/DBDelve.icns"
-rm -rf target/DBDelve.iconset
+cp assets/macos/DBDelve.icns "$APP/Contents/Resources/DBDelve.icns"
 cp target/release/dbdelve "$APP/Contents/MacOS/$NAME"
 
 # The OFL asks that the licence travel with the fonts, and the fonts are
