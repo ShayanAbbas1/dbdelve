@@ -117,6 +117,7 @@ actions!(
         RunQuery,
         CancelQuery,
         FormatQuery,
+        ToggleComment,
         ShowEditor,
         SelectTheme,
         SelectDatabase,
