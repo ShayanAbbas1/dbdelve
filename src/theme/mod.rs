@@ -110,6 +110,9 @@ pub mod layout {
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
+    /// A statement or an error shown on a modal, capped so a long one scrolls
+    /// inside the card instead of pushing its buttons off the window.
+    pub const DIALOG_TEXT_MAX_HEIGHT: f32 = 220.0;
     /// The palette. Wide enough for a schema-qualified name and its kind, and
     /// capped so a catalog of thousands scrolls rather than filling the window.
     pub const PALETTE_WIDTH: f32 = 520.0;
