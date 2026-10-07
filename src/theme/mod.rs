@@ -752,7 +752,7 @@ impl Theme {
         component.colors.button_danger_foreground = component.colors.danger_foreground;
         component.colors.button_danger_hover = component.colors.danger_hover;
         component.colors.button_danger_active = component.colors.danger_active;
-        component.colors.success =self.success.into();
+        component.colors.success = self.success.into();
         component.colors.success_foreground = self.on_accent.into();
         component.colors.success_hover = self.element_hover.flatten(self.success).into();
         component.colors.success_active = self.element_active.flatten(self.success).into();
