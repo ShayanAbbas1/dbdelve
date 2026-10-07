@@ -58,8 +58,8 @@ use actions::{
     RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
     ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
     SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor,
-    ShowReferences, SortColumn, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel, ToggleSidebar,
-    ZoomEditorIn, ZoomEditorOut,
+    ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+    ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

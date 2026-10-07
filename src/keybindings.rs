@@ -30,8 +30,8 @@ use crate::{
         NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextTab, OpenSettings,
         PaletteNext, PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab,
         Quit, RefreshConnection, RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery,
-        SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor, ToggleNextJoin,
-        ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+        SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor, ToggleComment,
+        ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -146,6 +146,7 @@ registry! {
     // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
     ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
+    ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),

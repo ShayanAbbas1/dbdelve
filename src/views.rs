@@ -27,7 +27,7 @@ use crate::{
     actions::{
         AddFilter, CancelQuery, ExplainQuery, FormatQuery, NewQuery, NewRow, NextPage,
         PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetFilterColumn, SetFilterOperator,
-        SetFilterRaw, SetRowLimit, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        SetFilterRaw, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -151,6 +151,7 @@ fn render_editor_surface(
                         .menu("Select All", Box::new(input::SelectAll))
                         .separator()
                         .menu("Format Query", Box::new(FormatQuery))
+                        .menu("Toggle Line Comment", Box::new(ToggleComment))
                 }),
         );
 

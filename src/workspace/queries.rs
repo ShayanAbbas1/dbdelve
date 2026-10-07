@@ -1690,6 +1690,42 @@ impl Workspace {
         });
     }
 
+    /// `cmd+/`: comment out every line the selection touches, or uncomment
+    /// them when they all already are.
+    pub(crate) fn toggle_comment(
+        &mut self,
+        _: &ToggleComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self
+            .profile()
+            .and_then(|profile| profile.session.editor(profile.session.active))
+        else {
+            return;
+        };
+        let marker = self.engine().syntax().line_comment();
+        editor.update(cx, |editor, cx| {
+            let Some((lines, toggled, after)) =
+                toggled_comments(&editor.value(), editor.selected_range(), marker)
+            else {
+                return;
+            };
+            // ponytail: only the active cursor's lines are toggled, and any
+            // other cursors are dropped -- gpui-base 0.6.4 exposes no way to
+            // read them all. Undo reselects the whole lines, not the caret, for
+            // the same lack of API.
+            //
+            // An IME composition in progress would otherwise be what `replace`
+            // overwrites, ahead of the selection.
+            gpui::EntityInputHandler::unmark_text(editor, window, cx);
+            // Through `replace`, not `set_value`: that one wipes the undo stack.
+            editor.set_selected_range(lines, cx);
+            editor.replace(toggled, window, cx);
+            editor.set_selected_range(after, cx);
+        });
+    }
+
     /// Put the cursor on what the error in front points at, with it selected.
     pub(crate) fn jump_to_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self
@@ -1738,6 +1774,103 @@ impl Workspace {
                 .map(|()| (range.start, sql[range].to_string())),
         )
     }
+}
+
+/// The whole lines `selection` touches, without the final newline. A
+/// selection that ends at the very start of a line has not taken that line in.
+fn line_span(text: &str, selection: Range<usize>) -> Range<usize> {
+    let start = text[..selection.start].rfind('\n').map_or(0, |i| i + 1);
+    let last = if selection.end > selection.start && text[..selection.end].ends_with('\n') {
+        selection.end - 1
+    } else {
+        selection.end
+    };
+    let end = text[last..].find('\n').map_or(text.len(), |i| last + i);
+    start..end
+}
+
+/// Comment out the lines `selection` touches in `text`, or uncomment them when
+/// every one already is: the span to replace, what replaces it, and the
+/// selection to leave behind. `None` when there is nothing to toggle.
+///
+/// Blank lines in a block are left alone either way; a blank line on its own
+/// takes the marker, to start a comment on. Commenting puts the marker at the
+/// shallowest indent of the block, so the block keeps its shape.
+fn toggled_comments(
+    text: &str,
+    selection: Range<usize>,
+    marker: &str,
+) -> Option<(Range<usize>, String, Range<usize>)> {
+    // The editor keeps a pasted `\r\n`; the marker must not land between them.
+    let content = |line: &'_ str| line.strip_suffix('\r').unwrap_or(line).len();
+    let indent_of = |line: &str| line.len() - line.trim_start_matches([' ', '\t']).len();
+
+    let span = line_span(text, selection.clone());
+    let block = &text[span.clone()];
+    let filled: Vec<&str> = block
+        .split('\n')
+        .map(|line| &line[..content(line)])
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let lone_blank = filled.is_empty() && !block.contains('\n');
+    if filled.is_empty() && !lone_blank {
+        return None;
+    }
+    let uncomment = !lone_blank
+        && filled
+            .iter()
+            .all(|line| line[indent_of(line)..].starts_with(marker));
+    let indent = filled.iter().map(|line| indent_of(line)).min().unwrap_or(0);
+
+    let mut toggled = String::with_capacity(block.len());
+    let mut caret = selection.start;
+    let mut line_start = span.start;
+    for (i, line) in block.split('\n').enumerate() {
+        if i > 0 {
+            toggled.push('\n');
+        }
+        let body = &line[..content(line)];
+        // Where in the line, how many bytes go, and what comes in.
+        let edit = if lone_blank {
+            Some((body.len(), 0, marker.len() + 1))
+        } else if body.trim().is_empty() {
+            None
+        } else if uncomment {
+            let at = indent_of(body);
+            let space = body[at + marker.len()..].starts_with(' ');
+            Some((at, marker.len() + usize::from(space), 0))
+        } else {
+            Some((indent, 0, marker.len() + 1))
+        };
+        match edit {
+            None => toggled.push_str(line),
+            Some((at, removed, inserted)) => {
+                toggled.push_str(&line[..at]);
+                if inserted > 0 {
+                    toggled.push_str(marker);
+                    toggled.push(' ');
+                }
+                toggled.push_str(&line[at + removed..]);
+                // A caret is on one line only, so this runs for it at most once.
+                let at = line_start + at;
+                if lone_blank {
+                    caret = at + inserted;
+                } else if caret >= at + removed {
+                    caret = caret - removed + inserted;
+                } else if caret > at {
+                    caret = at;
+                }
+            }
+        }
+        line_start += line.len() + 1;
+    }
+
+    let after = if selection.is_empty() {
+        caret..caret
+    } else {
+        span.start..span.start + toggled.len()
+    };
+    Some((span, toggled, after))
 }
 
 fn position_at(text: &str, offset: usize) -> Position {
@@ -1802,6 +1935,68 @@ fn error_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `text` with `|` marking the caret, or `[` `]` the selection, toggled.
+    fn toggle(text: &str, marker: &str) -> Option<String> {
+        let start = text.find(['|', '[']).unwrap();
+        let end = text.find(']').map_or(start, |i| i - 1);
+        let text = text.replace(['|', '[', ']'], "");
+        let (span, toggled, after) = toggled_comments(&text, start..end, marker)?;
+        let mut out = text;
+        out.replace_range(span, &toggled);
+        if after.is_empty() {
+            out.insert(after.start, '|');
+        } else {
+            out.insert(after.end, ']');
+            out.insert(after.start, '[');
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn a_comment_toggle_round_trips_a_block_at_its_shallowest_indent() {
+        let commented = toggle("[select *\n  from t\n\n  where x]", "--").unwrap();
+        assert_eq!(commented, "[-- select *\n--   from t\n\n--   where x]");
+        assert_eq!(
+            toggle(&commented, "--").unwrap(),
+            "[select *\n  from t\n\n  where x]"
+        );
+        // One line still bare means the block gets commented, not uncommented.
+        assert_eq!(toggle("[// a\nb]", "//").unwrap(), "[// // a\n// b]");
+        assert_eq!(toggle("  --x|", "--").unwrap(), "  x|");
+    }
+
+    #[test]
+    fn a_caret_keeps_its_place_in_the_text_it_was_on() {
+        assert_eq!(toggle("|    select 1", "--").unwrap(), "|    -- select 1");
+        assert_eq!(toggle("    sel|ect 1", "--").unwrap(), "    -- sel|ect 1");
+        assert_eq!(toggle("  |  -- select 1", "--").unwrap(), "  |  select 1");
+        // Inside the marker that goes, it lands where the marker was.
+        assert_eq!(toggle("    -|- select 1", "--").unwrap(), "    |select 1");
+    }
+
+    #[test]
+    fn a_blank_line_takes_a_marker_only_on_its_own() {
+        assert_eq!(toggle("  |  ", "--").unwrap(), "    -- |");
+        assert_eq!(toggle("|", "//").unwrap(), "// |");
+        assert_eq!(toggle("a\n[  \n   ]\nb", "--"), None);
+    }
+
+    #[test]
+    fn a_crlf_line_keeps_its_line_ending_whole() {
+        assert_eq!(toggle("a\r\n|\r\nb", "--").unwrap(), "a\r\n-- |\r\nb");
+        assert_eq!(toggle("[a\r\n\r\nb]", "--").unwrap(), "[-- a\r\n\r\n-- b]");
+        assert_eq!(toggle("-- a|\r\nb", "--").unwrap(), "a|\r\nb");
+    }
+
+    #[test]
+    fn a_line_span_covers_whole_lines_but_not_one_the_selection_only_reaches() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(&text[line_span(text, 5..5)], "two");
+        assert_eq!(&text[line_span(text, 1..9)], "one\ntwo\nthree");
+        // Selecting "two\n" by whole line ends at the start of "three".
+        assert_eq!(&text[line_span(text, 4..8)], "two");
+    }
 
     #[test]
     fn a_position_lands_on_the_line_the_offset_is_on() {

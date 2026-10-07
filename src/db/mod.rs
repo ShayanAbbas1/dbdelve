@@ -97,6 +97,13 @@ impl Syntax {
         }
     }
 
+    pub fn line_comment(self) -> &'static str {
+        match self {
+            Self::Sql => "--",
+            Self::Mongo => "//",
+        }
+    }
+
     pub fn placeholder(self) -> &'static str {
         match self {
             Self::Sql => "Write SQL…",
