@@ -274,10 +274,11 @@ impl Workspace {
             return;
         }
         // Whatever is in front, in the order it is stacked: the palette paints
-        // over the settings modal, which paints over the discard-close
-        // confirmation, which paints over the close confirmation, which paints
-        // over the new-row form, which paints over the apply review, which
-        // paints over the surface -- so `escape`
+        // over the settings modal, which paints over the stale-edit prompt,
+        // the stopped-run prompt and the run prompt, which paint over the
+        // discard-close confirmation, which paints over the close
+        // confirmation, which paints over the new-row form, which paints over
+        // the apply review, which paints over the surface -- so `escape`
         // backs out of them in that order, one at a time. The palette stays
         // first so that picking a font from inside settings closes the font
         // list and leaves the modal it was opened from standing.
@@ -285,6 +286,17 @@ impl Workspace {
             return;
         }
         if self.cancel_stale_edit(cx) {
+            return;
+        }
+        // Gated on what is drawn, not on the state alone: `queue_failure`
+        // outlives the queue it was about when a new run replaces it, and an
+        // `escape` meant for something else must not stop that new queue.
+        if self.render_queue_failure(cx).is_some() {
+            self.stop_queue(cx);
+            return;
+        }
+        if self.render_pending_run(cx).is_some() {
+            self.cancel_pending_run(cx);
             return;
         }
         if self.cancel_discard_close(cx) {
