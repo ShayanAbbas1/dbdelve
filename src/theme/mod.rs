@@ -748,6 +748,13 @@ impl Theme {
         component.colors.danger_foreground = self.on_accent.into();
         component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
         component.colors.danger_active = self.element_active.flatten(self.danger).into();
+        // Same split as `button_primary`: left unset, a `Button::danger()` is
+        // the library's pale tint with `on_accent` ink, unreadable on either
+        // polarity.
+        component.colors.button_danger = component.colors.danger;
+        component.colors.button_danger_foreground = component.colors.danger_foreground;
+        component.colors.button_danger_hover = component.colors.danger_hover;
+        component.colors.button_danger_active = component.colors.danger_active;
         component.colors.success = self.success.into();
         component.colors.success_foreground = self.on_accent.into();
         component.colors.success_hover = self.element_hover.flatten(self.success).into();
@@ -1723,6 +1730,7 @@ mod tests {
             check(t, "danger on panel", t.danger, t.panel, AA_TEXT);
             check(t, "success on surface", t.success, t.surface, AA_LARGE);
             check(t, "on_accent over accent", t.on_accent, t.accent, AA_LARGE);
+            check(t, "on_accent over danger", t.on_accent, t.danger, AA_LARGE);
             // Button labels are body-size UI text on the control tone.
             check(t, "text on control", t.text, t.control, AA_TEXT);
             // A changed cell is still a cell in the dense grid: the wash marks
