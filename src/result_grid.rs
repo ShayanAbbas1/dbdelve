@@ -127,9 +127,6 @@ pub struct ResultGrid {
     /// appending them (`db::Fed::set`). Dropped with the delegate, like
     /// `captured`, when the finished result replaces it.
     streamed: Option<usize>,
-    /// When rows last streamed in, so a run can tell rows arriving from a
-    /// server still working on the next one.
-    last_fed: Option<std::time::Instant>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -304,7 +301,6 @@ impl ResultGrid {
             editing: None,
             captured: None,
             streamed: None,
-            last_fed: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -453,11 +449,6 @@ impl ResultGrid {
 
     pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
         self.result.rows.extend(rows);
-        self.last_fed = Some(std::time::Instant::now());
-    }
-
-    pub fn last_fed(&self) -> Option<std::time::Instant> {
-        self.last_fed
     }
 
     /// The rows streamed in, for the finished result to be built around.

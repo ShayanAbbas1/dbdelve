@@ -1853,18 +1853,10 @@ pub(crate) fn render_running(
         return None;
     };
     let t = *theme(cx);
-    let (rows, streaming, last_fed) = results.map_or((0, false, None), |results| {
+    let (rows, streaming) = results.map_or((0, false), |results| {
         let grid = results.read(cx).delegate();
-        (
-            grid.rows_count(cx),
-            grid.streamed_set().is_some(),
-            grid.last_fed(),
-        )
+        (grid.rows_count(cx), grid.streamed_set().is_some())
     });
-    // Rows arriving are their own progress; the clock is for a wait, before
-    // the first of them or once they stop. Rows are poured every 100ms, so
-    // half a second without any is a pause rather than a gap between pours.
-    let fetching = last_fed.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(500));
     let what = match (streaming, rows) {
         (true, rows) => format!("{} fetched", crate::ui::row_readout(rows, rows)),
         // A refresh keeps the rows it is replacing on screen until it lands.
@@ -1890,10 +1882,7 @@ pub(crate) fn render_running(
                 div()
                     .whitespace_nowrap()
                     .text_color(t.text_muted)
-                    .child(match fetching {
-                        true => what,
-                        false => format!("{what} \u{b7} {}", clock(started.elapsed())),
-                    }),
+                    .child(format!("{what} \u{b7} {}", clock(started.elapsed()))),
             )
             .child(
                 button("cancel-query", label, Tone::Quiet, Control::Compact, t)
