@@ -1637,8 +1637,22 @@ impl Workspace {
                                 if let Some(feed) = &feed {
                                     let (names, widths) = (&shown.0, &shown.1);
                                     pour(feed, &results, mode, engine, (names, widths), cx);
-                                    let mut rows = results
-                                        .update(cx, |table, _| table.delegate_mut().take_rows());
+                                    let (mut rows, streamed_columns) =
+                                        results.update(cx, |table, _| {
+                                            let grid = table.delegate_mut();
+                                            (grid.take_rows(), grid.result().columns.clone())
+                                        });
+                                    // The describe after the statement can learn
+                                    // nothing (a cancel, several statements) where
+                                    // the one beside it already had.
+                                    if result
+                                        .columns
+                                        .iter()
+                                        .all(|column| column.data_type.is_none())
+                                        && streamed_columns.len() == result.columns.len()
+                                    {
+                                        result.columns = streamed_columns;
+                                    }
                                     rows.append(&mut result.rows);
                                     result.rows = rows;
                                     // A cancelled stream's size was never

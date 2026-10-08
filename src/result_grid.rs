@@ -422,13 +422,15 @@ impl ResultGrid {
     }
 
     /// The columns' types, learned while their rows are still arriving. The
-    /// rows are kept; what is worked out from the types is worked out again.
+    /// rows are kept; what is worked out from the types is worked out again,
+    /// the rows that arrived before the types included.
     pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
         self.numeric = columns
             .iter()
             .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
             .collect();
         self.result.columns = columns;
+        db::settle(self.engine, &mut self.result);
     }
 
     pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
@@ -2410,6 +2412,27 @@ mod tests {
             name: name.into(),
             data_type: Some(data_type.into()),
         }
+    }
+
+    #[test]
+    fn rows_streamed_in_before_their_types_are_rendered_once_the_types_arrive() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("n"), column("p")],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres)
+        .streaming(1);
+        grid.append_rows(vec![vec![Some("1".into()), Some(point.into())]]);
+
+        grid.set_column_types(vec![typed("n", "int4"), typed("p", "geometry")]);
+
+        assert!(grid.is_numeric_column(0));
+        let rendered = grid.result().rows[0][1].as_deref().unwrap_or_default();
+        assert!(rendered.starts_with("POINT"), "{rendered}");
     }
 
     fn value(text: &str) -> NewValue {
