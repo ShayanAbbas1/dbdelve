@@ -1753,6 +1753,7 @@ impl Workspace {
         }
         let fed = feed.clone();
         let reads_only = sql::stoppable(engine, &sql);
+        let run = cancel.clone();
         let query_task = cx.background_executor().spawn(async move {
             let fetch = Fetch {
                 limit,
@@ -1779,7 +1780,7 @@ impl Workspace {
                     // it belongs on has to be reached through the same session.
                     let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
-                            workspace.drop_stale_run(&id, tab, lane, cx);
+                            workspace.drop_stale_run(&id, tab, lane.map(|start| (start, &run)), cx);
                             return;
                         };
                         // Read before `slot`, which borrows the session and not
@@ -2100,17 +2101,28 @@ impl Workspace {
     ///
     /// A lane's entry goes, with every statement of its queue not yet sent,
     /// and the tab is let go of once the last lane still out is dropped too.
+    /// Only while the tab is still running the lane's own run (`run`): one
+    /// let go of by an earlier lane may have started another since, whose
+    /// statements can start where this one's did.
     pub(crate) fn drop_stale_run(
         &mut self,
         id: &str,
         tab: Tab,
-        lane: Option<usize>,
+        lane: Option<(usize, &CancelToken)>,
         cx: &mut Context<Self>,
     ) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        if let Some(start) = lane
+        if let Some((_, run)) = lane
+            && !matches!(
+                profile.session.slot(tab),
+                Some((QueryState::Running { cancel, .. }, _)) if cancel.is(run)
+            )
+        {
+            return;
+        }
+        if let Some((start, _)) = lane
             && let Tab::Query(query) = tab
             && let Some(queue) = profile
                 .session

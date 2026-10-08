@@ -64,6 +64,11 @@ impl CancelToken {
         })))
     }
 
+    /// Whether the two are one run's.
+    pub fn is(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Mark the run cancelled and hand back the connections it is running on,
     /// or `None` for a run on the profile's own.
     fn stop_alongside(&self) -> Option<Vec<Connection>> {
