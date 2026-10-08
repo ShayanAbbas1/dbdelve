@@ -22,9 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::{
-    CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, ForeignKey, NamedDefinition,
-    QueryResult, RelationKind, Structure, assemble_catalog, assemble_structure, plain_error,
-    terminated,
+    CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, Fetch, ForeignKey,
+    NamedDefinition, QueryResult, RelationKind, Stopped, Structure, assemble_catalog,
+    assemble_structure, plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -733,12 +733,18 @@ impl Connection {
     /// 885ms against 315ms for three `SELECT 1`s, and that is the price of the
     /// button working on the statement that needs it.
     pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.query_with(sql, &CancelToken::default())
+        self.query_with(sql, &CancelToken::default(), Fetch::default())
     }
 
-    /// The same, stoppable by a [`Connection::cancel`] given `cancel`.
-    pub fn query_with(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::Yes(cancel))
+    /// The same, stoppable by a [`Connection::cancel`] given `cancel`, keeping
+    /// what `fetch` asks for of its rows; see [`super::Connection::query`].
+    pub fn query_with(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, Cancellable::Yes(cancel), fetch)
     }
 
     /// The same, for a statement dbdelve wrote and the user cannot see.
@@ -748,10 +754,15 @@ impl Connection {
     /// buys. A structure load is four of these, so it is most of a second each
     /// time a relation is opened.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::No)
+        self.submit(sql, Cancellable::No, Fetch::default())
     }
 
-    fn submit(&self, sql: &str, cancellable: Cancellable) -> Result<QueryResult, DbError> {
+    fn submit(
+        &self,
+        sql: &str,
+        cancellable: Cancellable,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
         let host = self.config.host();
         let body = request_body(&self.config, sql);
@@ -828,35 +839,79 @@ impl Connection {
         }
 
         let row_types = row_types(&finished)?;
+        let columns: Vec<Column> = row_types
+            .iter()
+            .map(|row_type| Column {
+                name: row_type.name.clone(),
+                data_type: Some(data_type(row_type)),
+            })
+            .collect();
+        if let Some(feed) = fetch.feed {
+            feed.begin(columns.clone());
+        }
         let mut result = QueryResult {
-            columns: row_types
-                .iter()
-                .map(|row_type| Column {
-                    name: row_type.name.clone(),
-                    data_type: Some(data_type(row_type)),
-                })
-                .collect(),
-            rows: rows(&finished, &row_types),
+            columns,
             rows_affected: rows_affected(&finished),
             ..Default::default()
         };
-        // The whole result is fetched before any of it is shown, which is the
-        // ceiling the Postgres path has too.
-        for partition in 1..partition_count(&finished) {
-            let (status, body) =
+        // The statement is over before its first partition arrives, and the
+        // server has already counted its rows: a partition past the limit is
+        // simply not downloaded, which undoes nothing even for a write.
+        let total = finished["resultSetMetaData"]["numRows"]
+            .as_u64()
+            .and_then(|total| usize::try_from(total).ok());
+        let partitions = partition_count(&finished);
+        let full = |kept: usize| fetch.limit.is_some_and(|limit| kept >= limit);
+        let (mut returned, mut kept) = (0, 0);
+        let mut filled = None;
+        let mut partition = 0;
+        let mut body = finished;
+        loop {
+            for cells in rows(&body, &row_types) {
+                returned += 1;
+                if full(kept) {
+                    continue;
+                }
+                kept += 1;
+                if full(kept) {
+                    filled = Some(started.elapsed());
+                    if let Some(feed) = fetch.feed {
+                        feed.fill();
+                    }
+                }
+                result.bytes += cells.iter().flatten().map(String::len).sum::<usize>();
+                match fetch.feed {
+                    Some(feed) => feed.push(cells),
+                    None => result.rows.push(cells),
+                }
+            }
+            partition += 1;
+            if partition == partitions || full(kept) {
+                break;
+            }
+            let (status, next) =
                 self.fetch(&self.url(&format!("/{handle}?partition={partition}")))?;
-            reply(&host, status, &body)?;
-            result.rows.extend(rows(&body, &row_types));
+            reply(&host, status, &next)?;
+            body = next;
         }
 
-        result.bytes = result
-            .rows
-            .iter()
-            .flatten()
-            .flatten()
-            .map(String::len)
-            .sum();
-        result.elapsed = started.elapsed();
+        let returned = if partition < partitions {
+            total
+        } else {
+            Some(returned)
+        };
+        match returned {
+            Some(returned) => result.capped_from = (returned > kept).then_some(returned),
+            // Partitions went undownloaded and the server did not say how
+            // many rows they held.
+            None => result.stopped = Some(Stopped::AtLimit),
+        }
+        // Timed to the last kept row when rows past the limit followed it.
+        let past_limit = result.capped_from.is_some() || result.stopped.is_some();
+        result.elapsed = match filled {
+            Some(filled) if past_limit => filled,
+            _ => started.elapsed(),
+        };
         Ok(result)
     }
 
@@ -1700,7 +1755,9 @@ mod tests {
         let (waiting, run) = (connection.clone(), CancelToken::default());
         let token = run.clone();
         let started = Instant::now();
-        let query = std::thread::spawn(move || waiting.query_with("CALL SYSTEM$WAIT(60)", &token));
+        let query = std::thread::spawn(move || {
+            waiting.query_with("CALL SYSTEM$WAIT(60)", &token, Fetch::default())
+        });
         // Long enough for the submit to have returned its handle.
         std::thread::sleep(Duration::from_secs(3));
         connection.cancel(&run).expect("the cancel is accepted");
@@ -2382,6 +2439,117 @@ mod tests {
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 1);
     }
 
+    const LARGE_SQL: &str = "SELECT SEQ4() AS N FROM TABLE(GENERATOR(ROWCOUNT => 20000))";
+
+    /// The recorded 20 000 rows: 12 288 in the poll's answer and the rest in
+    /// partition 1. Returns that partition's target, to count its downloads.
+    fn large(mock: &Mock) -> String {
+        let handle = mock.accept(LARGE_SQL, "large");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(200, "large_poll.json.gz")],
+        );
+        let partition = format!("/{handle}?partition=1");
+        mock.on(
+            "GET",
+            &partition,
+            [Response::fixture(200, "large_partition_1.json.gz")],
+        );
+        partition
+    }
+
+    fn limited(limit: usize) -> Fetch<'static> {
+        Fetch {
+            limit: Some(limit),
+            ..Fetch::default()
+        }
+    }
+
+    #[test]
+    fn a_row_limit_is_kept_across_partitions_and_counts_every_row() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let result = connected(&mock)
+            .query_with(LARGE_SQL, &CancelToken::default(), limited(12_290))
+            .expect("runs");
+
+        assert_eq!(result.rows.len(), 12_290);
+        assert_eq!(result.rows[12_289], vec![Some("12289".to_string())]);
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(result.stopped, None);
+        assert_eq!(mock.hits("GET", &partition), 1);
+    }
+
+    #[test]
+    fn a_partition_past_the_limit_is_not_downloaded_and_its_rows_still_counted() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let result = connected(&mock)
+            .query_with(LARGE_SQL, &CancelToken::default(), limited(3))
+            .expect("runs");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Some("0".to_string())],
+                vec![Some("1".to_string())],
+                vec![Some("2".to_string())]
+            ]
+        );
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(mock.hits("GET", &partition), 0);
+    }
+
+    #[test]
+    fn rows_past_the_limit_go_uncounted_only_where_the_server_did_not_count_them() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        let mut poll: Value =
+            serde_json::from_slice(&super::mock::fixture("query_poll.json")).expect("JSON");
+        let metadata = &mut poll["resultSetMetaData"];
+        metadata["numRows"] = Value::Null;
+        metadata["partitionInfo"] = json!([{ "rowCount": 1 }, { "rowCount": 1 }]);
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(200, &poll.to_string())],
+        );
+
+        let result = connected(&mock)
+            .query_with(sql, &CancelToken::default(), limited(1))
+            .expect("runs");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn a_fed_query_hands_its_typed_rows_to_the_feed() {
+        let mock = Mock::start();
+        large(&mock);
+        let feed = crate::db::Feed::default();
+        let result = connected(&mock)
+            .query_with(
+                LARGE_SQL,
+                &CancelToken::default(),
+                Fetch {
+                    feed: Some(&feed),
+                    ..limited(3)
+                },
+            )
+            .expect("runs");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(fed.rows.len(), 3);
+        assert_eq!(fed.columns[0].data_type.as_deref(), Some("number(10,0)"));
+        assert!(fed.filled.is_some());
+    }
+
     #[test]
     fn a_partition_cut_short_is_an_error_and_not_fewer_rows() {
         let mock = Mock::start();
@@ -2473,7 +2641,9 @@ mod tests {
 
         let (waiting, run) = (connection.clone(), CancelToken::default());
         let token = run.clone();
-        let query = std::thread::spawn(move || waiting.query_with("CALL SYSTEM$WAIT(60)", &token));
+        let query = std::thread::spawn(move || {
+            waiting.query_with("CALL SYSTEM$WAIT(60)", &token, Fetch::default())
+        });
         let started = Instant::now();
         while mock.hits("GET", &poll) == 0 {
             assert!(started.elapsed() < Duration::from_secs(10), "never polled");
@@ -2536,11 +2706,13 @@ mod tests {
         let my_run = CancelToken::default();
         let my_query = {
             let (connection, token) = (connection.clone(), my_run.clone());
-            std::thread::spawn(move || connection.query_with(mine_sql, &token))
+            std::thread::spawn(move || connection.query_with(mine_sql, &token, Fetch::default()))
         };
         let their_query = {
             let connection = connection.clone();
-            std::thread::spawn(move || connection.query_with(theirs_sql, &CancelToken::default()))
+            std::thread::spawn(move || {
+                connection.query_with(theirs_sql, &CancelToken::default(), Fetch::default())
+            })
         };
         for handle in [&background, &mine, &theirs] {
             until_polled(&mock, handle);
@@ -2594,7 +2766,7 @@ mod tests {
         for (sql, handle) in [(first_sql, &first), (second_sql, &second)] {
             let (connection, token) = (connection.clone(), run.clone());
             queries.push(std::thread::spawn(move || {
-                connection.query_with(sql, &token)
+                connection.query_with(sql, &token, Fetch::default())
             }));
             until_polled(&mock, handle);
         }
@@ -2634,7 +2806,7 @@ mod tests {
         let run = CancelToken::default();
         let query = {
             let (connection, token) = (connection.clone(), run.clone());
-            std::thread::spawn(move || connection.query_with(sql, &token))
+            std::thread::spawn(move || connection.query_with(sql, &token, Fetch::default()))
         };
         let started = Instant::now();
         // The version check's submit, then this one's, still unanswered.
