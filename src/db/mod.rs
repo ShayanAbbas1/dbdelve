@@ -1062,8 +1062,8 @@ impl Connection {
     /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
     /// instead of the result, which then holds none of them, and values
     /// still waiting on their types are the caller's to [`render`]. Postgres,
-    /// MySQL and SQL Server honour [`Fetch`], SQL Server without stopping.
-    /// The others keep every row.
+    /// MySQL, SQL Server and MongoDB honour [`Fetch`], SQL Server without
+    /// stopping and MongoDB without a feed. The others keep every row.
     pub fn query(
         &self,
         sql: &str,
@@ -1076,7 +1076,7 @@ impl Connection {
             Self::SqlServer(connection) => connection.query(sql, fetch),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
-            Self::MongoDb(connection) => connection.query(sql, cancel),
+            Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
         }
     }
 

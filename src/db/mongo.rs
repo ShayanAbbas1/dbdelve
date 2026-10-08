@@ -41,9 +41,9 @@ use tokio::sync::oneshot;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, MISSING,
+    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, MISSING,
     NamedDefinition, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
-    Statistics, Structure, plain_error,
+    Statistics, Stopped, Structure, plain_error,
 };
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
@@ -530,7 +530,16 @@ impl Connection {
     /// Run the statements in `text` in turn and keep the last one's result,
     /// as a Postgres submission of several keeps its last set. The run path
     /// sends one at a time; this is for a selection `mql` reads as more.
-    pub fn query(&self, text: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    ///
+    /// A cursor's documents are kept to `fetch`'s limit ([`read_cursor`]), and
+    /// none are fed: a later document can bring a field no earlier one had, so
+    /// the columns are not known until the last one is in.
+    pub fn query(
+        &self,
+        text: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         let statements = mql::parse(text).map_err(|error| DbError {
             message: error.message,
             position: Some(error.at),
@@ -541,7 +550,7 @@ impl Connection {
             // Nothing brackets several statements, so a failure past the
             // first leaves the ones before it applied.
             result = Run::start(self, cancel)
-                .and_then(|run| self.statement(&statement.target, run))
+                .and_then(|run| self.statement(&statement.target, run, fetch))
                 .map_err(|error| match at {
                     0 => error,
                     1 => DbError {
@@ -563,7 +572,9 @@ impl Connection {
                     },
                 })?;
         }
-        result.elapsed = started.elapsed();
+        // A result cut at the limit holds how long the run went on past its
+        // last kept row, which is not the wait for the rows shown.
+        result.elapsed = started.elapsed().saturating_sub(result.elapsed);
         Ok(result)
     }
 
@@ -642,7 +653,7 @@ impl Connection {
         }
     }
 
-    fn statement(&self, target: &Target, run: Run) -> Result<QueryResult, DbError> {
+    fn statement(&self, target: &Target, run: Run, fetch: Fetch) -> Result<QueryResult, DbError> {
         match target {
             Target::Show(Show::Databases) => self.database_list(run),
             Target::Show(Show::Collections) => collection_names(run, &self.named(None)?),
@@ -654,7 +665,7 @@ impl Connection {
                 collection,
                 call,
                 cursor,
-            } => self.collection_call(run, database.as_deref(), collection, call, cursor),
+            } => self.collection_call(run, database.as_deref(), collection, call, cursor, fetch),
         }
     }
 
@@ -788,6 +799,7 @@ impl Connection {
         collection: &str,
         call: &Call<Method>,
         cursor: &[Call<CursorMethod>],
+        fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
         let elsewhere = database.is_some();
         let database = self.named(database)?;
@@ -833,7 +845,7 @@ impl Connection {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
                     None => {
                         let whole = !elsewhere && returns_whole_documents(&sent);
-                        let mut result = documents(fetch(run, &database, sent)?);
+                        let mut result = read_cursor(run, &database, sent, fetch)?.rows();
                         if whole {
                             result.edit = self.edit_target(collection, &result);
                         }
@@ -869,7 +881,7 @@ impl Connection {
                 )?;
                 match chained(&mut sent, cursor, false)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
-                    None => Ok(documents(fetch(run, &database, sent)?)),
+                    None => Ok(read_cursor(run, &database, sent, fetch)?.rows()),
                 }
             }
             // As the drivers count: a `$group` over the matching documents,
@@ -893,7 +905,7 @@ impl Connection {
                 if let Some(verbosity) = chained(&mut Document::new(), cursor, false)? {
                     return explained(run, &database, sent, verbosity);
                 }
-                let counted = fetch(run, &database, sent)?;
+                let counted = read_cursor(run, &database, sent, Fetch::default())?.documents;
                 let n = counted
                     .first()
                     .and_then(|counted| counted.get("n"))
@@ -939,11 +951,13 @@ impl Connection {
                         .collect(),
                 ))
             }
-            Method::GetIndexes => Ok(documents(fetch(
+            Method::GetIndexes => Ok(read_cursor(
                 run,
                 &database,
                 doc! { "listIndexes": collection },
-            )?)),
+                Fetch::default(),
+            )?
+            .rows()),
             Method::InsertOne | Method::InsertMany => {
                 let given = match call.method {
                     Method::InsertOne => vec![args.required_document(0)?],
@@ -1842,19 +1856,75 @@ fn command(mut run: Run, database: &Database, sent: Document) -> Result<Document
     run.execute(|session| database.run_command(sent).session(session))
 }
 
-/// Every document a cursor command returns, through as many `getMore`s as it
-/// takes. Nothing is limited here: the statement's own `limit` is the only one
-/// (hard rule 1), and the whole result is held, as the SQL engines hold theirs.
-fn fetch(mut run: Run, database: &Database, sent: Document) -> Result<Vec<Document>, DbError> {
+/// A cursor command's documents, through as many `getMore`s as it takes, kept
+/// to `fetch`'s limit and counted past it. The statement's own `limit` is the
+/// only one sent (hard rule 1). A read is stopped at the first document past
+/// the limit instead: dropping its cursor kills it on the server, which undoes
+/// nothing.
+fn read_cursor(
+    mut run: Run,
+    database: &Database,
+    sent: Document,
+    fetch: Fetch,
+) -> Result<Fetched, DbError> {
     let sent = run.tagged(sent);
     let comment = sent.get("comment").cloned();
+    let Fetch {
+        limit, reads_only, ..
+    } = fetch;
     run.execute(|session| async move {
         let mut action = database.run_cursor_command(sent).session(&mut *session);
         if let Some(comment) = comment {
             action = action.comment(comment);
         }
-        action.await?.stream(session).try_collect().await
+        let mut cursor = action.await?;
+        let mut stream = cursor.stream(session);
+        let mut fetched = Fetched::default();
+        while let Some(document) = stream.try_next().await? {
+            fetched.returned += 1;
+            if limit.is_some_and(|limit| fetched.documents.len() >= limit) {
+                if reads_only {
+                    fetched.stopped = true;
+                    break;
+                }
+                continue;
+            }
+            fetched.documents.push(document);
+            if limit == Some(fetched.documents.len()) {
+                fetched.filled = Some(Instant::now());
+            }
+        }
+        Ok(fetched)
     })
+}
+
+/// What [`read_cursor`] kept of a cursor's documents.
+#[derive(Default)]
+struct Fetched {
+    documents: Vec<Document>,
+    /// Every document the cursor returned, kept or not.
+    returned: usize,
+    /// When the kept documents reached the limit.
+    filled: Option<Instant>,
+    /// Ended at the first document past the limit, so how many more there
+    /// were is unknown.
+    stopped: bool,
+}
+
+impl Fetched {
+    /// The kept documents as rows. `elapsed` is how long the run went on past
+    /// the last kept one, for [`Connection::query`] to take off its clock.
+    fn rows(self) -> QueryResult {
+        let past = self.returned > self.documents.len();
+        let mut result = documents(self.documents);
+        result.rows_affected = Some(self.returned as u64);
+        result.capped_from = (past && !self.stopped).then_some(self.returned);
+        result.stopped = self.stopped.then_some(Stopped::AtLimit);
+        if past && let Some(filled) = self.filled {
+            result.elapsed = filled.elapsed();
+        }
+        result
+    }
 }
 
 /// A write command's reply, or its first write error as the failure. The
@@ -1886,11 +1956,13 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
 /// `show collections` and `getCollectionNames()`: every name, sorted, the
 /// server's own `system.*` included, since the statement asked the server.
 fn collection_names(run: Run, database: &Database) -> Result<QueryResult, DbError> {
-    let listed = fetch(
+    let listed = read_cursor(
         run,
         database,
         doc! { "listCollections": 1, "nameOnly": true, "authorizedCollections": true },
-    )?;
+        Fetch::default(),
+    )?
+    .documents;
     let mut names: Vec<&str> = listed
         .iter()
         .filter_map(|listed| listed.get_str("name").ok())
@@ -3162,7 +3234,7 @@ mod tests {
 
     fn ran(connection: &Connection, statement: &str) -> QueryResult {
         connection
-            .query(statement, &CancelToken::default())
+            .query(statement, &CancelToken::default(), Fetch::default())
             .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
     }
 
@@ -3309,13 +3381,18 @@ mod tests {
         assert_eq!(field(&last, 0, "count").0, Some("3"));
 
         let error = connection
-            .query("db.accounts.find({ a: })", &CancelToken::default())
+            .query(
+                "db.accounts.find({ a: })",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
             .expect_err("a statement that does not parse is not sent");
         assert!(error.position.is_some(), "{}", error.message);
         let error = connection
             .query(
                 "db.accounts.aggregate([]).sort({ a: 1 })",
                 &CancelToken::default(),
+                Fetch::default(),
             )
             .expect_err("aggregate's cursor has no sort");
         assert!(
@@ -3500,6 +3577,7 @@ mod tests {
             let _ = self.0.query(
                 &format!("db.getCollection('{}').drop()", self.1),
                 &CancelToken::default(),
+                Fetch::default(),
             );
         }
     }
@@ -3662,7 +3740,7 @@ mod tests {
              {collection}.insertOne({{_id: NumberLong(2)}});"
         );
         let error = connection
-            .query(&failing, &CancelToken::default())
+            .query(&failing, &CancelToken::default(), Fetch::default())
             .expect_err("a duplicate _id");
         assert!(
             error
@@ -3720,6 +3798,7 @@ mod tests {
                 .query(
                     &format!("db.getCollection('{}').{method}", scratch.1),
                     &CancelToken::default(),
+                    Fetch::default(),
                 )
                 .expect_err(method)
                 .message
@@ -3834,7 +3913,7 @@ mod tests {
         ];
         for statement in &hostile {
             let refused = connection
-                .query(statement, &CancelToken::default())
+                .query(statement, &CancelToken::default(), Fetch::default())
                 .expect_err(statement)
                 .message;
             assert!(
@@ -3863,7 +3942,7 @@ mod tests {
         let slow = std::thread::spawn({
             let (connection, run) = (connection.clone(), run.clone());
             let statement = format!("{SLOW}.comment('{}')", comments[0]);
-            move || connection.query(&statement, &run)
+            move || connection.query(&statement, &run, Fetch::default())
         });
         (0..100)
             .find(|_| {
@@ -3904,8 +3983,13 @@ mod tests {
         let run = CancelToken::default();
         let started = Instant::now();
         let error = std::thread::scope(|scope| {
-            let slow =
-                scope.spawn(|| connection.query(SLOW.trim_end_matches(".maxTimeMS(60000)"), &run));
+            let slow = scope.spawn(|| {
+                connection.query(
+                    SLOW.trim_end_matches(".maxTimeMS(60000)"),
+                    &run,
+                    Fetch::default(),
+                )
+            });
             slow.join()
                 .unwrap()
                 .expect_err("the timeout should stop it")
@@ -3930,7 +4014,7 @@ mod tests {
             comments[0]
         );
         let error = connection
-            .query(&command, &run)
+            .query(&command, &run, Fetch::default())
             .expect_err("the timeout should stop it");
         assert!(
             error.message.contains("statement timeout"),
@@ -3942,6 +4026,101 @@ mod tests {
             "the server is still running it"
         );
         assert_eq!(count(&connection, "accounts"), 5);
+    }
+
+    /// `statement` under a row limit of `limit`, stopped past it only where
+    /// [`crate::sql::rerunnable`] says it reads, as the run path decides.
+    fn limited(connection: &Connection, statement: &str, limit: usize) -> QueryResult {
+        connection
+            .query(
+                statement,
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(limit),
+                    reads_only: crate::sql::rerunnable(Engine::MongoDb, statement),
+                    ..Fetch::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_rows_past_the_limit_are_counted_and_a_read_is_stopped_there() {
+        let connection = live();
+        let counted = connection
+            .query(
+                "db.accounts.find()",
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(2),
+                    ..Fetch::default()
+                },
+            )
+            .expect("find should succeed");
+        assert_eq!(counted.rows.len(), 2);
+        assert_eq!(counted.cell_types.len(), 2);
+        assert_eq!(counted.capped_from, Some(5));
+        assert_eq!(counted.stopped, None);
+        assert!(counted.edit.is_some());
+
+        let whole = limited(&connection, "db.accounts.find()", 5);
+        assert_eq!((whole.rows.len(), whole.capped_from), (5, None));
+        assert_eq!(whole.stopped, None);
+
+        // A million documents, which a drain would take seconds over.
+        let comment = format!("dbdelve-test-{}", ObjectId::new());
+        let started = Instant::now();
+        let stopped = limited(
+            &connection,
+            &format!("db.events.find().comment('{comment}')"),
+            10,
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(stopped.rows.len(), 10);
+        assert_eq!(stopped.stopped, Some(Stopped::AtLimit));
+        assert_eq!(stopped.capped_from, None);
+        // Its cursor is killed rather than left open on the server.
+        let admin = connection.client().database("admin");
+        let open = || {
+            connection
+                .call(async {
+                    admin
+                        .aggregate([
+                            doc! { "$currentOp": { "idleCursors": true } },
+                            doc! { "$match": { "cursor.originatingCommand.comment": &comment } },
+                        ])
+                        .await?
+                        .try_collect::<Vec<Document>>()
+                        .await
+                })
+                .expect("$currentOp should list")
+        };
+        assert!(
+            (0..40).any(|_| {
+                let closed = open().is_empty();
+                if !closed {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                closed
+            }),
+            "the cursor is still open"
+        );
+        assert_eq!(count(&connection, "accounts"), 5);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_an_aggregate_that_writes_is_never_stopped_at_the_limit() {
+        let connection = live();
+        let scratch = Scratch(&connection, format!("dbdelve_test_{}", ObjectId::new()));
+        for stage in ["$merge", "$out"] {
+            let statement = format!("db.events.aggregate([{{ {stage}: '{}' }}])", scratch.1);
+            assert!(!crate::sql::rerunnable(Engine::MongoDb, &statement));
+            let result = limited(&connection, &statement, 1);
+            assert_eq!(result.stopped, None, "{stage}");
+            assert_eq!(count(&connection, &scratch.1), 1_000_000, "{stage}");
+        }
     }
 
     #[test]
