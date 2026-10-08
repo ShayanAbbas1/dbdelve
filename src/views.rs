@@ -1763,21 +1763,8 @@ fn row_limit_menu(
                 .text_color(t.text_faint),
         )
         .dropdown_menu(move |menu, _, _| {
-            // A hint rather than a confirm or a cap: the cost is the user's call.
             let menu = menu
-                .menu_element_with_check(limit.is_none(), pick(None), move |_, _| {
-                    div()
-                        .flex()
-                        .flex_1()
-                        .gap(px(layout::SPACE_MD))
-                        .justify_between()
-                        .child("No limit")
-                        .child(
-                            div()
-                                .text_color(t.text_faint)
-                                .child("Keeps every row in memory"),
-                        )
-                })
+                .menu_with_check("No limit", limit.is_none(), pick(None))
                 .separator();
             let custom = limit.filter(|rows| !ROW_LIMITS.contains(rows));
             ROW_LIMITS
