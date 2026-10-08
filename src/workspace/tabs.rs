@@ -165,7 +165,7 @@ impl Workspace {
     /// Written through to disk, so the palette a person picked is the one the
     /// next launch paints.
     pub(crate) fn set_theme(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
-        // `set_font_size` and `set_preview_rows` both skip the write-through
+        // `set_font_size` and `set_default_row_limit` both skip the write-through
         // when nothing changed; picking the theme already installed should not
         // rewrite `profiles.toml` or re-post the notice either.
         if theme.name == theme::theme(cx).name {

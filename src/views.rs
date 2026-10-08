@@ -2724,7 +2724,7 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
 fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let t = *theme(cx);
     let families = fonts(cx).clone();
-    let preview_rows = workspace.settings.preview_rows;
+    let row_limit = workspace.settings.row_limit;
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
     let client_sort = workspace.settings.client_sort;
@@ -2881,9 +2881,9 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
             settings_chip(
                 ("preview-rows", rows),
                 compact_count(rows),
-                rows == preview_rows,
+                rows == row_limit,
                 cx,
-                move |workspace, _, cx| workspace.set_preview_rows(rows, cx),
+                move |workspace, _, cx| workspace.set_default_row_limit(rows, cx),
             )
         })
         .collect();
@@ -2928,7 +2928,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
         ))
         .child(settings_section(
             t,
-            "Default limit",
+            "Row limit",
             div().flex().gap(px(layout::SPACE_XS)).children(limits),
         ))
         .child(settings_section(

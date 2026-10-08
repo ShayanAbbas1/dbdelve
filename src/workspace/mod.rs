@@ -34,7 +34,7 @@ pub(crate) struct Settings {
     pub(crate) chrome_font_size: f32,
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
-    pub(crate) preview_rows: usize,
+    pub(crate) row_limit: usize,
     /// How much of the window the desktop shows through, for themes with no
     /// entry in `theme_opacity`. Nothing writes it any more; it is what a
     /// single shared value from before per-theme opacity restores as.
@@ -73,7 +73,7 @@ impl Default for Settings {
             chrome_font_size: layout::BODY_FONT_SIZE,
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
             grid_font_size: layout::BODY_FONT_SIZE,
-            preview_rows: PREVIEW_ROW_LIMIT,
+            row_limit: PREVIEW_ROW_LIMIT,
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
             check_for_updates: true,
@@ -364,7 +364,7 @@ impl Workspace {
                 // is unreachable by the controls that set it, and leaves no
                 // chip highlighted either -- so it is rejected rather than
                 // clamped.
-                workspace.settings.preview_rows = stored_settings
+                workspace.settings.row_limit = stored_settings
                     .preview_rows
                     .filter(|rows| explorer::ROW_LIMITS.contains(rows))
                     .unwrap_or(PREVIEW_ROW_LIMIT);
@@ -753,11 +753,11 @@ impl Workspace {
     /// reason the zoom is, and deliberately not applied to the tabs already
     /// open: their row count is a property of those rows, and changing a
     /// default must never re-run a query nobody asked to re-run.
-    pub(crate) fn set_preview_rows(&mut self, rows: usize, cx: &mut Context<Self>) {
-        if self.settings.preview_rows == rows {
+    pub(crate) fn set_default_row_limit(&mut self, rows: usize, cx: &mut Context<Self>) {
+        if self.settings.row_limit == rows {
             return;
         }
-        self.settings.preview_rows = rows;
+        self.settings.row_limit = rows;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -781,7 +781,7 @@ impl Workspace {
     }
 
     /// The sorting a new tab starts with. Not applied to the tabs already
-    /// open, for the reason `set_preview_rows` is not: each holds its own.
+    /// open, for the reason `set_default_row_limit` is not: each holds its own.
     pub(crate) fn set_client_sort(&mut self, client: bool, cx: &mut Context<Self>) {
         if self.settings.client_sort == client {
             return;

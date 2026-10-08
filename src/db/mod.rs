@@ -1055,12 +1055,18 @@ impl Connection {
 
     /// Run one statement verbatim.
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    /// The SQL is never rewritten — no limit injected, no reformatting. A
+    /// `limit` bounds the rows kept, not the statement: they are read and
+    /// dropped past it, and [`QueryResult::capped_from`] says how many there
+    /// were. Only Postgres honours it so far.
+    pub fn query(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        limit: Option<usize>,
+    ) -> Result<QueryResult, DbError> {
         match self {
-            Self::Postgres(connection) => connection.query(sql),
+            Self::Postgres(connection) => connection.query(sql, limit),
             Self::MySql(connection) => connection.query(sql),
             Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
@@ -1080,7 +1086,7 @@ impl Connection {
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_) => self.query(sql, cancel),
+            | Self::MongoDb(_) => self.query(sql, cancel, None),
         }
     }
 
@@ -1252,7 +1258,8 @@ impl Connection {
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement, &CancelToken::default()).map(|_| ())
+        self.query(statement, &CancelToken::default(), None)
+            .map(|_| ())
     }
 }
 
@@ -1586,6 +1593,9 @@ pub struct QueryResult {
     /// zero both for commands that affected no rows and commands without a row
     /// count, so callers must not infer the command kind from this value.
     pub rows_affected: Option<u64>,
+    /// How many rows the statement returned, when the row limit kept fewer of
+    /// them than that. `None` when `rows` is the whole result.
+    pub capped_from: Option<usize>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
@@ -1608,6 +1618,13 @@ pub struct QueryResult {
     /// is split on the `GO`-separated batch instead, because a batch is a
     /// scope boundary, and one batch readily returns several.
     pub rest: Vec<QueryResult>,
+}
+
+impl QueryResult {
+    /// The rows the statement returned, held or not.
+    pub fn total_rows(&self) -> usize {
+        self.capped_from.unwrap_or(self.rows.len())
+    }
 }
 
 /// The table a result set's rows can be written back to, already resolved to

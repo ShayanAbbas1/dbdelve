@@ -1033,7 +1033,7 @@ impl Workspace {
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
     pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("copying", cx) {
+        if self.refuse_capped("copying", cx) {
             return;
         }
         let Some(results) = self
@@ -1092,23 +1092,34 @@ impl Workspace {
     }
 
     /// A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
-    /// result. Writing those out is quietly short of what the status bar says
-    /// the tab is showing, so this says how to get the rest instead.
-    fn refuse_capped_snapshot(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+    /// result, and a run at most the row limit. Writing those out is quietly
+    /// short of what the status bar says the tab is showing, so this says how
+    /// to get the rest instead.
+    fn refuse_capped(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
         let capped = self.profile().and_then(|profile| {
             let grid = profile.session.active_results()?.read(cx).delegate();
             let showing = grid.result().rows.len();
-            (showing < grid.total_rows()).then(|| (showing, grid.total_rows()))
+            (showing < grid.total_rows())
+                .then(|| (showing, grid.total_rows(), grid.captured().is_some()))
         });
-        let Some((showing, total)) = capped else {
+        let Some((showing, total, snapshot)) = capped else {
             return false;
         };
+        let (showing, total) = (
+            group_thousands(showing as u64),
+            group_thousands(total as u64),
+        );
         self.note(
-            format!(
-                "This tab is showing {} of {} rows from a snapshot. Refresh it before {doing}.",
-                group_thousands(showing as u64),
-                group_thousands(total as u64)
-            ),
+            match snapshot {
+                true => format!(
+                    "This tab is showing {showing} of {total} rows from a snapshot. Refresh it \
+                     before {doing}."
+                ),
+                false => format!(
+                    "This tab is showing {showing} of {total} rows, the row limit. Raise it in \
+                     Settings and run the statement again before {doing}."
+                ),
+            },
             cx,
         );
         true
@@ -1192,7 +1203,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("exporting", cx) {
+        if self.refuse_capped("exporting", cx) {
             return;
         }
         let Some(profile) = self.profile() else {

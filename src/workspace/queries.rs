@@ -375,7 +375,7 @@ impl Workspace {
                     sql: format!("Result {}", offset + 2),
                     start,
                     state: QueryState::Complete {
-                        rows: set.rows.len(),
+                        rows: set.total_rows(),
                         bytes: set.bytes,
                         elapsed: set.elapsed,
                         rows_affected: set.rows_affected,
@@ -1385,10 +1385,12 @@ impl Workspace {
         // dbdelve's statement only when an edit is applied from its grid, the
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
+        // A plan is never cut short: its rows are the plan, not data.
+        let limit = explain.is_none().then_some(self.settings.row_limit);
         let query_task = cx.background_executor().spawn(async move {
             let result = match generated {
                 true => connection.generated(&sql, &cancel),
-                false => connection.query(&sql, &cancel),
+                false => connection.query(&sql, &cancel, limit),
             };
             let lost = result.is_err() && connection.is_lost();
             (result, lost)
@@ -1477,7 +1479,7 @@ impl Workspace {
                                     result.edit = None;
                                 }
                                 *state = QueryState::Complete {
-                                    rows: result.rows.len(),
+                                    rows: result.total_rows(),
                                     bytes: result.bytes,
                                     elapsed: result.elapsed,
                                     rows_affected: result.rows_affected,

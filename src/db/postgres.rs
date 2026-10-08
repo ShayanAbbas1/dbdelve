@@ -1,10 +1,15 @@
 use std::collections::HashSet;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use futures_util::{FutureExt, StreamExt, future::Fuse};
 use geozero::{CoordDimensions, ToWkt, wkb::Ewkb};
-use postgres::{CancelToken, Client, NoTls, SimpleQueryMessage, config::Host};
+use tokio::runtime::Runtime;
+use tokio_postgres::{CancelToken, NoTls, SimpleQueryMessage, config::Host};
 
 use crate::tls;
 
@@ -400,7 +405,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
             query.append_pair(key, value);
         }
     }
-    let parsed: postgres::Config = without_tls_keys
+    let parsed: tokio_postgres::Config = without_tls_keys
         .as_str()
         .parse()
         .map_err(|error| format!("Connection URL is invalid: {error}"))?;
@@ -511,6 +516,59 @@ fn quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
+type Error = tokio_postgres::Error;
+/// The driver's half of a connection, whose type differs with the TLS stream.
+type Socket = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+/// tokio-postgres on a current-thread runtime of its own, driven only while a
+/// call blocks on it: what the `postgres` crate does, which offers no way to
+/// read a simple query's rows as they arrive rather than all at once.
+struct Client {
+    // Declared before `driver` so it drops first. A dropped client is what
+    // tells the connection to send `Terminate`, and `Driver::drop` is what
+    // polls it long enough to.
+    client: tokio_postgres::Client,
+    driver: Driver,
+}
+
+struct Driver {
+    runtime: Runtime,
+    connection: Fuse<Socket>,
+}
+
+impl Driver {
+    /// `future`, with the connection polled beside it so the socket is read
+    /// while the request waits. A connection that fails ends the call with its
+    /// own error. For a backend killed mid-statement that is "connection
+    /// closed", not the server's FATAL, as it was under the `postgres` crate.
+    fn block_on<T>(&mut self, future: impl Future<Output = T>) -> Result<T, Error> {
+        let mut future = pin!(future);
+        let connection = &mut self.connection;
+        self.runtime.block_on(poll_fn(|cx| {
+            if let Poll::Ready(Err(error)) = connection.poll_unpin(cx) {
+                return Poll::Ready(Err(error));
+            }
+            future.as_mut().poll(cx).map(Ok)
+        }))
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        use futures_util::future::FusedFuture;
+        // A finished `Fuse` is pending forever, so waiting on one would sit out
+        // the whole grace period.
+        if self.connection.is_terminated() {
+            return;
+        }
+        let connection = &mut self.connection;
+        // Built inside the runtime: a timer outside one has no clock to read.
+        let _ = self
+            .runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(1), connection).await });
+    }
+}
+
 /// A live connection. Cloneable so a background task can take one without
 /// borrowing the view.
 ///
@@ -557,14 +615,29 @@ impl Connection {
             None => connection_string(server),
             Some(tunnel) => tunnelled_string(server, tunnel.dial()?),
         };
-        let client = match &connector {
-            None => Client::connect(&string, NoTls),
-            Some(connector) => Client::connect(&string, connector.clone()),
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
+        let (client, connection) = match &connector {
+            None => runtime
+                .block_on(tokio_postgres::connect(&string, NoTls))
+                .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
+            Some(connector) => runtime
+                .block_on(tokio_postgres::connect(&string, connector.clone()))
+                .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
         }
         .map_err(|error| connect_error(&error, server))?;
+        let client = Client {
+            client,
+            driver: Driver {
+                runtime,
+                connection: connection.fuse(),
+            },
+        };
 
         Ok(Self {
-            cancel: client.cancel_token(),
+            cancel: client.client.cancel_token(),
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
@@ -574,7 +647,9 @@ impl Connection {
 
     /// A poisoned mutex counts: every later statement would fail on it too.
     pub fn is_lost(&self) -> bool {
-        self.client.lock().map_or(true, |client| client.is_closed())
+        self.client
+            .lock()
+            .map_or(true, |client| client.client.is_closed())
     }
 
     /// Cancellation is advisory and racy by the driver's own admission: the
@@ -586,9 +661,15 @@ impl Connection {
         if let Some(tunnel) = &self.tunnel {
             tunnel.dial()?;
         }
+        // Its own runtime: the connection's is blocked on the very statement
+        // this is here to stop.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| plain_error(format!("Could not ask the server to cancel: {error}")))?;
         match &self.connector {
-            None => self.cancel.cancel_query(NoTls),
-            Some(connector) => self.cancel.cancel_query(connector.clone()),
+            None => runtime.block_on(self.cancel.cancel_query(NoTls)),
+            Some(connector) => runtime.block_on(self.cancel.cancel_query(connector.clone())),
         }
         .map_err(|error| DbError {
             message: format!("Could not ask the server to cancel: {error}"),
@@ -596,22 +677,22 @@ impl Connection {
         })
     }
 
-    /// Run one statement verbatim.
+    /// Run one statement verbatim, keeping at most `limit` rows of its result.
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, true)
+    /// The SQL is never rewritten — no limit injected, no reformatting. The
+    /// server sends every row and the ones past the limit are read and
+    /// dropped, so the statement runs to completion exactly as typed.
+    pub fn query(&self, sql: &str, limit: Option<usize>) -> Result<QueryResult, DbError> {
+        self.run(sql, true, limit)
     }
 
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false)
+        self.run(sql, false, None)
     }
 
-    fn run(&self, sql: &str, typed: bool) -> Result<QueryResult, DbError> {
+    fn run(&self, sql: &str, typed: bool, limit: Option<usize>) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
@@ -621,11 +702,13 @@ impl Connection {
         // queries, and time spent waiting behind the catalog load is not time
         // the server spent on this statement.
         let started = Instant::now();
-        let messages = client
-            .simple_query(sql)
-            .map_err(|error| query_error(&error, sql))?;
-
-        let (mut result, commands) = assemble(messages, started.elapsed())?;
+        let Client {
+            client: inner,
+            driver,
+        } = &mut *client;
+        let (mut result, commands) = driver
+            .block_on(assemble(inner, sql, limit, started))
+            .map_err(|error| query_error(&error, sql))??;
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -842,7 +925,10 @@ struct ProbedColumn {
 /// why the ask has to come after the statement ran.
 fn describe_columns(client: &mut Client, sql: &str) -> Vec<ProbedColumn> {
     client
-        .prepare(sql)
+        .driver
+        .block_on(client.client.prepare(sql))
+        .ok()
+        .and_then(Result::ok)
         .map(|statement| {
             statement
                 .columns()
@@ -972,18 +1058,24 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
 /// The result, plus the number of statements the server completed -- one
 /// `CommandComplete` each, which is cheaper and more truthful than re-parsing
 /// the SQL to count them.
-fn assemble(
-    messages: Vec<SimpleQueryMessage>,
-    elapsed: Duration,
+///
+/// Read as the rows arrive, so a row past `limit` is dropped as soon as it is
+/// counted rather than held until the last one lands.
+async fn assemble(
+    client: &tokio_postgres::Client,
+    sql: &str,
+    limit: Option<usize>,
+    started: Instant,
 ) -> Result<(QueryResult, usize), DbError> {
-    let mut result = QueryResult {
-        elapsed,
-        ..Default::default()
-    };
+    let failed = |error: Error| query_error(&error, sql);
+    let mut messages = pin!(client.simple_query_raw(sql).await.map_err(failed)?);
+    let mut result = QueryResult::default();
     let mut commands = 0;
+    // The current set's rows, kept or not.
+    let mut returned = 0;
 
-    for message in messages {
-        match message {
+    while let Some(message) = messages.next().await {
+        match message.map_err(failed)? {
             // One selection can carry several statements, and the grid shows
             // one result set -- so each new description starts the kept set
             // over and the last statement wins. Accumulating across statements
@@ -999,8 +1091,13 @@ fn assemble(
                 result.rows.clear();
                 result.bytes = 0;
                 result.rows_affected = None;
+                returned = 0;
             }
             SimpleQueryMessage::Row(row) => {
+                returned += 1;
+                if limit.is_some_and(|limit| result.rows.len() >= limit) {
+                    continue;
+                }
                 // A row arriving with no description before it is not a path
                 // the driver takes today; without this the grid would render
                 // headerless and drop every value it was handed.
@@ -1041,6 +1138,8 @@ fn assemble(
         }
     }
 
+    result.elapsed = started.elapsed();
+    result.capped_from = (returned > result.rows.len()).then_some(returned);
     Ok((result, commands))
 }
 
@@ -1102,7 +1201,7 @@ fn readable_wkt(wkt: &str) -> String {
     readable
 }
 
-fn connect_error(error: &postgres::Error, server: &ServerConfig) -> DbError {
+fn connect_error(error: &tokio_postgres::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing
     // about what the user should do -- we cannot see their machine.
@@ -1124,10 +1223,10 @@ fn connect_error(error: &postgres::Error, server: &ServerConfig) -> DbError {
     }
 }
 
-fn query_error(error: &postgres::Error, sql: &str) -> DbError {
+fn query_error(error: &tokio_postgres::Error, sql: &str) -> DbError {
     let position = error.as_db_error().and_then(|db| match db.position() {
         // Postgres reports a 1-based character position into the statement.
-        Some(postgres::error::ErrorPosition::Original(p)) => {
+        Some(tokio_postgres::error::ErrorPosition::Original(p)) => {
             character_position_to_byte_offset(sql, *p)
         }
         _ => None,
@@ -1149,7 +1248,7 @@ fn character_position_to_byte_offset(sql: &str, position: u32) -> Option<usize> 
 
 /// Prefer the server's own message. It is written for humans and already says
 /// the useful part; the driver's wrapper text mostly repeats "db error".
-fn describe(error: &postgres::Error) -> String {
+fn describe(error: &tokio_postgres::Error) -> String {
     if let Some(db) = error.as_db_error() {
         let mut message = db.message().to_string();
         if let Some(detail) = db.detail() {
@@ -1176,7 +1275,7 @@ fn describe(error: &postgres::Error) -> String {
 
 /// The last link in an error's source chain, which is where the driver's
 /// wrappers finally give way to what actually went wrong.
-fn root_cause(error: &postgres::Error) -> Option<String> {
+fn root_cause(error: &tokio_postgres::Error) -> Option<String> {
     let mut source = std::error::Error::source(error);
     let mut deepest = None;
     while let Some(current) = source {
@@ -1186,7 +1285,7 @@ fn root_cause(error: &postgres::Error) -> Option<String> {
     deepest
 }
 
-fn io_source(error: &postgres::Error) -> Option<&std::io::Error> {
+fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
     let mut source = std::error::Error::source(error);
     while let Some(current) = source {
         if let Some(io) = current.downcast_ref::<std::io::Error>() {
@@ -1345,7 +1444,7 @@ mod tests {
     #[test]
     fn a_tunnelled_connection_verifies_the_servers_name_and_dials_the_tunnel() {
         let string = tunnelled_string(&config(), "127.0.0.1:40000".parse().unwrap());
-        let parsed: postgres::Config = string.parse().expect("the driver should parse it");
+        let parsed: tokio_postgres::Config = string.parse().expect("the driver should parse it");
 
         assert_eq!(parsed.get_hosts(), [Host::Tcp("db.example.test".into())]);
         assert_eq!(
@@ -1515,7 +1614,7 @@ mod tests {
             // And it parses: this is the check that would have caught handing
             // the driver "verify-full".
             assert!(
-                string.parse::<::postgres::Config>().is_ok(),
+                string.parse::<tokio_postgres::Config>().is_ok(),
                 "{mode:?} produced an unparsable string: {string}"
             );
         }
@@ -1776,14 +1875,14 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", None)
             .expect_err("the statement should be cancelled");
         assert!(
             error.message.contains("cancel"),
             "the server's own words: {}",
             error.message
         );
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", None).is_ok());
     }
 
     #[test]
@@ -1791,25 +1890,28 @@ mod tests {
     fn live_a_terminated_session_is_lost_and_a_failed_statement_is_not() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("BEGIN")
+            .query("BEGIN", None)
             .expect("the transaction should open");
-        assert!(connection.query("SELECT broken").is_err());
+        assert!(connection.query("SELECT broken", None).is_err());
         assert!(
             !connection.is_lost(),
             "an aborted transaction is still a session"
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", None)
             .expect("the session should still answer");
 
-        let pid = connection.query("SELECT pg_backend_pid()").unwrap().rows[0][0]
+        let pid = connection
+            .query("SELECT pg_backend_pid()", None)
+            .unwrap()
+            .rows[0][0]
             .clone()
             .unwrap();
         Connection::open(&live_config())
             .expect("a second connection should open")
-            .query(&format!("SELECT pg_terminate_backend({pid})"))
+            .query(&format!("SELECT pg_terminate_backend({pid})"), None)
             .expect("the terminate should run");
-        assert!(connection.query("SELECT 1").is_err());
+        assert!(connection.query("SELECT 1", None).is_err());
         assert!(connection.is_lost());
     }
 
@@ -1819,7 +1921,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-bastion")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one")
+            .query("SELECT 1 AS one", None)
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
         let sizes = connection
@@ -1834,7 +1936,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-inner")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one")
+            .query("SELECT 1 AS one", None)
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
     }
@@ -1869,10 +1971,10 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", None)
             .expect_err("the statement should be cancelled");
         assert!(error.message.contains("cancel"), "{}", error.message);
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", None).is_ok());
     }
 
     #[test]
@@ -1885,7 +1987,7 @@ mod tests {
         .expect("connection should open");
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", None)
             .expect_err("the statement should time out");
         assert!(error.message.contains("timeout"), "{}", error.message);
     }
@@ -1895,7 +1997,10 @@ mod tests {
     fn live_query_round_trip() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         let result = connection
-            .query("SELECT * FROM (VALUES (1, 'alpha'), (2, NULL)) AS sample(id, label)")
+            .query(
+                "SELECT * FROM (VALUES (1, 'alpha'), (2, NULL)) AS sample(id, label)",
+                None,
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["id", "label"]);
@@ -1912,6 +2017,40 @@ mod tests {
         );
         assert_eq!(result.bytes, 7);
         assert_eq!(result.rows_affected, Some(2));
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_row_limit_keeps_the_first_rows_and_counts_the_rest() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let capped = connection
+            .query("SELECT n FROM generate_series(1, 10) AS n", Some(3))
+            .expect("query should succeed");
+        assert_eq!(
+            capped.rows,
+            vec![
+                vec![Some("1".into())],
+                vec![Some("2".into())],
+                vec![Some("3".into())]
+            ]
+        );
+        assert_eq!(capped.capped_from, Some(10));
+        assert_eq!(capped.total_rows(), 10);
+
+        // The cap is per result set: the last set is the one kept, and its
+        // count starts over rather than carrying the first one's.
+        let last = connection
+            .query("SELECT generate_series(1, 10); SELECT 1 AS one", Some(3))
+            .expect("query should succeed");
+        assert_eq!(last.rows, vec![vec![Some("1".into())]]);
+        assert_eq!(last.capped_from, None);
+
+        // A statement after the capped one still ran: nothing was cut short.
+        let after = connection
+            .query("CREATE TEMP TABLE capped AS SELECT generate_series(1, 10) AS n; SELECT n FROM capped", Some(3))
+            .expect("query should succeed");
+        assert_eq!(after.capped_from, Some(10));
+        assert!(connection.query("SELECT 1", None).is_ok());
     }
 
     #[test]
@@ -1949,10 +2088,12 @@ mod tests {
         // handles fine, and reported every later failure as "current
         // transaction is aborted" instead of its own cause.
         let connection = Connection::open(&live_config()).expect("connection should open");
-        connection.query("BEGIN").expect("BEGIN should succeed");
+        connection
+            .query("BEGIN", None)
+            .expect("BEGIN should succeed");
 
         let result = connection
-            .query("SELECT 1 AS a; SELECT 2 AS b")
+            .query("SELECT 1 AS a; SELECT 2 AS b", None)
             .expect("a multi-statement selection must survive an open transaction");
 
         assert_eq!(names(&result), vec!["b"]);
@@ -1960,7 +2101,7 @@ mod tests {
         assert_eq!(types(&result), vec![None]);
 
         let error = connection
-            .query("SELECT * FROM no_such_relation")
+            .query("SELECT * FROM no_such_relation", None)
             .unwrap_err();
 
         assert!(
@@ -1969,7 +2110,7 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", None)
             .expect("ROLLBACK should succeed");
     }
 
@@ -1983,7 +2124,7 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let result = connection
-            .query("SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d")
+            .query("SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d", None)
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["d"]);
@@ -1998,7 +2139,7 @@ mod tests {
 
         // A valid empty result still has to carry its headers.
         let empty = connection
-            .query("SELECT 1 AS id, 'x' AS label WHERE false")
+            .query("SELECT 1 AS id, 'x' AS label WHERE false", None)
             .expect("query should succeed");
 
         assert_eq!(names(&empty), vec!["id", "label"]);
@@ -2013,7 +2154,7 @@ mod tests {
         // own names and the key's position among them.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, id FROM accounts")
+            .query("SELECT name, id FROM accounts", None)
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -2033,7 +2174,10 @@ mod tests {
         // about the table, and an expression has no name in the table at all.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT id AS ident, upper(name) AS shouted, name FROM accounts")
+            .query(
+                "SELECT id AS ident, upper(name) AS shouted, name FROM accounts",
+                None,
+            )
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -2059,7 +2203,7 @@ mod tests {
         ] {
             assert!(
                 connection
-                    .query(sql)
+                    .query(sql, None)
                     .expect("query should succeed")
                     .edit
                     .is_none(),
@@ -2074,7 +2218,7 @@ mod tests {
         // Nothing in this result set identifies which account a row is.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, email FROM accounts")
+            .query("SELECT name, email FROM accounts", None)
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2086,11 +2230,14 @@ mod tests {
         // There is no predicate that names one of two identical rows.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("CREATE TEMP TABLE dbdelve_unkeyed (value integer, label text)")
+            .query(
+                "CREATE TEMP TABLE dbdelve_unkeyed (value integer, label text)",
+                None,
+            )
             .expect("the temporary table should be created");
 
         let result = connection
-            .query("SELECT value, label FROM dbdelve_unkeyed")
+            .query("SELECT value, label FROM dbdelve_unkeyed", None)
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2128,12 +2275,13 @@ mod tests {
                  CREATE TABLE dbdelve_test_ddl (id bigint, note text DEFAULT 'x') \
                      PARTITION BY RANGE (id); \
                  CREATE INDEX dbdelve_test_ddl_note ON dbdelve_test_ddl (note)",
+                None,
             )
             .expect("the fixture table should be created");
         let partitioned =
             connection.ddl("public", "dbdelve_test_ddl", RelationKind::PartitionedTable);
         connection
-            .query("DROP TABLE dbdelve_test_ddl")
+            .query("DROP TABLE dbdelve_test_ddl", None)
             .expect("the fixture table should be cleaned up");
         let table = connection
             .ddl("public", "accounts", RelationKind::Table)
@@ -2192,8 +2340,9 @@ mod tests {
         };
         let drop = "DROP TABLE IF EXISTS dbdelve_test_ddl_generated CASCADE";
         connection
-            .query(&format!(
-                "{drop}; \
+            .query(
+                &format!(
+                    "{drop}; \
                  CREATE TABLE dbdelve_test_ddl_generated (a int, \
                      twice int GENERATED ALWAYS AS (a * 2) STORED, \
                      CONSTRAINT dbdelve_test_ddl_generated_a CHECK (a > 0)); \
@@ -2203,16 +2352,18 @@ mod tests {
                  CREATE MATERIALIZED VIEW dbdelve_test_ddl_materialized AS \
                      SELECT a FROM dbdelve_test_ddl_generated; \
                  CREATE INDEX dbdelve_test_ddl_materialized_a ON dbdelve_test_ddl_materialized (a)"
-            ))
+                ),
+                None,
+            )
             .expect("the fixtures should be created");
         let written = ddl();
         let rerun = written.as_ref().map_err(Clone::clone).and_then(|written| {
-            connection.query(drop)?;
-            connection.query(&written.join("\n"))?;
+            connection.query(drop, None)?;
+            connection.query(&written.join("\n"), None)?;
             ddl()
         });
         connection
-            .query(drop)
+            .query(drop, None)
             .expect("the fixtures should be cleaned up");
 
         let written = written.expect("the DDL should load");
@@ -2261,12 +2412,13 @@ mod tests {
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (0) TO (500); \
                  CREATE TABLE dbdelve_test_referencing_p2 \
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (500) TO (1000)",
+                None,
             )
             .expect("the fixture tables should be created");
 
         let references = connection.references("public", "accounts");
         connection
-            .query("DROP TABLE dbdelve_test_referencing")
+            .query("DROP TABLE dbdelve_test_referencing", None)
             .expect("the fixture tables should be cleaned up");
         let tables: Vec<String> = references
             .expect("references should load")
@@ -2290,11 +2442,15 @@ mod tests {
                     label text,
                     PRIMARY KEY (left_id, right_id)
                 )",
+                None,
             )
             .expect("the temporary table should be created");
 
         let edit = connection
-            .query("SELECT label, right_id, left_id FROM dbdelve_composite")
+            .query(
+                "SELECT label, right_id, left_id FROM dbdelve_composite",
+                None,
+            )
             .expect("query should succeed")
             .edit
             .expect("both key columns are in the result set");
@@ -2316,18 +2472,20 @@ mod tests {
         // inside whatever transaction the user has open. It must be as
         // harmless there as the type probe beside it.
         let connection = Connection::open(&live_config()).expect("connection should open");
-        connection.query("BEGIN").expect("BEGIN should succeed");
+        connection
+            .query("BEGIN", None)
+            .expect("BEGIN should succeed");
 
         assert!(
             connection
-                .query("SELECT id FROM accounts")
+                .query("SELECT id FROM accounts", None)
                 .expect("query should succeed")
                 .edit
                 .is_some()
         );
 
         let error = connection
-            .query("SELECT * FROM no_such_relation")
+            .query("SELECT * FROM no_such_relation", None)
             .unwrap_err();
 
         assert!(
@@ -2336,7 +2494,7 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", None)
             .expect("ROLLBACK should succeed");
     }
 
@@ -2443,6 +2601,7 @@ mod tests {
                  DROP TABLE IF EXISTS dbdelve_test_unanalyzed; \
                  CREATE TABLE dbdelve_test_unanalyzed (id integer NOT NULL); \
                  INSERT INTO dbdelve_test_unanalyzed (id) SELECT generate_series(1, 10)",
+                None,
             )
             .expect("the fixture tables should be created");
 
@@ -2479,7 +2638,10 @@ mod tests {
         );
 
         connection
-            .query("DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed")
+            .query(
+                "DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed",
+                None,
+            )
             .expect("the fixture tables should be cleaned up");
 
         catalog.set_sizes(&sizes);
@@ -2502,12 +2664,15 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let items = connection
-            .query("SELECT count(*) AS rows_seeded FROM order_items")
+            .query("SELECT count(*) AS rows_seeded FROM order_items", None)
             .expect("query should succeed");
         assert_eq!(items.rows[0][0].as_deref(), Some("3"));
 
         let closed = connection
-            .query("SELECT count(*) AS rows_seeded FROM archive.closed_accounts")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM archive.closed_accounts",
+                None,
+            )
             .expect("query should succeed");
         assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
     }

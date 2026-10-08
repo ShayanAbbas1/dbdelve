@@ -123,10 +123,6 @@ pub struct ResultGrid {
     /// whole delegate: there is no field anyone has to remember to clear, and
     /// so no way for a live result to keep claiming it is a snapshot.
     captured: Option<u64>,
-    /// How many rows the result had, for a snapshot that was capped before it
-    /// was written. Held beside `captured` and for the same reason: a run
-    /// replaces the whole delegate, so a live result cannot keep a stale count.
-    restored_total: Option<usize>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -300,7 +296,6 @@ impl ResultGrid {
             pending: Vec::new(),
             editing: None,
             captured: None,
-            restored_total: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -368,6 +363,7 @@ impl ResultGrid {
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                capped_from: (stored.total_rows > stored.rows.len()).then_some(stored.total_rows),
                 // All or none: a snapshot naming a type this build does not
                 // know is read as having none, never as rows out of step.
                 cell_types: stored
@@ -396,7 +392,6 @@ impl ResultGrid {
             .active
             .filter(|(row, col)| *row < rows && *col < columns);
         grid.captured = Some(stored.captured);
-        grid.restored_total = Some(stored.total_rows);
         grid.unconfirmed = stored.edit.is_some();
         grid
     }
@@ -417,10 +412,9 @@ impl ResultGrid {
     }
 
     /// How many rows the result behind this grid had. More than the grid holds
-    /// only for a restored snapshot the cap trimmed -- which is the one case
-    /// where the rows on screen are not the whole result set.
+    /// when the row limit or a snapshot's cap trimmed it.
     pub fn total_rows(&self) -> usize {
-        self.restored_total.unwrap_or(self.result.rows.len())
+        self.result.total_rows()
     }
 
     /// What a snapshot of this grid keeps. The tab's own fields -- the

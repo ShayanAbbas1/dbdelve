@@ -45,10 +45,12 @@ tree-sitter-javascript = "=0.23.1"
 # implement and the types we hand it are the same crate rather than two copies.
 lsp-types = "=0.97.0"
 
-# Blocking client, deliberately. GPUI's executor is async-task over Grand
-# Central Dispatch with no reactor, so a tokio future panics on it. This owns
-# its runtime and runs on the background executor. See AGENTS.md.
-postgres = "0.19"
+# Async, driven the way SQL Server's tiberius is below: each connection owns a
+# tokio current-thread runtime and blocks on it from the background executor,
+# so no tokio future reaches GPUI's. Directly rather than through the blocking
+# `postgres` crate, whose `simple_query` collects every row before returning
+# one, which leaves nothing to stop at a row limit. See AGENTS.md.
+tokio-postgres = "0.7"
 
 # SQLite. Blocking like the Postgres driver, and for the same reason.
 #

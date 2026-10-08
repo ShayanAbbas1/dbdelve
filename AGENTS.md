@@ -20,8 +20,12 @@ require it, stop and raise it instead.
    column projection, no reformatting on execute, and nothing at all on a
    statement the user did not ask DBDelve to change. A client that silently
    alters statements cannot be trusted with the statements that matter, which
-   is why "silently" is the word that carries the rule. Row limits apply to
-   DBDelve-generated preview queries only, and they are visible in the UI.
+   is why "silently" is the word that carries the rule. A `LIMIT` is written
+   only into DBDelve-generated preview queries. A user's own statement runs
+   as typed; the row limit bounds it by keeping only that many rows and
+   dropping the rest as they arrive, never by changing the statement. Either
+   way the limit is visible in the UI, and a capped result says how many rows
+   the statement returned.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always
    where the user can read it:
@@ -316,13 +320,15 @@ timer. Database work uses blocking drivers, which own their runtimes
 internally, spawned onto the background executor. `rusqlite` is blocking by
 construction and has no runtime at all.
 
-`tokio` is a direct dependency for one reason, and the same rule is why it is
-safe: tiberius is async with no runtime of its own, so `mssql::Connection`
-owns a tokio current-thread runtime per connection and every call into the
-driver is a `runtime.block_on(...)` on the background thread the query was
-already spawned onto. That is what the `postgres` crate does privately around
-tokio-postgres, written out. The runtime lives behind the connection mutex and
-nothing that leaves `src/db/mssql.rs` is a future.
+`tokio` is a direct dependency for two drivers, and the same rule is why it
+is safe. tiberius is async with no runtime of its own, and tokio-postgres is
+used directly rather than through the blocking `postgres` crate, whose
+`simple_query` collects every row before returning one and so cannot stop
+keeping rows at the row limit. Each `mssql::Connection` and
+`postgres::Connection` owns a tokio current-thread runtime and every call into
+the driver is a `runtime.block_on(...)` on the background thread the query was
+already spawned onto. The runtime lives behind the connection mutex and nothing
+that leaves `src/db/mssql.rs` or `src/db/postgres.rs` is a future.
 
 `tokio-rustls` in the tree is not a breach of that rule, and the rule is why:
 the TLS handshake is a future belonging to the connection, so it runs inside the
