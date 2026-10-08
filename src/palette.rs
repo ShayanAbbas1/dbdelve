@@ -30,7 +30,7 @@ use crate::{
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
-    ui::{chord_hint, object_icon, row_icon},
+    ui::{chord_hint, object_icon, one_line, row_icon},
     workspace::opacity_for,
 };
 
@@ -388,6 +388,10 @@ fn history_items(profile: &Profile) -> Vec<Item> {
         .history
         .iter()
         .map(|sql| Item {
+            // The label is what the matcher scores as well as what the row
+            // reads as, so collapsing the whitespace is also what makes
+            // `select from accounts` find a statement whose `FROM` was on its
+            // own line.
             label: one_line(sql),
             hint: "".into(),
             icon: icon::HISTORY,
@@ -468,14 +472,6 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             command: Command::SetDatabase(name.clone()),
         })
         .collect()
-}
-
-/// A statement as a row: one line, however many it was written across. The
-/// label is what the matcher scores as well as what the row reads as, so
-/// collapsing the whitespace is also what makes `select from accounts` find a
-/// statement whose `FROM` was on its own line.
-fn one_line(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The verbs, filtered to the ones that mean something from where the user is

@@ -1081,7 +1081,8 @@ impl Render for Workspace {
                     _ => profile.config.endpoint(),
                 }
             }
-            ProfileState::Failed(message) => message.clone(),
+            // Postgres puts its DETAIL and HINT on lines of their own.
+            ProfileState::Failed(message) => one_line(message),
         };
 
         // The rows the grid actually holds, which is fewer than the result had
@@ -1345,7 +1346,7 @@ impl Render for Workspace {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(notice)
+                                .child(one_line(&notice))
                         })),
                 )
                 // Between two sides that share the free space equally, so
