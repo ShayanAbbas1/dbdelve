@@ -1518,10 +1518,10 @@ impl Workspace {
                         let running = profile.session.slot(tab).is_some_and(|(state, _)| {
                             matches!(state, QueryState::Running { started: at, .. } if *at == started)
                         });
-                        if running {
-                            pour(&feed, &results, mode, engine, (&names, &widths), cx);
-                            // The count in the status bar is the workspace's to
-                            // draw, not the grid's.
+                        // The count in the status bar is the workspace's to
+                        // draw, not the grid's. Only when something arrived:
+                        // the clock has a tick of its own.
+                        if running && pour(&feed, &results, mode, engine, (&names, &widths), cx) {
                             cx.notify();
                         }
                         running
@@ -2228,7 +2228,8 @@ fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &m
 pub(crate) const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
 /// Move what has arrived into the grid. A new result set starts the grid over,
-/// as it would have when the set's statement finished.
+/// as it would have when the set's statement finished. `true` when anything
+/// on screen changed.
 fn pour(
     feed: &Feed,
     results: &Entity<TableState<ResultGrid>>,
@@ -2236,13 +2237,17 @@ fn pour(
     engine: Engine,
     (names, widths): (&[String], &[Pixels]),
     cx: &mut App,
-) {
+) -> bool {
     let fed = feed.take();
     // No result set has begun: nothing has a column to go under yet.
     if fed.set == 0 {
-        return;
+        return false;
     }
-    let typed = results.update(cx, |table, cx| {
+    let (typed, changed) = results.update(cx, |table, cx| {
+        let changed = table.delegate().streamed_set() != Some(fed.set)
+            || table.delegate().result().columns != fed.columns
+            || table.delegate().filled() != fed.filled
+            || !fed.rows.is_empty();
         let mut typed = false;
         if table.delegate().streamed_set() != Some(fed.set) {
             typed = fed.columns.iter().any(|column| column.data_type.is_some());
@@ -2272,11 +2277,12 @@ fn pour(
             }
             cx.notify();
         }
-        typed
+        (typed, changed)
     });
     if typed {
         render_aside(results, engine, cx);
     }
+    changed
 }
 
 #[cfg(test)]
