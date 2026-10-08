@@ -493,6 +493,11 @@ impl Session {
     }
 
     /// [`Self::trip`], keeping what `fetch` asks for of the rows.
+    ///
+    /// The timeout stops applying once a set's kept rows reach the limit.
+    /// What follows is rows read only to be counted and dropped, and stopping
+    /// them would close the connection and take the user's transaction with
+    /// it for rows nobody sees. Cancel still reaches it.
     fn fetching(
         &mut self,
         sql: &str,
@@ -504,11 +509,21 @@ impl Session {
         let (runtime, client, seconds) = (&self.runtime, &mut self.client, self.timeout);
         let outcome = guarded(|| {
             runtime.block_on(async {
-                let collect = collect(client, sql, fetch);
+                let past_limit = std::cell::Cell::new(false);
+                let collect = collect(client, sql, fetch, &past_limit);
                 match seconds {
                     0 => Ok(collect.await),
                     seconds => {
-                        tokio::time::timeout(Duration::from_secs(seconds.into()), collect).await
+                        tokio::pin!(collect);
+                        tokio::select! {
+                            collected = &mut collect => Ok(collected),
+                            () = tokio::time::sleep(Duration::from_secs(seconds.into())) => {
+                                match past_limit.get() {
+                                    true => Ok(collect.await),
+                                    false => Err(()),
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -1247,10 +1262,13 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
 /// Every set of a submission, each kept to the limit and counted past it. The
 /// first set alone is fed, since it is the one the grid shows; the sets behind
 /// it are results of their own, kept here until the batch is done.
+///
+/// `past_limit` is set once any set's kept rows reach the limit.
 async fn collect(
     client: &mut Tds,
     sql: &str,
     fetch: Fetch<'_>,
+    past_limit: &std::cell::Cell<bool>,
 ) -> Result<Collected, tiberius::error::Error> {
     let mut stream = client.simple_query(sql).await?;
     let mut collected: Vec<QueryResult> = Vec::new();
@@ -1291,6 +1309,9 @@ async fn collect(
                     continue;
                 }
                 kept += 1;
+                if fetch.limit == Some(kept) {
+                    past_limit.set(true);
+                }
                 if fed && fetch.limit == Some(kept) {
                     filled = Some(Instant::now());
                     if let Some(feed) = fetch.feed {
@@ -3616,6 +3637,41 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_timeout_leaves_a_capped_read_to_drain_inside_an_open_transaction() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        connection
+            .query("BEGIN TRANSACTION", Fetch::default())
+            .unwrap();
+        let started = Instant::now();
+        let capped = connection
+            .query(
+                "SELECT TOP 3000000 a.name, b.name FROM sys.all_columns a \
+                 CROSS JOIN sys.all_columns b",
+                Fetch {
+                    limit: Some(10),
+                    ..Fetch::default()
+                },
+            )
+            .expect("rows past the limit are drained, not timed out");
+        assert!(
+            started.elapsed() > Duration::from_secs(1),
+            "the drain has to outlast the timeout to prove anything: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(capped.capped_from, Some(3_000_000));
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
     #[test]
