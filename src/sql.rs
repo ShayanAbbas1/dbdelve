@@ -1805,6 +1805,31 @@ pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
         && Buffer::for_engine(engine, sql).statements().len() == 1
 }
 
+/// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,
+/// transaction control, declaration or `SELECT … INTO`, and nothing `classify`
+/// cannot read. Such a submission leaves its session as it found it, and
+/// reads the same on another session to the same server as on this one, bar
+/// what this one already holds that a fresh one would not.
+pub(crate) fn plain_read(engine: Engine, sql: &str) -> bool {
+    let queries_only = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+            statements
+                .iter()
+                .all(|statement| matches!(statement, Statement::Query(_)))
+        }),
+        None => true,
+    };
+    queries_only && rerunnable(engine, sql)
+}
+
+/// Whether running `sql` can leave its session unlike a fresh one to the same
+/// profile -- a transaction left open, a `SET`, a `USE`, a temporary table --
+/// so that a statement sent to a fresh one could read something else.
+/// Snowflake and MongoDB keep nothing from one run to the next.
+pub(crate) fn alters_session(engine: Engine, sql: &str) -> bool {
+    !matches!(engine, Engine::Snowflake | Engine::MongoDb) && !plain_read(engine, sql)
+}
+
 /// The lowest mode that may run one statement: what its variant earns, raised
 /// by whatever the `Query` it owns turns out to contain.
 ///

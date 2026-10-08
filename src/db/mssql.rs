@@ -605,6 +605,10 @@ pub struct Connection {
     /// What every login dials, reconnects included, and held so ssh runs as
     /// long as any clone does.
     tunnel: Option<Arc<Tunnel>>,
+    /// Opened for one statement ([`Self::alongside`]): a stop closes it for
+    /// good rather than reconnecting, and has no session of the user's to
+    /// report lost.
+    alongside: bool,
 }
 
 impl Connection {
@@ -615,6 +619,7 @@ impl Connection {
                 in_flight: Arc::new(Mutex::new(InFlight::default())),
                 server: server.clone(),
                 tunnel,
+                alongside: false,
             };
             let mut session = connection.connect()?;
             if connection.server.database.is_empty() {
@@ -666,6 +671,18 @@ impl Connection {
             timeout: self.server.statement_timeout,
             lost: None,
         })
+    }
+
+    /// A second session, for a statement to run on beside this one's; see
+    /// [`super::Connection::query_alongside`]. It logs in on its first run,
+    /// as a reconnect does.
+    pub fn alongside(&self) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            alongside: true,
+            ..self.clone()
+        }
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -981,6 +998,9 @@ impl Connection {
             let _ = socket.shutdown(Shutdown::Both);
         }
         *session = None;
+        if self.alongside {
+            return plain_error(what);
+        }
         let lost = "The connection was reset: the server rolled back any transaction that was \
                     open, and temporary tables and SET options are gone with the session.";
         let reconnected = match self.connect() {
@@ -3633,6 +3653,34 @@ mod tests {
         connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
+    /// A read the server has to work through, about a second of it: there is
+    /// no `WAITFOR` in a plain read, and only a plain read runs at once with
+    /// others. A `COUNT` of the same join is answered without the work.
+    const LIVE_SLOW_SELECT: &str = "SELECT MAX(CHECKSUM(a.name, b.name)) FROM sys.all_objects a \
+         CROSS JOIN (SELECT TOP 500 name FROM sys.all_objects) b";
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        super::super::at_once::reads_overlap(
+            &super::super::Connection::SqlServer(live()),
+            Engine::SqlServer,
+            LIVE_SLOW_SELECT,
+            "INSERT INTO accounts DEFAULT VALUES",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        super::super::at_once::a_cancel_stops_them_all(
+            &super::super::Connection::SqlServer(live()),
+            Engine::SqlServer,
+            "SELECT MAX(CHECKSUM(a.name, b.name, c.name)) FROM sys.all_objects a \
+             CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c",
+        );
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_cancel_stops_the_statement_on_the_server_and_reconnects() {
@@ -4271,6 +4319,7 @@ mod tests {
             ))
             .unwrap(),
             tunnel: None,
+            alongside: false,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

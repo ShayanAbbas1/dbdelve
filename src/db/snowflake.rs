@@ -1635,6 +1635,7 @@ mod tests {
         let running = Mutex::new(Cancelling {
             asked: false,
             handles: vec!["other".to_string()],
+            alongside: None,
         });
         let attempt = || -> Result<(), DbError> {
             running

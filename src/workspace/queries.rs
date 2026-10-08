@@ -130,8 +130,24 @@ impl Workspace {
         if cancelling.is_some() {
             return;
         }
-        *cancelling = Some(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        *cancelling = Some(now);
         let cancel = cancel.clone();
+        // A queue's statements running at once went out under that same
+        // token, and each one's own slot is what its chip reads and what
+        // decides whether it keeps the rows it had.
+        if let Tab::Query(id) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(id)
+                .and_then(|query| query.queue.as_mut())
+        {
+            for finished in &mut queue.done {
+                if let QueryState::Running { cancelling, .. } = &mut finished.state {
+                    *cancelling = Some(now);
+                }
+            }
+        }
         // An explicit stop ends the queue the statement was part of: nothing
         // behind it is sent, and no decision is raised -- this was the
         // decision. The cancelled statement itself still lands, as the queue's
@@ -358,13 +374,29 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        // A new queue in place of one with a statement still out would take
+        // that statement's result as one of its own.
+        if profile.session.running(tab) {
+            return;
+        }
+        let engine = self.engine();
+        let texts: Vec<&str> = statements
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect();
+        if session::runs_at_once(engine, profile.mode, profile.altered, &texts) {
+            self.run_at_once(tab, text, statements, window, cx);
+            return;
+        }
         let Some((first, rest)) = statements.split_first() else {
             return;
         };
         // One grid per result the run can land, less the first, which the tab's
         // own slot holds. That is one per statement on four engines; on SQL
         // Server a batch can answer with a set per statement inside it.
-        let engine = self.engine();
         let spares = statements
             .iter()
             .map(|range| sql::expected_sets(engine, &text[range.clone()]))
@@ -391,6 +423,165 @@ impl Workspace {
         self.execute_sql(sql, tab, cx);
     }
 
+    /// Run a selection's statements all at once, each on a connection of its
+    /// own, keeping every result in its own place in the strip whatever order
+    /// they finish in. Only for a queue `session::runs_at_once` admits: plain
+    /// reads, with nothing to keep in order and nothing for a failure to
+    /// protect, so one that fails says so on its chip and the rest carry on.
+    ///
+    /// The tab's own slot holds the run while it is out, under one token every
+    /// statement shares, so a Cancel reaches all of them and nothing else is
+    /// run on the tab meanwhile. It is given the last statement's result once
+    /// the last has landed, as a queue run in turn leaves it.
+    fn run_at_once(
+        &mut self,
+        tab: Tab,
+        text: String,
+        statements: Vec<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let engine = self.engine();
+        let spares = statements
+            .iter()
+            .map(|range| sql::expected_sets(engine, &text[range.clone()]) - 1)
+            .sum::<usize>();
+        let done = statements
+            .iter()
+            .map(|range| Finished {
+                sql: text[range.clone()].to_string(),
+                start: range.start,
+                state: QueryState::Idle,
+                grid: crate::result_grid::new_grid(window, cx),
+            })
+            .collect();
+        let spare = (0..spares)
+            .map(|_| crate::result_grid::new_grid(window, cx))
+            .collect();
+        let Some(query) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        query.queue = Some(Queue {
+            sql: text,
+            remaining: Vec::new(),
+            done,
+            showing: 0,
+            awaiting: false,
+            spare,
+        });
+        query.query = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        for _ in 0..session::STATEMENTS_AT_ONCE {
+            self.start_lane(tab, cx);
+        }
+        cx.notify();
+    }
+
+    /// Send the first of a queue's statements still waiting to run at once
+    /// with the others.
+    fn start_lane(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some((start, sql)) = self
+            .profile()
+            .and_then(|profile| profile.session.query_tab(id))
+            .and_then(|query| query.queue.as_ref())
+            .and_then(|queue| {
+                queue
+                    .done
+                    .iter()
+                    .find(|finished| matches!(finished.state, QueryState::Idle))
+            })
+            .map(|finished| (finished.start, finished.sql.clone()))
+        else {
+            return;
+        };
+        self.execute_unchecked(sql, tab, None, false, None, Some(start), cx);
+    }
+
+    /// A statement run at once with others has landed in its own entry: put
+    /// any further sets of its batch beside it, send the next waiting
+    /// statement, and once none is out, hand the tab back.
+    fn land_lane(
+        &mut self,
+        tab: Tab,
+        start: usize,
+        rest: Vec<QueryResult>,
+        cx: &mut Context<Self>,
+    ) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let (mode, client_keys) = self.landing_view(tab);
+        let (extra, dropped, out) = {
+            let Some(queue) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(id))
+                .and_then(|query| query.queue.as_mut())
+            else {
+                return;
+            };
+            let Some(at) = queue.lane(start) else {
+                return;
+            };
+            let (extra, dropped) = queue.land_sets(at + 1, start, rest);
+            let out = queue.done.iter().any(|finished| {
+                matches!(
+                    finished.state,
+                    QueryState::Running { .. } | QueryState::Idle
+                )
+            });
+            (extra, dropped, out)
+        };
+        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
+        if out {
+            self.start_lane(tab, cx);
+            return;
+        }
+
+        let Some(query) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        let Some(queue) = &mut query.queue else {
+            return;
+        };
+        let last = queue.done.iter().map(|finished| finished.start).max();
+        if let Some(last) = queue
+            .done
+            .iter()
+            .find(|finished| Some(finished.start) == last)
+        {
+            query.query = last.state.clone();
+            query.results = last.grid.clone();
+            query.ran_from = Some((last.start, last.sql.clone()));
+            if matches!(last.state, QueryState::Complete { .. })
+                && !last.grid.read(cx).delegate().result().columns.is_empty()
+            {
+                query.last_query = Some(last.sql.clone());
+            }
+        } else {
+            query.query = QueryState::Idle;
+        }
+        // Cancelled before the rest went out, one result is no queue at all.
+        if queue.done.len() < 2 {
+            query.queue = None;
+        }
+        cx.notify();
+    }
+
     /// Land the statement that just finished in the queue's history, and send
     /// the next one — or park the decision when it failed with more to run.
     ///
@@ -402,18 +593,7 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let engine = self.engine();
-        // Read before the session is borrowed, for the reason the completion
-        // handler reads it before `slot`.
-        let mode = self
-            .profile()
-            .map(|profile| profile.mode)
-            .unwrap_or_default();
-        let client_keys = self
-            .profile()
-            .and_then(|profile| profile.session.sorting(tab))
-            .and_then(Sorting::client_keys)
-            .map(<[SortKey]>::to_vec);
+        let (mode, client_keys) = self.landing_view(tab);
         let (step, extra, dropped) = {
             let Some(profile) = self.profile_mut() else {
                 return;
@@ -448,70 +628,14 @@ impl Workspace {
                 grid,
             });
 
-            // The grids are the ones the run reserved, because there is no
-            // `Window` here to build another with.
-            //
-            // ponytail: the reservation is one per statement in the batch,
-            // which is an upper bound for an ordinary batch and not for a
-            // procedure, a loop or a trigger; a set past the last spare is
-            // dropped and said so rather than shown. Take a window into
-            // `execute_unchecked` if a set has to be able to arrive
-            // unreserved.
-            let mut extra = Vec::new();
-            let mut dropped = 0;
-            for (offset, set) in rest.into_iter().enumerate() {
-                let Some(grid) = queue.spare.pop() else {
-                    dropped += 1;
-                    continue;
-                };
-                queue.done.push(Finished {
-                    // A set after the first has no statement of its own to be
-                    // named after: one batch produced them all, and the chip
-                    // says which of its results this is.
-                    sql: format!("Result {}", offset + 2),
-                    start,
-                    state: QueryState::Complete {
-                        rows: set.total_rows(),
-                        bytes: set.bytes,
-                        elapsed: set.elapsed,
-                        rows_affected: set.rows_affected,
-                    },
-                    grid: grid.clone(),
-                });
-                extra.push((grid, set));
-            }
+            let (extra, dropped) = queue.land_sets(queue.done.len(), start, rest);
             if following {
                 queue.showing = queue.done.len() - 1;
             }
             (next_step(failed, &queue.remaining), extra, dropped)
         };
 
-        for (grid, set) in extra {
-            // The server's sort is not carried over -- a header click reads
-            // the statement in the buffer, and this set is not the one the
-            // buffer names -- but the view's in-memory keys are, and there is
-            // no layout to carry. A multi-set batch is uneditable, so there is
-            // no target.
-            grid.update(cx, |table, cx| {
-                *table.delegate_mut() = ResultGrid::new(set, mode)
-                    .with_engine(engine)
-                    .with_client_sort(client_keys.as_deref());
-                table.refresh(cx);
-            });
-        }
-        if dropped > 0 {
-            let (sets, them) = match dropped {
-                1 => ("set", "it is"),
-                _ => ("sets", "they are"),
-            };
-            self.note(
-                format!(
-                    "The batch returned {dropped} more result {sets} than there were grids \
-                     reserved for it, and {them} not shown."
-                ),
-                cx,
-            );
-        }
+        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
 
         match step {
             Step::Finished => {
@@ -538,6 +662,61 @@ impl Workspace {
                 cx.notify();
             }
             Step::Next(_) => self.send_next_statement(tab, cx),
+        }
+    }
+
+    /// The mode and in-memory sort a queue's result lands under, read before
+    /// the session is borrowed, for the reason the completion handler reads
+    /// them before `slot`.
+    fn landing_view(&self, tab: Tab) -> (Mode, Option<Vec<SortKey>>) {
+        let mode = self
+            .profile()
+            .map(|profile| profile.mode)
+            .unwrap_or_default();
+        let client_keys = self
+            .profile()
+            .and_then(|profile| profile.session.sorting(tab))
+            .and_then(Sorting::client_keys)
+            .map(<[SortKey]>::to_vec);
+        (mode, client_keys)
+    }
+
+    /// Fill the grids `Queue::land_sets` took for a batch's further sets, and say
+    /// how many found none.
+    fn show_sets(
+        &mut self,
+        extra: Vec<(Entity<TableState<ResultGrid>>, QueryResult)>,
+        dropped: usize,
+        mode: Mode,
+        client_keys: Option<&[SortKey]>,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine();
+        for (grid, set) in extra {
+            // The server's sort is not carried over -- a header click reads
+            // the statement in the buffer, and this set is not the one the
+            // buffer names -- but the view's in-memory keys are, and there is
+            // no layout to carry. A multi-set batch is uneditable, so there is
+            // no target.
+            grid.update(cx, |table, cx| {
+                *table.delegate_mut() = ResultGrid::new(set, mode)
+                    .with_engine(engine)
+                    .with_client_sort(client_keys);
+                table.refresh(cx);
+            });
+        }
+        if dropped > 0 {
+            let (sets, them) = match dropped {
+                1 => ("set", "it is"),
+                _ => ("sets", "they are"),
+            };
+            self.note(
+                format!(
+                    "The batch returned {dropped} more result {sets} than there were grids \
+                     reserved for it, and {them} not shown."
+                ),
+                cx,
+            );
         }
     }
 
@@ -598,9 +777,16 @@ impl Workspace {
         else {
             return;
         };
-        // The in-flight slot is only a chip while something is in it.
+        // The in-flight slot is only a chip while something is in it, and a
+        // statement not yet sent has nothing to show.
         let last = queue.done.len();
-        if index > last || (index == last && !queue.awaiting) {
+        if index > last
+            || (index == last && !queue.awaiting)
+            || queue
+                .done
+                .get(index)
+                .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
+        {
             return;
         }
         queue.showing = index;
@@ -658,6 +844,12 @@ impl Workspace {
             && let Some(queue) = &mut query.queue
         {
             queue.remaining.clear();
+            // Statements waiting to run at once with others are always the
+            // last of `done`, and never the one on screen, so dropping them
+            // moves no other result.
+            queue
+                .done
+                .retain(|finished| !matches!(finished.state, QueryState::Idle));
         }
     }
 
@@ -1291,7 +1483,7 @@ impl Workspace {
             return;
         }
 
-        self.execute_unchecked(sql, tab, refresh, keep_rows, explain, cx);
+        self.execute_unchecked(sql, tab, refresh, keep_rows, explain, None, cx);
     }
 
     /// Runs a statement without consulting the connection's mode. Only two
@@ -1315,6 +1507,12 @@ impl Workspace {
     /// refuses to start while a query is running, so a second call made here
     /// would be dropped on the floor. Nothing follows a failure — the error is
     /// what there is to see, and a refresh would replace it with rows.
+    ///
+    /// `lane` is a statement of a queue running at once with others (where it
+    /// starts in `Queue::sql`): it lands in its own entry of the queue, runs
+    /// on a connection of its own under the run's shared token, and hands its
+    /// result to `land_lane` rather than `advance_queue`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_unchecked(
         &mut self,
         sql: String,
@@ -1322,6 +1520,7 @@ impl Workspace {
         refresh: Option<Refresh>,
         keep_rows: bool,
         explain: Option<ExplainMode>,
+        lane: Option<usize>,
         cx: &mut Context<Self>,
     ) {
         // Read before the task, which outlives the borrow of `self`.
@@ -1332,7 +1531,12 @@ impl Workspace {
         let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
-        let Some((state, results)) = profile.session.slot(tab) else {
+        let read_only = profile.mode == Mode::ReadOnly;
+        let shared = match (lane, profile.session.slot(tab)) {
+            (Some(_), Some((QueryState::Running { cancel, .. }, _))) => Some(cancel.clone()),
+            _ => None,
+        };
+        let Some((state, results)) = profile.session.slot_at(tab, lane) else {
             return;
         };
         // Guarded here rather than in each caller: every path that runs SQL
@@ -1348,9 +1552,12 @@ impl Workspace {
                 position: None,
             });
             cx.notify();
+            if let Some(start) = lane {
+                self.land_lane(tab, start, Vec::new(), cx);
+            }
             return;
         };
-        let cancel = CancelToken::default();
+        let cancel = shared.unwrap_or_default();
         let started = std::time::Instant::now();
         let previous = std::mem::replace(
             state,
@@ -1375,7 +1582,7 @@ impl Workspace {
                     let still_running = workspace.update(cx, |workspace, cx| {
                         let running = workspace
                             .issued_to(&id, generation)
-                            .and_then(|profile| profile.session.slot(tab))
+                            .and_then(|profile| profile.session.slot_at(tab, lane))
                             .is_some_and(|(state, _)| {
                                 matches!(state, QueryState::Running { started: at, .. } if *at == started)
                             });
@@ -1466,6 +1673,7 @@ impl Workspace {
             bare.strip_suffix(suffix).unwrap_or(bare).to_string()
         });
         if let Tab::Query(query) = tab
+            && lane.is_none()
             && let Some(tab) = self
                 .profile_mut()
                 .and_then(|profile| profile.session.query_tab_mut(query))
@@ -1489,6 +1697,14 @@ impl Workspace {
         // dbdelve's statement only when an edit is applied from its grid, the
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
+        // Marked on the way out, like the history: a statement that failed
+        // part way may still have opened a transaction.
+        if !generated
+            && sql::alters_session(engine, explained.as_deref().unwrap_or(&sql))
+            && let Some(profile) = self.profile_mut()
+        {
+            profile.altered = true;
+        }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
             Tab::Query(query) if explain.is_none() => self
@@ -1517,7 +1733,7 @@ impl Workspace {
                             return false;
                         };
                         let mode = profile.mode;
-                        let running = profile.session.slot(tab).is_some_and(|(state, _)| {
+                        let running = profile.session.slot_at(tab, lane).is_some_and(|(state, _)| {
                             matches!(state, QueryState::Running { started: at, .. } if *at == started)
                         });
                         // The count in the status bar is the workspace's to
@@ -1538,19 +1754,19 @@ impl Workspace {
         let fed = feed.clone();
         let reads_only = sql::stoppable(engine, &sql);
         let query_task = cx.background_executor().spawn(async move {
-            let result = match generated {
-                true => connection.generated(&sql, &cancel, fed.as_ref()),
-                false => connection.query(
-                    &sql,
-                    &cancel,
-                    Fetch {
-                        limit,
-                        feed: fed.as_ref(),
-                        reads_only,
-                    },
-                ),
+            let fetch = Fetch {
+                limit,
+                feed: fed.as_ref(),
+                reads_only,
             };
-            let lost = result.is_err() && connection.is_lost();
+            let result = match (generated, lane) {
+                (true, _) => connection.generated(&sql, &cancel, fed.as_ref()),
+                (false, None) => connection.query(&sql, &cancel, fetch),
+                (false, Some(_)) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            };
+            // A connection of the lane's own that failed is gone with it, and
+            // says nothing about the profile's.
+            let lost = lane.is_none() && result.is_err() && connection.is_lost();
             (result, lost)
         });
 
@@ -1563,7 +1779,7 @@ impl Workspace {
                     // it belongs on has to be reached through the same session.
                     let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
-                            workspace.drop_stale_run(&id, tab, cx);
+                            workspace.drop_stale_run(&id, tab, lane, cx);
                             return;
                         };
                         // Read before `slot`, which borrows the session and not
@@ -1597,7 +1813,7 @@ impl Workspace {
                                 queue.remaining.clear();
                             }
                         }
-                        let Some((state, results)) = profile.session.slot(tab) else {
+                        let Some((state, results)) = profile.session.slot_at(tab, lane) else {
                             return;
                         };
 
@@ -1809,7 +2025,10 @@ impl Workspace {
                         // so it is not the statement to go back to — which is
                         // what keeps an applied UPDATE from becoming the query
                         // an apply re-runs.
+                        // A lane's is set once the last of the queue lands,
+                        // since the order they finish in is not the buffer's.
                         if produced_grid
+                            && lane.is_none()
                             && let Some(statement) = statement
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
@@ -1859,8 +2078,10 @@ impl Workspace {
                     // switchable -- which is why this turns on the refresh and
                     // not on the queue's presence. `Queue::awaiting` is what
                     // keeps the edit's own result out of `done`.
-                    if !had_refresh {
-                        workspace.advance_queue(tab, rest, cx);
+                    match lane {
+                        Some(start) => workspace.land_lane(tab, start, rest, cx),
+                        None if !had_refresh => workspace.advance_queue(tab, rest, cx),
+                        None => {}
                     }
                 })
                 .ok();
@@ -1876,10 +2097,39 @@ impl Workspace {
     /// that is not `Idle` or `Failed`. `Idle` rather than `Failed`, because
     /// nothing failed: the run was abandoned, and `Idle` is what makes the next
     /// visit to the tab run it again.
-    pub(crate) fn drop_stale_run(&mut self, id: &str, tab: Tab, cx: &mut Context<Self>) {
+    ///
+    /// A lane's entry goes, with every statement of its queue not yet sent,
+    /// and the tab is let go of once the last lane still out is dropped too.
+    pub(crate) fn drop_stale_run(
+        &mut self,
+        id: &str,
+        tab: Tab,
+        lane: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
+        if let Some(start) = lane
+            && let Tab::Query(query) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(query)
+                .and_then(|query| query.queue.as_mut())
+        {
+            queue.done.retain(|finished| {
+                finished.start != start && !matches!(finished.state, QueryState::Idle)
+            });
+            queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
+            cx.notify();
+            if queue
+                .done
+                .iter()
+                .any(|finished| matches!(finished.state, QueryState::Running { .. }))
+            {
+                return;
+            }
+        }
         let Some((state, _)) = profile.session.slot(tab) else {
             return;
         };

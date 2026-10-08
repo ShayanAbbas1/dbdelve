@@ -389,6 +389,17 @@ impl Connection {
         self.engine
     }
 
+    /// A second session, for a statement to run on beside this one's; see
+    /// [`super::Connection::query_alongside`]. It shares the side session.
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        let connection = connect(&self.server, self.engine, self.dial()?)?;
+        Ok(Self {
+            connection_id: connection.connection_id(),
+            connection: Arc::new(Mutex::new(connection)),
+            ..self.clone()
+        })
+    }
+
     /// A round trip, unlike Postgres's check: the driver keeps no closed flag.
     /// `COM_PING` is answered inside a failed transaction too, so a statement
     /// that merely errored is not mistaken for a dropped session.
@@ -1410,6 +1421,27 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
+    fn live_profile(engine: Engine) -> super::super::Connection {
+        super::super::Connection::MySql(live(engine))
+    }
+
+    fn live_reads_run_at_once_take_the_time_of_one(engine: Engine) {
+        super::super::at_once::reads_overlap(
+            &live_profile(engine),
+            engine,
+            "SELECT SLEEP(1), 1",
+            "INSERT INTO accounts () VALUES ()",
+        );
+    }
+
+    fn live_a_cancel_stops_every_read_run_at_once(engine: Engine) {
+        super::super::at_once::a_cancel_stops_them_all(
+            &live_profile(engine),
+            engine,
+            LIVE_SLOW_SELECT,
+        );
+    }
+
     fn live_a_killed_session_is_lost_and_a_failed_statement_is_not(engine: Engine) {
         let connection = live(engine);
         assert!(connection.query("SELECT broken", Fetch::default()).is_err());
@@ -1997,6 +2029,8 @@ mod tests {
     }
 
     on_both_servers!(
+        live_reads_run_at_once_take_the_time_of_one,
+        live_a_cancel_stops_every_read_run_at_once,
         live_a_row_limit_keeps_the_first_rows_and_counts_the_rest,
         live_a_fed_query_hands_its_typed_rows_to_the_feed,
         live_a_read_past_the_limit_is_stopped_rather_than_drained,

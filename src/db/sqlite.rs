@@ -76,32 +76,21 @@ pub struct Connection {
     /// The profile's statement timeout. SQLite has no such setting, so this is
     /// a wall-clock timer firing the same interrupt — see `run`.
     statement_timeout: Option<Duration>,
+    /// The file, for [`Self::alongside`] to open again; `None` in memory.
+    path: Option<String>,
 }
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         let path = crate::store::home_expanded(path);
-        let shown = path.display();
-        // Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an
-        // empty database that opens successfully and then reports an empty
-        // catalog, which reads as "this database has nothing in it" rather than
-        // "this is not the file you meant". dbdelve would also have littered a
-        // file onto the user's disk to tell them so.
-        //
-        // `SQLITE_OPEN_URI` is off for the same reason: the path came out of the
-        // URL already, and leaving URI parsing on would make a path containing
-        // `?` mean something other than itself.
         if !path.exists() {
-            return Err(plain_error(format!("No database file at {shown}")));
+            return Err(plain_error(format!(
+                "No database file at {}",
+                path.display()
+            )));
         }
 
-        let connection = rusqlite::Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| plain_error(format!("Cannot open {shown}: {}", describe(&error))))?;
-
-        Ok(Self::wrap(connection, statement_timeout))
+        Ok(Self::wrap(open_file(&path)?, statement_timeout))
     }
 
     fn wrap(connection: rusqlite::Connection, statement_timeout: u32) -> Self {
@@ -109,8 +98,26 @@ impl Connection {
             interrupt: Arc::new(connection.get_interrupt_handle()),
             statement_timeout: (statement_timeout > 0)
                 .then(|| Duration::from_secs(u64::from(statement_timeout))),
+            path: connection
+                .path()
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
             connection: Arc::new(Mutex::new(connection)),
         }
+    }
+
+    /// A second connection to the same file, for a statement to run on beside
+    /// this one's; see [`super::Connection::query_alongside`].
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        let path = self.path.as_deref().ok_or_else(|| {
+            plain_error("An in-memory database cannot be opened a second time.".into())
+        })?;
+        let connection = open_file(std::path::Path::new(path))?;
+        Ok(Self {
+            interrupt: Arc::new(connection.get_interrupt_handle()),
+            connection: Arc::new(Mutex::new(connection)),
+            ..self.clone()
+        })
     }
 
     /// Interrupting is local and immediate: there is no server to ask, so
@@ -883,6 +890,29 @@ fn query_error(error: &rusqlite::Error, submission: &str) -> DbError {
             position: None,
         },
     }
+}
+
+/// Deliberately no `SQLITE_OPEN_CREATE`. With it, a mistyped path is an empty
+/// database that opens successfully and then reports an empty catalog, which
+/// reads as "this database has nothing in it" rather than "this is not the file
+/// you meant". dbdelve would also have littered a file onto the user's disk to
+/// tell them so.
+///
+/// `SQLITE_OPEN_URI` is off for the same reason: the path came out of the URL
+/// already, and leaving URI parsing on would make a path containing `?` mean
+/// something other than itself.
+fn open_file(path: &std::path::Path) -> Result<rusqlite::Connection, DbError> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        plain_error(format!(
+            "Cannot open {}: {}",
+            path.display(),
+            describe(&error)
+        ))
+    })
 }
 
 /// End the transaction a failed batch left open, and say so in the error.
@@ -1753,6 +1783,28 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             .expect("query should succeed");
 
         assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        super::super::at_once::reads_overlap(
+            &super::super::Connection::Sqlite(live()),
+            Engine::Sqlite,
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000)
+             SELECT count(*) FROM n",
+            "INSERT INTO accounts DEFAULT VALUES",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        super::super::at_once::a_cancel_stops_them_all(
+            &super::super::Connection::Sqlite(live()),
+            Engine::Sqlite,
+            FOREVER,
+        );
     }
 
     #[test]

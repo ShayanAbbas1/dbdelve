@@ -678,6 +678,16 @@ impl Connection {
         })
     }
 
+    /// A second session, for a statement to run on beside this one's; see
+    /// [`super::Connection::query_alongside`]. It shares the side session, so
+    /// a run of several costs one connection per statement and not two.
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        Ok(Self {
+            side: self.side.clone(),
+            ..Self::connect(&self.server, self.tunnel.clone())?
+        })
+    }
+
     /// A poisoned mutex counts: every later statement would fail on it too.
     pub fn is_lost(&self) -> bool {
         self.client
@@ -2144,6 +2154,33 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    fn live_profile() -> super::super::Connection {
+        super::super::Connection::Postgres(
+            Connection::open(&live_config()).expect("connection should open"),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        super::super::at_once::reads_overlap(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(1), 1",
+            "INSERT INTO accounts DEFAULT VALUES",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        super::super::at_once::a_cancel_stops_them_all(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(30), 1",
+        );
     }
 
     #[test]

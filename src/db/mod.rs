@@ -47,6 +47,37 @@ pub struct CancelToken(Arc<Mutex<Cancelling>>);
 struct Cancelling {
     asked: bool,
     handles: Vec<String>,
+    /// `Some` for a run made by [`CancelToken::alongside`]: the connections
+    /// its statements are running on, each emptied once its statement ends.
+    alongside: Option<Vec<Option<Connection>>>,
+}
+
+impl CancelToken {
+    /// For a run whose statements each go out on a connection of their own
+    /// ([`Connection::query_alongside`]). A cancel under it stops those, and
+    /// never what the connection it is asked on is running, which is some
+    /// other tab's statement or nothing.
+    pub fn alongside() -> Self {
+        Self(Arc::new(Mutex::new(Cancelling {
+            alongside: Some(Vec::new()),
+            ..Cancelling::default()
+        })))
+    }
+
+    /// Mark the run cancelled and hand back the connections it is running on,
+    /// or `None` for a run on the profile's own.
+    fn stop_alongside(&self) -> Option<Vec<Connection>> {
+        let mut running = self.0.lock().ok()?;
+        let connections = running
+            .alongside
+            .as_ref()?
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        running.asked = true;
+        Some(connections)
+    }
 }
 
 /// Which engine a profile talks to.
@@ -1083,6 +1114,51 @@ impl Connection {
         }
     }
 
+    /// [`Connection::query`] on a connection of its own, opened the way this
+    /// one was (its tunnel and side session shared), so the statement runs
+    /// beside whatever this one is running rather than queued behind it, and
+    /// closed once it ends. Snowflake and MongoDB need no second one: they
+    /// already run statements side by side, and stop them by `cancel`.
+    ///
+    /// `cancel` is made by [`CancelToken::alongside`]. `read_only` puts the
+    /// profile's Read-only hold on the new session as well.
+    pub fn query_alongside(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+        read_only: bool,
+    ) -> Result<QueryResult, DbError> {
+        let connection = match self {
+            Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            Self::Postgres(connection) => Self::Postgres(connection.alongside()?),
+            Self::MySql(connection) => Self::MySql(connection.alongside()?),
+            Self::SqlServer(connection) => Self::SqlServer(connection.alongside()),
+            Self::Sqlite(connection) => Self::Sqlite(connection.alongside()?),
+        };
+        if read_only {
+            connection.set_read_only(true)?;
+        }
+        let slot = {
+            let mut running = cancel.0.lock().map_err(|_| {
+                plain_error("The run is unavailable after an earlier internal failure.".into())
+            })?;
+            if running.asked {
+                return Err(plain_error("Cancelled before it was sent.".into()));
+            }
+            let alongside = running.alongside.get_or_insert_default();
+            alongside.push(Some(connection.clone()));
+            alongside.len() - 1
+        };
+        let result = connection.query(sql, cancel, fetch);
+        if let Ok(mut running) = cancel.0.lock()
+            && let Some(alongside) = &mut running.alongside
+        {
+            alongside[slot] = None;
+        }
+        result
+    }
+
     /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
     /// Server alone runs it differently: its session options are the user's to
@@ -1244,6 +1320,14 @@ impl Connection {
     /// a query already returning gigabytes is past the point where stopping the
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
+        if let Some(alongside) = cancel.stop_alongside()
+            && !matches!(self, Self::Snowflake(_) | Self::MongoDb(_))
+        {
+            return alongside
+                .iter()
+                .map(|connection| connection.cancel(&CancelToken::default()))
+                .fold(Ok(()), Result::and);
+        }
         match self {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
@@ -2257,6 +2341,105 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
             .map(|row| row.iter().map(|cell| cell.map(str::to_string)).collect())
             .collect(),
         ..Default::default()
+    }
+}
+
+/// The live checks every engine's `live_` tests make of a queue run at once,
+/// shared because they are one claim about [`Connection::query_alongside`]:
+/// the `Workspace` around it needs a window, and these need a server.
+#[cfg(test)]
+pub(super) mod at_once {
+    use std::time::{Duration, Instant};
+
+    use super::{CancelToken, Connection, DbError, Engine, Fetch, QueryResult, is_cancel};
+    use crate::{session::runs_at_once, sql::Mode};
+
+    /// Each statement on a connection of its own, all at once, as
+    /// `Workspace::run_at_once` sends a queue: how long the lot took, and each
+    /// one's outcome in order.
+    pub(in crate::db) fn run(
+        connection: &Connection,
+        statements: &[&str],
+        cancel: &CancelToken,
+    ) -> (Duration, Vec<Result<QueryResult, DbError>>) {
+        let started = Instant::now();
+        let outcomes = std::thread::scope(|scope| {
+            let running: Vec<_> = statements
+                .iter()
+                .map(|sql| {
+                    scope.spawn(|| connection.query_alongside(sql, cancel, Fetch::default(), false))
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| {
+                    thread
+                        .join()
+                        .expect("the statement's thread should not panic")
+                })
+                .collect()
+        });
+        (started.elapsed(), outcomes)
+    }
+
+    /// Two slow reads run at once take about the time of one: well under what
+    /// they take one after the other on the profile's connection. A queue
+    /// with a write in it is not run at once at all.
+    pub(in crate::db) fn reads_overlap(
+        connection: &Connection,
+        engine: Engine,
+        slow: &str,
+        write: &str,
+    ) {
+        let pair = [slow, slow];
+        assert!(runs_at_once(engine, Mode::ReadWrite, false, &pair));
+        assert!(!runs_at_once(engine, Mode::Full, false, &[slow, write]));
+
+        let started = Instant::now();
+        for sql in pair {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .expect("the read should run");
+        }
+        let in_turn = started.elapsed();
+        let (at_once, outcomes) = run(connection, &pair, &CancelToken::alongside());
+        for outcome in outcomes {
+            outcome.expect("the read should run at once with the other");
+        }
+        eprintln!("{engine:?}: two reads in turn {in_turn:?}, at once {at_once:?}");
+        assert!(
+            at_once.as_secs_f64() < in_turn.as_secs_f64() * 0.8,
+            "at once {at_once:?} against {in_turn:?} in turn"
+        );
+    }
+
+    /// A cancel under the run's token stops every statement running at once,
+    /// each on its own connection, and leaves the profile's connection be.
+    pub(in crate::db) fn a_cancel_stops_them_all(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+    ) {
+        let cancel = CancelToken::alongside();
+        let (elapsed, outcomes) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Long enough for both to have connected and started.
+                std::thread::sleep(Duration::from_millis(1500));
+                connection
+                    .cancel(&cancel)
+                    .expect("the cancel should reach each connection");
+            });
+            run(connection, &[runaway, runaway], &cancel)
+        });
+        eprintln!("{engine:?}: two runaways cancelled after {elapsed:?}");
+        for outcome in outcomes {
+            let error = outcome.expect_err("the statement should have been stopped");
+            assert!(is_cancel(engine, &error), "{}", error.message);
+        }
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        connection
+            .query("SELECT 1", &CancelToken::default(), Fetch::default())
+            .expect("the profile's own connection should be untouched");
     }
 }
 
