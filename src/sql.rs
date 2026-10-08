@@ -1685,13 +1685,8 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
 /// finds statement boundaries in a buffer someone is still typing into;
 /// this needs a typed statement, and would rather refuse than guess.
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
-    let dialect: Box<dyn Dialect> = match engine {
-        Engine::Postgres => Box::new(PostgreSqlDialect {}),
-        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
-        Engine::Sqlite => Box::new(SQLiteDialect {}),
-        Engine::Snowflake => Box::new(SnowflakeDialect {}),
-        Engine::SqlServer => Box::new(MsSqlDialect {}),
-        Engine::MongoDb => return crate::mql::classify(sql),
+    let Some(dialect) = dialect(engine) else {
+        return crate::mql::classify(sql);
     };
 
     if engine == Engine::MariaDb
@@ -1722,6 +1717,19 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .iter()
         .map(statement_verdict)
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB,
+/// which is not SQL.
+fn dialect(engine: Engine) -> Option<Box<dyn Dialect>> {
+    Some(match engine {
+        Engine::Postgres => Box::new(PostgreSqlDialect {}),
+        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
+        Engine::Sqlite => Box::new(SQLiteDialect {}),
+        Engine::Snowflake => Box::new(SnowflakeDialect {}),
+        Engine::SqlServer => Box::new(MsSqlDialect {}),
+        Engine::MongoDb => return None,
+    })
 }
 
 /// MariaDB's `ANALYZE <statement>` respelled as the `EXPLAIN ANALYZE` sqlparser
@@ -1772,6 +1780,26 @@ fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String
 pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
     let verdict = classify(engine, sql);
     verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
+}
+
+/// Whether a submission may be stopped part way once its rows pass the limit:
+/// a read, and the only statement in it. Stopping one statement of several
+/// ends the rest with it -- a `COMMIT` behind a `SELECT` never runs, a `SET`
+/// before it is rolled back with the implicit transaction -- and the rows on
+/// screen are not the last statement's. A SQL Server batch is several
+/// statements in one submission wherever the user did not separate them.
+///
+/// Both parsers have to count one: the grammar reads `BEGIN; …; COMMIT` as a
+/// single transaction block.
+pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
+    let parsed_alone = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql)
+            .is_ok_and(|statements| statements.len() == 1),
+        None => true,
+    };
+    rerunnable(engine, sql)
+        && parsed_alone
+        && Buffer::for_engine(engine, sql).statements().len() == 1
 }
 
 /// The lowest mode that may run one statement: what its variant earns, raised
@@ -4142,6 +4170,72 @@ mod tests {
         ] {
             assert!(!rerunnable(Engine::Postgres, sql), "{sql}");
         }
+    }
+
+    #[test]
+    fn only_a_lone_read_is_stopped_at_the_limit() {
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Snowflake,
+            Engine::SqlServer,
+        ] {
+            assert!(stoppable(engine, "SELECT * FROM t"), "{engine:?}");
+            assert!(stoppable(engine, "SELECT * FROM t;"), "{engine:?}");
+            assert!(
+                stoppable(engine, "-- the big one\nSELECT * FROM t"),
+                "{engine:?}"
+            );
+            for sql in [
+                "SELECT * FROM t; COMMIT",
+                "SET x = 1; SELECT * FROM t",
+                "BEGIN; SELECT * FROM t; COMMIT",
+                "SELECT 1; SELECT * FROM t",
+                "UPDATE t SET v = 1",
+            ] {
+                assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        assert!(!stoppable(
+            Engine::SqlServer,
+            "SELECT * FROM t\nSELECT * FROM u"
+        ));
+        // SQL Server caps a stoppable read with `SET ROWCOUNT`, which caps a
+        // write just the same, so nothing that writes may get through.
+        for sql in [
+            "SELECT * INTO #copy FROM t",
+            "SELECT * INTO copy FROM t",
+            "EXEC dbo.report",
+            "EXECUTE dbo.report 1",
+            "dbo.report",
+            "INSERT INTO t SELECT * FROM u",
+            "SELECT * FROM t; DELETE FROM t",
+            "IF 1 = 1 DELETE FROM t",
+            "BEGIN SELECT * FROM t; DELETE FROM t END",
+            "WITH c AS (SELECT 1 AS a) DELETE FROM t",
+            "MERGE t USING u ON t.id = u.id WHEN MATCHED THEN DELETE;",
+        ] {
+            assert!(!stoppable(Engine::SqlServer, sql), "{sql}");
+        }
+        assert!(stoppable(
+            Engine::SqlServer,
+            "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
+        ));
+        assert!(stoppable(Engine::MongoDb, "db.accounts.find({})"));
+        assert!(stoppable(
+            Engine::MongoDb,
+            "db.accounts\n  .find({})\n  .sort({a: 1})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.find({})\ndb.other.find({})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.aggregate([{$out: 'copy'}])"
+        ));
     }
 
     /// Every MongoDB write returns a reply grid, so a restored one is offered

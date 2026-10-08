@@ -239,6 +239,11 @@ pub struct StoredGrid {
     /// The row count before [`GRID_ROW_CAP`] trimmed it, so the UI can say
     /// "5000 of N" for a result that did not fit whole.
     pub total_rows: usize,
+    /// Set when the statement was stopped before it finished, so
+    /// [`Self::total_rows`] is what had arrived and not what it would have
+    /// returned. Absent from a snapshot written before it was kept.
+    #[serde(default)]
+    pub stopped: Option<crate::db::Stopped>,
     #[serde(default)]
     pub sort: Vec<(usize, bool)>,
     /// A relation tab's `ORDER BY`, as expression and direction. [`Self::sort`]
@@ -743,6 +748,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             columns: grid.columns.clone(),
             rows: grid.rows[..GRID_ROW_CAP].to_vec(),
             total_rows: grid.total_rows,
+            stopped: grid.stopped,
             sort: grid.sort.clone(),
             order_by: grid.order_by.clone(),
             client_sort: grid.client_sort.clone(),
@@ -2327,6 +2333,7 @@ open_objects = []
                 columns: vec!["n".into()],
                 rows: vec![vec![Some("1".into())]],
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,
@@ -2375,6 +2382,7 @@ open_objects = []
                 columns: vec!["id".into(), "name".into()],
                 rows: vec![vec![Some("1".into()), None]],
                 total_rows: 1,
+                stopped: None,
                 sort: vec![(0, true)],
                 order_by: vec![("created_at".into(), false)],
                 client_sort: Some(vec![("\"name\"".into(), false)]),
@@ -2410,6 +2418,7 @@ open_objects = []
                     .map(|n| vec![Some(n.to_string())])
                     .collect(),
                 total_rows: GRID_ROW_CAP + 10,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: Some(Vec::new()),
@@ -2459,6 +2468,7 @@ open_objects = []
                 columns: vec!["id".into()],
                 rows: vec![vec![Some("1".into())]],
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: vec![("\"id\"".into(), true)],
                 client_sort: None,

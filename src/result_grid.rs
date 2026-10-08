@@ -78,6 +78,13 @@ type ReferenceMenu = Rc<Vec<(usize, SharedString)>>;
 /// one-row `DELETE` needs and nothing else.
 pub type RowKey = (String, String, Vec<(String, String)>);
 
+/// A grid's selection, apart from the grid it was made in.
+pub struct GridSelection {
+    active: Option<(usize, usize)>,
+    rows: std::collections::BTreeSet<usize>,
+    anchor: Option<usize>,
+}
+
 pub struct ResultGrid {
     columns: Vec<Column>,
     result: QueryResult,
@@ -373,6 +380,7 @@ impl ResultGrid {
                     .collect(),
                 rows: stored.rows.clone(),
                 capped_from: (stored.total_rows > stored.rows.len()).then_some(stored.total_rows),
+                stopped: stored.stopped,
                 // All or none: a snapshot naming a type this build does not
                 // know is read as having none, never as rows out of step.
                 cell_types: stored
@@ -510,6 +518,7 @@ impl ResultGrid {
             // hold: recomputing it from the capped rows is what collapsed a
             // 20,000-row snapshot to 5,000 on the next save.
             total_rows: self.total_rows(),
+            stopped: self.result.stopped,
             sort: self.sort.clone(),
             order_by: Vec::new(),
             client_sort: None,
@@ -670,6 +679,34 @@ impl ResultGrid {
         if !self.selected_rows.contains(&row) {
             self.click_row(row, false, false);
         }
+    }
+
+    /// What the user has picked out, to be carried onto the finished result
+    /// of the rows it was picked from.
+    pub fn selection(&self) -> GridSelection {
+        GridSelection {
+            active: self.active,
+            rows: self.selected_rows.clone(),
+            anchor: self.row_selection_anchor,
+        }
+    }
+
+    /// Take `selection` back if every row and cell it names is still here:
+    /// `false`, with nothing taken, otherwise or when it picks nothing.
+    pub fn select(&mut self, selection: GridSelection) -> bool {
+        let (rows, columns) = (self.result.rows.len(), self.columns.len());
+        let fits = selection
+            .active
+            .is_none_or(|(row, col)| row < rows && col < columns)
+            && selection.rows.iter().all(|row| *row < rows)
+            && selection.anchor.is_none_or(|row| row < rows);
+        if !fits || (selection.active.is_none() && selection.rows.is_empty()) {
+            return false;
+        }
+        self.active = selection.active;
+        self.selected_rows = selection.rows;
+        self.row_selection_anchor = selection.anchor;
+        true
     }
 
     pub fn clear_row_selection(&mut self) {
@@ -2943,6 +2980,59 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_carries_onto_rows_that_are_still_there_and_no_further() {
+        let grid = |rows: usize| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: (0..rows).map(|row| vec![Some(row.to_string())]).collect(),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+        };
+        let mut streaming = grid(3);
+        streaming.click_row(1, false, false);
+        streaming.click_row(2, true, false);
+        streaming.set_active(2, 0);
+
+        let mut landed = grid(5);
+        assert!(landed.select(streaming.selection()));
+        assert_eq!(landed.active(), Some((2, 0)));
+        assert_eq!(landed.selected_rows, [1, 2].into());
+        assert_eq!(landed.row_selection_anchor, Some(1));
+
+        let mut shorter = grid(2);
+        assert!(!shorter.select(streaming.selection()));
+        assert_eq!(shorter.active(), None);
+        assert!(shorter.selected_rows.is_empty());
+        assert!(!grid(5).select(grid(3).selection()), "nothing was picked");
+    }
+
+    #[test]
+    fn a_stopped_result_is_still_stopped_once_restored() {
+        for stopped in [db::Stopped::AtLimit, db::Stopped::Cancelled] {
+            let grid = ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: vec![vec![Some("1".into())], vec![Some("2".into())]],
+                    stopped: Some(stopped),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            );
+            let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+            assert_eq!(restored.result().stopped, Some(stopped));
+        }
+    }
+
+    #[test]
     fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
         let grid = ResultGrid::new(
             QueryResult {
@@ -3055,6 +3145,7 @@ mod tests {
                     .map(|n| vec![Some(n.to_string())])
                     .collect(),
                 total_rows: 20_000,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,

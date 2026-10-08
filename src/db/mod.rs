@@ -1063,7 +1063,8 @@ impl Connection {
     /// instead of the result, which then holds none of them, and values
     /// still waiting on their types are the caller's to [`render`]. Postgres,
     /// MySQL, SQL Server, SQLite, Snowflake and MongoDB honour [`Fetch`]: SQL
-    /// Server without stopping, Snowflake by not downloading the partitions
+    /// Server by `SET ROWCOUNT` around a lone read, which the server stops
+    /// itself, and by draining anything else, Snowflake by not downloading the partitions
     /// past the limit, whose rows the server has already counted, and MongoDB
     /// without a feed.
     pub fn query(
@@ -1628,6 +1629,10 @@ pub struct QueryResult {
     /// Set when the statement was stopped before it finished, so `rows` are
     /// what had arrived by then and how many more there were is unknown.
     pub stopped: Option<Stopped>,
+    /// What running the statement cost beyond its result, for the user to be
+    /// told beside it: SQL Server's session, reset by a Cancel that landed
+    /// after the statement had finished.
+    pub notice: Option<String>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
@@ -1653,12 +1658,54 @@ pub struct QueryResult {
 }
 
 /// Why a statement's rows end before the statement did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stopped {
     /// It reached the row limit and was safe to stop there.
     AtLimit,
     /// The user cancelled it part way.
     Cancelled,
+}
+
+/// Whether `error` is the user's Cancel landing, in the words each engine's
+/// stop comes back in, rather than anything else that ended the statement while
+/// the cancel was on its way. A server answering in another language reads as
+/// not a cancel, which drops the rows instead of keeping them as a result.
+pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
+    let message = error.message.as_str();
+    match engine {
+        Engine::Postgres => message == "canceling statement due to user request",
+        Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
+        Engine::Sqlite => message == "interrupted",
+        Engine::Snowflake => message == "SQL execution canceled",
+        Engine::SqlServer => message.starts_with(mssql::CANCELLED),
+        Engine::MongoDb => message == "Cancelled.",
+    }
+}
+
+/// What a Cancel took beyond the statement it stopped, which the user has to
+/// be told even where the rows it had are kept: on SQL Server the error
+/// itself, which says the session was reset. Postgres cannot say whether a
+/// transaction was open, and a cancel aborts the one it lands in; SQLite rolls
+/// back the transaction an interrupted write was in. MySQL's `KILL QUERY` and
+/// SQLite's interrupt of a read undo only the statement, and Snowflake has no
+/// session to lose.
+pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<String> {
+    match engine {
+        Engine::SqlServer => Some(error.message.clone()),
+        Engine::Postgres => Some(
+            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
+             statement until a ROLLBACK."
+                .into(),
+        ),
+        Engine::Sqlite if !reads => Some(
+            "If the statement was inside a transaction, SQLite rolled the whole transaction \
+             back."
+                .into(),
+        ),
+        Engine::Sqlite | Engine::MySql | Engine::MariaDb | Engine::Snowflake | Engine::MongoDb => {
+            None
+        }
+    }
 }
 
 /// How a user statement's rows are taken: how many are kept, where they go as
@@ -1668,8 +1715,9 @@ pub enum Stopped {
 pub struct Fetch<'a> {
     pub limit: Option<usize>,
     pub feed: Option<&'a Feed>,
-    /// The statement only reads, as `sql::rerunnable` judges it, so stopping
-    /// it at the limit loses nothing it was going to do.
+    /// The submission is one statement that only reads, as `sql::stoppable`
+    /// judges it, so stopping it at the limit loses nothing it was going to
+    /// do.
     pub reads_only: bool,
 }
 
@@ -2215,6 +2263,35 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_cancel_itself_reads_as_a_cancel() {
+        let error = |message: &str| DbError {
+            message: message.into(),
+            position: None,
+        };
+        let reset = format!("{} The connection was reset.", mssql::CANCELLED);
+        for (engine, words) in [
+            (Engine::Postgres, "canceling statement due to user request"),
+            (Engine::MySql, "Query execution was interrupted"),
+            (Engine::MariaDb, "Query execution was interrupted"),
+            (Engine::Sqlite, "interrupted"),
+            (Engine::Snowflake, "SQL execution canceled"),
+            (Engine::SqlServer, reset.as_str()),
+        ] {
+            assert!(is_cancel(engine, &error(words)), "{engine:?}");
+            assert!(!is_cancel(engine, &error("division by zero")), "{engine:?}");
+        }
+        // The statement had finished: a whole result, not a cancelled one.
+        assert!(!is_cancel(
+            Engine::SqlServer,
+            &error("The statement finished, but Cancel arrived after that.")
+        ));
+        assert!(!is_cancel(
+            Engine::MariaDb,
+            &error("Query execution was interrupted (max_statement_time exceeded)")
+        ));
+    }
 
     #[test]
     fn every_buffer_is_highlighted_by_a_grammar_the_editor_was_built_with() {

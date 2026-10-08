@@ -629,6 +629,23 @@ impl Session {
         }
     }
 
+    /// Whether one named tab has a statement in flight: its own slot, not
+    /// whichever of a queue's results the switcher is showing.
+    pub(crate) fn running(&self, tab: Tab) -> bool {
+        let state = match tab {
+            Tab::Query(id) => self.query_tab(id).map(|tab| &tab.query),
+            Tab::Object(id) => self
+                .objects
+                .iter()
+                .find(|tab| tab.id == id)
+                .and_then(|tab| match &tab.body {
+                    ObjectBody::Relation { query, .. } => Some(query),
+                    ObjectBody::Routine(_) => None,
+                }),
+        };
+        matches!(state, Some(QueryState::Running { .. }))
+    }
+
     /// Who orders one named tab's rows. `None` for a routine, which has none.
     pub(crate) fn sorting(&self, tab: Tab) -> Option<&Sorting> {
         match tab {

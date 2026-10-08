@@ -33,7 +33,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RelationKind, ServerConfig, SslMode, Structure, assemble_catalog, assemble_databases,
+    RelationKind, ServerConfig, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
     assemble_foreign_keys, assemble_references, assemble_structure, create_table, plain_error,
     required_cell, terminated,
 };
@@ -464,6 +464,19 @@ fn encryption(mode: SslMode) -> EncryptionLevel {
     }
 }
 
+/// How a statement Cancel stopped part way begins its error, which goes on to
+/// say what the reset cost.
+pub(crate) const CANCELLED: &str =
+    "Cancelled: the statement was stopped by closing its connection.";
+
+/// Why a session was closed after a capped read.
+const UNCAPPED: &str = "dbdelve could not take back the SET ROWCOUNT the row limit sent ahead of \
+     it, so the session was closed rather than left capping every statement after it.";
+
+/// The largest row limit `SET ROWCOUNT` can carry one past: it takes an
+/// `int`. A larger one drains instead.
+const MAX_ROWCOUNT_LIMIT: usize = i32::MAX as usize - 1;
+
 /// A runtime, and the client it drives.
 struct Session {
     runtime: Runtime,
@@ -478,6 +491,9 @@ struct Session {
 enum Lost {
     TimedOut,
     Panicked(String),
+    /// The `SET ROWCOUNT` a capped read went out under could not be taken
+    /// back, and every statement after it would be capped too.
+    Capped,
 }
 
 impl Session {
@@ -488,6 +504,11 @@ impl Session {
     }
 
     /// [`Self::trip`], keeping what `fetch` asks for of the rows.
+    ///
+    /// The timeout stops applying once a set's kept rows reach the limit.
+    /// What follows is rows read only to be counted and dropped, and stopping
+    /// them would close the connection and take the user's transaction with
+    /// it for rows nobody sees. Cancel still reaches it.
     fn fetching(
         &mut self,
         sql: &str,
@@ -499,11 +520,21 @@ impl Session {
         let (runtime, client, seconds) = (&self.runtime, &mut self.client, self.timeout);
         let outcome = guarded(|| {
             runtime.block_on(async {
-                let collect = collect(client, sql, fetch);
+                let past_limit = std::cell::Cell::new(false);
+                let collect = collect(client, sql, fetch, &past_limit);
                 match seconds {
                     0 => Ok(collect.await),
                     seconds => {
-                        tokio::time::timeout(Duration::from_secs(seconds.into()), collect).await
+                        tokio::pin!(collect);
+                        tokio::select! {
+                            collected = &mut collect => Ok(collected),
+                            () = tokio::time::sleep(Duration::from_secs(seconds.into())) => {
+                                match past_limit.get() {
+                                    true => Ok(collect.await),
+                                    false => Err(()),
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -669,10 +700,12 @@ impl Connection {
     /// Run one statement verbatim, keeping what `fetch` asks for of its rows;
     /// see [`super::Connection::query`].
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Rows
-    /// past the limit are read and dropped, never stopped: the only stop the
-    /// driver has is closing the connection, which takes the user's
-    /// transaction and temporary tables with it.
+    /// The SQL is never rewritten — no limit injected, no reformatting. A
+    /// lone read is stopped at the limit by `SET ROWCOUNT`, sent as a batch of
+    /// its own before it and taken back after it. Anything else has the rows
+    /// past the limit read and dropped: the only other stop the driver has is
+    /// closing the connection, which takes the user's transaction and
+    /// temporary tables with it.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
         self.run(sql, Origin::User, fetch)
     }
@@ -742,25 +775,34 @@ impl Connection {
                      by closing its connection."
                 ),
                 (None, Some(Lost::Panicked(message))) => message,
-                (None, None) => {
-                    "Cancelled: the statement was stopped by closing its connection.".into()
-                }
+                (None, Some(Lost::Capped)) => UNCAPPED.into(),
+                (None, None) => CANCELLED.into(),
                 // What dbdelve asks after the statement is what was stopped,
                 // and the statement's own work stands.
                 (Some(ran), lost) => {
-                    let outcome = match ran.result {
-                        Ok(_) => "The statement finished".to_string(),
-                        Err(error) => format!("{}\n\nThe statement failed", error.message),
-                    };
                     let after = match lost {
                         Some(Lost::TimedOut) => format!(
                             "a query dbdelve sends after it ran past the {limit}-second statement \
                              timeout."
                         ),
                         Some(Lost::Panicked(message)) => format!("then {message}"),
+                        Some(Lost::Capped) => UNCAPPED.into(),
                         None => "Cancel arrived after that.".into(),
                     };
-                    format!("{outcome}, but {after}")
+                    match ran.result {
+                        // Whole, so it lands as a result rather than as an
+                        // error or as rows a cancel cut short, and the reset
+                        // is said beside it.
+                        Ok(mut result) => {
+                            let reset = self
+                                .stop(&mut guard, format!("The statement finished, but {after}"));
+                            result.notice = Some(reset.message);
+                            return Ok(result);
+                        }
+                        Err(error) => {
+                            format!("{}\n\nThe statement failed, but {after}", error.message)
+                        }
+                    }
                 }
             };
             return Err(self.stop(&mut guard, what));
@@ -818,6 +860,22 @@ impl Connection {
             Origin::User => statement.clone(),
             Origin::Generated | Origin::Internal => scoped(&statement),
         };
+        // A lone read is stopped at the limit by the server: one row past it
+        // says there were more, and nothing past that is sent. A batch of its
+        // own rather than a prefix on the user's text, which would move every
+        // line number the server reports. Never a write: `SET ROWCOUNT` caps
+        // those too, and `sql::stoppable` admits none.
+        let capped = fetch.limit.filter(|limit| {
+            origin == Origin::User && fetch.reads_only && *limit <= MAX_ROWCOUNT_LIMIT
+        });
+        let capped = match capped {
+            Some(limit) => match session.trip(&format!("SET ROWCOUNT {}", limit + 1))? {
+                Ok(_) => Some(limit),
+                // Nothing was set, so the rows past the limit are drained.
+                Err(_) => None,
+            },
+            None => None,
+        };
         // Timed from here, not from the call: one connection serialises a
         // profile's queries, and time spent waiting behind the catalog load is
         // not time the server spent on this statement.
@@ -847,6 +905,21 @@ impl Connection {
             Err(_) if self.in_flight().stopped => return None,
             Err(error) => Err(query_error(&error, sql)),
         };
+        if capped.is_some() {
+            // Taken back whatever the statement did, before anything else is
+            // asked. One that cannot be is a session that would cap every
+            // statement after it, so it is closed instead: a fresh one starts
+            // uncapped.
+            let reset = matches!(session.trip("SET ROWCOUNT 0"), Some(Ok(_)));
+            if !reset && session.lost.is_none() && !self.in_flight().stopped {
+                session.lost = Some(Lost::Capped);
+            }
+            if let Ok(collected) = &mut result
+                && collected.result.capped_from.take().is_some()
+            {
+                collected.result.stopped = Some(Stopped::AtLimit);
+            }
+        }
         if origin == Origin::Internal {
             return Some(Ran {
                 result: result.map(|collected| collected.result),
@@ -857,8 +930,10 @@ impl Connection {
         if let Err(error) = result {
             result = Err(transaction_outcome(session, sql, origin, before, error));
         }
+        // After a `SET ROWCOUNT`, `@@ROWCOUNT` is that `SET`'s.
         if let Ok(collected) = &mut result
             && collected.sets == 0
+            && capped.is_none()
         {
             // tiberius keeps the done tokens to itself, so the count is asked
             // for. It is the last statement's, as Postgres reports it.
@@ -1235,10 +1310,13 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
 /// Every set of a submission, each kept to the limit and counted past it. The
 /// first set alone is fed, since it is the one the grid shows; the sets behind
 /// it are results of their own, kept here until the batch is done.
+///
+/// `past_limit` is set once any set's kept rows reach the limit.
 async fn collect(
     client: &mut Tds,
     sql: &str,
     fetch: Fetch<'_>,
+    past_limit: &std::cell::Cell<bool>,
 ) -> Result<Collected, tiberius::error::Error> {
     let mut stream = client.simple_query(sql).await?;
     let mut collected: Vec<QueryResult> = Vec::new();
@@ -1279,6 +1357,9 @@ async fn collect(
                     continue;
                 }
                 kept += 1;
+                if fetch.limit == Some(kept) {
+                    past_limit.set(true);
+                }
                 if fed && fetch.limit == Some(kept) {
                     filled = Some(Instant::now());
                     if let Some(feed) = fetch.feed {
@@ -3564,7 +3645,11 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        assert!(error.message.starts_with("Cancelled"), "{}", error.message);
+        assert!(
+            crate::db::is_cancel(Engine::SqlServer, &error),
+            "{}",
+            error.message
+        );
         assert!(error.message.contains("reconnected"), "{}", error.message);
 
         // Honest only if the server stopped too: past the delay, the insert
@@ -3600,6 +3685,143 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    /// Rows of a probe table, numbered from one, in this session alone.
+    fn probe_table(connection: &Connection, name: &str, rows: usize) {
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {name} (id int, touched bit DEFAULT 0); \
+                     INSERT INTO {name} (id) SELECT TOP {rows} \
+                     ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) FROM sys.all_columns"
+                ),
+                Fetch::default(),
+            )
+            .unwrap();
+    }
+
+    /// Every row of the probe table, touched: what a session left capped by
+    /// `SET ROWCOUNT` would stop short of.
+    fn touches_every_row(connection: &Connection, name: &str, rows: usize) {
+        let updated = connection
+            .query(&format!("UPDATE {name} SET touched = 1"), Fetch::default())
+            .unwrap();
+        assert_eq!(updated.rows_affected, Some(rows as u64));
+        let touched = connection
+            .query(
+                &format!("SELECT count(*) FROM {name} WHERE touched = 1"),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(first(&touched), vec![Some(rows.to_string().as_str())]);
+    }
+
+    fn stoppable(limit: usize) -> Fetch<'static> {
+        Fetch {
+            limit: Some(limit),
+            reads_only: true,
+            ..Fetch::default()
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_lone_read_is_stopped_at_the_limit_by_the_server_and_the_cap_taken_back() {
+        let connection = live();
+        probe_table(&connection, "#dbdelve_rowcount_probe", 50);
+        let started = Instant::now();
+        let result = connection
+            .query(
+                "SELECT a.name FROM sys.all_columns a CROSS JOIN sys.all_columns b",
+                stoppable(10),
+            )
+            .expect("a stopped read is not an error");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.rows.len(), 10);
+        touches_every_row(&connection, "#dbdelve_rowcount_probe", 50);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_read_that_fails_still_takes_its_cap_back() {
+        let connection = live();
+        probe_table(&connection, "#dbdelve_rowcount_probe", 50);
+        let error = connection
+            .query("SELECT 1 / 0 AS x FROM sys.all_columns", stoppable(10))
+            .expect_err("the division fails");
+        assert!(error.message.contains("zero"), "{}", error.message);
+        touches_every_row(&connection, "#dbdelve_rowcount_probe", 50);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_read_stopped_at_the_limit_leaves_the_users_transaction_open() {
+        let connection = live();
+        probe_table(&connection, "#dbdelve_rowcount_probe", 50);
+        connection
+            .query(
+                "BEGIN TRANSACTION; UPDATE #dbdelve_rowcount_probe SET touched = 1 WHERE id = 1",
+                Fetch::default(),
+            )
+            .unwrap();
+        let result = connection
+            .query("SELECT id FROM #dbdelve_rowcount_probe", stoppable(10))
+            .unwrap();
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        let kept = connection
+            .query(
+                "SELECT count(*) FROM #dbdelve_rowcount_probe WHERE touched = 1",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(first(&kept), vec![Some("1")]);
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_timeout_leaves_a_capped_read_to_drain_inside_an_open_transaction() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        connection
+            .query("BEGIN TRANSACTION", Fetch::default())
+            .unwrap();
+        let started = Instant::now();
+        let capped = connection
+            .query(
+                "SELECT TOP 3000000 a.name, b.name FROM sys.all_columns a \
+                 CROSS JOIN sys.all_columns b",
+                Fetch {
+                    limit: Some(10),
+                    ..Fetch::default()
+                },
+            )
+            .expect("rows past the limit are drained, not timed out");
+        assert!(
+            started.elapsed() > Duration::from_secs(1),
+            "the drain has to outlast the timeout to prove anything: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(capped.capped_from, Some(3_000_000));
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
     #[test]

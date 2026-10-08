@@ -132,10 +132,11 @@ impl Workspace {
         }
         *cancelling = Some(std::time::Instant::now());
         let cancel = cancel.clone();
-        // An explicit stop ends the queue the statement was part of: the
-        // cancelled statement's error lands like any other, and nothing behind
-        // it is sent. No decision is raised -- this was the decision.
-        self.stop_queue_on(tab, cx);
+        // An explicit stop ends the queue the statement was part of: nothing
+        // behind it is sent, and no decision is raised -- this was the
+        // decision. The cancelled statement itself still lands, as the queue's
+        // last result, with whatever rows it kept or the error it ended in.
+        self.drop_rest_of_queue(tab);
         cx.notify();
         let cancel_task = cx
             .background_executor()
@@ -635,6 +636,13 @@ impl Workspace {
     /// Stop whatever queue the named tab is part way through. Nothing that
     /// has run is touched: the results already on it are still results.
     pub(crate) fn stop_queue_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.drop_rest_of_queue(tab);
+        self.release_queue(tab, cx);
+    }
+
+    /// Unsend whatever of a queue has not gone out, leaving the statement in
+    /// flight to land.
+    fn drop_rest_of_queue(&mut self, tab: Tab) {
         let Tab::Query(id) = tab else {
             return;
         };
@@ -649,11 +657,10 @@ impl Workspace {
         {
             queue.remaining.clear();
         }
-        self.release_queue(tab, cx);
     }
 
     /// Let go of a statement the queue sent that will never land: one the
-    /// mode gate refused, or one a cancel ended before it ran.
+    /// mode gate refused, or one a reconnect abandoned.
     ///
     /// Only `advance_queue` clears `awaiting` otherwise, and it runs on a
     /// result. A statement that produces none would leave the flag set for
@@ -1511,10 +1518,10 @@ impl Workspace {
                         let running = profile.session.slot(tab).is_some_and(|(state, _)| {
                             matches!(state, QueryState::Running { started: at, .. } if *at == started)
                         });
-                        if running {
-                            pour(&feed, &results, mode, engine, (&names, &widths), cx);
-                            // The count in the status bar is the workspace's to
-                            // draw, not the grid's.
+                        // The count in the status bar is the workspace's to
+                        // draw, not the grid's. Only when something arrived:
+                        // the clock has a tick of its own.
+                        if running && pour(&feed, &results, mode, engine, (&names, &widths), cx) {
                             cx.notify();
                         }
                         running
@@ -1527,7 +1534,7 @@ impl Workspace {
             .detach();
         }
         let fed = feed.clone();
-        let reads_only = sql::rerunnable(engine, &sql);
+        let reads_only = sql::stoppable(engine, &sql);
         let query_task = cx.background_executor().spawn(async move {
             let result = match generated {
                 true => connection.generated(&sql, &cancel, fed.as_ref()),
@@ -1552,7 +1559,7 @@ impl Workspace {
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
-                    let (succeeded, produced_grid, plan, rest) = {
+                    let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             workspace.drop_stale_run(&id, tab, cx);
                             return;
@@ -1592,24 +1599,40 @@ impl Workspace {
                             return;
                         };
 
-                        // Cancelled part way, a stream keeps the rows it had:
-                        // they are what the user stopped it to look at.
+                        let cancelled = matches!(
+                            state,
+                            QueryState::Running {
+                                cancelling: Some(_),
+                                ..
+                            }
+                        );
+                        // Cancelled part way, a lone read keeps the rows it
+                        // had: they are what the user stopped it to look at.
+                        // Not a write's, which the cancel undid, and not when
+                        // something other than the cancel ended it. Whatever
+                        // the cancel cost besides is said either way.
                         let result = match result {
-                            Err(_)
-                                if matches!(
-                                    state,
-                                    QueryState::Running {
-                                        cancelling: Some(_),
-                                        ..
-                                    }
-                                ) && results.read(cx).delegate().streamed_set().is_some() =>
+                            Err(error)
+                                if cancelled
+                                    && reads_only
+                                    && db::is_cancel(engine, &error)
+                                    && results.read(cx).delegate().streamed_set().is_some() =>
                             {
                                 Ok(QueryResult {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
+                                    notice: db::cancel_cost(engine, &error, true),
                                     ..QueryResult::default()
                                 })
+                            }
+                            Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
+                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only)
+                                    && cost != error.message
+                                {
+                                    error.message = format!("{}\n\n{cost}", error.message);
+                                }
+                                Err(error)
                             }
                             result => result,
                         };
@@ -1630,7 +1653,7 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan), Vec::new())
+                                (true, false, Some(plan), Vec::new(), result.notice)
                             }
                             Ok(mut result) => {
                                 // Rows that streamed in were scrolled through as
@@ -1675,6 +1698,7 @@ impl Workspace {
                                 // their own and have no business inside this
                                 // one's snapshot.
                                 let rest = std::mem::take(&mut result.rest);
+                                let notice = result.notice.take();
                                 // An `INSERT … RETURNING` grid traces to its
                                 // table like any select, but applying an edit
                                 // re-runs the statement behind the grid to
@@ -1692,7 +1716,12 @@ impl Workspace {
                                     rows_affected: result.rows_affected,
                                 };
                                 let produced_grid = !result.columns.is_empty();
+                                // Sorted in memory as it lands, the rows move
+                                // out from under any index into them.
+                                let reordered =
+                                    client_keys.as_deref().is_some_and(|keys| !keys.is_empty());
                                 results.update(cx, |table, cx| {
+                                    let selection = table.delegate().selection();
                                     let sort = sort_columns(engine, &keys, &result.columns);
                                     let (names, widths, vertical, horizontal) = &shown;
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
@@ -1700,10 +1729,19 @@ impl Workspace {
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
                                         .with_layout(names, widths);
-                                    // Rows kept through a refresh kept their
-                                    // selection too, and its index now names
-                                    // whichever row the new result put there.
-                                    table.clear_selection(cx);
+                                    // Streamed rows are the finished result's
+                                    // first rows, in order, so what was picked
+                                    // out of them as they came still names
+                                    // them. Rows kept through a refresh kept
+                                    // their selection too, but its index now
+                                    // names whichever row the new result put
+                                    // there.
+                                    let kept = streamed
+                                        && !reordered
+                                        && table.delegate_mut().select(selection);
+                                    if !kept {
+                                        table.clear_selection(cx);
+                                    }
                                     table.refresh(cx);
                                     if !streamed && table.delegate().layout().0 == *names {
                                         table
@@ -1721,7 +1759,7 @@ impl Workspace {
                                 if feed.is_some() {
                                     render_aside(&results, engine, cx);
                                 }
-                                (true, produced_grid, None, rest)
+                                (true, produced_grid, None, rest, notice)
                             }
                             Err(mut error) => {
                                 // Rows of a statement that failed part way are
@@ -1744,18 +1782,11 @@ impl Workspace {
                                 error.position = error
                                     .position
                                     .and_then(|position| position.checked_sub(prefix));
-                                let cancelled = matches!(
-                                    state,
-                                    QueryState::Running {
-                                        cancelling: Some(_),
-                                        ..
-                                    }
-                                );
                                 *state = match restored {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new())
+                                (false, false, None, Vec::new(), None)
                             }
                         }
                     };
@@ -1765,6 +1796,11 @@ impl Workspace {
                         && profile.session.notice.as_deref() == Some(Self::REFRESHING)
                     {
                         profile.session.notice = None;
+                    }
+                    if let Some(notice) = notice
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                    {
+                        profile.session.notice = Some(notice);
                     }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
@@ -1848,6 +1884,18 @@ impl Workspace {
         if matches!(state, QueryState::Running { .. }) {
             *state = QueryState::Idle;
             cx.notify();
+        }
+        // A queued statement that will never land holds no chip, as
+        // `release_queue` says; that one reaches only the active profile.
+        if let Tab::Query(query) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(query)
+                .and_then(|query| query.queue.as_mut())
+            && std::mem::take(&mut queue.awaiting)
+        {
+            queue.remaining.clear();
+            queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
         }
         // Rows of a run nobody will land are not a result, and a grid still
         // marked as streaming would refuse every copy as if more were coming.
@@ -2194,7 +2242,8 @@ fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &m
 pub(crate) const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
 /// Move what has arrived into the grid. A new result set starts the grid over,
-/// as it would have when the set's statement finished.
+/// as it would have when the set's statement finished. `true` when anything
+/// on screen changed.
 fn pour(
     feed: &Feed,
     results: &Entity<TableState<ResultGrid>>,
@@ -2202,13 +2251,17 @@ fn pour(
     engine: Engine,
     (names, widths): (&[String], &[Pixels]),
     cx: &mut App,
-) {
+) -> bool {
     let fed = feed.take();
     // No result set has begun: nothing has a column to go under yet.
     if fed.set == 0 {
-        return;
+        return false;
     }
-    let typed = results.update(cx, |table, cx| {
+    let (typed, changed) = results.update(cx, |table, cx| {
+        let changed = table.delegate().streamed_set() != Some(fed.set)
+            || table.delegate().result().columns != fed.columns
+            || table.delegate().filled() != fed.filled
+            || !fed.rows.is_empty();
         let mut typed = false;
         if table.delegate().streamed_set() != Some(fed.set) {
             typed = fed.columns.iter().any(|column| column.data_type.is_some());
@@ -2238,11 +2291,12 @@ fn pour(
             }
             cx.notify();
         }
-        typed
+        (typed, changed)
     });
     if typed {
         render_aside(results, engine, cx);
     }
+    changed
 }
 
 #[cfg(test)]

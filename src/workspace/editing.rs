@@ -355,17 +355,20 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        // Sorting rows that are still arriving would order some of them and
-        // not the rest, and a sort that runs SQL would be refused by the run
-        // in flight after it had already rewritten the buffer.
-        if profile
-            .session
-            .active_results()
-            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some())
-        {
+        // Asked of the tab, not the grid on screen, which can be a finished
+        // result of a queue whose next statement is still running. A sort
+        // that runs SQL would be refused by that run after it had already
+        // rewritten the buffer, and rows still arriving would be ordered only
+        // in part.
+        let tab = profile.session.active;
+        if profile.session.running(tab) {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
             return;
         }
-        let tab = profile.session.active;
         if profile
             .session
             .sorting(tab)
