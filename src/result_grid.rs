@@ -421,6 +421,16 @@ impl ResultGrid {
         self.streamed
     }
 
+    /// The columns' types, learned while their rows are still arriving. The
+    /// rows are kept; what is worked out from the types is worked out again.
+    pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
+        self.numeric = columns
+            .iter()
+            .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
+            .collect();
+        self.result.columns = columns;
+    }
+
     pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
         self.result.rows.extend(rows);
         self.last_fed = Some(std::time::Instant::now());

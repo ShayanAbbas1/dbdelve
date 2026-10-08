@@ -17,7 +17,7 @@ use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
     RelationKind, ServerConfig, Sizes, Stopped, Structure, assemble_catalog, assemble_databases,
     assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, create_table,
     non_utf8_error, optional_cell, plain_error, required_cell, terminated,
@@ -735,6 +735,9 @@ impl Connection {
                 .map_err(failed)?
                 .map_err(failed)?,
         );
+        if typed && let Some(feed) = fetch.feed {
+            self.describe_aside(sql, feed);
+        }
         let mut assembly = Assembly::new(sql, fetch);
         let stoppable = fetch.reads_only && fetch.limit.is_some();
         // Split at the first row past the limit, because whether to stop there
@@ -806,6 +809,33 @@ impl Connection {
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
         resolve_edit_target(probed, &keyed_table(&catalog)?)
+    }
+
+    /// Learn the statement's column types while it runs, so its rows can be
+    /// shown by type -- numbers aligned, geometry as text -- as they stream in
+    /// rather than once it is done. On a connection of its own: a describe this session's server
+    /// refuses aborts the transaction it is in (see [`Self::run`]), and
+    /// another session has none of the user's to abort. One that cannot see
+    /// what this session sees -- a temporary table, a `SET search_path` --
+    /// learns nothing, and the rows are rendered at the end as before.
+    ///
+    /// ponytail: a thread and a connection per streamed run. A side
+    /// connection kept open is the upgrade path, shared with `stop_at_limit`.
+    fn describe_aside(&self, sql: &str, feed: &Feed) {
+        let (this, sql, feed) = (self.clone(), sql.to_string(), feed.clone());
+        std::thread::spawn(move || {
+            let Ok(side) = Self::connect(&this.server, this.tunnel.clone()) else {
+                return;
+            };
+            let Ok(mut client) = side.client.lock() else {
+                return;
+            };
+            let types: Vec<String> = describe_columns(&mut client, &sql)
+                .into_iter()
+                .map(|column| column.type_name)
+                .collect();
+            feed.describe(types);
+        });
     }
 
     /// Stop the statement in flight now that it has passed the row limit, if
@@ -1151,6 +1181,11 @@ struct Assembly<'a> {
     /// A cancel went out for the rows past the limit, so the error the
     /// statement ends in is the limit's doing and not the statement's.
     stopping: bool,
+    /// Result sets begun. The describe behind the feed's spatial columns
+    /// is of the first statement, so it says nothing about any after it.
+    sets: usize,
+    /// Which of the first set's columns are spatial, once the feed knows.
+    spatial: Option<Vec<bool>>,
 }
 
 impl<'a> Assembly<'a> {
@@ -1163,10 +1198,13 @@ impl<'a> Assembly<'a> {
             returned: 0,
             kept: 0,
             stopping: false,
+            sets: 0,
+            spatial: None,
         }
     }
 
     fn begin(&mut self, columns: Vec<Column>) {
+        self.sets += 1;
         if let Some(feed) = self.fetch.feed {
             feed.begin(columns.clone());
         }
@@ -1253,7 +1291,20 @@ impl<'a> Assembly<'a> {
                         .filter_map(|cell| cell.as_ref().map(String::len))
                         .sum::<usize>();
                     match self.fetch.feed {
-                        Some(feed) => feed.push(cells),
+                        Some(feed) => {
+                            let mut cells = cells;
+                            if self.sets == 1 {
+                                if self.spatial.is_none() {
+                                    self.spatial = feed.types().map(|types| {
+                                        types.iter().map(|name| is_spatial(name)).collect()
+                                    });
+                                }
+                                if let Some(spatial) = &self.spatial {
+                                    format_spatial_row(&mut cells, spatial);
+                                }
+                            }
+                            feed.push(cells);
+                        }
                         None => self.result.rows.push(cells),
                     }
                 }
@@ -1291,28 +1342,40 @@ fn apply_types(columns: &mut [Column], probed: &[ProbedColumn]) {
 }
 
 pub(super) fn format_spatial_cells(result: &mut QueryResult) {
-    let spatial_columns = result
+    let spatial = result
         .columns
         .iter()
-        .map(|column| matches!(column.data_type.as_deref(), Some("geometry" | "geography")))
+        .map(|column| is_spatial(column.data_type.as_deref().unwrap_or_default()))
         .collect::<Vec<_>>();
-
+    if !spatial.contains(&true) {
+        return;
+    }
     for row in &mut result.rows {
-        for (cell, spatial) in row.iter_mut().zip(&spatial_columns) {
-            if !spatial {
-                continue;
-            }
-            let Some(value) = cell else {
-                continue;
-            };
-            let Ok(bytes) = hex::decode(&*value) else {
-                continue;
-            };
-            let Ok(wkt) = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()) else {
-                continue;
-            };
-            *value = readable_wkt(&wkt);
+        format_spatial_row(row, &spatial);
+    }
+}
+
+fn is_spatial(type_name: &str) -> bool {
+    matches!(type_name, "geometry" | "geography")
+}
+
+/// A value that is not hex EWKB is left alone, which is what lets rows already
+/// rendered as they streamed in go through this a second time.
+fn format_spatial_row(row: &mut [Cell], spatial: &[bool]) {
+    for (cell, spatial) in row.iter_mut().zip(spatial) {
+        if !spatial {
+            continue;
         }
+        let Some(value) = cell else {
+            continue;
+        };
+        let Ok(bytes) = hex::decode(&*value) else {
+            continue;
+        };
+        let Ok(wkt) = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()) else {
+            continue;
+        };
+        *value = readable_wkt(&wkt);
     }
 }
 
@@ -2258,6 +2321,35 @@ mod tests {
                 .is_ok()
         );
         connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_fed_rows_are_shown_by_type_once_a_describe_aside_has_said() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let feed = crate::db::Feed::default();
+        connection
+            .query(
+                // The sleep holds every row back until the describe on the
+                // other connection has had time to answer.
+                "SELECT n, ST_MakePoint(n, n) AS p FROM generate_series(1, 3) AS n, pg_sleep(1)",
+                Fetch {
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        let types: Vec<_> = fed.columns.iter().map(|c| c.data_type.as_deref()).collect();
+        assert_eq!(types, vec![Some("int4"), Some("geometry")]);
+        assert!(
+            fed.rows[0][1]
+                .as_deref()
+                .is_some_and(|cell| cell.starts_with("POINT")),
+            "{:?}",
+            fed.rows[0][1]
+        );
     }
 
     #[test]

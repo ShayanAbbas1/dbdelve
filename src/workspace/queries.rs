@@ -2176,6 +2176,9 @@ fn pour(
                 .with_layout(names, widths)
                 .streaming(fed.set);
             table.refresh(cx);
+        } else if table.delegate().result().columns != fed.columns {
+            table.delegate_mut().set_column_types(fed.columns);
+            cx.notify();
         }
         if !fed.rows.is_empty() {
             let digits = |rows: usize| rows.max(1).ilog10();

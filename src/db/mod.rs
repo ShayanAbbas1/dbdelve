@@ -1661,6 +1661,10 @@ pub struct Fed {
     pub set: usize,
     pub columns: Vec<Column>,
     pub rows: Vec<Vec<Cell>>,
+    /// The first set's column types, once a describe on another connection
+    /// has said, so rows can be shown by type before the statement is done.
+    /// Empty until then.
+    types: Vec<String>,
 }
 
 impl Feed {
@@ -1681,13 +1685,34 @@ impl Feed {
         self.lock().rows.push(row);
     }
 
+    /// The rows since the last take, under the set's columns, typed once the
+    /// types are known. Positional, and only where the counts agree: the
+    /// describe ran apart from the statement, and a type against the wrong
+    /// column is worse than none.
     pub fn take(&self) -> Fed {
         let mut fed = self.lock();
+        let mut columns = fed.columns.clone();
+        if fed.set == 1 && fed.types.len() == columns.len() {
+            for (column, data_type) in columns.iter_mut().zip(&fed.types) {
+                column.data_type = Some(data_type.clone());
+            }
+        }
         Fed {
             set: fed.set,
-            columns: fed.columns.clone(),
+            columns,
             rows: std::mem::take(&mut fed.rows),
+            types: Vec::new(),
         }
+    }
+
+    pub(crate) fn describe(&self, types: Vec<String>) {
+        self.lock().types = types;
+    }
+
+    /// `None` until [`Feed::describe`] has been told.
+    pub(crate) fn types(&self) -> Option<Vec<String>> {
+        let fed = self.lock();
+        (!fed.types.is_empty()).then(|| fed.types.clone())
     }
 }
 
