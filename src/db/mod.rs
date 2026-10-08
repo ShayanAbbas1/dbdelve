@@ -2397,8 +2397,8 @@ pub(super) mod at_once {
         write: &str,
     ) {
         let pair = [slow, slow];
-        assert!(runs_at_once(engine, Mode::ReadWrite, false, &pair));
-        assert!(!runs_at_once(engine, Mode::Full, false, &[slow, write]));
+        assert!(runs_at_once(engine, Mode::ReadWrite, &pair));
+        assert!(!runs_at_once(engine, Mode::Full, &[slow, write]));
 
         let started = Instant::now();
         for sql in pair {

@@ -383,22 +383,22 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let Some(profile) = self.profile() else {
+        let Some(profile) = self.profile_mut() else {
             return;
         };
-        // A new queue in place of one with a statement still out would take
-        // that statement's result as one of its own.
-        if profile.session.running(tab) {
-            return;
-        }
-        let engine = self.engine();
+        let engine = profile.config.engine();
         let texts: Vec<&str> = statements
             .iter()
             .map(|range| &text[range.clone()])
             .collect();
-        if session::runs_at_once(engine, profile.mode, profile.altered, &texts) {
-            self.run_at_once(tab, text, statements, window, cx);
-            return;
+        if session::runs_at_once(engine, profile.mode, &texts) {
+            match profile.in_turn() {
+                Some(why) => profile.session.notice = Some(why.into()),
+                None => {
+                    self.run_at_once(tab, text, statements, window, cx);
+                    return;
+                }
+            }
         }
         let Some((first, rest)) = statements.split_first() else {
             return;
@@ -1700,16 +1700,17 @@ impl Workspace {
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
-        if !generated
-            && sql::alters_session(engine, explained.as_deref().unwrap_or(&sql))
-            && let Some(profile) = self.profile_mut()
-        {
-            profile.altered = true;
+        if !generated && let Some(profile) = self.issued_to(&id, generation) {
+            let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
+            if let Some(open) = leaves.transaction {
+                profile.in_transaction = open;
+            }
+            profile.session_changed |= leaves.settings;
         }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
             Tab::Query(query) if explain.is_none() => self
-                .profile()
+                .issued_to(&id, generation)
                 .and_then(|profile| profile.session.query_tab(query))
                 .and_then(|query| query.row_limit),
             _ => None,

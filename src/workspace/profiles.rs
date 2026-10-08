@@ -212,7 +212,8 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
-            altered: false,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -260,7 +261,8 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
-            altered: false,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -1241,7 +1243,8 @@ impl Workspace {
         };
         profile.generation = generation;
         profile.state = ProfileState::Connecting;
-        profile.altered = false;
+        profile.in_transaction = false;
+        profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
 
         let id = profile.id.clone();

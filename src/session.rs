@@ -58,11 +58,14 @@ pub(crate) struct Profile {
     pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
-    /// Whether a statement of the user's that `sql::alters_session` flags has
-    /// run on this connection, which a fresh one opened for a queue's reads
-    /// would then not see the same way. Cleared on connect; never on a
-    /// `COMMIT`, which is the conservative side of not asking the server.
-    pub(crate) altered: bool,
+    /// Whether the user's statements on this connection have left a
+    /// transaction open (`sql::Leaves`), which a fresh one opened for a
+    /// queue's reads would not see. Read off what was sent, not asked of the
+    /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
+    pub(crate) in_transaction: bool,
+    /// Whether they have changed the session in a way that lasts as long as
+    /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
+    pub(crate) session_changed: bool,
     pub(crate) catalog: CatalogState,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
@@ -70,6 +73,18 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
+    /// Why a queue of reads on this connection runs in turn rather than at
+    /// once, said to the user when one does.
+    pub(crate) fn in_turn(&self) -> Option<&'static str> {
+        if self.in_transaction {
+            Some("Ran one at a time: a transaction is open on this connection.")
+        } else if self.session_changed {
+            Some("Ran one at a time: this connection's session settings were changed.")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),
@@ -1196,14 +1211,14 @@ pub(crate) const STATEMENTS_AT_ONCE: usize = 8;
 
 /// Whether a queue's statements can all go out at once rather than in turn:
 /// only when each is a plain read the gate lets through as it stands, and
-/// nothing run on the session so far could make a fresh connection read
-/// differently from it. Anything else runs in turn, as it always has.
-pub(crate) fn runs_at_once(engine: Engine, mode: Mode, altered: bool, statements: &[&str]) -> bool {
-    !altered
-        && statements.iter().all(|statement| {
-            sql::plain_read(engine, statement)
-                && sql::gate(&sql::classify(engine, statement), mode, &[]).is_none()
-        })
+/// (`Profile::in_turn`, asked separately so it can be said) nothing run on the
+/// session so far makes a fresh connection read differently from it. Anything
+/// else runs in turn, as it always has.
+pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> bool {
+    statements.iter().all(|statement| {
+        sql::plain_read(engine, statement)
+            && sql::gate(&sql::classify(engine, statement), mode, &[]).is_none()
+    })
 }
 
 impl QueryTab {
@@ -1933,9 +1948,9 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_reads_on_an_unaltered_session_run_at_once() {
+    fn only_plain_reads_run_at_once() {
         let at_once =
-            |engine, statements: &[&str]| runs_at_once(engine, Mode::ReadOnly, false, statements);
+            |engine, statements: &[&str]| runs_at_once(engine, Mode::ReadOnly, statements);
         assert!(at_once(
             Engine::Postgres,
             &[
@@ -1984,28 +1999,6 @@ mod tests {
                 "{unsafe_one}"
             );
         }
-
-        // Reads alone, but the session they would leave behind may hold a
-        // transaction or a `SET` a fresh connection would not.
-        assert!(!runs_at_once(
-            Engine::Postgres,
-            Mode::Full,
-            true,
-            &["SELECT 1", "SELECT 2"]
-        ));
-        assert!(sql::alters_session(Engine::Postgres, "BEGIN"));
-        assert!(sql::alters_session(Engine::MySql, "SET autocommit = 0"));
-        assert!(sql::alters_session(
-            Engine::SqlServer,
-            "INSERT INTO t VALUES (1)"
-        ));
-        assert!(!sql::alters_session(Engine::Postgres, "SELECT 1"));
-        // Neither keeps anything from one run to the next.
-        assert!(!sql::alters_session(Engine::Snowflake, "BEGIN"));
-        assert!(!sql::alters_session(
-            Engine::MongoDb,
-            "db.a.insertOne({ x: 1 })"
-        ));
     }
 
     #[test]
