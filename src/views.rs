@@ -1330,15 +1330,16 @@ fn render_results(
     .into_any_element()
 }
 
-/// One chip per statement a queue has run, and one for the statement still
-/// running, above the result the selected chip is showing.
+/// One chip per statement of a queue, from the moment it starts: those that
+/// have run, the one running, and those still to go, above the result the
+/// selected chip is showing.
 ///
-/// Only from the second result: one chip is nothing to switch between, and an
+/// Only from the second chip: one is nothing to switch between, and an
 /// ordinary run has no queue at all.
 fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let t = *theme(cx);
     let queue = tab.queue.as_ref()?;
-    if queue.done.len() < 2 {
+    if queue.done.len() + usize::from(queue.awaiting) + queue.remaining.len() < 2 {
         return None;
     }
     // The statement in flight is the tab's own slot, not one of `done`, so it
@@ -1360,7 +1361,7 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
             cx,
         )
     });
-    let chips: Vec<AnyElement> = queue
+    let mut chips: Vec<AnyElement> = queue
         .done
         .iter()
         .enumerate()
@@ -1376,6 +1377,18 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
         })
         .chain(running)
         .collect();
+    for (offset, range) in queue.remaining.iter().enumerate() {
+        let index = queue.done.len() + usize::from(queue.awaiting) + offset;
+        let label = queue.sql.get(range.clone()).map(query_label);
+        chips.push(result_chip(
+            tab.id,
+            index,
+            &label.unwrap_or_default(),
+            &QueryState::Idle,
+            false,
+            cx,
+        ));
+    }
 
     Some(
         div()
@@ -1407,7 +1420,9 @@ fn result_chip(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
+    let queued = matches!(state, QueryState::Idle);
     let (readout, tint) = match state {
+        QueryState::Idle => (Some("queued".to_string()), t.text_faint),
         QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
         QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
         QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
@@ -1427,6 +1442,9 @@ fn result_chip(
         .map(|chip| {
             if selected {
                 chip.bg(t.element_active).text_color(t.text)
+            } else if queued {
+                // Nothing to show yet, so nothing to offer on hover.
+                chip.text_color(t.text_faint)
             } else {
                 chip.text_color(t.text_muted)
                     .hover(|style| style.bg(t.element_hover))
