@@ -1665,6 +1665,9 @@ pub struct Fed {
     /// has said, so rows can be shown by type before the statement is done.
     /// Empty until then.
     types: Vec<String>,
+    /// When the current set's kept rows reached the limit. Whatever the run
+    /// does after that is not fetching rows anyone will see.
+    pub filled: Option<std::time::Instant>,
 }
 
 impl Feed {
@@ -1679,6 +1682,7 @@ impl Feed {
         fed.set += 1;
         fed.columns = columns;
         fed.rows.clear();
+        fed.filled = None;
     }
 
     pub(crate) fn push(&self, row: Vec<Cell>) {
@@ -1702,7 +1706,12 @@ impl Feed {
             columns,
             rows: std::mem::take(&mut fed.rows),
             types: Vec::new(),
+            filled: fed.filled,
         }
+    }
+
+    pub(crate) fn fill(&self) {
+        self.lock().filled = Some(std::time::Instant::now());
     }
 
     pub(crate) fn describe(&self, types: Vec<String>) {

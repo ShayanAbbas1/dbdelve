@@ -2223,6 +2223,7 @@ fn pour(
             typed = true;
             cx.notify();
         }
+        table.delegate_mut().fill(fed.filled);
         if !fed.rows.is_empty() {
             let digits = |rows: usize| rows.max(1).ilog10();
             let before = table.delegate().result().rows.len();

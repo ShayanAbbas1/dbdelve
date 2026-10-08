@@ -127,6 +127,9 @@ pub struct ResultGrid {
     /// appending them (`db::Fed::set`). Dropped with the delegate, like
     /// `captured`, when the finished result replaces it.
     streamed: Option<usize>,
+    /// When a streamed run's kept rows reached the limit, for its clock to
+    /// stop at.
+    filled: Option<std::time::Instant>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -301,6 +304,7 @@ impl ResultGrid {
             editing: None,
             captured: None,
             streamed: None,
+            filled: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -445,6 +449,14 @@ impl ResultGrid {
                 *cell = now;
             }
         }
+    }
+
+    pub fn fill(&mut self, at: Option<std::time::Instant>) {
+        self.filled = at;
+    }
+
+    pub fn filled(&self) -> Option<std::time::Instant> {
+        self.filled
     }
 
     pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {

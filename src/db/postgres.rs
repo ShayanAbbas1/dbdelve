@@ -745,7 +745,7 @@ impl Connection {
         if typed && let Some(feed) = fetch.feed {
             self.describe_aside(sql, feed);
         }
-        let mut assembly = Assembly::new(sql, fetch);
+        let mut assembly = Assembly::new(sql, fetch, started);
         let stoppable = fetch.reads_only && fetch.limit.is_some();
         // Split at the first row past the limit, because whether to stop there
         // is asked on another connection, and that cannot be done from inside
@@ -760,7 +760,7 @@ impl Connection {
                 .map_err(failed)??;
         }
         drop(messages);
-        let (mut result, commands) = assembly.finish(started);
+        let (mut result, commands) = assembly.finish();
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -850,32 +850,36 @@ impl Connection {
     }
 
     /// Stop the statement in flight now that it has passed the row limit, if
-    /// that undoes nothing: `true` when a cancel went out.
+    /// that undoes nothing: `true` when it was signalled.
     ///
     /// Only a statement that has written nothing, outside any transaction the
     /// user opened. A cancel aborts the transaction it lands in, so stopping
     /// one inside `BEGIN` would throw the user's open work away, and stopping
     /// a write would leave it half done. In the implicit transaction of a
-    /// lone statement, `xact_start` is `query_start` to the microsecond. Asked
-    /// on the side session, since this one is busy with the rows.
+    /// lone statement, `xact_start` is `query_start` to the microsecond.
     ///
-    /// A cancel can land after the statement finished on its own; on an idle
-    /// session the server ignores it, which is the same race Cancel has.
+    /// Checked and signalled in one statement on the side session, so the
+    /// check cannot go stale before the cancel, and no new socket is opened
+    /// for it -- a cancel request is a connection of its own, which through a
+    /// proxy to a remote server costs a full handshake. A server process that
+    /// is not visible here, behind a pooler, is never signalled, and the rows
+    /// past the limit are drained instead.
     fn stop_at_limit(&self) -> bool {
         let Some(pid) = self.pid else {
             return false;
         };
-        let safe = self.aside(|side| {
+        let signalled = self.aside(|side| {
             let result = side
                 .internal_query(&format!(
-                    "SELECT xact_start = query_start AND backend_xid IS NULL
+                    "SELECT pg_catalog.pg_cancel_backend(pid)
                      FROM pg_catalog.pg_stat_activity
-                     WHERE pid = {pid} AND state = 'active'"
+                     WHERE pid = {pid} AND state = 'active'
+                       AND xact_start = query_start AND backend_xid IS NULL"
                 ))
                 .ok()?;
             Some(result.rows.first()?.first()? == &Some("t".to_string()))
         });
-        safe == Some(true) && self.cancel().is_ok()
+        signalled == Some(true)
     }
 
     pub fn databases(&self) -> Result<super::Databases, DbError> {
@@ -1192,10 +1196,13 @@ struct Assembly<'a> {
     sets: usize,
     /// Which of the first set's columns are spatial, once the feed knows.
     spatial: Option<Vec<bool>>,
+    started: Instant,
+    /// How long the kept rows took, once there were as many as the limit.
+    filled: Option<Duration>,
 }
 
 impl<'a> Assembly<'a> {
-    fn new(sql: &'a str, fetch: Fetch<'a>) -> Self {
+    fn new(sql: &'a str, fetch: Fetch<'a>, started: Instant) -> Self {
         Self {
             sql,
             fetch,
@@ -1206,6 +1213,8 @@ impl<'a> Assembly<'a> {
             stopping: false,
             sets: 0,
             spatial: None,
+            started,
+            filled: None,
         }
     }
 
@@ -1254,6 +1263,7 @@ impl<'a> Assembly<'a> {
                     self.result.bytes = 0;
                     self.result.rows_affected = None;
                     (self.returned, self.kept) = (0, 0);
+                    self.filled = None;
                 }
                 SimpleQueryMessage::Row(row) => {
                     self.returned += 1;
@@ -1264,6 +1274,12 @@ impl<'a> Assembly<'a> {
                         continue;
                     }
                     self.kept += 1;
+                    if self.fetch.limit == Some(self.kept) {
+                        self.filled = Some(self.started.elapsed());
+                        if let Some(feed) = self.fetch.feed {
+                            feed.fill();
+                        }
+                    }
                     // A row arriving with no description before it is not a
                     // path the driver takes today; without this the grid would
                     // render headerless and drop every value it was handed.
@@ -1325,8 +1341,16 @@ impl<'a> Assembly<'a> {
     }
 
     /// The result, plus the number of statements the server completed.
-    fn finish(mut self, started: Instant) -> (QueryResult, usize) {
-        self.result.elapsed = started.elapsed();
+    ///
+    /// Timed to the last kept row when rows past the limit came after it:
+    /// what follows, stopping the statement or draining it, is not the wait
+    /// for these rows.
+    fn finish(mut self) -> (QueryResult, usize) {
+        let past_limit = self.returned > self.kept || self.result.stopped.is_some();
+        self.result.elapsed = match self.filled {
+            Some(filled) if past_limit => filled,
+            _ => self.started.elapsed(),
+        };
         // A stopped statement's count is only what had arrived, not its size.
         self.result.capped_from =
             (self.result.stopped.is_none() && self.returned > self.kept).then_some(self.returned);

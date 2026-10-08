@@ -1853,10 +1853,18 @@ pub(crate) fn render_running(
         return None;
     };
     let t = *theme(cx);
-    let (rows, streaming) = results.map_or((0, false), |results| {
+    let (rows, streaming, filled) = results.map_or((0, false, None), |results| {
         let grid = results.read(cx).delegate();
-        (grid.rows_count(cx), grid.streamed_set().is_some())
+        (
+            grid.rows_count(cx),
+            grid.streamed_set().is_some(),
+            grid.filled(),
+        )
     });
+    // Stopped where the limit filled: the rows on screen are all the run will
+    // keep, and the time spent stopping or draining the statement after them
+    // is not time spent fetching them.
+    let elapsed = filled.map_or_else(|| started.elapsed(), |at| at.duration_since(*started));
     let what = match (streaming, rows) {
         (true, rows) => format!("{} fetched", crate::ui::row_readout(rows, rows)),
         // A refresh keeps the rows it is replacing on screen until it lands.
@@ -1882,7 +1890,7 @@ pub(crate) fn render_running(
                 div()
                     .whitespace_nowrap()
                     .text_color(t.text_muted)
-                    .child(format!("{what} \u{b7} {}", clock(started.elapsed()))),
+                    .child(format!("{what} \u{b7} {}", clock(elapsed))),
             )
             .child(
                 button("cancel-query", label, Tone::Quiet, Control::Compact, t)
