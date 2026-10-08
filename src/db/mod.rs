@@ -1134,12 +1134,23 @@ impl Connection {
         fetch: Fetch,
         read_only: bool,
     ) -> Result<QueryResult, DbError> {
-        let connection = match self {
+        let opened = match self {
             Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
-            Self::Postgres(connection) => Self::Postgres(connection.alongside()?),
-            Self::MySql(connection) => Self::MySql(connection.alongside()?),
-            Self::SqlServer(connection) => Self::SqlServer(connection.alongside()),
-            Self::Sqlite(connection) => Self::Sqlite(connection.alongside()?),
+            Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
+            Self::MySql(connection) => connection.alongside().map(Self::MySql),
+            Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
+        };
+        // A server out of connections still has this one, which the statement
+        // waits its turn on rather than failing.
+        // ponytail: a Cancel does not reach a statement run this way; it is a
+        // read, and ends on its own. SQL Server logs in on the first run, so
+        // its refusal surfaces as the statement's error instead.
+        let Ok(connection) = opened else {
+            if cancel.0.lock().is_ok_and(|running| running.asked) {
+                return Err(plain_error("Cancelled before it was sent.".into()));
+            }
+            return self.query(sql, cancel, fetch);
         };
         if read_only {
             connection.set_read_only(true)?;
