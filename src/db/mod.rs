@@ -1060,8 +1060,10 @@ impl Connection {
     /// and dropped, and [`QueryResult::capped_from`] says how many there were,
     /// unless the statement could be stopped there instead
     /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
-    /// instead of the result, which then holds none, and [`settle`] is owed
-    /// once they are gathered. Only Postgres and MySQL honour [`Fetch`] so far.
+    /// instead of the result, which then holds none of them, and values
+    /// still waiting on their types are the caller's to [`render`]. Postgres,
+    /// MySQL and SQL Server honour [`Fetch`], SQL Server without stopping.
+    /// The others keep every row.
     pub fn query(
         &self,
         sql: &str,
@@ -1071,7 +1073,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.query(sql, fetch),
             Self::MySql(connection) => connection.query(sql, fetch),
-            Self::SqlServer(connection) => connection.query(sql),
+            Self::SqlServer(connection) => connection.query(sql, fetch),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
             Self::MongoDb(connection) => connection.query(sql, cancel),
@@ -1093,7 +1095,13 @@ impl Connection {
         feed: Option<&Feed>,
     ) -> Result<QueryResult, DbError> {
         match self {
-            Self::SqlServer(connection) => connection.generated(sql),
+            Self::SqlServer(connection) => connection.generated(
+                sql,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
@@ -1724,6 +1732,11 @@ impl Feed {
             types: Vec::new(),
             filled: fed.filled,
         }
+    }
+
+    /// Types learned from a row rather than the description before it.
+    pub(crate) fn retype(&self, columns: Vec<Column>) {
+        self.lock().columns = columns;
     }
 
     pub(crate) fn fill(&self) {
