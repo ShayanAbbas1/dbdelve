@@ -4202,6 +4202,27 @@ mod tests {
             Engine::SqlServer,
             "SELECT * FROM t\nSELECT * FROM u"
         ));
+        // SQL Server caps a stoppable read with `SET ROWCOUNT`, which caps a
+        // write just the same, so nothing that writes may get through.
+        for sql in [
+            "SELECT * INTO #copy FROM t",
+            "SELECT * INTO copy FROM t",
+            "EXEC dbo.report",
+            "EXECUTE dbo.report 1",
+            "dbo.report",
+            "INSERT INTO t SELECT * FROM u",
+            "SELECT * FROM t; DELETE FROM t",
+            "IF 1 = 1 DELETE FROM t",
+            "BEGIN SELECT * FROM t; DELETE FROM t END",
+            "WITH c AS (SELECT 1 AS a) DELETE FROM t",
+            "MERGE t USING u ON t.id = u.id WHEN MATCHED THEN DELETE;",
+        ] {
+            assert!(!stoppable(Engine::SqlServer, sql), "{sql}");
+        }
+        assert!(stoppable(
+            Engine::SqlServer,
+            "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
+        ));
         assert!(stoppable(Engine::MongoDb, "db.accounts.find({})"));
         assert!(stoppable(
             Engine::MongoDb,

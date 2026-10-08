@@ -1063,7 +1063,8 @@ impl Connection {
     /// instead of the result, which then holds none of them, and values
     /// still waiting on their types are the caller's to [`render`]. Postgres,
     /// MySQL, SQL Server, SQLite, Snowflake and MongoDB honour [`Fetch`]: SQL
-    /// Server without stopping, Snowflake by not downloading the partitions
+    /// Server by `SET ROWCOUNT` around a lone read, which the server stops
+    /// itself, and by draining anything else, Snowflake by not downloading the partitions
     /// past the limit, whose rows the server has already counted, and MongoDB
     /// without a feed.
     pub fn query(
