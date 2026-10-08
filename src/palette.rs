@@ -592,7 +592,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             // The same gates the pager buttons stand behind: forward only off
             // a full page, backwards only off a page that is not the first.
             if !*showing_structure {
-                if matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit) {
+                if matches!(
+                    query,
+                    QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+                ) {
                     items.push(Item::command(
                         "Next page",
                         "",

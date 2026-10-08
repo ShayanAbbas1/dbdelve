@@ -98,7 +98,8 @@ require it, stop and raise it instead.
    exactly `{_id: <literal>}` and whose update is exactly a `$set` of literals,
    one `insertOne` of a literal document, and one `deleteOne` by `_id`; and
    `mql::browse::is_generated_read` admits only the preview's own
-   `find(filter).sort().skip().limit()` and the status bar's `countDocuments`,
+   `find(filter).sort().skip().limit()` (no `limit()` under no row limit) and the
+   status bar's `countDocuments`,
    each written again from its parts and compared with the text,
    with a filter that is one document running no server-side JavaScript
    (`$where`, `$function`, `$accumulator`). Both read the tree-sitter parse, not

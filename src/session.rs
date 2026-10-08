@@ -365,7 +365,7 @@ impl Session {
         pending_objects: Vec<store::StoredObject>,
         engine: Engine,
         sorting: Sorting,
-        row_limit: usize,
+        row_limit: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -990,7 +990,7 @@ pub(crate) struct QueryTab {
     pub(crate) sorting: Sorting,
     /// How many rows of a statement's result this tab keeps, or `None` for
     /// all of them. Starts at the Settings row limit and is not persisted, so
-    /// "No limit" lasts only as long as the tab does.
+    /// a limit picked for one tab lasts only as long as the tab does.
     pub(crate) row_limit: Option<usize>,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
@@ -1124,7 +1124,7 @@ impl QueryTab {
         stored: &store::StoredQueryTab,
         engine: Engine,
         sorting: Sorting,
-        row_limit: usize,
+        row_limit: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1160,7 +1160,7 @@ impl QueryTab {
             queue: None,
             queued_results: stored.queued_results,
             sorting,
-            row_limit: Some(row_limit),
+            row_limit,
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),
@@ -1413,14 +1413,15 @@ pub(crate) enum ObjectBody {
         /// row. Not persisted: it is a choice about a bar that does not exist
         /// yet, and a restart that forgot it has forgotten nothing.
         next_join: Conjunction,
-        /// How many rows this preview asks for. Every result set is capped
-        /// (spec §4.3); this is the tab's own copy of the cap, so raising it
-        /// for one wide table does not raise it everywhere.
-        limit: usize,
+        /// How many rows this preview asks for, `None` for every row. This is
+        /// the tab's own copy of the cap, so raising it for one wide table does
+        /// not raise it everywhere.
+        limit: Option<usize>,
         /// How far into the relation this preview's page starts, in rows.
-        /// Always a multiple of `limit`: paging moves it by one page, and a
-        /// change of sort or limit puts it back to zero, because a window into
-        /// an ordering that no longer exists is not a page of anything.
+        /// Always a multiple of `limit`, and zero without one: paging moves it
+        /// by one page, and a change of sort or limit puts it back to zero,
+        /// because a window into an ordering that no longer exists is not a
+        /// page of anything.
         offset: usize,
         /// Whether the rows on screen are owed a refresh that keeps them on
         /// screen until it lands: rows that came off disk or over a connection
@@ -1685,7 +1686,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             &profile.id,
             &store::object_grid_key(&tab.schema, &tab.name, filter),
             &store::StoredGrid {
-                limit: Some(*limit),
+                limit: Some(limit.unwrap_or(0)),
                 filter: filter.clone(),
                 showing_structure: *showing_structure,
                 order_by: sort

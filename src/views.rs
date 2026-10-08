@@ -1710,13 +1710,12 @@ fn preview_tab(
         }))
 }
 
-/// A row limit, and the menu that changes it: the sizes on offer, a number of
-/// one's own, and, where `unlimited`, none at all. While `editing` is the field
-/// Custom… opened, it stands where the button was.
+/// A row limit, and the menu that changes it: none at all, the sizes on offer,
+/// and a number of one's own. While `editing` is the field Custom… opened, it
+/// stands where the button was.
 fn row_limit_menu(
     target: LimitTarget,
     limit: Option<usize>,
-    unlimited: bool,
     editing: Option<&Entity<InputState>>,
     t: Theme,
 ) -> AnyElement {
@@ -1745,9 +1744,9 @@ fn row_limit_menu(
     }
     let rows_label = |rows: usize| format!("{} rows", group_thousands(rows as u64));
     let label = limit.map_or_else(|| "No limit".to_string(), rows_label);
-    let pick = move |rows: usize| -> Box<dyn gpui::Action> {
+    let pick = move |rows: Option<usize>| -> Box<dyn gpui::Action> {
         match target {
-            LimitTarget::Query(_) => Box::new(SetQueryLimit { rows: Some(rows) }),
+            LimitTarget::Query(_) => Box::new(SetQueryLimit { rows }),
             LimitTarget::Relation(_) => Box::new(SetRowLimit { rows }),
             LimitTarget::Default => Box::new(SetDefaultRowLimit { rows }),
         }
@@ -1764,21 +1763,27 @@ fn row_limit_menu(
                 .text_color(t.text_faint),
         )
         .dropdown_menu(move |menu, _, _| {
-            let menu = match unlimited {
-                true => menu
-                    .menu_with_check(
-                        "No limit",
-                        limit.is_none(),
-                        Box::new(SetQueryLimit { rows: None }),
-                    )
-                    .separator(),
-                false => menu,
-            };
+            // A hint rather than a confirm or a cap: the cost is the user's call.
+            let menu = menu
+                .menu_element_with_check(limit.is_none(), pick(None), move |_, _| {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .gap(px(layout::SPACE_MD))
+                        .justify_between()
+                        .child("No limit")
+                        .child(
+                            div()
+                                .text_color(t.text_faint)
+                                .child("Keeps every row in memory"),
+                        )
+                })
+                .separator();
             let custom = limit.filter(|rows| !ROW_LIMITS.contains(rows));
             ROW_LIMITS
                 .into_iter()
                 .fold(menu, |menu, rows| {
-                    menu.menu_with_check(rows_label(rows), limit == Some(rows), pick(rows))
+                    menu.menu_with_check(rows_label(rows), limit == Some(rows), pick(Some(rows)))
                 })
                 .separator()
                 .menu_with_check(
@@ -1916,7 +1921,7 @@ fn render_structure(
 /// What the preview in front asked the server for: its limit, its offset, and
 /// whether a page may follow. Only while its rows are shown: it is a property
 /// of these rows, not of the window.
-fn relation_preview(session: &Session) -> Option<(usize, usize, bool)> {
+fn relation_preview(session: &Session) -> Option<(Option<usize>, usize, bool)> {
     session.active_object().and_then(|tab| match &tab.body {
         ObjectBody::Relation {
             limit,
@@ -1930,7 +1935,10 @@ fn relation_preview(session: &Session) -> Option<(usize, usize, bool)> {
             // A full page may have another behind it; a short one is the
             // relation's end. The same gate `turn_page` holds, read here only
             // to decide whether the button is worth drawing.
-            matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
+            matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ),
         )),
         _ => None,
     })
@@ -2028,7 +2036,7 @@ pub(crate) fn render_paging(
         let editing = custom_limit
             .filter(|(editing, _)| *editing == target)
             .map(|(_, input)| input);
-        row_limit_menu(target, Some(limit), false, editing, t)
+        row_limit_menu(target, limit, editing, t)
     });
     // The pager appears only once there is somewhere to go: a first page
     // shorter than its limit is the whole relation, and arrows over it are
@@ -2721,7 +2729,7 @@ fn render_tab_strip(
                     let editing = custom_limit
                         .filter(|(editing, _)| *editing == target)
                         .map(|(_, input)| input);
-                    row_limit_menu(target, tab.row_limit, true, editing, t)
+                    row_limit_menu(target, tab.row_limit, editing, t)
                 }),
         )
         // Beside Run, because it asks about the same statement Run would run.
@@ -2996,8 +3004,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
 
     let limits = row_limit_menu(
         LimitTarget::Default,
-        Some(row_limit),
-        false,
+        row_limit,
         workspace
             .custom_limit
             .as_ref()

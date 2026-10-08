@@ -167,7 +167,7 @@ impl Workspace {
     pub(crate) fn requery_relation(
         &mut self,
         id: u64,
-        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut usize, &mut usize) -> bool,
+        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut Option<usize>, &mut usize) -> bool,
         cx: &mut Context<Self>,
     ) {
         let engine = self.engine();
@@ -1011,7 +1011,11 @@ impl Workspace {
                     // is where they are stored: the snapshot is keyed by this
                     // expression, so the two cannot disagree.
                     *filter = snapshot.filter.clone();
-                    *limit = snapshot.limit.unwrap_or(row_limit);
+                    *limit = match snapshot.limit {
+                        Some(0) => None,
+                        Some(rows) => Some(rows),
+                        None => row_limit,
+                    };
                     *stale = true;
                 }
             }

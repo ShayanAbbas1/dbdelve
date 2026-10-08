@@ -44,7 +44,7 @@ impl Workspace {
             chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
             grid_font_size: Some(self.settings.grid_font_size),
-            preview_rows: Some(self.settings.row_limit),
+            preview_rows: Some(self.settings.row_limit.unwrap_or(0)),
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),

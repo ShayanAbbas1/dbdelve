@@ -3164,7 +3164,7 @@ mod tests {
                 "measurements",
                 filter,
                 &[SortKey::new("\"id\"", false)],
-                10,
+                Some(10),
                 offset,
             );
             assert!(sql::is_generated_select(Engine::SqlServer, &sql), "{sql}");
@@ -3205,7 +3205,26 @@ mod tests {
         )
         .unwrap();
         assert!(preview(&literal, 0).rows.is_empty());
-        let unsorted = relation_sql(Engine::SqlServer, "dbo", "orders", "", &[], 100, 0);
+        // No limit is every matching row on one page, with no order to page by.
+        let every = relation_sql(
+            Engine::SqlServer,
+            "dbo",
+            "measurements",
+            &equals,
+            &[],
+            None,
+            0,
+        );
+        let every = sql::paged(Engine::SqlServer, &every, &[]).unwrap();
+        assert_eq!(
+            connection
+                .generated(&every, Fetch::default())
+                .unwrap()
+                .rows
+                .len(),
+            209
+        );
+        let unsorted = relation_sql(Engine::SqlServer, "dbo", "orders", "", &[], Some(100), 0);
         let unsorted = sql::paged(Engine::SqlServer, &unsorted, &[]).unwrap();
         assert_eq!(
             connection
@@ -3561,7 +3580,7 @@ mod tests {
                 ..FilterBar::default()
             };
             let filter = derived_filter(Engine::SqlServer, &[bar], &structure.columns);
-            let preview = relation_sql(Engine::SqlServer, "dbo", table, &filter, &[], 10, 0);
+            let preview = relation_sql(Engine::SqlServer, "dbo", table, &filter, &[], Some(10), 0);
             assert!(
                 sql::is_generated_select(Engine::SqlServer, &preview),
                 "{preview}"
@@ -3581,7 +3600,7 @@ mod tests {
     fn live_a_seeded_spatial_preview_reads_as_text_inside_the_users_transaction() {
         let connection = live();
         let structure = connection.structure("dbo", "places").unwrap();
-        let preview = relation_sql(Engine::SqlServer, "dbo", "places", "", &[], 10, 0);
+        let preview = relation_sql(Engine::SqlServer, "dbo", "places", "", &[], Some(10), 0);
         let paged = sql::paged(Engine::SqlServer, &preview, &structure.row_key()).unwrap();
         connection
             .query("BEGIN TRANSACTION", Fetch::default())

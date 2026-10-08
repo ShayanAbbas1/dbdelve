@@ -53,11 +53,8 @@ impl Workspace {
         }
     }
 
-    /// Ask a relation's preview for a different number of rows.
-    ///
-    /// The cap is the point of the row limit, so this moves it rather than
-    /// removing it: a `SELECT` with no limit at all is what the query tab is
-    /// for, where the statement is the user's and its cost is theirs to judge.
+    /// Ask a relation's preview for a different number of rows, or for all of
+    /// them.
     pub(crate) fn set_row_limit(
         &mut self,
         action: &SetRowLimit,

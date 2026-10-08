@@ -77,12 +77,13 @@ pub(crate) struct OpenReference {
     pub(crate) index: usize,
 }
 
-/// How many rows a relation's preview asks for. dbdelve's own statement carries
-/// the limit, so the only thing to say is the number.
+/// How many rows a relation's preview asks for, `None` for all of them.
+/// dbdelve's own statement carries the limit, so the only thing to say is the
+/// number.
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = dbdelve, no_json)]
 pub(crate) struct SetRowLimit {
-    pub(crate) rows: usize,
+    pub(crate) rows: Option<usize>,
 }
 
 /// Whose row limit a control sets.
@@ -94,11 +95,11 @@ pub(crate) enum LimitTarget {
     Default,
 }
 
-/// The Settings row limit.
+/// The Settings row limit, `None` for no limit.
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = dbdelve, no_json)]
 pub(crate) struct SetDefaultRowLimit {
-    pub(crate) rows: usize,
+    pub(crate) rows: Option<usize>,
 }
 
 /// Swap a row-limit menu for a field to type a number of one's own into.

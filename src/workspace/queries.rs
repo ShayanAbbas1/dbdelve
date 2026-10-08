@@ -192,7 +192,7 @@ impl Workspace {
                 InputEvent::PressEnter { .. } => {
                     let typed = input.read(cx).value().replace([',', '_', ' '], "");
                     match typed.parse::<usize>() {
-                        Ok(rows) if (1..=MAX_ROW_LIMIT).contains(&rows) => {
+                        Ok(rows) if (1..=explorer::MAX_ROW_LIMIT).contains(&rows) => {
                             // The field goes while it holds focus, and focus
                             // left with nothing holding it takes every
                             // keybinding with it.
@@ -233,8 +233,10 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            LimitTarget::Relation(_) => self.set_row_limit(&SetRowLimit { rows }, window, cx),
-            LimitTarget::Default => self.set_default_row_limit(rows, cx),
+            LimitTarget::Relation(_) => {
+                self.set_row_limit(&SetRowLimit { rows: Some(rows) }, window, cx)
+            }
+            LimitTarget::Default => self.set_default_row_limit(Some(rows), cx),
         }
     }
 
@@ -2236,10 +2238,6 @@ fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &m
     })
     .detach();
 }
-
-/// The most rows a limit may ask for: a relation's preview writes it into its
-/// `LIMIT`, and Postgres reads that as a `bigint`.
-pub(crate) const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
 /// Move what has arrived into the grid. A new result set starts the grid over,
 /// as it would have when the set's statement finished. `true` when anything

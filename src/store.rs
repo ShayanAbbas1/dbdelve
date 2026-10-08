@@ -264,6 +264,8 @@ pub struct StoredGrid {
     pub active: Option<(usize, usize)>,
     #[serde(default)]
     pub last_query: Option<String>,
+    /// A relation tab's row limit, `0` for none: absent already means a
+    /// snapshot from before it was kept, which takes the Settings default.
     #[serde(default)]
     pub limit: Option<usize>,
     /// The relation tab's filter, so reopening dbdelve lands on the rows that
@@ -320,6 +322,9 @@ pub struct StoredSettings {
     pub editor_font_size: Option<f32>,
     #[serde(default)]
     pub grid_font_size: Option<f32>,
+    /// The row limit a new tab starts with, `0` for none and absent for the
+    /// default. A number either way: anything else fails an older build's
+    /// decode of the whole file, which it reads as no profiles at all.
     #[serde(default)]
     pub preview_rows: Option<usize>,
     #[serde(default)]
@@ -339,6 +344,16 @@ pub struct StoredSettings {
     /// below the scalars.
     #[serde(default)]
     pub theme_opacity: Option<HashMap<String, f32>>,
+}
+
+impl StoredSettings {
+    pub fn row_limit(&self) -> Option<usize> {
+        match self.preview_rows {
+            Some(0) => None,
+            Some(rows) if rows <= crate::explorer::MAX_ROW_LIMIT => Some(rows),
+            _ => Some(crate::explorer::PREVIEW_ROW_LIMIT),
+        }
+    }
 }
 
 /// A named collection of connections. A connection is listed by at most one
@@ -1382,6 +1397,21 @@ user = "shayan"
 
         assert_eq!(decoded.profiles, vec![profile]);
         assert_eq!(decoded.active.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn a_row_limit_reads_back_from_a_plain_number_with_zero_for_none() {
+        let limit = |settings: &str| {
+            toml::from_str::<ProfileFile>(&format!("[settings]\n{settings}"))
+                .expect("settings must decode")
+                .settings
+                .expect("settings were written")
+                .row_limit()
+        };
+        // What every build before "No limit" wrote.
+        assert_eq!(limit("preview_rows = 500"), Some(500));
+        assert_eq!(limit(""), Some(crate::explorer::PREVIEW_ROW_LIMIT));
+        assert_eq!(limit("preview_rows = 0"), None);
     }
 
     #[test]

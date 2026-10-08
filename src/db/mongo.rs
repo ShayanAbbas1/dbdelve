@@ -4176,7 +4176,7 @@ mod tests {
                 "wide_metrics",
                 "",
                 &by_id,
-                10,
+                Some(10),
                 offset,
             );
             let result = generated(&connection, &statement);
@@ -4223,7 +4223,7 @@ mod tests {
                 "dbdelve_dev",
                 "accounts",
                 filter,
-                100,
+                None,
                 0,
             );
             generated(&connection, &statement).rows.len() as u64

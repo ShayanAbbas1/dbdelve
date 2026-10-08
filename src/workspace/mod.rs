@@ -34,7 +34,7 @@ pub(crate) struct Settings {
     pub(crate) chrome_font_size: f32,
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
-    pub(crate) row_limit: usize,
+    pub(crate) row_limit: Option<usize>,
     /// How much of the window the desktop shows through, for themes with no
     /// entry in `theme_opacity`. Nothing writes it any more; it is what a
     /// single shared value from before per-theme opacity restores as.
@@ -73,7 +73,7 @@ impl Default for Settings {
             chrome_font_size: layout::BODY_FONT_SIZE,
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
             grid_font_size: layout::BODY_FONT_SIZE,
-            row_limit: PREVIEW_ROW_LIMIT,
+            row_limit: Some(PREVIEW_ROW_LIMIT),
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
             check_for_updates: true,
@@ -366,11 +366,7 @@ impl Workspace {
                             .and_then(|stored| stored.editor_font_size)
                     }),
                 );
-                // Zero would keep no rows of anything, which no control offers.
-                workspace.settings.row_limit = stored_settings
-                    .preview_rows
-                    .filter(|rows| (1..=queries::MAX_ROW_LIMIT).contains(rows))
-                    .unwrap_or(PREVIEW_ROW_LIMIT);
+                workspace.settings.row_limit = stored_settings.row_limit();
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
@@ -756,7 +752,7 @@ impl Workspace {
     /// reason the zoom is, and deliberately not applied to the tabs already
     /// open: their row count is a property of those rows, and changing a
     /// default must never re-run a query nobody asked to re-run.
-    pub(crate) fn set_default_row_limit(&mut self, rows: usize, cx: &mut Context<Self>) {
+    pub(crate) fn set_default_row_limit(&mut self, rows: Option<usize>, cx: &mut Context<Self>) {
         if self.settings.row_limit == rows {
             return;
         }
@@ -1158,8 +1154,11 @@ impl Render for Workspace {
                 }
                 _ => None,
             };
-            let whole =
-                offset == 0 && matches!(query, QueryState::Complete { rows, .. } if *rows < limit);
+            let whole = offset == 0
+                && matches!(
+                    query,
+                    QueryState::Complete { rows, .. } if limit.is_none_or(|limit| *rows < limit)
+                );
             session::relation_rows(count, filter, estimate, engine.exact_row_estimates(), whole)
         });
         // The way to an exact number, which is never run unasked. Its tooltip

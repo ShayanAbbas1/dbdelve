@@ -242,7 +242,10 @@ impl Workspace {
             return;
         };
         let can_turn = match forward {
-            true => matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
+            true => matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ),
             false => *offset > 0,
         };
         if !can_turn {
@@ -251,9 +254,12 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
+                let Some(limit) = *limit else {
+                    return false;
+                };
                 match forward {
-                    true => *offset += *limit,
-                    false => *offset = offset.saturating_sub(*limit),
+                    true => *offset += limit,
+                    false => *offset = offset.saturating_sub(limit),
                 }
                 true
             },
@@ -291,7 +297,10 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
-                *offset = page * *limit;
+                let Some(limit) = *limit else {
+                    return false;
+                };
+                *offset = page * limit;
                 true
             },
             cx,
@@ -315,7 +324,9 @@ impl Workspace {
             .session
             .active_object()
             .and_then(|tab| match &tab.body {
-                ObjectBody::Relation { limit, offset, .. } => Some(offset / limit + 1),
+                ObjectBody::Relation { limit, offset, .. } => {
+                    Some(limit.map_or(1, |limit| offset / limit + 1))
+                }
                 _ => None,
             });
         let Some(page) = page else {

@@ -320,16 +320,19 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
 /// columns that tell its rows apart: without a total order the server may hand
 /// the same row to two pages and none to another. The key follows a
 /// `(SELECT NULL)` that orders nothing, which is how [`unpaged`] tells it from
-/// a sort the user asked for, and is all there is when no key is known.
+/// a sort the user asked for, and is all there is when no key is known. A
+/// preview with no limit is one page already, and comes back as it is.
 ///
-/// `None` for a statement with no limit this can read, which is not a preview.
+/// `None` for a statement this cannot read, or whose limit it cannot.
 pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
     if engine != Engine::SqlServer {
         return Some(statement.to_string());
     }
     let tree = parse(statement)?;
     let anchor = clause_anchor(&tree, statement)?;
-    let limit = child_of_kind(&anchor, "limit")?;
+    let Some(limit) = child_of_kind(&anchor, "limit") else {
+        return Some(statement.to_string());
+    };
     let number = |node: tree_sitter::Node| -> Option<usize> {
         statement
             .get(child_of_kind(&node, "literal")?.byte_range())?
@@ -3836,8 +3839,11 @@ mod tests {
                 "{engine:?}"
             );
         }
-        // Not a preview: nothing to re-spell, so nothing to run.
-        assert_eq!(paged(Engine::SqlServer, &statement(""), &[]), None);
+        // No limit is one page, which needs no `OFFSET` and so no order.
+        assert_eq!(
+            paged(Engine::SqlServer, &statement(""), &[]).as_deref(),
+            Some(statement("").as_str())
+        );
         assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1", &[]), None);
     }
 
