@@ -13,11 +13,12 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    Disableable, ElementExt, Sizable,
+    Disableable, ElementExt, IconName, Sizable,
     button::Button,
     input::{self, Editor, EditorState, Input, InputState},
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
+    spinner::Spinner,
     table::{DataTable, TableDelegate, TableState},
 };
 
@@ -1035,12 +1036,80 @@ fn render_results(
             .child(line)
             .into_any_element()
     };
+    // The default `Loader` icon names a file dbdelve's asset source does not
+    // serve, so the spinner has to be pointed at the one it does.
+    let spinner = || {
+        Spinner::new()
+            .icon(IconName::LoaderCircle)
+            .color(t.text_muted.into())
+            .small()
+            .into_any_element()
+    };
+
+    let (started, cancelling) = match query {
+        QueryState::Running {
+            started,
+            cancelling,
+            ..
+        } => (Some(*started), *cancelling),
+        _ => (None, None),
+    };
+    let cancel = move |cx: &mut Context<Workspace>| {
+        // A word rather than an icon: a square or a cross beside a status line
+        // reads as "close this", and the quiet tone is what keeps it from
+        // competing with rows that are still coming.
+        //
+        // Once the request is out the label is the only acknowledgement the
+        // click gets, and the statement is still running, so the button goes
+        // inert rather than away.
+        let label = match cancelling {
+            Some(sent) if sent.elapsed() >= CANCEL_PATIENCE => "Still waiting on server…",
+            Some(_) => "Cancelling…",
+            None => "Cancel",
+        };
+        let timer = started.map(|started| quiet_line(clock(started.elapsed())));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .children(timer)
+            .child(
+                button("cancel-query", label, Tone::Quiet, Control::Compact, t)
+                    .disabled(cancelling.is_some())
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.cancel_query(&CancelQuery, window, cx);
+                    })),
+            )
+    };
     // A refresh keeps the rows it is replacing (`execute_and_then`'s
     // `keep_rows`), and a centred spinner over rows the user is still reading
     // hides the data this pane is for. So every state that has rows behind it
     // falls through to the grid, and the run says so in a strip above it
     // instead of in place of it.
     let has_rows = results.read(cx).delegate().rows_count(cx) > 0;
+
+    // The two loading states, overlaid on the grid rather than replacing it
+    // (below). Opening a tab focuses the grid before its first result lands,
+    // and a `message` that replaces it unmounts the very element that focus
+    // handle names -- the window is left with a focused handle no element
+    // tracks, and no dispatch path for anything, `secondary-w` included.
+    let loading = match query {
+        // A preview runs the moment its tab is shown, so an idle one is a
+        // tab that is about to run rather than one waiting to be asked. It has
+        // nothing to cancel yet, though, which is the whole difference here.
+        QueryState::Idle if query_tab.is_none() && !has_rows => Some(centered(spinner())),
+        QueryState::Running { .. } if !has_rows => Some(centered(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(layout::SPACE_MD))
+                .child(spinner())
+                .child(cancel(cx))
+                .into_any_element(),
+        )),
+        _ => None,
+    };
 
     let message = match query {
         QueryState::Idle if query_tab.is_some() => Some(centered(
@@ -1185,11 +1254,44 @@ fn render_results(
         })
         .into_any_element();
 
-    let content = message.unwrap_or(grid);
+    let content = match message {
+        Some(message) => message,
+        None => match loading {
+            // A child rather than replacing the grid: it must stay mounted
+            // for the focus a fresh tab put on it, `secondary-w` included --
+            // see the comment above `loading`.
+            Some(overlay) => div()
+                .relative()
+                .size_full()
+                .min_h_0()
+                .min_w_0()
+                .child(grid)
+                .child(
+                    // Pinned to the corner: a `div` is block layout, which puts
+                    // an absolute child with no insets where it would have
+                    // flowed -- below the full-height grid, out of sight.
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        // Without this a header click reaches the grid
+                        // mounted underneath -- empty or stale, since this is
+                        // exactly the state a run has not replaced it yet.
+                        // The overlay's own Cancel button still works: this
+                        // only stops a click from reaching past the overlay,
+                        // never from landing on it.
+                        .occlude()
+                        .child(overlay),
+                )
+                .into_any_element(),
+            None => grid,
+        },
+    };
 
     // The new-row form, or the selected row's inspector, takes a slice beside
-    // whatever is occupying the main area -- the grid or a message -- rather
-    // than just the grid, so New row stays usable on an
+    // whatever is occupying the main area -- the grid, a message or a loading
+    // overlay -- rather than just the grid, so New row stays usable on an
     // empty table and Delete's refusal is visible after a failed preview.
     let panel = match form {
         Some(form) => Some((render_new_row_panel(engine, form, scope, cx), false)),
