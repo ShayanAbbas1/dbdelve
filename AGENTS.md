@@ -399,6 +399,9 @@ sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
 
 The seed uses `unhex()`, so it needs sqlite3 3.41 or later.
 
+`dev/load.sh` rebuilds Postgres `events` about a hundred columns wide for load testing;
+it is opt-in and CI never runs it (see `CONTRIBUTING.md`).
+
 **The MySQL container reports itself healthy when its init script failed.**
 `mysqladmin ping` does not care whether the seed applied, so a half-seeded
 database looks exactly like a good one. Check a row count, not the status;
