@@ -464,6 +464,11 @@ fn encryption(mode: SslMode) -> EncryptionLevel {
     }
 }
 
+/// How a statement Cancel stopped part way begins its error, which goes on to
+/// say what the reset cost.
+pub(crate) const CANCELLED: &str =
+    "Cancelled: the statement was stopped by closing its connection.";
+
 /// A runtime, and the client it drives.
 struct Session {
     runtime: Runtime,
@@ -742,16 +747,10 @@ impl Connection {
                      by closing its connection."
                 ),
                 (None, Some(Lost::Panicked(message))) => message,
-                (None, None) => {
-                    "Cancelled: the statement was stopped by closing its connection.".into()
-                }
+                (None, None) => CANCELLED.into(),
                 // What dbdelve asks after the statement is what was stopped,
                 // and the statement's own work stands.
                 (Some(ran), lost) => {
-                    let outcome = match ran.result {
-                        Ok(_) => "The statement finished".to_string(),
-                        Err(error) => format!("{}\n\nThe statement failed", error.message),
-                    };
                     let after = match lost {
                         Some(Lost::TimedOut) => format!(
                             "a query dbdelve sends after it ran past the {limit}-second statement \
@@ -760,7 +759,20 @@ impl Connection {
                         Some(Lost::Panicked(message)) => format!("then {message}"),
                         None => "Cancel arrived after that.".into(),
                     };
-                    format!("{outcome}, but {after}")
+                    match ran.result {
+                        // Whole, so it lands as a result rather than as an
+                        // error or as rows a cancel cut short, and the reset
+                        // is said beside it.
+                        Ok(mut result) => {
+                            let reset = self
+                                .stop(&mut guard, format!("The statement finished, but {after}"));
+                            result.notice = Some(reset.message);
+                            return Ok(result);
+                        }
+                        Err(error) => {
+                            format!("{}\n\nThe statement failed, but {after}", error.message)
+                        }
+                    }
                 }
             };
             return Err(self.stop(&mut guard, what));
@@ -3564,7 +3576,11 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        assert!(error.message.starts_with("Cancelled"), "{}", error.message);
+        assert!(
+            crate::db::is_cancel(Engine::SqlServer, &error),
+            "{}",
+            error.message
+        );
         assert!(error.message.contains("reconnected"), "{}", error.message);
 
         // Honest only if the server stopped too: past the delay, the insert

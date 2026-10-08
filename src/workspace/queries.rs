@@ -1552,7 +1552,7 @@ impl Workspace {
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
-                    let (succeeded, produced_grid, plan, rest) = {
+                    let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             workspace.drop_stale_run(&id, tab, cx);
                             return;
@@ -1592,24 +1592,40 @@ impl Workspace {
                             return;
                         };
 
-                        // Cancelled part way, a stream keeps the rows it had:
-                        // they are what the user stopped it to look at.
+                        let cancelled = matches!(
+                            state,
+                            QueryState::Running {
+                                cancelling: Some(_),
+                                ..
+                            }
+                        );
+                        // Cancelled part way, a lone read keeps the rows it
+                        // had: they are what the user stopped it to look at.
+                        // Not a write's, which the cancel undid, and not when
+                        // something other than the cancel ended it. Whatever
+                        // the cancel cost besides is said either way.
                         let result = match result {
-                            Err(_)
-                                if matches!(
-                                    state,
-                                    QueryState::Running {
-                                        cancelling: Some(_),
-                                        ..
-                                    }
-                                ) && results.read(cx).delegate().streamed_set().is_some() =>
+                            Err(error)
+                                if cancelled
+                                    && reads_only
+                                    && db::is_cancel(engine, &error)
+                                    && results.read(cx).delegate().streamed_set().is_some() =>
                             {
                                 Ok(QueryResult {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
+                                    notice: db::cancel_cost(engine, &error, true),
                                     ..QueryResult::default()
                                 })
+                            }
+                            Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
+                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only)
+                                    && cost != error.message
+                                {
+                                    error.message = format!("{}\n\n{cost}", error.message);
+                                }
+                                Err(error)
                             }
                             result => result,
                         };
@@ -1630,7 +1646,7 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan), Vec::new())
+                                (true, false, Some(plan), Vec::new(), result.notice)
                             }
                             Ok(mut result) => {
                                 // Rows that streamed in were scrolled through as
@@ -1675,6 +1691,7 @@ impl Workspace {
                                 // their own and have no business inside this
                                 // one's snapshot.
                                 let rest = std::mem::take(&mut result.rest);
+                                let notice = result.notice.take();
                                 // An `INSERT … RETURNING` grid traces to its
                                 // table like any select, but applying an edit
                                 // re-runs the statement behind the grid to
@@ -1721,7 +1738,7 @@ impl Workspace {
                                 if feed.is_some() {
                                     render_aside(&results, engine, cx);
                                 }
-                                (true, produced_grid, None, rest)
+                                (true, produced_grid, None, rest, notice)
                             }
                             Err(mut error) => {
                                 // Rows of a statement that failed part way are
@@ -1744,18 +1761,11 @@ impl Workspace {
                                 error.position = error
                                     .position
                                     .and_then(|position| position.checked_sub(prefix));
-                                let cancelled = matches!(
-                                    state,
-                                    QueryState::Running {
-                                        cancelling: Some(_),
-                                        ..
-                                    }
-                                );
                                 *state = match restored {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new())
+                                (false, false, None, Vec::new(), None)
                             }
                         }
                     };
@@ -1765,6 +1775,11 @@ impl Workspace {
                         && profile.session.notice.as_deref() == Some(Self::REFRESHING)
                     {
                         profile.session.notice = None;
+                    }
+                    if let Some(notice) = notice
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                    {
+                        profile.session.notice = Some(notice);
                     }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
