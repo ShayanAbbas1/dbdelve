@@ -759,7 +759,7 @@ impl Connection {
             .block_on(assembly.read(&mut messages, stoppable))
             .map_err(failed)??
         {
-            assembly.stopping = self.stop_at_limit();
+            assembly.stopping = self.stop_at_limit(sql);
             driver
                 .block_on(assembly.read(&mut messages, false))
                 .map_err(failed)??;
@@ -886,20 +886,29 @@ impl Connection {
     /// session is bounded, because this session's lock is held through it and
     /// a describe there can be stuck behind a lock the user's own transaction
     /// holds, which only this session can release; still busy, the rows past
-    /// the limit are drained. A server process that
-    /// is not visible here, behind a pooler, is never signalled, and the rows
-    /// past the limit are drained instead.
-    fn stop_at_limit(&self) -> bool {
+    /// the limit are drained.
+    ///
+    /// The process is the one this session was given at connect. Behind a
+    /// transaction pooler -- PgBouncer, Supavisor -- that process serves other
+    /// clients between this one's transactions, and a lone read of theirs
+    /// passes every check above, so it must also be running this statement's
+    /// exact text. `query` is cut at `track_activity_query_size` (1 kB by
+    /// default), so a longer statement never matches and is drained. Another
+    /// client running byte-for-byte the same lone read on that process at
+    /// that moment would still be stopped (known limitation).
+    fn stop_at_limit(&self, sql: &str) -> bool {
         let Some(pid) = self.pid else {
             return false;
         };
+        // `E''`, so it reads the same whatever `standard_conforming_strings` is.
+        let text = format!("E'{}'", sql.replace('\\', r"\\").replace('\'', "''"));
         let wait = Duration::from_secs(SIDE_TIMEOUT_SECONDS.into());
         let signalled = self.aside(wait, |side| {
             let result = side
                 .internal_query(&format!(
                     "SELECT pg_catalog.pg_cancel_backend(pid)
                      FROM pg_catalog.pg_stat_activity
-                     WHERE pid = {pid} AND state = 'active'
+                     WHERE pid = {pid} AND state = 'active' AND query = {text}
                        AND xact_start = query_start AND backend_xid IS NULL"
                 ))
                 .ok()?;
@@ -2447,6 +2456,43 @@ mod tests {
         connection
             .query(&format!("DROP TABLE {table}"), Fetch::default())
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_stop_leaves_another_clients_read_on_a_pooled_process_alone() {
+        let ours = Connection::open(&live_config()).expect("connection should open");
+        let theirs = Connection::open(&live_config()).expect("connection should open");
+        // What a transaction pooler does: the process this session was given
+        // at connect is now running someone else's lone read.
+        let pooled = Connection {
+            pid: theirs.pid,
+            ..ours.clone()
+        };
+        let sql = r"SELECT pg_sleep(3), 'it''s a \ '";
+        let reader = std::thread::spawn({
+            let theirs = theirs.clone();
+            move || theirs.query(sql, Fetch::default())
+        });
+        let active = format!(
+            "SELECT 1 FROM pg_catalog.pg_stat_activity
+             WHERE pid = {} AND state = 'active'",
+            theirs.pid.unwrap()
+        );
+        while ours
+            .query(&active, Fetch::default())
+            .unwrap()
+            .rows
+            .is_empty()
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(!pooled.stop_at_limit("SELECT n FROM generate_series(1, 10) AS n"));
+        // The same check does stop the process when the text is ours.
+        assert!(pooled.stop_at_limit(sql));
+        let error = reader.join().unwrap().expect_err("it was cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
     }
 
     #[test]
