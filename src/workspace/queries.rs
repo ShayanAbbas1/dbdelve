@@ -1716,7 +1716,12 @@ impl Workspace {
                                     rows_affected: result.rows_affected,
                                 };
                                 let produced_grid = !result.columns.is_empty();
+                                // Sorted in memory as it lands, the rows move
+                                // out from under any index into them.
+                                let reordered =
+                                    client_keys.as_deref().is_some_and(|keys| !keys.is_empty());
                                 results.update(cx, |table, cx| {
+                                    let selection = table.delegate().selection();
                                     let sort = sort_columns(engine, &keys, &result.columns);
                                     let (names, widths, vertical, horizontal) = &shown;
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
@@ -1724,10 +1729,19 @@ impl Workspace {
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
                                         .with_layout(names, widths);
-                                    // Rows kept through a refresh kept their
-                                    // selection too, and its index now names
-                                    // whichever row the new result put there.
-                                    table.clear_selection(cx);
+                                    // Streamed rows are the finished result's
+                                    // first rows, in order, so what was picked
+                                    // out of them as they came still names
+                                    // them. Rows kept through a refresh kept
+                                    // their selection too, but its index now
+                                    // names whichever row the new result put
+                                    // there.
+                                    let kept = streamed
+                                        && !reordered
+                                        && table.delegate_mut().select(selection);
+                                    if !kept {
+                                        table.clear_selection(cx);
+                                    }
                                     table.refresh(cx);
                                     if !streamed && table.delegate().layout().0 == *names {
                                         table
