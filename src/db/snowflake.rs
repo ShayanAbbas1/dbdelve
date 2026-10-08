@@ -889,6 +889,13 @@ impl Connection {
             if partition >= partitions || full(kept) {
                 break;
             }
+            // The statement is over, so there is no handle to stop: the cancel
+            // is honoured by not fetching what is left.
+            if let Cancellable::Yes(CancelToken(running)) = cancellable
+                && running.lock().is_ok_and(|running| running.asked)
+            {
+                return Err(plain_error("Cancelled.".into()));
+            }
             let (status, next) =
                 self.fetch(&self.url(&format!("/{handle}?partition={partition}")))?;
             reply(&host, status, &next)?;
@@ -2545,6 +2552,27 @@ mod tests {
             .expect("runs");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn a_cancel_stops_the_download_between_partitions() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let handle = partition.split('?').next().expect("a path").to_string();
+        mock.on(
+            "POST",
+            &format!("{handle}/cancel"),
+            [Response::fixture(200, "cancel.json")],
+        );
+        let connection = connected(&mock);
+        let run = CancelToken::default();
+        connection.cancel(&run).expect("nothing to cancel yet");
+
+        let error = connection
+            .query_with(LARGE_SQL, &run, Fetch::default())
+            .expect_err("a cancelled run is an error");
+        assert_eq!(error.message, "Cancelled.");
+        assert_eq!(mock.hits("GET", &partition), 0);
     }
 
     #[test]
