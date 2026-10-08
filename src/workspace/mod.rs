@@ -1221,7 +1221,8 @@ impl Render for Workspace {
                     let count = row_readout(showing.unwrap_or(*rows), *rows);
                     match stopped {
                         Some(db::Stopped::Cancelled) => format!("{count}, cancelled"),
-                        Some(db::Stopped::AtLimit) | None => count,
+                        Some(db::Stopped::AtLimit) => format!("{count}, stopped at limit"),
+                        None => count,
                     }
                 });
                 let joined = |rest: String| match count {
