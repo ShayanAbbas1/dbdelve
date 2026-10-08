@@ -306,7 +306,7 @@ impl Workspace {
 
         let task = cx
             .background_executor()
-            .spawn(async move { connection.generated(&sql, &cancel) });
+            .spawn(async move { connection.generated(&sql, &cancel, None) });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             _ = workspace.update(cx, |workspace, cx| {
@@ -769,7 +769,7 @@ impl Workspace {
                     .map(|(index, label, sql)| {
                         let answer = match sql {
                             Some(sql) => connection
-                                .generated(&sql, &CancelToken::default())
+                                .generated(&sql, &CancelToken::default(), None)
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
                             None => Err(

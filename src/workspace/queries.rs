@@ -1490,8 +1490,11 @@ impl Workspace {
         };
         // Rows land in the grid as they arrive, but only in a grid cleared for
         // them: a refresh keeps the rows it is replacing until the new ones are
-        // whole, and a plan's rows never reach the grid at all.
-        let feed = (!keep_rows && !generated && explain.is_none()).then(Feed::default);
+        // whole, and a plan's rows never reach the grid at all. A relation's
+        // preview is dbdelve's statement and streams like the user's; a query
+        // tab's generated run is an edit, with no rows to stream.
+        let streams = matches!(tab, Tab::Object(_)) || !generated;
+        let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
             let (id, results) = (id.clone(), results.clone());
             let (names, widths) = (shown.0.clone(), shown.1.clone());
@@ -1527,7 +1530,7 @@ impl Workspace {
         let reads_only = sql::rerunnable(engine, &sql);
         let query_task = cx.background_executor().spawn(async move {
             let result = match generated {
-                true => connection.generated(&sql, &cancel),
+                true => connection.generated(&sql, &cancel, fed.as_ref()),
                 false => connection.query(
                     &sql,
                     &cancel,

@@ -1082,14 +1082,30 @@ impl Connection {
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
     /// Server alone runs it differently: its session options are the user's to
     /// `SET`, and dbdelve's SQL is written for particular ones.
-    pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    ///
+    /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
+    /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
+    /// applies.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        feed: Option<&Feed>,
+    ) -> Result<QueryResult, DbError> {
         match self {
             Self::SqlServer(connection) => connection.generated(sql),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_) => self.query(sql, cancel, Fetch::default()),
+            | Self::MongoDb(_) => self.query(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
         }
     }
 
