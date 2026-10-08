@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -373,6 +373,11 @@ ORDER BY attribute.attnum
 ";
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
+/// The side session's statement timeout, and how long a stop at the row
+/// limit waits for the side session before draining instead. A describe
+/// there waits on the same locks the user's statement took, and the user's
+/// own open transaction can hold them for as long as it likes.
+const SIDE_TIMEOUT_SECONDS: u32 = 2;
 
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let url_parts =
@@ -754,7 +759,7 @@ impl Connection {
             .block_on(assembly.read(&mut messages, stoppable))
             .map_err(failed)??
         {
-            assembly.stopping = self.stop_at_limit();
+            assembly.stopping = self.stop_at_limit(sql);
             driver
                 .block_on(assembly.read(&mut messages, false))
                 .map_err(failed)??;
@@ -819,11 +824,26 @@ impl Connection {
     }
 
     /// `ask` on the side session, opened if there is none or the last one
-    /// was lost. `None` when it could not be opened or `ask` had no answer.
-    fn aside<T>(&self, ask: impl FnOnce(&Connection) -> Option<T>) -> Option<T> {
-        let mut side = self.side.lock().ok()?;
+    /// was lost. `None` when it could not be opened, `ask` had no answer, or
+    /// the session was still busy after `wait` -- never blocked on, so no
+    /// caller queues behind a describe stuck on a lock.
+    fn aside<T>(&self, wait: Duration, ask: impl FnOnce(&Connection) -> Option<T>) -> Option<T> {
+        let deadline = Instant::now() + wait;
+        let mut side = loop {
+            match self.side.try_lock() {
+                Ok(side) => break side,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        };
         if side.as_ref().is_none_or(Connection::is_lost) {
-            *side = Self::connect(&self.server, self.tunnel.clone()).ok();
+            let server = ServerConfig {
+                statement_timeout: SIDE_TIMEOUT_SECONDS,
+                ..self.server.clone()
+            };
+            *side = Self::connect(&server, self.tunnel.clone()).ok();
         }
         ask(side.as_ref()?)
     }
@@ -835,11 +855,12 @@ impl Connection {
     /// [`Self::run`]), and the side session has none of the user's to abort.
     /// One that cannot see what this session sees -- a temporary table, a
     /// `SET search_path` -- learns nothing, and the rows are rendered at the
-    /// end as before.
+    /// end as before. So does one that times out on a lock, or finds the side
+    /// session still busy with an earlier one.
     fn describe_aside(&self, sql: &str, feed: &Feed) {
         let (this, sql, feed) = (self.clone(), sql.to_string(), feed.clone());
         std::thread::spawn(move || {
-            let types = this.aside(|side| {
+            let types = this.aside(Duration::ZERO, |side| {
                 let mut client = side.client.lock().ok()?;
                 Some(describe_columns(&mut client, &sql))
             });
@@ -861,19 +882,33 @@ impl Connection {
     /// Checked and signalled in one statement on the side session, so the
     /// check cannot go stale before the cancel, and no new socket is opened
     /// for it -- a cancel request is a connection of its own, which through a
-    /// proxy to a remote server costs a full handshake. A server process that
-    /// is not visible here, behind a pooler, is never signalled, and the rows
-    /// past the limit are drained instead.
-    fn stop_at_limit(&self) -> bool {
+    /// proxy to a remote server costs a full handshake. The wait for the side
+    /// session is bounded, because this session's lock is held through it and
+    /// a describe there can be stuck behind a lock the user's own transaction
+    /// holds, which only this session can release; still busy, the rows past
+    /// the limit are drained.
+    ///
+    /// The process is the one this session was given at connect. Behind a
+    /// transaction pooler -- PgBouncer, Supavisor -- that process serves other
+    /// clients between this one's transactions, and a lone read of theirs
+    /// passes every check above, so it must also be running this statement's
+    /// exact text. `query` is cut at `track_activity_query_size` (1 kB by
+    /// default), so a longer statement never matches and is drained. Another
+    /// client running byte-for-byte the same lone read on that process at
+    /// that moment would still be stopped (known limitation).
+    fn stop_at_limit(&self, sql: &str) -> bool {
         let Some(pid) = self.pid else {
             return false;
         };
-        let signalled = self.aside(|side| {
+        // `E''`, so it reads the same whatever `standard_conforming_strings` is.
+        let text = format!("E'{}'", sql.replace('\\', r"\\").replace('\'', "''"));
+        let wait = Duration::from_secs(SIDE_TIMEOUT_SECONDS.into());
+        let signalled = self.aside(wait, |side| {
             let result = side
                 .internal_query(&format!(
                     "SELECT pg_catalog.pg_cancel_backend(pid)
                      FROM pg_catalog.pg_stat_activity
-                     WHERE pid = {pid} AND state = 'active'
+                     WHERE pid = {pid} AND state = 'active' AND query = {text}
                        AND xact_start = query_start AND backend_xid IS NULL"
                 ))
                 .ok()?;
@@ -2373,6 +2408,91 @@ mod tests {
                 .is_ok()
         );
         connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_of_a_table_the_users_transaction_locked_is_drained_not_hung() {
+        let table = format!("dbdelve_locked_{}", std::process::id());
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .query(
+                &format!("CREATE TABLE {table} AS SELECT generate_series(1, 1000) AS n"),
+                Fetch::default(),
+            )
+            .unwrap();
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query(
+                &format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"),
+                Fetch::default(),
+            )
+            .unwrap();
+
+        // On a thread, so a regression fails the test instead of hanging it:
+        // the describe aside waits on the lock this transaction holds.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (reader, sql) = (connection.clone(), format!("SELECT n FROM {table}"));
+        std::thread::spawn(move || {
+            let feed = crate::db::Feed::default();
+            let result = reader.query(
+                &sql,
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    feed: Some(&feed),
+                },
+            );
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the read should not wait on the side session")
+            .unwrap();
+
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.capped_from, Some(1000));
+        connection.query("COMMIT", Fetch::default()).unwrap();
+        connection
+            .query(&format!("DROP TABLE {table}"), Fetch::default())
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_stop_leaves_another_clients_read_on_a_pooled_process_alone() {
+        let ours = Connection::open(&live_config()).expect("connection should open");
+        let theirs = Connection::open(&live_config()).expect("connection should open");
+        // What a transaction pooler does: the process this session was given
+        // at connect is now running someone else's lone read.
+        let pooled = Connection {
+            pid: theirs.pid,
+            ..ours.clone()
+        };
+        let sql = r"SELECT pg_sleep(3), 'it''s a \ '";
+        let reader = std::thread::spawn({
+            let theirs = theirs.clone();
+            move || theirs.query(sql, Fetch::default())
+        });
+        let active = format!(
+            "SELECT 1 FROM pg_catalog.pg_stat_activity
+             WHERE pid = {} AND state = 'active'",
+            theirs.pid.unwrap()
+        );
+        while ours
+            .query(&active, Fetch::default())
+            .unwrap()
+            .rows
+            .is_empty()
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(!pooled.stop_at_limit("SELECT n FROM generate_series(1, 10) AS n"));
+        // The same check does stop the process when the text is ours.
+        assert!(pooled.stop_at_limit(sql));
+        let error = reader.join().unwrap().expect_err("it was cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
     }
 
     #[test]
