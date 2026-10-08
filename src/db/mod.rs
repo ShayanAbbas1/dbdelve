@@ -1061,7 +1061,7 @@ impl Connection {
     /// unless the statement could be stopped there instead
     /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
     /// instead of the result, which then holds none, and [`settle`] is owed
-    /// once they are gathered. Only Postgres honours any of [`Fetch`] so far.
+    /// once they are gathered. Only Postgres and MySQL honour [`Fetch`] so far.
     pub fn query(
         &self,
         sql: &str,
@@ -1070,7 +1070,7 @@ impl Connection {
     ) -> Result<QueryResult, DbError> {
         match self {
             Self::Postgres(connection) => connection.query(sql, fetch),
-            Self::MySql(connection) => connection.query(sql),
+            Self::MySql(connection) => connection.query(sql, fetch),
             Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
             Self::Snowflake(connection) => connection.query_with(sql, cancel),
