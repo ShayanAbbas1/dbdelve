@@ -422,15 +422,33 @@ impl ResultGrid {
     }
 
     /// The columns' types, learned while their rows are still arriving. The
-    /// rows are kept; what is worked out from the types is worked out again,
-    /// the rows that arrived before the types included.
+    /// rows are kept; what is worked out from the types is worked out again.
+    /// Their values are rendered apart, off the frame thread
+    /// ([`db::unrendered`]).
     pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
         self.numeric = columns
             .iter()
             .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
             .collect();
         self.result.columns = columns;
-        db::settle(self.engine, &mut self.result);
+    }
+
+    /// Put values rendered off the frame thread in place, each only where the
+    /// cell still holds what was rendered: a sort or a new run in between has
+    /// moved or replaced it, and a value written there would be another
+    /// row's.
+    pub fn apply_rendered(&mut self, rendered: Vec<(usize, usize, String, String)>) {
+        for (row, column, was, now) in rendered {
+            if let Some(Some(cell)) = self
+                .result
+                .rows
+                .get_mut(row)
+                .and_then(|cells| cells.get_mut(column))
+                && *cell == was
+            {
+                *cell = now;
+            }
+        }
     }
 
     pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
@@ -2429,10 +2447,32 @@ mod tests {
         grid.append_rows(vec![vec![Some("1".into()), Some(point.into())]]);
 
         grid.set_column_types(vec![typed("n", "int4"), typed("p", "geometry")]);
+        let rendered = db::render(db::unrendered(db::Engine::Postgres, grid.result()));
+        grid.apply_rendered(rendered);
 
         assert!(grid.is_numeric_column(0));
-        let rendered = grid.result().rows[0][1].as_deref().unwrap_or_default();
-        assert!(rendered.starts_with("POINT"), "{rendered}");
+        let shown = grid.result().rows[0][1].as_deref().unwrap_or_default();
+        assert!(shown.starts_with("POINT"), "{shown}");
+        // Rendered already, so a second pass finds nothing left to do.
+        assert!(db::unrendered(db::Engine::Postgres, grid.result()).is_empty());
+    }
+
+    #[test]
+    fn a_rendered_value_lands_only_where_the_cell_still_holds_what_was_rendered() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("p")],
+                rows: vec![vec![Some("moved".into())], vec![Some("0101".into())]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        grid.apply_rendered(vec![
+            (0, 0, "0101".into(), "POINT(1 1)".into()),
+            (1, 0, "0101".into(), "POINT(2 2)".into()),
+        ]);
+        assert_eq!(grid.result().rows[0][0].as_deref(), Some("moved"));
+        assert_eq!(grid.result().rows[1][0].as_deref(), Some("POINT(2 2)"));
     }
 
     fn value(text: &str) -> NewValue {

@@ -592,6 +592,12 @@ pub struct Connection {
     /// The server process behind the client, for asking after the statement
     /// it is running from another connection. `None` if it would not say.
     pid: Option<i32>,
+    /// A second session to the same server, for what has to be asked while
+    /// this one is busy with a statement's rows: its column types, and
+    /// whether it can be stopped at the row limit. Opened the first time it
+    /// is needed and kept, so a run does not pay for a connect. Never in a
+    /// transaction of the user's, which is what makes it safe to describe on.
+    side: Arc<Mutex<Option<Connection>>>,
     /// Held so ssh runs as long as any clone does. The cancel token dials the
     /// address the client connected to, so a cancel goes through it too.
     tunnel: Option<Arc<Tunnel>>,
@@ -659,6 +665,7 @@ impl Connection {
         Ok(Self {
             cancel: client.client.cancel_token(),
             pid,
+            side: Arc::default(),
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
@@ -811,30 +818,34 @@ impl Connection {
         resolve_edit_target(probed, &keyed_table(&catalog)?)
     }
 
+    /// `ask` on the side session, opened if there is none or the last one
+    /// was lost. `None` when it could not be opened or `ask` had no answer.
+    fn aside<T>(&self, ask: impl FnOnce(&Connection) -> Option<T>) -> Option<T> {
+        let mut side = self.side.lock().ok()?;
+        if side.as_ref().is_none_or(Connection::is_lost) {
+            *side = Self::connect(&self.server, self.tunnel.clone()).ok();
+        }
+        ask(side.as_ref()?)
+    }
+
     /// Learn the statement's column types while it runs, so its rows can be
     /// shown by type -- numbers aligned, geometry as text -- as they stream in
-    /// rather than once it is done. On a connection of its own: a describe this session's server
-    /// refuses aborts the transaction it is in (see [`Self::run`]), and
-    /// another session has none of the user's to abort. One that cannot see
-    /// what this session sees -- a temporary table, a `SET search_path` --
-    /// learns nothing, and the rows are rendered at the end as before.
-    ///
-    /// ponytail: a thread and a connection per streamed run. A side
-    /// connection kept open is the upgrade path, shared with `stop_at_limit`.
+    /// rather than once it is done. On the side session: a describe this
+    /// session's server refuses aborts the transaction it is in (see
+    /// [`Self::run`]), and the side session has none of the user's to abort.
+    /// One that cannot see what this session sees -- a temporary table, a
+    /// `SET search_path` -- learns nothing, and the rows are rendered at the
+    /// end as before.
     fn describe_aside(&self, sql: &str, feed: &Feed) {
         let (this, sql, feed) = (self.clone(), sql.to_string(), feed.clone());
         std::thread::spawn(move || {
-            let Ok(side) = Self::connect(&this.server, this.tunnel.clone()) else {
-                return;
-            };
-            let Ok(mut client) = side.client.lock() else {
-                return;
-            };
-            let types: Vec<String> = describe_columns(&mut client, &sql)
-                .into_iter()
-                .map(|column| column.type_name)
-                .collect();
-            feed.describe(types);
+            let types = this.aside(|side| {
+                let mut client = side.client.lock().ok()?;
+                Some(describe_columns(&mut client, &sql))
+            });
+            if let Some(types) = types {
+                feed.describe(types.into_iter().map(|column| column.type_name).collect());
+            }
         });
     }
 
@@ -846,30 +857,25 @@ impl Connection {
     /// one inside `BEGIN` would throw the user's open work away, and stopping
     /// a write would leave it half done. In the implicit transaction of a
     /// lone statement, `xact_start` is `query_start` to the microsecond. Asked
-    /// on a connection of its own, since this one is busy with the rows.
+    /// on the side session, since this one is busy with the rows.
     ///
     /// A cancel can land after the statement finished on its own; on an idle
     /// session the server ignores it, which is the same race Cancel has.
-    ///
-    /// ponytail: a connection opened per stop. A side connection kept open is
-    /// the upgrade path if the connect shows up in query timings.
     fn stop_at_limit(&self) -> bool {
         let Some(pid) = self.pid else {
             return false;
         };
-        let Ok(side) = Self::connect(&self.server, self.tunnel.clone()) else {
-            return false;
-        };
-        let safe = side
-            .internal_query(&format!(
-                "SELECT xact_start = query_start AND backend_xid IS NULL
-                 FROM pg_catalog.pg_stat_activity
-                 WHERE pid = {pid} AND state = 'active'"
-            ))
-            .is_ok_and(|result| {
-                result.rows.first().and_then(|row| row.first()) == Some(&Some("t".to_string()))
-            });
-        safe && self.cancel().is_ok()
+        let safe = self.aside(|side| {
+            let result = side
+                .internal_query(&format!(
+                    "SELECT xact_start = query_start AND backend_xid IS NULL
+                     FROM pg_catalog.pg_stat_activity
+                     WHERE pid = {pid} AND state = 'active'"
+                ))
+                .ok()?;
+            Some(result.rows.first()?.first()? == &Some("t".to_string()))
+        });
+        safe == Some(true) && self.cancel().is_ok()
     }
 
     pub fn databases(&self) -> Result<super::Databases, DbError> {
@@ -1341,7 +1347,7 @@ fn apply_types(columns: &mut [Column], probed: &[ProbedColumn]) {
     }
 }
 
-pub(super) fn format_spatial_cells(result: &mut QueryResult) {
+fn format_spatial_cells(result: &mut QueryResult) {
     let spatial = result
         .columns
         .iter()
@@ -1355,7 +1361,7 @@ pub(super) fn format_spatial_cells(result: &mut QueryResult) {
     }
 }
 
-fn is_spatial(type_name: &str) -> bool {
+pub(super) fn is_spatial(type_name: &str) -> bool {
     matches!(type_name, "geometry" | "geography")
 }
 
@@ -1363,20 +1369,19 @@ fn is_spatial(type_name: &str) -> bool {
 /// rendered as they streamed in go through this a second time.
 fn format_spatial_row(row: &mut [Cell], spatial: &[bool]) {
     for (cell, spatial) in row.iter_mut().zip(spatial) {
-        if !spatial {
-            continue;
+        if let (true, Some(value)) = (spatial, cell)
+            && let Some(wkt) = render_spatial(value)
+        {
+            *value = wkt;
         }
-        let Some(value) = cell else {
-            continue;
-        };
-        let Ok(bytes) = hex::decode(&*value) else {
-            continue;
-        };
-        let Ok(wkt) = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()) else {
-            continue;
-        };
-        *value = readable_wkt(&wkt);
     }
+}
+
+/// Hex EWKB as WKT, or `None` for anything else -- WKT already, among others.
+pub(super) fn render_spatial(value: &str) -> Option<String> {
+    let bytes = hex::decode(value).ok()?;
+    let wkt = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()).ok()?;
+    Some(readable_wkt(&wkt))
 }
 
 fn readable_wkt(wkt: &str) -> String {
@@ -2291,6 +2296,29 @@ mod tests {
         // Described like any single statement, though it never completed.
         assert_eq!(types(&result), vec![Some("int4")]);
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+
+        // The side session that answered is kept for the next run, not
+        // reopened.
+        let side_pid = |connection: &Connection| {
+            connection
+                .side
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|side| side.pid)
+        };
+        let first = side_pid(&connection).expect("the stop opened a side session");
+        connection
+            .query(
+                "SELECT generate_series(1, 500000000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(side_pid(&connection), Some(first));
     }
 
     #[test]

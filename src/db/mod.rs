@@ -1716,13 +1716,54 @@ impl Feed {
     }
 }
 
-/// What a fed result's rows still need once they are all in one place: the
-/// driver learns the column types only after the statement ran, and some
-/// values are rendered by type.
-pub fn settle(engine: Engine, result: &mut QueryResult) {
-    if engine == Engine::Postgres {
-        postgres::format_spatial_cells(result);
+/// The cells of `result` still waiting to be rendered by their column's type,
+/// as `(row, column, value)`: a fed result's rows can arrive before the types
+/// they are rendered by. Copied out so [`render`] can work on them off the
+/// frame thread.
+pub fn unrendered(engine: Engine, result: &QueryResult) -> Vec<(usize, usize, String)> {
+    if engine != Engine::Postgres {
+        return Vec::new();
     }
+    let spatial: Vec<usize> = result
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            column
+                .data_type
+                .as_deref()
+                .is_some_and(postgres::is_spatial)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if spatial.is_empty() {
+        return Vec::new();
+    }
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            spatial.iter().filter_map(move |&column| {
+                let value = cells.get(column)?.as_deref()?;
+                // EWKB opens with its byte-order flag, `00` or `01`, which no
+                // WKT keyword does: a cheap test before a copy of the value.
+                (value.starts_with("00") || value.starts_with("01"))
+                    .then(|| (row, column, value.to_string()))
+            })
+        })
+        .collect()
+}
+
+/// What [`unrendered`] found, rendered: the value it was, and what it reads as.
+pub fn render(cells: Vec<(usize, usize, String)>) -> Vec<(usize, usize, String, String)> {
+    cells
+        .into_iter()
+        .filter_map(|(row, column, value)| {
+            let rendered = postgres::render_spatial(&value)?;
+            Some((row, column, value, rendered))
+        })
+        .collect()
 }
 
 impl QueryResult {

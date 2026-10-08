@@ -1666,7 +1666,6 @@ impl Workspace {
                                             .map(String::len)
                                             .sum();
                                     }
-                                    db::settle(engine, &mut result);
                                 }
                                 // Off the result before it reaches the grid:
                                 // the sets behind the first become results of
@@ -1713,6 +1712,12 @@ impl Workspace {
                                         table.horizontal_scroll_handle.set_offset(*horizontal);
                                     }
                                 });
+                                // Rows that arrived before their types, all of
+                                // them if the describe beside the run learned
+                                // nothing.
+                                if feed.is_some() {
+                                    render_aside(&results, engine, cx);
+                                }
                                 (true, produced_grid, None, rest)
                             }
                             Err(mut error) => {
@@ -2160,6 +2165,27 @@ fn error_span(
     ))
 }
 
+/// Render a grid's cells that arrived before their types, off the frame
+/// thread, and put them back where they still are.
+fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &mut App) {
+    let cells = db::unrendered(engine, results.read(cx).delegate().result());
+    if cells.is_empty() {
+        return;
+    }
+    let rendering = cx
+        .background_executor()
+        .spawn(async move { db::render(cells) });
+    let results = results.clone();
+    cx.spawn(async move |cx| {
+        let rendered = rendering.await;
+        results.update(cx, |table, cx| {
+            table.delegate_mut().apply_rendered(rendered);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
 /// The most rows a limit may ask for: a relation's preview writes it into its
 /// `LIMIT`, and Postgres reads that as a `bigint`.
 pub(crate) const MAX_ROW_LIMIT: usize = i64::MAX as usize;
@@ -2179,8 +2205,10 @@ fn pour(
     if fed.set == 0 {
         return;
     }
-    results.update(cx, |table, cx| {
+    let typed = results.update(cx, |table, cx| {
+        let mut typed = false;
         if table.delegate().streamed_set() != Some(fed.set) {
+            typed = fed.columns.iter().any(|column| column.data_type.is_some());
             let columns = QueryResult {
                 columns: fed.columns,
                 ..QueryResult::default()
@@ -2192,6 +2220,7 @@ fn pour(
             table.refresh(cx);
         } else if table.delegate().result().columns != fed.columns {
             table.delegate_mut().set_column_types(fed.columns);
+            typed = true;
             cx.notify();
         }
         if !fed.rows.is_empty() {
@@ -2205,7 +2234,11 @@ fn pour(
             }
             cx.notify();
         }
+        typed
     });
+    if typed {
+        render_aside(results, engine, cx);
+    }
 }
 
 #[cfg(test)]
