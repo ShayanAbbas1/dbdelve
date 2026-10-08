@@ -886,8 +886,15 @@ impl Connection {
                 }
             }
             partition += 1;
-            if partition == partitions || full(kept) {
+            if partition >= partitions || full(kept) {
                 break;
+            }
+            // The statement is over, so there is no handle to stop: the cancel
+            // is honoured by not fetching what is left.
+            if let Cancellable::Yes(CancelToken(running)) = cancellable
+                && running.lock().is_ok_and(|running| running.asked)
+            {
+                return Err(plain_error("Cancelled.".into()));
             }
             let (status, next) =
                 self.fetch(&self.url(&format!("/{handle}?partition={partition}")))?;
@@ -2524,6 +2531,48 @@ mod tests {
         assert_eq!(result.capped_from, None);
         assert_eq!(result.stopped, Some(Stopped::AtLimit));
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn an_empty_partition_list_fetches_no_further_partition() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        let mut poll: Value =
+            serde_json::from_slice(&super::mock::fixture("query_poll.json")).expect("JSON");
+        poll["resultSetMetaData"]["partitionInfo"] = json!([]);
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(200, &poll.to_string())],
+        );
+
+        let result = connected(&mock)
+            .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn a_cancel_stops_the_download_between_partitions() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let handle = partition.split('?').next().expect("a path").to_string();
+        mock.on(
+            "POST",
+            &format!("{handle}/cancel"),
+            [Response::fixture(200, "cancel.json")],
+        );
+        let connection = connected(&mock);
+        let run = CancelToken::default();
+        connection.cancel(&run).expect("nothing to cancel yet");
+
+        let error = connection
+            .query_with(LARGE_SQL, &run, Fetch::default())
+            .expect_err("a cancelled run is an error");
+        assert_eq!(error.message, "Cancelled.");
+        assert_eq!(mock.hits("GET", &partition), 0);
     }
 
     #[test]
