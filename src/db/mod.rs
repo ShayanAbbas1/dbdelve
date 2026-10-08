@@ -1657,7 +1657,7 @@ pub struct QueryResult {
 }
 
 /// Why a statement's rows end before the statement did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stopped {
     /// It reached the row limit and was safe to stop there.
     AtLimit,

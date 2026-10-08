@@ -373,6 +373,7 @@ impl ResultGrid {
                     .collect(),
                 rows: stored.rows.clone(),
                 capped_from: (stored.total_rows > stored.rows.len()).then_some(stored.total_rows),
+                stopped: stored.stopped,
                 // All or none: a snapshot naming a type this build does not
                 // know is read as having none, never as rows out of step.
                 cell_types: stored
@@ -510,6 +511,7 @@ impl ResultGrid {
             // hold: recomputing it from the capped rows is what collapsed a
             // 20,000-row snapshot to 5,000 on the next save.
             total_rows: self.total_rows(),
+            stopped: self.result.stopped,
             sort: self.sort.clone(),
             order_by: Vec::new(),
             client_sort: None,
@@ -2943,6 +2945,26 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_result_is_still_stopped_once_restored() {
+        for stopped in [db::Stopped::AtLimit, db::Stopped::Cancelled] {
+            let grid = ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: vec![vec![Some("1".into())], vec![Some("2".into())]],
+                    stopped: Some(stopped),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            );
+            let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+            assert_eq!(restored.result().stopped, Some(stopped));
+        }
+    }
+
+    #[test]
     fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
         let grid = ResultGrid::new(
             QueryResult {
@@ -3055,6 +3077,7 @@ mod tests {
                     .map(|n| vec![Some(n.to_string())])
                     .collect(),
                 total_rows: 20_000,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,
