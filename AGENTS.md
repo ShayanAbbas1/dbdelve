@@ -24,9 +24,10 @@ require it, stop and raise it instead.
    only into DBDelve-generated preview queries. A user's own statement runs
    as typed; the row limit bounds it by keeping only that many rows and
    dropping the rest as they arrive, never by changing the statement. A
-   statement that only reads, outside any transaction the user opened, is
-   cancelled once it passes the limit instead of being drained, since that
-   undoes nothing. Either way the limit is visible in the UI, and a capped
+   statement that only reads is cancelled once it passes the limit instead of
+   being drained, where that undoes nothing: on Postgres only outside any
+   transaction the user opened, since a cancel aborts it; on MySQL anywhere,
+   since a killed statement is rolled back alone. Either way the limit is visible in the UI, and a capped
    result says how many rows the statement returned, or that it was stopped.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always
