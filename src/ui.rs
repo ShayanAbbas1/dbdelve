@@ -506,6 +506,14 @@ pub(crate) fn compact_count(rows: usize) -> String {
     }
 }
 
+/// Text for a row one line tall, however many lines it came in. A line break
+/// breaks the line whether or not the row is `whitespace_nowrap`, and the text
+/// is then laid out over several lines and centred, so the row shows whichever
+/// of them falls in the middle instead of its start.
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// `1234567` → `1,234,567`. Row counts are read at a glance, and groups are
 /// what keeps six digits legible.
 pub(crate) fn group_thousands(value: u64) -> String {
@@ -601,6 +609,20 @@ mod tests {
         for rows in explorer::ROW_LIMITS {
             assert!(compact_count(rows).len() <= 4, "{rows} is a wide label");
         }
+    }
+
+    #[test]
+    fn a_multi_line_error_reads_from_its_start() {
+        // The shape `postgres::describe` builds: message, DETAIL, HINT.
+        let error = "role \"dbdelve\" is not permitted to log in\n\
+                     Role has no LOGIN attribute.\n\
+                     Grant it with ALTER ROLE.";
+        assert_eq!(
+            one_line(error),
+            "role \"dbdelve\" is not permitted to log in Role has no LOGIN attribute. \
+             Grant it with ALTER ROLE."
+        );
+        assert_eq!(one_line("one\r\n\r\n  two  "), "one two");
     }
 
     #[test]

@@ -510,7 +510,7 @@ fn clip_label(label: &str) -> String {
 
 /// A statement on one line, for the header strip that says what was explained.
 fn one_line(sql: &str) -> String {
-    clip_label(&sql.split_whitespace().collect::<Vec<_>>().join(" "))
+    clip_label(&crate::ui::one_line(sql))
 }
 
 /// A count the server reported as a fraction, because it averaged it over the
