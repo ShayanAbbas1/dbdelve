@@ -1867,11 +1867,14 @@ fn read_cursor(
     sent: Document,
     fetch: Fetch,
 ) -> Result<Fetched, DbError> {
-    let sent = run.tagged(sent);
+    let mut sent = run.tagged(sent);
     let comment = sent.get("comment").cloned();
     let Fetch {
         limit, reads_only, ..
     } = fetch;
+    if let (Some(limit), true) = (limit, reads_only) {
+        sized_to(&mut sent, limit);
+    }
     run.execute(|session| async move {
         let mut action = database.run_cursor_command(sent).session(&mut *session);
         if let Some(comment) = comment {
@@ -1896,6 +1899,25 @@ fn read_cursor(
         }
         Ok(fetched)
     })
+}
+
+/// Asks a `find` or `aggregate` for one document past `limit` in its first
+/// batch, which is all a read stopped at the limit looks at: left to itself the
+/// server answers with a second batch of up to 16 MiB for the one document.
+/// A batch size the statement set is its own.
+fn sized_to(sent: &mut Document, limit: usize) {
+    const LARGEST_BATCH: usize = 10_000;
+    let size = i64::try_from(limit.saturating_add(1).min(LARGEST_BATCH)).unwrap_or_default();
+    if sent.contains_key("find") {
+        if !sent.contains_key("batchSize") {
+            sent.insert("batchSize", size);
+        }
+    } else if sent.contains_key("aggregate")
+        && let Ok(cursor) = sent.get_document_mut("cursor")
+        && !cursor.contains_key("batchSize")
+    {
+        cursor.insert("batchSize", size);
+    }
 }
 
 /// What [`read_cursor`] kept of a cursor's documents.
