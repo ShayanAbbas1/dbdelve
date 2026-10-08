@@ -3653,29 +3653,16 @@ mod tests {
         connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
-    /// A read the server has to work through, about a second of it: there is
-    /// no `WAITFOR` in a plain read, and only a plain read runs at once with
-    /// others. A `COUNT` of the same join is answered without the work.
-    const LIVE_SLOW_SELECT: &str = "SELECT MAX(CHECKSUM(a.name, b.name)) FROM sys.all_objects a \
-         CROSS JOIN (SELECT TOP 500 name FROM sys.all_objects) b";
-
-    #[test]
-    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
-    fn live_reads_run_at_once_take_the_time_of_one() {
-        super::super::at_once::reads_overlap(
-            &super::super::Connection::SqlServer(live()),
-            Engine::SqlServer,
-            LIVE_SLOW_SELECT,
-            "INSERT INTO accounts DEFAULT VALUES",
-        );
-    }
-
+    // No timing check here as on the other engines: a slow plain read is CPU
+    // on this server, which shares an emulated CPU with every other test, so
+    // in turn and at once measured each other's load rather than the overlap.
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_cancel_stops_every_read_run_at_once() {
         super::super::at_once::a_cancel_stops_them_all(
             &super::super::Connection::SqlServer(live()),
             Engine::SqlServer,
+            // Work through, not waited out: `WAITFOR` is no plain read.
             "SELECT MAX(CHECKSUM(a.name, b.name, c.name)) FROM sys.all_objects a \
              CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c",
         );
