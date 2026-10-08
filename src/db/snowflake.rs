@@ -886,7 +886,7 @@ impl Connection {
                 }
             }
             partition += 1;
-            if partition == partitions || full(kept) {
+            if partition >= partitions || full(kept) {
                 break;
             }
             let (status, next) =
@@ -2523,6 +2523,27 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.capped_from, None);
         assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn an_empty_partition_list_fetches_no_further_partition() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        let mut poll: Value =
+            serde_json::from_slice(&super::mock::fixture("query_poll.json")).expect("JSON");
+        poll["resultSetMetaData"]["partitionInfo"] = json!([]);
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(200, &poll.to_string())],
+        );
+
+        let result = connected(&mock)
+            .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+        assert_eq!(result.rows.len(), 1);
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
     }
 
