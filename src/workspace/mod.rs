@@ -151,6 +151,10 @@ pub(crate) struct Workspace {
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
+    /// The field a row-limit menu turned into after Custom…, and whose limit
+    /// it sets. One at a time: it closes the moment it loses focus.
+    pub(crate) custom_limit: Option<(LimitTarget, Entity<InputState>)>,
+    pub(crate) custom_limit_needs_focus: bool,
     /// The project whose delete button has been clicked once and is waiting
     /// for the second.
     pub(crate) pending_project_deletion: Option<String>,
@@ -274,6 +278,8 @@ impl Workspace {
             project_name: None,
             renaming_project: None,
             project_name_needs_focus: false,
+            custom_limit: None,
+            custom_limit_needs_focus: false,
             pending_project_deletion: None,
             expanded_groups: Vec::new(),
             assigning_project: None,
@@ -360,13 +366,10 @@ impl Workspace {
                             .and_then(|stored| stored.editor_font_size)
                     }),
                 );
-                // A hand-edited value outside the choices the controls offer
-                // is unreachable by the controls that set it, and leaves no
-                // chip highlighted either -- so it is rejected rather than
-                // clamped.
+                // Zero would keep no rows of anything, which no control offers.
                 workspace.settings.row_limit = stored_settings
                     .preview_rows
-                    .filter(|rows| explorer::ROW_LIMITS.contains(rows))
+                    .filter(|rows| (1..=queries::MAX_ROW_LIMIT).contains(rows))
                     .unwrap_or(PREVIEW_ROW_LIMIT);
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
@@ -977,6 +980,11 @@ impl Render for Workspace {
         {
             self.focus.focus(window, cx);
         }
+        if std::mem::take(&mut self.custom_limit_needs_focus)
+            && let Some((_, input)) = &self.custom_limit
+        {
+            input.focus_handle(cx).focus(window, cx);
+        }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
         {
@@ -1090,6 +1098,10 @@ impl Render for Workspace {
             .session
             .active_results()
             .map(|results| results.read(cx).delegate().result().rows.len());
+        let stopped = profile
+            .session
+            .active_results()
+            .and_then(|results| results.read(cx).delegate().result().stopped);
         let column_count = profile
             .session
             .active_results()
@@ -1111,7 +1123,16 @@ impl Render for Workspace {
                     .as_deref()
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
-        let paging = views::render_paging(profile, cx);
+        // A query tab's own slot rather than the result in front: a queue can
+        // be showing a statement that finished while the next one runs.
+        let running = match profile.session.active_query_tab() {
+            Some(tab) => views::render_running(&tab.query, Some(&tab.results), cx),
+            None => profile.session.active_query().and_then(|query| {
+                views::render_running(query, profile.session.active_results(), cx)
+            }),
+        };
+        let paging =
+            running.or_else(|| views::render_paging(profile, self.custom_limit.as_ref(), cx));
         let view_sorting = views::render_view_sorting(profile, cx);
         let relation = profile
             .session
@@ -1196,9 +1217,13 @@ impl Render for Workspace {
             }) => {
                 // The rows on screen, unless the relation's own count or
                 // estimate is beside the stats already.
-                let count = relation_rows
-                    .is_none()
-                    .then(|| row_readout(showing.unwrap_or(*rows), *rows));
+                let count = relation_rows.is_none().then(|| {
+                    let count = row_readout(showing.unwrap_or(*rows), *rows);
+                    match stopped {
+                        Some(db::Stopped::Cancelled) => format!("{count}, cancelled"),
+                        Some(db::Stopped::AtLimit) | None => count,
+                    }
+                });
                 let joined = |rest: String| match count {
                     Some(count) => format!("{count} \u{b7} {rest}"),
                     None => rest,
@@ -1532,6 +1557,7 @@ impl Render for Workspace {
                 &self.row_panel,
                 self.plan_copied,
                 &self.tab_strip,
+                self.custom_limit.as_ref(),
                 cx,
             )))
             .children(results_status);
@@ -1601,6 +1627,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_edit))
             .on_action(cx.listener(Self::sort_column))
             .on_action(cx.listener(Self::set_row_limit))
+            .on_action(cx.listener(Self::set_query_limit))
+            .on_action(cx.listener(Self::set_default_row_limit_action))
+            .on_action(cx.listener(Self::custom_row_limit))
             .on_action(cx.listener(Self::refresh_active_relation))
             .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::next_page))

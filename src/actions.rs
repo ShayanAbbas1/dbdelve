@@ -85,6 +85,37 @@ pub(crate) struct SetRowLimit {
     pub(crate) rows: usize,
 }
 
+/// Whose row limit a control sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) enum LimitTarget {
+    Query(u64),
+    Relation(u64),
+    /// The Settings row limit every new tab starts from.
+    Default,
+}
+
+/// The Settings row limit.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetDefaultRowLimit {
+    pub(crate) rows: usize,
+}
+
+/// Swap a row-limit menu for a field to type a number of one's own into.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct CustomRowLimit {
+    pub(crate) target: LimitTarget,
+}
+
+/// How many rows a query tab keeps of what its statements return, `None` for
+/// all of them. The statement is never changed: see AGENTS.md, hard rule 1.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetQueryLimit {
+    pub(crate) rows: Option<usize>,
+}
+
 /// Ask the server how it would run the statement under the cursor. The mode
 /// travels with the action because it is the user's choice at the menu, and the
 /// difference between the two is whether the statement is executed.

@@ -365,6 +365,7 @@ impl Session {
         pending_objects: Vec<store::StoredObject>,
         engine: Engine,
         sorting: Sorting,
+        row_limit: usize,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -430,7 +431,7 @@ impl Session {
             .iter()
             .map(|stored| {
                 let (tab, failure) =
-                    QueryTab::restore(&id, stored, engine, sorting.clone(), window, cx);
+                    QueryTab::restore(&id, stored, engine, sorting.clone(), row_limit, window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -970,6 +971,10 @@ pub(crate) struct QueryTab {
     /// Who orders this tab's rows on a header click. Per tab rather than per
     /// result: a queue's results are one view, read through one switcher.
     pub(crate) sorting: Sorting,
+    /// How many rows of a statement's result this tab keeps, or `None` for
+    /// all of them. Starts at the Settings row limit and is not persisted, so
+    /// "No limit" lasts only as long as the tab does.
+    pub(crate) row_limit: Option<usize>,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
@@ -1102,6 +1107,7 @@ impl QueryTab {
         stored: &store::StoredQueryTab,
         engine: Engine,
         sorting: Sorting,
+        row_limit: usize,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1137,6 +1143,7 @@ impl QueryTab {
             queue: None,
             queued_results: stored.queued_results,
             sorting,
+            row_limit: Some(row_limit),
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),

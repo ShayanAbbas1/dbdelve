@@ -5,6 +5,11 @@
 
 use std::ops::Range;
 
+use gpui::Pixels;
+use gpui_component::table::TableState;
+
+use crate::db::{Feed, Fetch, QueryResult, Stopped};
+
 use super::*;
 use crate::session::{Finished, PendingRun, Queue, Resume, Step, TabKey, next_step};
 
@@ -142,6 +147,94 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn set_query_limit(
+        &mut self,
+        action: &SetQueryLimit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.profile_mut().and_then(|profile| {
+            let Tab::Query(id) = profile.session.active else {
+                return None;
+            };
+            profile.session.query_tab_mut(id)
+        }) else {
+            return;
+        };
+        tab.row_limit = action.rows;
+        cx.notify();
+    }
+
+    pub(crate) fn set_default_row_limit_action(
+        &mut self,
+        action: &SetDefaultRowLimit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_default_row_limit(action.rows, cx);
+    }
+
+    pub(crate) fn custom_row_limit(
+        &mut self,
+        action: &CustomRowLimit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = action.target;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Rows"));
+        cx.subscribe_in(
+            &input,
+            window,
+            move |workspace, input, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let typed = input.read(cx).value().replace([',', '_', ' '], "");
+                    match typed.parse::<usize>() {
+                        Ok(rows) if (1..=MAX_ROW_LIMIT).contains(&rows) => {
+                            // The field goes while it holds focus, and focus
+                            // left with nothing holding it takes every
+                            // keybinding with it.
+                            workspace.custom_limit = None;
+                            workspace.refocus_front();
+                            workspace.apply_row_limit(target, rows, window, cx);
+                        }
+                        _ => workspace.note("A row limit is a whole number above zero.".into(), cx),
+                    }
+                }
+                InputEvent::Blur => {
+                    workspace.custom_limit = None;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.custom_limit = Some((target, input));
+        self.custom_limit_needs_focus = true;
+        cx.notify();
+    }
+
+    fn apply_row_limit(
+        &mut self,
+        target: LimitTarget,
+        rows: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            LimitTarget::Query(id) => {
+                if let Some(tab) = self
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_tab_mut(id))
+                {
+                    tab.row_limit = Some(rows);
+                }
+                cx.notify();
+            }
+            LimitTarget::Relation(_) => self.set_row_limit(&SetRowLimit { rows }, window, cx),
+            LimitTarget::Default => self.set_default_row_limit(rows, cx),
+        }
     }
 
     pub(crate) fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
@@ -894,6 +987,7 @@ impl Workspace {
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -997,6 +1091,7 @@ impl Workspace {
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -1386,11 +1481,62 @@ impl Workspace {
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
         // A plan is never cut short: its rows are the plan, not data.
-        let limit = explain.is_none().then_some(self.settings.row_limit);
+        let limit = match tab {
+            Tab::Query(query) if explain.is_none() => self
+                .profile()
+                .and_then(|profile| profile.session.query_tab(query))
+                .and_then(|query| query.row_limit),
+            _ => None,
+        };
+        // Rows land in the grid as they arrive, but only in a grid cleared for
+        // them: a refresh keeps the rows it is replacing until the new ones are
+        // whole, and a plan's rows never reach the grid at all.
+        let feed = (!keep_rows && !generated && explain.is_none()).then(Feed::default);
+        if let Some(feed) = feed.clone() {
+            let (id, results) = (id.clone(), results.clone());
+            let (names, widths) = (shown.0.clone(), shown.1.clone());
+            cx.spawn(async move |workspace, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                    let running = workspace.update(cx, |workspace, cx| {
+                        let Some(profile) = workspace.issued_to(&id, generation) else {
+                            return false;
+                        };
+                        let mode = profile.mode;
+                        let running = profile.session.slot(tab).is_some_and(|(state, _)| {
+                            matches!(state, QueryState::Running { started: at, .. } if *at == started)
+                        });
+                        if running {
+                            pour(&feed, &results, mode, engine, (&names, &widths), cx);
+                            // The count in the status bar is the workspace's to
+                            // draw, not the grid's.
+                            cx.notify();
+                        }
+                        running
+                    });
+                    if !matches!(running, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        let fed = feed.clone();
+        let reads_only = sql::rerunnable(engine, &sql);
         let query_task = cx.background_executor().spawn(async move {
             let result = match generated {
                 true => connection.generated(&sql, &cancel),
-                false => connection.query(&sql, &cancel, limit),
+                false => connection.query(
+                    &sql,
+                    &cancel,
+                    Fetch {
+                        limit,
+                        feed: fed.as_ref(),
+                        reads_only,
+                    },
+                ),
             };
             let lost = result.is_err() && connection.is_lost();
             (result, lost)
@@ -1443,6 +1589,27 @@ impl Workspace {
                             return;
                         };
 
+                        // Cancelled part way, a stream keeps the rows it had:
+                        // they are what the user stopped it to look at.
+                        let result = match result {
+                            Err(_)
+                                if matches!(
+                                    state,
+                                    QueryState::Running {
+                                        cancelling: Some(_),
+                                        ..
+                                    }
+                                ) && results.read(cx).delegate().streamed_set().is_some() =>
+                            {
+                                Ok(QueryResult {
+                                    columns: results.read(cx).delegate().result().columns.clone(),
+                                    elapsed: started.elapsed(),
+                                    stopped: Some(Stopped::Cancelled),
+                                    ..QueryResult::default()
+                                })
+                            }
+                            result => result,
+                        };
                         match result {
                             // An `EXPLAIN` describes a statement rather than
                             // returning its rows, so nothing here reaches the
@@ -1463,6 +1630,30 @@ impl Workspace {
                                 (true, false, Some(plan), Vec::new())
                             }
                             Ok(mut result) => {
+                                // Rows that streamed in were scrolled through as
+                                // they came, so the grid stays where the user
+                                // took it rather than where the last run left it.
+                                let streamed = results.read(cx).delegate().streamed_set().is_some();
+                                if let Some(feed) = &feed {
+                                    let (names, widths) = (&shown.0, &shown.1);
+                                    pour(feed, &results, mode, engine, (names, widths), cx);
+                                    let mut rows = results
+                                        .update(cx, |table, _| table.delegate_mut().take_rows());
+                                    rows.append(&mut result.rows);
+                                    result.rows = rows;
+                                    // A cancelled stream's size was never
+                                    // reported; it is what arrived.
+                                    if result.stopped == Some(Stopped::Cancelled) {
+                                        result.bytes = result
+                                            .rows
+                                            .iter()
+                                            .flatten()
+                                            .flatten()
+                                            .map(String::len)
+                                            .sum();
+                                    }
+                                    db::settle(engine, &mut result);
+                                }
                                 // Off the result before it reaches the grid:
                                 // the sets behind the first become results of
                                 // their own and have no business inside this
@@ -1498,7 +1689,7 @@ impl Workspace {
                                     // whichever row the new result put there.
                                     table.clear_selection(cx);
                                     table.refresh(cx);
-                                    if table.delegate().layout().0 == *names {
+                                    if !streamed && table.delegate().layout().0 == *names {
                                         table
                                             .vertical_scroll_handle
                                             .0
@@ -1511,6 +1702,17 @@ impl Workspace {
                                 (true, produced_grid, None, rest)
                             }
                             Err(mut error) => {
+                                // Rows of a statement that failed part way are
+                                // not its result, and nothing on screen would
+                                // say they were cut short.
+                                if feed.is_some() {
+                                    results.update(cx, |table, cx| {
+                                        if table.delegate().streamed_set().is_some() {
+                                            *table.delegate_mut() = ResultGrid::empty();
+                                            table.refresh(cx);
+                                        }
+                                    });
+                                }
                                 // Into the user's statement, not the prefix
                                 // dbdelve put in front of it, which is on no
                                 // screen to count from.
@@ -1624,6 +1826,16 @@ impl Workspace {
         if matches!(state, QueryState::Running { .. }) {
             *state = QueryState::Idle;
             cx.notify();
+        }
+        // Rows of a run nobody will land are not a result, and a grid still
+        // marked as streaming would refuse every copy as if more were coming.
+        if let Some((_, results)) = profile.session.slot(tab) {
+            results.update(cx, |table, cx| {
+                if table.delegate().streamed_set().is_some() {
+                    *table.delegate_mut() = ResultGrid::empty();
+                    table.refresh(cx);
+                }
+            });
         }
     }
 
@@ -1932,6 +2144,51 @@ fn error_span(
         position_at(buffer, start + position),
         start + token.start..start + token.end,
     ))
+}
+
+/// The most rows a limit may ask for: a relation's preview writes it into its
+/// `LIMIT`, and Postgres reads that as a `bigint`.
+pub(crate) const MAX_ROW_LIMIT: usize = i64::MAX as usize;
+
+/// Move what has arrived into the grid. A new result set starts the grid over,
+/// as it would have when the set's statement finished.
+fn pour(
+    feed: &Feed,
+    results: &Entity<TableState<ResultGrid>>,
+    mode: Mode,
+    engine: Engine,
+    (names, widths): (&[String], &[Pixels]),
+    cx: &mut App,
+) {
+    let fed = feed.take();
+    // No result set has begun: nothing has a column to go under yet.
+    if fed.set == 0 {
+        return;
+    }
+    results.update(cx, |table, cx| {
+        if table.delegate().streamed_set() != Some(fed.set) {
+            let columns = QueryResult {
+                columns: fed.columns,
+                ..QueryResult::default()
+            };
+            *table.delegate_mut() = ResultGrid::new(columns, mode)
+                .with_engine(engine)
+                .with_layout(names, widths)
+                .streaming(fed.set);
+            table.refresh(cx);
+        }
+        if !fed.rows.is_empty() {
+            let digits = |rows: usize| rows.max(1).ilog10();
+            let before = table.delegate().result().rows.len();
+            table.delegate_mut().append_rows(fed.rows);
+            // The row-number gutter is sized to the last row's number, and
+            // only a refresh lays its width out again.
+            if digits(table.delegate().result().rows.len()) != digits(before) {
+                table.refresh(cx);
+            }
+            cx.notify();
+        }
+    });
 }
 
 #[cfg(test)]

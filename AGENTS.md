@@ -23,9 +23,11 @@ require it, stop and raise it instead.
    is why "silently" is the word that carries the rule. A `LIMIT` is written
    only into DBDelve-generated preview queries. A user's own statement runs
    as typed; the row limit bounds it by keeping only that many rows and
-   dropping the rest as they arrive, never by changing the statement. Either
-   way the limit is visible in the UI, and a capped result says how many rows
-   the statement returned.
+   dropping the rest as they arrive, never by changing the statement. A
+   statement that only reads, outside any transaction the user opened, is
+   cancelled once it passes the limit instead of being drained, since that
+   undoes nothing. Either way the limit is visible in the UI, and a capped
+   result says how many rows the statement returned, or that it was stopped.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always
    where the user can read it:

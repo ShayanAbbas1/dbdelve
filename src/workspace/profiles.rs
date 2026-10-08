@@ -169,6 +169,7 @@ impl Workspace {
             stored.open_objects,
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -243,6 +244,7 @@ impl Workspace {
             Vec::new(),
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );

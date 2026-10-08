@@ -1056,17 +1056,20 @@ impl Connection {
     /// Run one statement verbatim.
     ///
     /// The SQL is never rewritten — no limit injected, no reformatting. A
-    /// `limit` bounds the rows kept, not the statement: they are read and
-    /// dropped past it, and [`QueryResult::capped_from`] says how many there
-    /// were. Only Postgres honours it so far.
+    /// limit bounds the rows kept, not the statement: past it they are read
+    /// and dropped, and [`QueryResult::capped_from`] says how many there were,
+    /// unless the statement could be stopped there instead
+    /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
+    /// instead of the result, which then holds none, and [`settle`] is owed
+    /// once they are gathered. Only Postgres honours any of [`Fetch`] so far.
     pub fn query(
         &self,
         sql: &str,
         cancel: &CancelToken,
-        limit: Option<usize>,
+        fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
         match self {
-            Self::Postgres(connection) => connection.query(sql, limit),
+            Self::Postgres(connection) => connection.query(sql, fetch),
             Self::MySql(connection) => connection.query(sql),
             Self::SqlServer(connection) => connection.query(sql),
             Self::Sqlite(connection) => connection.query(sql),
@@ -1086,7 +1089,7 @@ impl Connection {
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_) => self.query(sql, cancel, None),
+            | Self::MongoDb(_) => self.query(sql, cancel, Fetch::default()),
         }
     }
 
@@ -1258,7 +1261,7 @@ impl Connection {
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement, &CancelToken::default(), None)
+        self.query(statement, &CancelToken::default(), Fetch::default())
             .map(|_| ())
     }
 }
@@ -1596,6 +1599,9 @@ pub struct QueryResult {
     /// How many rows the statement returned, when the row limit kept fewer of
     /// them than that. `None` when `rows` is the whole result.
     pub capped_from: Option<usize>,
+    /// Set when the statement was stopped before it finished, so `rows` are
+    /// what had arrived by then and how many more there were is unknown.
+    pub stopped: Option<Stopped>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
@@ -1618,6 +1624,80 @@ pub struct QueryResult {
     /// is split on the `GO`-separated batch instead, because a batch is a
     /// scope boundary, and one batch readily returns several.
     pub rest: Vec<QueryResult>,
+}
+
+/// Why a statement's rows end before the statement did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// It reached the row limit and was safe to stop there.
+    AtLimit,
+    /// The user cancelled it part way.
+    Cancelled,
+}
+
+/// How a user statement's rows are taken: how many are kept, where they go as
+/// they arrive, and whether the statement may be stopped once there are
+/// enough of them.
+#[derive(Clone, Copy, Default)]
+pub struct Fetch<'a> {
+    pub limit: Option<usize>,
+    pub feed: Option<&'a Feed>,
+    /// The statement only reads, as `sql::rerunnable` judges it, so stopping
+    /// it at the limit loses nothing it was going to do.
+    pub reads_only: bool,
+}
+
+/// Rows handed over while a statement is still running, so the first of a
+/// large result is on screen long before the last arrives. The driver pushes
+/// and the grid takes; a row sits here only between the two.
+#[derive(Clone, Default)]
+pub struct Feed(Arc<Mutex<Fed>>);
+
+/// What a [`Feed`] holds since it was last taken from.
+#[derive(Default)]
+pub struct Fed {
+    /// Counts result sets. A taker whose rows came from an earlier set than
+    /// this one has rows of a statement the submission has moved past.
+    pub set: usize,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Vec<Cell>>,
+}
+
+impl Feed {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Fed> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn begin(&self, columns: Vec<Column>) {
+        let mut fed = self.lock();
+        fed.set += 1;
+        fed.columns = columns;
+        fed.rows.clear();
+    }
+
+    pub(crate) fn push(&self, row: Vec<Cell>) {
+        self.lock().rows.push(row);
+    }
+
+    pub fn take(&self) -> Fed {
+        let mut fed = self.lock();
+        Fed {
+            set: fed.set,
+            columns: fed.columns.clone(),
+            rows: std::mem::take(&mut fed.rows),
+        }
+    }
+}
+
+/// What a fed result's rows still need once they are all in one place: the
+/// driver learns the column types only after the statement ran, and some
+/// values are rendered by type.
+pub fn settle(engine: Engine, result: &mut QueryResult) {
+    if engine == Engine::Postgres {
+        postgres::format_spatial_cells(result);
+    }
 }
 
 impl QueryResult {

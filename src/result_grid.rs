@@ -123,6 +123,13 @@ pub struct ResultGrid {
     /// whole delegate: there is no field anyone has to remember to clear, and
     /// so no way for a live result to keep claiming it is a snapshot.
     captured: Option<u64>,
+    /// Which of a run's result sets these rows are, while the run is still
+    /// appending them (`db::Fed::set`). Dropped with the delegate, like
+    /// `captured`, when the finished result replaces it.
+    streamed: Option<usize>,
+    /// When rows last streamed in, so a run can tell rows arriving from a
+    /// server still working on the next one.
+    last_fed: Option<std::time::Instant>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -296,6 +303,8 @@ impl ResultGrid {
             pending: Vec::new(),
             editing: None,
             captured: None,
+            streamed: None,
+            last_fed: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -400,6 +409,30 @@ impl ResultGrid {
     /// put here.
     pub fn captured(&self) -> Option<u64> {
         self.captured
+    }
+
+    /// A grid for result set `set` of a run's rows to arrive in.
+    pub fn streaming(mut self, set: usize) -> Self {
+        self.streamed = Some(set);
+        self
+    }
+
+    pub fn streamed_set(&self) -> Option<usize> {
+        self.streamed
+    }
+
+    pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
+        self.result.rows.extend(rows);
+        self.last_fed = Some(std::time::Instant::now());
+    }
+
+    pub fn last_fed(&self) -> Option<std::time::Instant> {
+        self.last_fed
+    }
+
+    /// The rows streamed in, for the finished result to be built around.
+    pub fn take_rows(&mut self) -> Vec<Vec<db::Cell>> {
+        std::mem::take(&mut self.result.rows)
     }
 
     /// Whether an edit here has to be confirmed against stale rows first.

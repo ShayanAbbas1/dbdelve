@@ -355,6 +355,16 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        // Sorting rows that are still arriving would order some of them and
+        // not the rest, and a sort that runs SQL would be refused by the run
+        // in flight after it had already rewritten the buffer.
+        if profile
+            .session
+            .active_results()
+            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some())
+        {
+            return;
+        }
         let tab = profile.session.active;
         if profile
             .session
@@ -1096,6 +1106,40 @@ impl Workspace {
     /// short of what the status bar says the tab is showing, so this says how
     /// to get the rest instead.
     fn refuse_capped(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+        let streaming = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some());
+        if streaming {
+            self.note(
+                format!(
+                    "Rows are still arriving. Wait for the statement to finish before {doing}."
+                ),
+                cx,
+            );
+            return true;
+        }
+        let stopped = self.profile().and_then(|profile| {
+            let grid = profile.session.active_results()?.read(cx).delegate();
+            Some((grid.result().rows.len(), grid.result().stopped?))
+        });
+        if let Some((showing, stopped)) = stopped {
+            let showing = group_thousands(showing as u64);
+            self.note(
+                match stopped {
+                    db::Stopped::AtLimit => format!(
+                        "This tab is showing the first {showing} rows, the row limit. Raise it \
+                         and run the statement again before {doing}."
+                    ),
+                    db::Stopped::Cancelled => format!(
+                        "This tab is showing the {showing} rows that arrived before the \
+                         statement was cancelled. Run it again before {doing}."
+                    ),
+                },
+                cx,
+            );
+            return true;
+        }
         let capped = self.profile().and_then(|profile| {
             let grid = profile.session.active_results()?.read(cx).delegate();
             let showing = grid.result().rows.len();
@@ -1116,8 +1160,8 @@ impl Workspace {
                      before {doing}."
                 ),
                 false => format!(
-                    "This tab is showing {showing} of {total} rows, the row limit. Raise it in \
-                     Settings and run the statement again before {doing}."
+                    "This tab is showing {showing} of {total} rows, the row limit. Raise it \
+                     and run the statement again before {doing}."
                 ),
             },
             cx,

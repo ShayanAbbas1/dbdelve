@@ -9,16 +9,18 @@ use std::time::{Duration, Instant};
 use futures_util::{FutureExt, StreamExt, future::Fuse};
 use geozero::{CoordDimensions, ToWkt, wkb::Ewkb};
 use tokio::runtime::Runtime;
-use tokio_postgres::{CancelToken, NoTls, SimpleQueryMessage, config::Host};
+use tokio_postgres::{
+    CancelToken, NoTls, SimpleQueryMessage, SimpleQueryStream, config::Host, error::SqlState,
+};
 
 use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, RelationKind,
-    ServerConfig, Sizes, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
-    assemble_references, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    RelationKind, ServerConfig, Sizes, Stopped, Structure, assemble_catalog, assemble_databases,
+    assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, create_table,
+    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
 };
 
 /// The port the server listens on when the profile does not say.
@@ -587,6 +589,9 @@ pub struct Connection {
     /// second socket to the same server and an `sslmode` is never quietly
     /// weakened for it either (AGENTS.md, hard rule 7).
     connector: Option<tls::MakeRustlsConnect>,
+    /// The server process behind the client, for asking after the statement
+    /// it is running from another connection. `None` if it would not say.
+    pid: Option<i32>,
     /// Held so ssh runs as long as any clone does. The cancel token dials the
     /// address the client connected to, so a cancel goes through it too.
     tunnel: Option<Arc<Tunnel>>,
@@ -628,16 +633,32 @@ impl Connection {
                 .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
         }
         .map_err(|error| connect_error(&error, server))?;
-        let client = Client {
+        let mut client = Client {
             client,
             driver: Driver {
                 runtime,
                 connection: connection.fuse(),
             },
         };
+        let pid = client
+            .driver
+            .block_on(
+                client
+                    .client
+                    .simple_query("SELECT pg_catalog.pg_backend_pid()"),
+            )
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|messages| {
+                messages.into_iter().find_map(|message| match message {
+                    SimpleQueryMessage::Row(row) => row.get(0)?.parse().ok(),
+                    _ => None,
+                })
+            });
 
         Ok(Self {
             cancel: client.client.cancel_token(),
+            pid,
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
@@ -681,18 +702,19 @@ impl Connection {
     ///
     /// The SQL is never rewritten — no limit injected, no reformatting. The
     /// server sends every row and the ones past the limit are read and
-    /// dropped, so the statement runs to completion exactly as typed.
-    pub fn query(&self, sql: &str, limit: Option<usize>) -> Result<QueryResult, DbError> {
-        self.run(sql, true, limit)
+    /// dropped, so the statement runs to completion exactly as typed. Kept
+    /// rows go to `feed` when there is one; see [`super::Connection::query`].
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(sql, true, fetch)
     }
 
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, None)
+        self.run(sql, false, Fetch::default())
     }
 
-    fn run(&self, sql: &str, typed: bool, limit: Option<usize>) -> Result<QueryResult, DbError> {
+    fn run(&self, sql: &str, typed: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
@@ -706,9 +728,29 @@ impl Connection {
             client: inner,
             driver,
         } = &mut *client;
-        let (mut result, commands) = driver
-            .block_on(assemble(inner, sql, limit, started))
-            .map_err(|error| query_error(&error, sql))??;
+        let failed = |error: Error| query_error(&error, sql);
+        let mut messages = Box::pin(
+            driver
+                .block_on(inner.simple_query_raw(sql))
+                .map_err(failed)?
+                .map_err(failed)?,
+        );
+        let mut assembly = Assembly::new(sql, fetch);
+        let stoppable = fetch.reads_only && fetch.limit.is_some();
+        // Split at the first row past the limit, because whether to stop there
+        // is asked on another connection, and that cannot be done from inside
+        // this one's `block_on`.
+        if driver
+            .block_on(assembly.read(&mut messages, stoppable))
+            .map_err(failed)??
+        {
+            assembly.stopping = self.stop_at_limit();
+            driver
+                .block_on(assembly.read(&mut messages, false))
+                .map_err(failed)??;
+        }
+        drop(messages);
+        let (mut result, commands) = assembly.finish(started);
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -722,7 +764,10 @@ impl Connection {
         // some utility statements -- can still abort an open transaction. That
         // is the whole of the remaining hole, and the driver exposes no
         // transaction state to guard it with.
-        let mut probed = if typed && !result.columns.is_empty() && commands == 1 {
+        // A statement stopped at the limit never completed, so it counts no
+        // command; it is still the one statement that returned these columns.
+        let single = commands == 1 || (commands == 0 && result.stopped.is_some());
+        let mut probed = if typed && !result.columns.is_empty() && single {
             describe_columns(&mut client, sql)
         } else {
             Vec::new()
@@ -761,6 +806,40 @@ impl Connection {
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
         resolve_edit_target(probed, &keyed_table(&catalog)?)
+    }
+
+    /// Stop the statement in flight now that it has passed the row limit, if
+    /// that undoes nothing: `true` when a cancel went out.
+    ///
+    /// Only a statement that has written nothing, outside any transaction the
+    /// user opened. A cancel aborts the transaction it lands in, so stopping
+    /// one inside `BEGIN` would throw the user's open work away, and stopping
+    /// a write would leave it half done. In the implicit transaction of a
+    /// lone statement, `xact_start` is `query_start` to the microsecond. Asked
+    /// on a connection of its own, since this one is busy with the rows.
+    ///
+    /// A cancel can land after the statement finished on its own; on an idle
+    /// session the server ignores it, which is the same race Cancel has.
+    ///
+    /// ponytail: a connection opened per stop. A side connection kept open is
+    /// the upgrade path if the connect shows up in query timings.
+    fn stop_at_limit(&self) -> bool {
+        let Some(pid) = self.pid else {
+            return false;
+        };
+        let Ok(side) = Self::connect(&self.server, self.tunnel.clone()) else {
+            return false;
+        };
+        let safe = side
+            .internal_query(&format!(
+                "SELECT xact_start = query_start AND backend_xid IS NULL
+                 FROM pg_catalog.pg_stat_activity
+                 WHERE pid = {pid} AND state = 'active'"
+            ))
+            .is_ok_and(|result| {
+                result.rows.first().and_then(|row| row.first()) == Some(&Some("t".to_string()))
+            });
+        safe && self.cancel().is_ok()
     }
 
     pub fn databases(&self) -> Result<super::Databases, DbError> {
@@ -1055,92 +1134,147 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
         )
 }
 
-/// The result, plus the number of statements the server completed -- one
-/// `CommandComplete` each, which is cheaper and more truthful than re-parsing
-/// the SQL to count them.
-///
-/// Read as the rows arrive, so a row past `limit` is dropped as soon as it is
-/// counted rather than held until the last one lands.
-async fn assemble(
-    client: &tokio_postgres::Client,
-    sql: &str,
-    limit: Option<usize>,
-    started: Instant,
-) -> Result<(QueryResult, usize), DbError> {
-    let failed = |error: Error| query_error(&error, sql);
-    let mut messages = pin!(client.simple_query_raw(sql).await.map_err(failed)?);
-    let mut result = QueryResult::default();
-    let mut commands = 0;
-    // The current set's rows, kept or not.
-    let mut returned = 0;
+/// A result read off the wire, held across the reads [`Connection::run`]
+/// splits it into. Rows are taken as they arrive, so one past the limit is
+/// dropped as soon as it is counted rather than held until the last one lands.
+struct Assembly<'a> {
+    sql: &'a str,
+    fetch: Fetch<'a>,
+    result: QueryResult,
+    /// Statements the server completed -- one `CommandComplete` each, which is
+    /// cheaper and more truthful than re-parsing the SQL to count them.
+    commands: usize,
+    /// The current set's rows, kept or not, and kept: a fed row is not in
+    /// `result.rows` to be counted.
+    returned: usize,
+    kept: usize,
+    /// A cancel went out for the rows past the limit, so the error the
+    /// statement ends in is the limit's doing and not the statement's.
+    stopping: bool,
+}
 
-    while let Some(message) = messages.next().await {
-        match message.map_err(failed)? {
-            // One selection can carry several statements, and the grid shows
-            // one result set -- so each new description starts the kept set
-            // over and the last statement wins. Accumulating across statements
-            // would put one statement's rows under another's column names.
-            SimpleQueryMessage::RowDescription(columns) => {
-                result.columns = columns
-                    .iter()
-                    .map(|column| Column {
-                        name: column.name().to_string(),
-                        data_type: None,
-                    })
-                    .collect();
-                result.rows.clear();
-                result.bytes = 0;
-                result.rows_affected = None;
-                returned = 0;
-            }
-            SimpleQueryMessage::Row(row) => {
-                returned += 1;
-                if limit.is_some_and(|limit| result.rows.len() >= limit) {
-                    continue;
-                }
-                // A row arriving with no description before it is not a path
-                // the driver takes today; without this the grid would render
-                // headerless and drop every value it was handed.
-                if result.columns.is_empty() {
-                    result.columns = row
-                        .columns()
-                        .iter()
-                        .map(|column| Column {
-                            name: column.name().to_string(),
-                            data_type: None,
-                        })
-                        .collect();
-                }
-
-                // `get` panics on a value the driver cannot decode as UTF-8,
-                // and it would panic here holding the client mutex — poisoning
-                // it and taking the process down with it. A database whose
-                // encoding is SQL_ASCII can return such bytes for ordinary text.
-                let cells: Vec<Cell> = (0..row.len())
-                    .map(|index| {
-                        row.try_get(index)
-                            .map(|cell| cell.map(str::to_string))
-                            .map_err(|_| non_utf8_error(&result.columns, index))
-                    })
-                    .collect::<Result<_, _>>()?;
-
-                result.bytes += cells
-                    .iter()
-                    .filter_map(|cell| cell.as_ref().map(String::len))
-                    .sum::<usize>();
-                result.rows.push(cells);
-            }
-            SimpleQueryMessage::CommandComplete(count) => {
-                result.rows_affected = Some(count);
-                commands += 1;
-            }
-            _ => {}
+impl<'a> Assembly<'a> {
+    fn new(sql: &'a str, fetch: Fetch<'a>) -> Self {
+        Self {
+            sql,
+            fetch,
+            result: QueryResult::default(),
+            commands: 0,
+            returned: 0,
+            kept: 0,
+            stopping: false,
         }
     }
 
-    result.elapsed = started.elapsed();
-    result.capped_from = (returned > result.rows.len()).then_some(returned);
-    Ok((result, commands))
+    fn begin(&mut self, columns: Vec<Column>) {
+        if let Some(feed) = self.fetch.feed {
+            feed.begin(columns.clone());
+        }
+        self.result.columns = columns;
+    }
+
+    /// Read until the statement is done or, with `pause`, until the first row
+    /// past the limit, which is counted and dropped like every one after it.
+    /// `true` when it paused.
+    async fn read(
+        &mut self,
+        messages: &mut Pin<Box<SimpleQueryStream>>,
+        pause: bool,
+    ) -> Result<bool, DbError> {
+        while let Some(message) = messages.next().await {
+            let message = match message {
+                Ok(message) => message,
+                Err(error) if self.stopping && error.code() == Some(&SqlState::QUERY_CANCELED) => {
+                    self.result.stopped = Some(Stopped::AtLimit);
+                    return Ok(false);
+                }
+                Err(error) => return Err(query_error(&error, self.sql)),
+            };
+            match message {
+                // One selection can carry several statements, and the grid
+                // shows one result set -- so each new description starts the
+                // kept set over and the last statement wins. Accumulating
+                // across statements would put one statement's rows under
+                // another's column names.
+                SimpleQueryMessage::RowDescription(columns) => {
+                    self.begin(
+                        columns
+                            .iter()
+                            .map(|column| Column {
+                                name: column.name().to_string(),
+                                data_type: None,
+                            })
+                            .collect(),
+                    );
+                    self.result.rows.clear();
+                    self.result.bytes = 0;
+                    self.result.rows_affected = None;
+                    (self.returned, self.kept) = (0, 0);
+                }
+                SimpleQueryMessage::Row(row) => {
+                    self.returned += 1;
+                    if self.fetch.limit.is_some_and(|limit| self.kept >= limit) {
+                        if pause && self.returned == self.kept + 1 {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    self.kept += 1;
+                    // A row arriving with no description before it is not a
+                    // path the driver takes today; without this the grid would
+                    // render headerless and drop every value it was handed.
+                    if self.result.columns.is_empty() {
+                        self.begin(
+                            row.columns()
+                                .iter()
+                                .map(|column| Column {
+                                    name: column.name().to_string(),
+                                    data_type: None,
+                                })
+                                .collect(),
+                        );
+                    }
+
+                    // `get` panics on a value the driver cannot decode as
+                    // UTF-8, and it would panic here holding the client mutex
+                    // — poisoning it and taking the process down with it. A
+                    // database whose encoding is SQL_ASCII can return such
+                    // bytes for ordinary text.
+                    let cells: Vec<Cell> = (0..row.len())
+                        .map(|index| {
+                            row.try_get(index)
+                                .map(|cell| cell.map(str::to_string))
+                                .map_err(|_| non_utf8_error(&self.result.columns, index))
+                        })
+                        .collect::<Result<_, _>>()?;
+
+                    self.result.bytes += cells
+                        .iter()
+                        .filter_map(|cell| cell.as_ref().map(String::len))
+                        .sum::<usize>();
+                    match self.fetch.feed {
+                        Some(feed) => feed.push(cells),
+                        None => self.result.rows.push(cells),
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(count) => {
+                    self.result.rows_affected = Some(count);
+                    self.commands += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    /// The result, plus the number of statements the server completed.
+    fn finish(mut self, started: Instant) -> (QueryResult, usize) {
+        self.result.elapsed = started.elapsed();
+        // A stopped statement's count is only what had arrived, not its size.
+        self.result.capped_from =
+            (self.result.stopped.is_none() && self.returned > self.kept).then_some(self.returned);
+        (self.result, self.commands)
+    }
 }
 
 /// Matched by position, and only when the two agree on how many columns there
@@ -1156,7 +1290,7 @@ fn apply_types(columns: &mut [Column], probed: &[ProbedColumn]) {
     }
 }
 
-fn format_spatial_cells(result: &mut QueryResult) {
+pub(super) fn format_spatial_cells(result: &mut QueryResult) {
     let spatial_columns = result
         .columns
         .iter()
@@ -1875,14 +2009,14 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)", None)
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should be cancelled");
         assert!(
             error.message.contains("cancel"),
             "the server's own words: {}",
             error.message
         );
-        assert!(connection.query("SELECT 1", None).is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
     #[test]
@@ -1890,28 +2024,31 @@ mod tests {
     fn live_a_terminated_session_is_lost_and_a_failed_statement_is_not() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("BEGIN", None)
+            .query("BEGIN", Fetch::default())
             .expect("the transaction should open");
-        assert!(connection.query("SELECT broken", None).is_err());
+        assert!(connection.query("SELECT broken", Fetch::default()).is_err());
         assert!(
             !connection.is_lost(),
             "an aborted transaction is still a session"
         );
         connection
-            .query("ROLLBACK", None)
+            .query("ROLLBACK", Fetch::default())
             .expect("the session should still answer");
 
         let pid = connection
-            .query("SELECT pg_backend_pid()", None)
+            .query("SELECT pg_backend_pid()", Fetch::default())
             .unwrap()
             .rows[0][0]
             .clone()
             .unwrap();
         Connection::open(&live_config())
             .expect("a second connection should open")
-            .query(&format!("SELECT pg_terminate_backend({pid})"), None)
+            .query(
+                &format!("SELECT pg_terminate_backend({pid})"),
+                Fetch::default(),
+            )
             .expect("the terminate should run");
-        assert!(connection.query("SELECT 1", None).is_err());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_err());
         assert!(connection.is_lost());
     }
 
@@ -1921,7 +2058,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-bastion")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one", None)
+            .query("SELECT 1 AS one", Fetch::default())
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
         let sizes = connection
@@ -1936,7 +2073,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-inner")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one", None)
+            .query("SELECT 1 AS one", Fetch::default())
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
     }
@@ -1971,10 +2108,10 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)", None)
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should be cancelled");
         assert!(error.message.contains("cancel"), "{}", error.message);
-        assert!(connection.query("SELECT 1", None).is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
     #[test]
@@ -1987,7 +2124,7 @@ mod tests {
         .expect("connection should open");
 
         let error = connection
-            .query("SELECT pg_sleep(30)", None)
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should time out");
         assert!(error.message.contains("timeout"), "{}", error.message);
     }
@@ -1999,7 +2136,7 @@ mod tests {
         let result = connection
             .query(
                 "SELECT * FROM (VALUES (1, 'alpha'), (2, NULL)) AS sample(id, label)",
-                None,
+                Fetch::default(),
             )
             .expect("query should succeed");
 
@@ -2024,7 +2161,13 @@ mod tests {
     fn live_a_row_limit_keeps_the_first_rows_and_counts_the_rest() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         let capped = connection
-            .query("SELECT n FROM generate_series(1, 10) AS n", Some(3))
+            .query(
+                "SELECT n FROM generate_series(1, 10) AS n",
+                Fetch {
+                    limit: Some(3),
+                    ..Fetch::default()
+                },
+            )
             .expect("query should succeed");
         assert_eq!(
             capped.rows,
@@ -2040,17 +2183,118 @@ mod tests {
         // The cap is per result set: the last set is the one kept, and its
         // count starts over rather than carrying the first one's.
         let last = connection
-            .query("SELECT generate_series(1, 10); SELECT 1 AS one", Some(3))
+            .query(
+                "SELECT generate_series(1, 10); SELECT 1 AS one",
+                Fetch {
+                    limit: Some(3),
+                    ..Fetch::default()
+                },
+            )
             .expect("query should succeed");
         assert_eq!(last.rows, vec![vec![Some("1".into())]]);
         assert_eq!(last.capped_from, None);
 
         // A statement after the capped one still ran: nothing was cut short.
         let after = connection
-            .query("CREATE TEMP TABLE capped AS SELECT generate_series(1, 10) AS n; SELECT n FROM capped", Some(3))
+            .query("CREATE TEMP TABLE capped AS SELECT generate_series(1, 10) AS n; SELECT n FROM capped", Fetch { limit: Some(3), ..Fetch::default() })
             .expect("query should succeed");
         assert_eq!(after.capped_from, Some(10));
-        assert!(connection.query("SELECT 1", None).is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_past_the_limit_is_stopped_rather_than_drained() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let started = Instant::now();
+        let result = connection
+            .query(
+                // Far more rows than a drain could get through in the time
+                // allowed below. In the select list, not `FROM`, where the
+                // whole series is built before the first row is sent.
+                "SELECT generate_series(1, 500000000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .expect("a stopped read is not an error");
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.capped_from, None);
+        // Described like any single statement, though it never completed.
+        assert_eq!(types(&result), vec![Some("int4")]);
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_inside_the_users_transaction_is_drained_not_stopped() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query("CREATE TEMP TABLE kept AS SELECT 1 AS n", Fetch::default())
+            .unwrap();
+        let result = connection
+            .query(
+                "SELECT n FROM generate_series(1, 1000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.capped_from, Some(1000));
+        // A cancel would have aborted the transaction, and this with it.
+        assert!(
+            connection
+                .query("SELECT n FROM kept", Fetch::default())
+                .is_ok()
+        );
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_fed_query_hands_its_kept_rows_to_the_feed_and_not_the_result() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let feed = crate::db::Feed::default();
+        let result = connection
+            .query(
+                "SELECT n FROM generate_series(1, 10) AS n",
+                Fetch {
+                    limit: Some(3),
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.capped_from, Some(10));
+        assert_eq!(fed.set, 1);
+        assert_eq!(
+            names(&QueryResult {
+                columns: fed.columns,
+                ..Default::default()
+            }),
+            vec!["n"]
+        );
+        assert_eq!(
+            fed.rows,
+            vec![
+                vec![Some("1".into())],
+                vec![Some("2".into())],
+                vec![Some("3".into())]
+            ]
+        );
     }
 
     #[test]
@@ -2089,11 +2333,11 @@ mod tests {
         // transaction is aborted" instead of its own cause.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("BEGIN", None)
+            .query("BEGIN", Fetch::default())
             .expect("BEGIN should succeed");
 
         let result = connection
-            .query("SELECT 1 AS a; SELECT 2 AS b", None)
+            .query("SELECT 1 AS a; SELECT 2 AS b", Fetch::default())
             .expect("a multi-statement selection must survive an open transaction");
 
         assert_eq!(names(&result), vec!["b"]);
@@ -2101,7 +2345,7 @@ mod tests {
         assert_eq!(types(&result), vec![None]);
 
         let error = connection
-            .query("SELECT * FROM no_such_relation", None)
+            .query("SELECT * FROM no_such_relation", Fetch::default())
             .unwrap_err();
 
         assert!(
@@ -2110,7 +2354,7 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK", None)
+            .query("ROLLBACK", Fetch::default())
             .expect("ROLLBACK should succeed");
     }
 
@@ -2124,7 +2368,10 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let result = connection
-            .query("SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d", None)
+            .query(
+                "SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["d"]);
@@ -2139,7 +2386,7 @@ mod tests {
 
         // A valid empty result still has to carry its headers.
         let empty = connection
-            .query("SELECT 1 AS id, 'x' AS label WHERE false", None)
+            .query("SELECT 1 AS id, 'x' AS label WHERE false", Fetch::default())
             .expect("query should succeed");
 
         assert_eq!(names(&empty), vec!["id", "label"]);
@@ -2154,7 +2401,7 @@ mod tests {
         // own names and the key's position among them.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, id FROM accounts", None)
+            .query("SELECT name, id FROM accounts", Fetch::default())
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -2176,7 +2423,7 @@ mod tests {
             .expect("connection should open")
             .query(
                 "SELECT id AS ident, upper(name) AS shouted, name FROM accounts",
-                None,
+                Fetch::default(),
             )
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
@@ -2203,7 +2450,7 @@ mod tests {
         ] {
             assert!(
                 connection
-                    .query(sql, None)
+                    .query(sql, Fetch::default())
                     .expect("query should succeed")
                     .edit
                     .is_none(),
@@ -2218,7 +2465,7 @@ mod tests {
         // Nothing in this result set identifies which account a row is.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, email FROM accounts", None)
+            .query("SELECT name, email FROM accounts", Fetch::default())
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2232,12 +2479,12 @@ mod tests {
         connection
             .query(
                 "CREATE TEMP TABLE dbdelve_unkeyed (value integer, label text)",
-                None,
+                Fetch::default(),
             )
             .expect("the temporary table should be created");
 
         let result = connection
-            .query("SELECT value, label FROM dbdelve_unkeyed", None)
+            .query("SELECT value, label FROM dbdelve_unkeyed", Fetch::default())
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2275,13 +2522,13 @@ mod tests {
                  CREATE TABLE dbdelve_test_ddl (id bigint, note text DEFAULT 'x') \
                      PARTITION BY RANGE (id); \
                  CREATE INDEX dbdelve_test_ddl_note ON dbdelve_test_ddl (note)",
-                None,
+                Fetch::default(),
             )
             .expect("the fixture table should be created");
         let partitioned =
             connection.ddl("public", "dbdelve_test_ddl", RelationKind::PartitionedTable);
         connection
-            .query("DROP TABLE dbdelve_test_ddl", None)
+            .query("DROP TABLE dbdelve_test_ddl", Fetch::default())
             .expect("the fixture table should be cleaned up");
         let table = connection
             .ddl("public", "accounts", RelationKind::Table)
@@ -2353,17 +2600,17 @@ mod tests {
                      SELECT a FROM dbdelve_test_ddl_generated; \
                  CREATE INDEX dbdelve_test_ddl_materialized_a ON dbdelve_test_ddl_materialized (a)"
                 ),
-                None,
+                Fetch::default(),
             )
             .expect("the fixtures should be created");
         let written = ddl();
         let rerun = written.as_ref().map_err(Clone::clone).and_then(|written| {
-            connection.query(drop, None)?;
-            connection.query(&written.join("\n"), None)?;
+            connection.query(drop, Fetch::default())?;
+            connection.query(&written.join("\n"), Fetch::default())?;
             ddl()
         });
         connection
-            .query(drop, None)
+            .query(drop, Fetch::default())
             .expect("the fixtures should be cleaned up");
 
         let written = written.expect("the DDL should load");
@@ -2412,13 +2659,13 @@ mod tests {
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (0) TO (500); \
                  CREATE TABLE dbdelve_test_referencing_p2 \
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (500) TO (1000)",
-                None,
+                Fetch::default(),
             )
             .expect("the fixture tables should be created");
 
         let references = connection.references("public", "accounts");
         connection
-            .query("DROP TABLE dbdelve_test_referencing", None)
+            .query("DROP TABLE dbdelve_test_referencing", Fetch::default())
             .expect("the fixture tables should be cleaned up");
         let tables: Vec<String> = references
             .expect("references should load")
@@ -2442,14 +2689,14 @@ mod tests {
                     label text,
                     PRIMARY KEY (left_id, right_id)
                 )",
-                None,
+                Fetch::default(),
             )
             .expect("the temporary table should be created");
 
         let edit = connection
             .query(
                 "SELECT label, right_id, left_id FROM dbdelve_composite",
-                None,
+                Fetch::default(),
             )
             .expect("query should succeed")
             .edit
@@ -2473,19 +2720,19 @@ mod tests {
         // harmless there as the type probe beside it.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("BEGIN", None)
+            .query("BEGIN", Fetch::default())
             .expect("BEGIN should succeed");
 
         assert!(
             connection
-                .query("SELECT id FROM accounts", None)
+                .query("SELECT id FROM accounts", Fetch::default())
                 .expect("query should succeed")
                 .edit
                 .is_some()
         );
 
         let error = connection
-            .query("SELECT * FROM no_such_relation", None)
+            .query("SELECT * FROM no_such_relation", Fetch::default())
             .unwrap_err();
 
         assert!(
@@ -2494,7 +2741,7 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK", None)
+            .query("ROLLBACK", Fetch::default())
             .expect("ROLLBACK should succeed");
     }
 
@@ -2601,7 +2848,7 @@ mod tests {
                  DROP TABLE IF EXISTS dbdelve_test_unanalyzed; \
                  CREATE TABLE dbdelve_test_unanalyzed (id integer NOT NULL); \
                  INSERT INTO dbdelve_test_unanalyzed (id) SELECT generate_series(1, 10)",
-                None,
+                Fetch::default(),
             )
             .expect("the fixture tables should be created");
 
@@ -2640,7 +2887,7 @@ mod tests {
         connection
             .query(
                 "DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed",
-                None,
+                Fetch::default(),
             )
             .expect("the fixture tables should be cleaned up");
 
@@ -2664,14 +2911,17 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let items = connection
-            .query("SELECT count(*) AS rows_seeded FROM order_items", None)
+            .query(
+                "SELECT count(*) AS rows_seeded FROM order_items",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         assert_eq!(items.rows[0][0].as_deref(), Some("3"));
 
         let closed = connection
             .query(
                 "SELECT count(*) AS rows_seeded FROM archive.closed_accounts",
-                None,
+                Fetch::default(),
             )
             .expect("query should succeed");
         assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
