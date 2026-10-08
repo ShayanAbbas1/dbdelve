@@ -1084,8 +1084,8 @@ fn render_results(
     // A refresh keeps the rows it is replacing (`execute_and_then`'s
     // `keep_rows`), and a centred spinner over rows the user is still reading
     // hides the data this pane is for. So every state that has rows behind it
-    // falls through to the grid, and the run says so in a strip above it
-    // instead of in place of it.
+    // falls through to the grid, and the status bar says the run is going.
+    // The spinner is only for the wait before the first row.
     let has_rows = results.read(cx).delegate().rows_count(cx) > 0;
 
     // The two loading states, overlaid on the grid rather than replacing it
@@ -1206,9 +1206,6 @@ fn render_results(
                 results.read(cx).horizontal_scroll_handle.clone(),
                 cx,
             );
-            // `flex_1` rather than full height: under the "Refreshing…" strip a
-            // full-height grid overruns the pane by the strip's height and
-            // takes its last row and scrollbar with it.
             div()
                 .id("results")
                 .smooth_scroll(&rows_scroll)
