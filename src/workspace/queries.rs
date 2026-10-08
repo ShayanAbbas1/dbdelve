@@ -132,10 +132,11 @@ impl Workspace {
         }
         *cancelling = Some(std::time::Instant::now());
         let cancel = cancel.clone();
-        // An explicit stop ends the queue the statement was part of: the
-        // cancelled statement's error lands like any other, and nothing behind
-        // it is sent. No decision is raised -- this was the decision.
-        self.stop_queue_on(tab, cx);
+        // An explicit stop ends the queue the statement was part of: nothing
+        // behind it is sent, and no decision is raised -- this was the
+        // decision. The cancelled statement itself still lands, as the queue's
+        // last result, with whatever rows it kept or the error it ended in.
+        self.drop_rest_of_queue(tab);
         cx.notify();
         let cancel_task = cx
             .background_executor()
@@ -635,6 +636,13 @@ impl Workspace {
     /// Stop whatever queue the named tab is part way through. Nothing that
     /// has run is touched: the results already on it are still results.
     pub(crate) fn stop_queue_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.drop_rest_of_queue(tab);
+        self.release_queue(tab, cx);
+    }
+
+    /// Unsend whatever of a queue has not gone out, leaving the statement in
+    /// flight to land.
+    fn drop_rest_of_queue(&mut self, tab: Tab) {
         let Tab::Query(id) = tab else {
             return;
         };
@@ -649,11 +657,10 @@ impl Workspace {
         {
             queue.remaining.clear();
         }
-        self.release_queue(tab, cx);
     }
 
     /// Let go of a statement the queue sent that will never land: one the
-    /// mode gate refused, or one a cancel ended before it ran.
+    /// mode gate refused, or one a reconnect abandoned.
     ///
     /// Only `advance_queue` clears `awaiting` otherwise, and it runs on a
     /// result. A statement that produces none would leave the flag set for
@@ -1863,6 +1870,18 @@ impl Workspace {
         if matches!(state, QueryState::Running { .. }) {
             *state = QueryState::Idle;
             cx.notify();
+        }
+        // A queued statement that will never land holds no chip, as
+        // `release_queue` says; that one reaches only the active profile.
+        if let Tab::Query(query) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(query)
+                .and_then(|query| query.queue.as_mut())
+            && std::mem::take(&mut queue.awaiting)
+        {
+            queue.remaining.clear();
+            queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
         }
         // Rows of a run nobody will land are not a result, and a grid still
         // marked as streaming would refuse every copy as if more were coming.
