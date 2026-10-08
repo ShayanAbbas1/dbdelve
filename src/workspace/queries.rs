@@ -268,6 +268,12 @@ impl Workspace {
             self.refresh_relation(id, cx);
             return;
         }
+        // Before anything on the tab is touched: a new queue in place of one
+        // with a statement still out would take that statement's result as
+        // one of its own, or leave a queue run at once nowhere to land.
+        if profile.session.running(tab) {
+            return;
+        }
         let Some(editor) = profile.session.editor(tab) else {
             return;
         };
@@ -342,15 +348,18 @@ impl Workspace {
     }
 
     /// Say why nothing ran, where the result would have gone. A refusal is the
-    /// tab's answer to the run, not a notice beside it.
+    /// tab's answer to the run, not a notice beside it -- unless a run is still
+    /// out there, which owns the slot and the token Cancel reaches it by.
     fn refuse_run(&mut self, tab: Tab, message: String, cx: &mut Context<Self>) {
-        if let Some(profile) = self.profile_mut()
-            && let Some((state, _)) = profile.session.slot(tab)
-        {
-            *state = QueryState::Failed(DbError {
-                message,
-                position: None,
-            });
+        if let Some(profile) = self.profile_mut() {
+            if profile.session.running(tab) {
+                profile.session.notice = Some(message);
+            } else if let Some((state, _)) = profile.session.slot(tab) {
+                *state = QueryState::Failed(DbError {
+                    message,
+                    position: None,
+                });
+            }
         }
         cx.notify();
     }
@@ -919,15 +928,7 @@ impl Workspace {
         let engine = profile.config.engine();
 
         let failure = |workspace: &mut Self, message: &str, cx: &mut Context<Self>| {
-            if let Some(profile) = workspace.profile_mut()
-                && let Some((state, _)) = profile.session.slot(tab)
-            {
-                *state = QueryState::Failed(DbError {
-                    message: message.into(),
-                    position: None,
-                });
-            }
-            cx.notify();
+            workspace.refuse_run(tab, message.into(), cx);
         };
 
         let Some(prefix) = engine.explain_prefix(action.mode) else {
