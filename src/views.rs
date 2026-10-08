@@ -1866,6 +1866,13 @@ pub(crate) fn render_running(
     // is not time spent fetching them.
     let elapsed = filled.map_or_else(|| started.elapsed(), |at| at.duration_since(*started));
     let what = match (streaming, rows) {
+        // The rows are all in, and the statement is being stopped or drained
+        // behind them: still running, but no longer fetching anything shown.
+        (true, rows) if filled.is_some() => format!(
+            "{} \u{b7} {} \u{b7} finishing\u{2026}",
+            crate::ui::row_readout(rows, rows),
+            clock(elapsed)
+        ),
         (true, rows) => format!("{} fetched", crate::ui::row_readout(rows, rows)),
         // A refresh keeps the rows it is replacing on screen until it lands.
         (false, 1..) => "Refreshing".to_string(),
@@ -1890,7 +1897,10 @@ pub(crate) fn render_running(
                 div()
                     .whitespace_nowrap()
                     .text_color(t.text_muted)
-                    .child(format!("{what} \u{b7} {}", clock(elapsed))),
+                    .child(match filled {
+                        Some(_) => what,
+                        None => format!("{what} \u{b7} {}", clock(elapsed)),
+                    }),
             )
             .child(
                 button("cancel-query", label, Tone::Quiet, Control::Compact, t)
