@@ -24,10 +24,17 @@ require it, stop and raise it instead.
    only into DBDelve-generated preview queries. A user's own statement runs
    as typed; the row limit bounds it by keeping only that many rows and
    dropping the rest as they arrive, never by changing the statement. A
-   statement that only reads is cancelled once it passes the limit instead of
-   being drained, where that undoes nothing: on Postgres only outside any
-   transaction the user opened, since a cancel aborts it; on MySQL anywhere,
-   since a killed statement is rolled back alone. Either way the limit is visible in the UI, and a capped
+   read is stopped once it passes the limit instead of being drained only when
+   it is the submission's one statement (`sql::stoppable`: rerunnable, and both
+   parsers count exactly one statement) and stopping it undoes nothing. Postgres
+   cancels it only outside any transaction the user opened, since a cancel
+   aborts it, and only if `pg_stat_activity` shows the session's process running
+   this statement's exact text, never waiting on the side session to find
+   out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
+   rolled back alone; SQLite interrupts it; MongoDB drops the cursor; SQL Server
+   sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
+   `SET ROWCOUNT 0` after, reconnecting if that reset fails. Anything else is
+   drained. Either way the limit is visible in the UI, and a capped
    result says how many rows the statement returned, or that it was stopped.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always
@@ -681,7 +688,10 @@ Decided, and not to be re-litigated:
   trip a run needs and not just the statement: the preflight ahead of it
   (`@@TRANCOUNT` and the result-set describe) and the follow-ups behind it
   (`@@ROWCOUNT`, the edit-target describe) run inside the same window and are
-  stopped the same way.
+  stopped the same way. The timer stops applying once a result set's kept rows
+  reach the limit: what follows is rows read only to be counted, and closing the
+  connection for them would take the user's transaction with it. Cancel still
+  reaches it.
 - **Cancel reaches the running statement and nothing queued behind it.** The
   handle it needs (Postgres's `CancelToken`, MySQL's connection id, SQLite's
   `InterruptHandle`, a second handle on SQL Server's socket) is captured in
@@ -697,8 +707,20 @@ Decided, and not to be re-litigated:
   before it is ever sent (`InFlight::cancel_queued`, checked in
   `Connection::run` once the mutex is taken and the session reconnected), and a Cancel that lands after the statement already finished is
   answered "Cancel arrived after that." rather than left to look like it did
-  nothing.
-- **SQL Server's Cancel closes the connection.** tiberius cannot send TDS's
+  nothing. On SQL Server that Cancel still closes the connection, so the
+  complete result lands with a notice about the reset instead of an error.
+  Rows that streamed in are kept as a cancelled result only for a stoppable
+  read where `db::is_cancel` matched the error; otherwise the error is shown.
+  Either way `db::cancel_cost` says what the cancel cost: SQL Server's session
+  reset, Postgres's aborted transaction, a SQLite write's rolled-back
+  transaction.
+- **Postgres's side session** (describe, and the check before a stop at the
+  limit) opens with a 2-second `statement_timeout`, and neither ever blocks on
+  it: a describe that finds it busy is skipped, and a stop that cannot get it
+  quickly drains instead. A describe waits on the same locks as the user's
+  statement, which their own open transaction can hold for good.
+- **SQL Server's Cancel closes the connection** (a read stopped at the row
+  limit does not: that is `SET ROWCOUNT`). tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary
   login lacks, so Cancel shuts the socket down and the server abandons the
   batch, rolling back what it had open (`live_a_cancel_stops_the_statement_on_the_server_and_reconnects`
@@ -740,7 +762,8 @@ Decided, and not to be re-litigated:
   registered under that token. A cancel that lands before the submit has
   returned a handle is kept on the token and carried out when the handle
   arrives. The other engines take the token and ignore it:
-  they stop whatever their one connection is running.
+  they stop whatever their one connection is running. Between partitions the
+  fetch checks whether Cancel was asked and stops fetching the rest.
   Statements are always submitted `async=true`, because a synchronous submit
   withholds its handle for up to 45 seconds and the handle is what Cancel needs.
 - **Snowflake signs in with a key pair and nothing else.** An RS256 token per
@@ -952,7 +975,9 @@ Decided, and not to be re-litigated:
   before the review, never a quiet string.
 - **The row limit caps a `find` or `aggregate` cursor, and a read is stopped
   there by dropping it**, which the driver kills on the server and which
-  undoes nothing; an aggregate with `$out` or `$merge` runs to its end. A
+  undoes nothing; an aggregate with `$out` or `$merge` runs to its end. The
+  first batch is sized to limit+1 (capped at 10,000) unless the statement set
+  its own `batchSize`. A
   command's reply is one document of at most 16MB and is not capped. Rows
   are not streamed into the grid: a later document can bring a field no
   earlier one had, so the columns are not known until the last one is in.
