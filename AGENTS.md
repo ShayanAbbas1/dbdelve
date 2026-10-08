@@ -1181,30 +1181,42 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A queue of plain reads runs at once, each on a connection of its own**
   (`session::runs_at_once`, `Workspace::run_at_once`). Plain is
   `sql::plain_read`: every statement a query `classify` reads as a read, so no
-  `SET`, `USE`, transaction control, declaration or `SELECT … INTO`, and on
-  MongoDB a read with no `$out` or `$merge`. And only while `Profile::altered`
-  is false: any statement of the user's other than a plain read
-  (`sql::alters_session`) sets it until the next connect, since a fresh
-  connection would not see the transaction, `SET`, `USE` or temporary table it
-  may have left behind. Nothing asks the server whether a transaction is open:
-  Postgres's and MySQL's drivers keep that to themselves, so this is the
-  conservative side of not knowing, and a `COMMIT` does not clear it. Every
-  entry is in `done` from the start, in `Idle`, and runs through
-  `execute_unchecked` with its `lane` (where it starts in `Queue::sql`): it
-  lands in its own entry, found by that key and never by position, because a
-  SQL Server batch landing several sets puts results ahead of those still
-  running. `Connection::query_alongside` opens the connection the way the
+  `SET`, `USE`, transaction control, declaration or `SELECT … INTO`, no call
+  whose answer is the session's (`nextval`, advisory and named locks,
+  `LAST_INSERT_ID`, `SCOPE_IDENTITY`, `@x := …`), and on MongoDB a read with
+  no `$out` or `$merge`. And only while `Profile::in_turn` is `None`: what the
+  user's statements left on the session (`sql::leaves`) -- a transaction
+  still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
+  `ROLLBACK`, read off what was sent rather than asked of the server), or a
+  `SET`, `USE` or temporary table (`session_changed`, until the next connect)
+  -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,
+  a statement nothing can parse and an autocommitted write or DDL leave
+  nothing. A queue of reads held in turn this way says why in the notice.
+  Every entry is in `done` from the start, in `Idle`, and runs through
+  `execute_unchecked` with its `session::Lane`: the profile (by id and
+  generation) and run (its shared token) it was issued for, and where it
+  starts in `Queue::sql`. It lands in its own entry, found by that key and
+  never by position, because a SQL Server batch landing several sets puts
+  results ahead of those still running, and only while the tab still runs
+  that same run; a switch to another profile meanwhile changes nothing about
+  where it lands. Each statement's blocking call runs on a thread of its own
+  (`on_own_thread`), as a Cancel does, not on GPUI's background executor,
+  which on Linux has a thread per core and would be filled by them.
+  `Connection::query_alongside` opens the connection the way the
   profile's was (its tunnel, password and timeout; Postgres and MySQL share
   its side session; the Read-only hold is put on it too) and drops it when the
   statement ends; Snowflake and MongoDB run it on the profile's own, which
-  already runs statements side by side. At most `STATEMENTS_AT_ONCE` (8) are
+  already runs statements side by side, and so does any engine whose server
+  refuses another connection, behind the profile's other statements and out
+  of Cancel's reach. At most `STATEMENTS_AT_ONCE` (8) are
   out together; the rest start as those land. Each is the lone statement on
   its connection, so it streams and stops at the row limit as a single run
   does. A failure stays on its own chip and the rest carry on, with no
   Stop/Continue to raise. The tab's own slot is `Running` under one
   `CancelToken::alongside` every statement shares, so Cancel and closing the
   tab stop all of them, statements not yet sent are dropped, and nothing else
-  runs on the tab until the last has landed and `land_lane` gives the slot the
+  runs on or is written over the tab (a refusal goes to the notice) until the
+  last has landed and `land_lane` gives the slot the
   last statement's result, as a queue run in turn leaves it.
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
