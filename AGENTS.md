@@ -766,7 +766,9 @@ Decided, and not to be re-litigated:
   registered under that token. A cancel that lands before the submit has
   returned a handle is kept on the token and carried out when the handle
   arrives. The other engines take the token and ignore it:
-  they stop whatever their one connection is running. Between partitions the
+  they stop whatever their one connection is running, except under a
+  token made by `CancelToken::alongside`, which stops the connections a queue
+  run at once opened instead (see "Session and tabs"). Between partitions the
   fetch checks whether Cancel was asked and stops fetching the rest.
   Statements are always submitted `async=true`, because a synchronous submit
   withholds its handle for up to 45 seconds and the handle is what Cancel needs.
@@ -1153,13 +1155,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`open_query`) and `last_query`.** Do not reintroduce a single shared editor
   for anything.
 - **A selection holding more than one statement runs each of them in turn, one
-  chip per result set.** `sql::queued_statements` splits it and `Queue` on
+  chip per result set, unless every one is a plain read, when they run at
+  once.** `sql::queued_statements` splits it and `Queue` on
   the tab is the queue: `remaining` is what has not gone out, `done` holds a
   `Finished` per result kept, and `showing` says which of them the tab's one
   `query`/`results` pair is displaying. That is one per statement on four
   engines, where a submission holds one statement; on SQL Server the unit is
   the batch, so one submission can land several (see the SQL Server entry under
-  "Engine divergences"). Each statement goes out through
+  "Engine divergences"). Every statement has a chip from the moment Run is
+  pressed: those not yet sent read "queued" and cannot be selected. Each
+  statement goes out through
   `execute_sql` separately, so `sql::classify` and `sql::gate` answer for each
   one on its own and a statement the gate stops parks a `PendingRun` the rest
   wait behind. Nothing else changes: one statement -- selected, or the one
@@ -1173,6 +1178,34 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   fails raises a Stop/Continue decision (`Session::queue_failure`) rather
   than deciding for the user, while a Cancel ends the queue without asking,
   because a cancel was already the decision.
+- **A queue of plain reads runs at once, each on a connection of its own**
+  (`session::runs_at_once`, `Workspace::run_at_once`). Plain is
+  `sql::plain_read`: every statement a query `classify` reads as a read, so no
+  `SET`, `USE`, transaction control, declaration or `SELECT … INTO`, and on
+  MongoDB a read with no `$out` or `$merge`. And only while `Profile::altered`
+  is false: any statement of the user's other than a plain read
+  (`sql::alters_session`) sets it until the next connect, since a fresh
+  connection would not see the transaction, `SET`, `USE` or temporary table it
+  may have left behind. Nothing asks the server whether a transaction is open:
+  Postgres's and MySQL's drivers keep that to themselves, so this is the
+  conservative side of not knowing, and a `COMMIT` does not clear it. Every
+  entry is in `done` from the start, in `Idle`, and runs through
+  `execute_unchecked` with its `lane` (where it starts in `Queue::sql`): it
+  lands in its own entry, found by that key and never by position, because a
+  SQL Server batch landing several sets puts results ahead of those still
+  running. `Connection::query_alongside` opens the connection the way the
+  profile's was (its tunnel, password and timeout; Postgres and MySQL share
+  its side session; the Read-only hold is put on it too) and drops it when the
+  statement ends; Snowflake and MongoDB run it on the profile's own, which
+  already runs statements side by side. At most `STATEMENTS_AT_ONCE` (8) are
+  out together; the rest start as those land. Each is the lone statement on
+  its connection, so it streams and stops at the row limit as a single run
+  does. A failure stays on its own chip and the rest carry on, with no
+  Stop/Continue to raise. The tab's own slot is `Running` under one
+  `CancelToken::alongside` every statement shares, so Cancel and closing the
+  tab stop all of them, statements not yet sent are dropped, and nothing else
+  runs on the tab until the last has landed and `land_lane` gives the slot the
+  last statement's result, as a queue run in turn leaves it.
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
   reaches `advance_queue`. Without the flag an ordinary Run, a header sort or
