@@ -4160,6 +4160,7 @@ mod tests {
             "db.accounts.deleteOne({_id: 1})",
             "db.accounts.findOneAndUpdate({_id: 1}, {$set: {a: 2}})",
             "db.accounts.aggregate([{$out: 'copy'}])",
+            "db.accounts.aggregate([{$merge: 'copy'}])",
             "db.accounts.find({}",
         ] {
             assert!(!rerunnable(Engine::MongoDb, sql), "{sql}");

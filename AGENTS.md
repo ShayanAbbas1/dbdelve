@@ -950,6 +950,12 @@ Decided, and not to be re-litigated:
   shared type when the present, non-null cells agree and `mixed` otherwise. An
   edit is coerced back to its cell's tag; text that does not coerce is an error
   before the review, never a quiet string.
+- **The row limit caps a `find` or `aggregate` cursor, and a read is stopped
+  there by dropping it**, which the driver kills on the server and which
+  undoes nothing; an aggregate with `$out` or `$merge` runs to its end. A
+  command's reply is one document of at most 16MB and is not capped. Rows
+  are not streamed into the grid: a later document can bring a field no
+  earlier one had, so the columns are not known until the last one is in.
 - **Cancel goes by session, not by comment.** Every run is sent in a driver
   session of its own with the statement untouched (a user's `comment` is theirs
   and is never rewritten to carry a tag). `cancel` takes `&self`, finds the run's
