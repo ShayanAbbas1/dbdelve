@@ -1527,7 +1527,7 @@ impl Workspace {
             .detach();
         }
         let fed = feed.clone();
-        let reads_only = sql::rerunnable(engine, &sql);
+        let reads_only = sql::stoppable(engine, &sql);
         let query_task = cx.background_executor().spawn(async move {
             let result = match generated {
                 true => connection.generated(&sql, &cancel, fed.as_ref()),

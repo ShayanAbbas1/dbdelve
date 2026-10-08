@@ -1668,8 +1668,9 @@ pub enum Stopped {
 pub struct Fetch<'a> {
     pub limit: Option<usize>,
     pub feed: Option<&'a Feed>,
-    /// The statement only reads, as `sql::rerunnable` judges it, so stopping
-    /// it at the limit loses nothing it was going to do.
+    /// The submission is one statement that only reads, as `sql::stoppable`
+    /// judges it, so stopping it at the limit loses nothing it was going to
+    /// do.
     pub reads_only: bool,
 }
 
