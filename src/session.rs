@@ -729,23 +729,29 @@ impl Session {
         }
     }
 
-    /// `slot`, or for a queue's statement running at once with others
-    /// (`lane`, where it starts in `Queue::sql`), that statement's own entry
-    /// in `done`. Keyed by statement rather than position, because a batch
-    /// that lands more than one set puts results ahead of those still running.
+    /// `slot`, or for a queue's statement running at once with others, that
+    /// statement's own entry in `done`. Keyed by statement rather than
+    /// position, because a batch that lands more than one set puts results
+    /// ahead of those still running; and only while the tab is still running
+    /// the lane's own run, since a later run of the same text has statements
+    /// starting at the same places.
     pub(crate) fn slot_at(
         &mut self,
         tab: Tab,
-        lane: Option<usize>,
+        lane: Option<&Lane>,
     ) -> Option<(&mut QueryState, Entity<TableState<ResultGrid>>)> {
-        let Some(start) = lane else {
+        let Some(lane) = lane else {
             return self.slot(tab);
         };
         let Tab::Query(id) = tab else {
             return None;
         };
-        let queue = self.query_tab_mut(id)?.queue.as_mut()?;
-        let at = queue.lane(start)?;
+        let query = self.query_tab_mut(id)?;
+        if !matches!(&query.query, QueryState::Running { cancel, .. } if cancel.is(&lane.run)) {
+            return None;
+        }
+        let queue = query.queue.as_mut()?;
+        let at = queue.lane(lane.start)?;
         let finished = &mut queue.done[at];
         Some((&mut finished.state, finished.grid.clone()))
     }
@@ -1094,6 +1100,19 @@ pub(crate) struct Queue<G = Entity<TableState<ResultGrid>>> {
     /// is the same count they reach anyway; take a window into
     /// `execute_unchecked` if one ever needs to be built later than this.
     pub(crate) spare: Vec<G>,
+}
+
+/// A statement of a queue running at once with others, as it was issued: to
+/// which profile's connection, under which run's shared token, and where it
+/// starts in [`Queue::sql`]. The profile is named rather than taken to be the
+/// one in front, which the user may have switched away from by the time it
+/// lands.
+#[derive(Clone)]
+pub(crate) struct Lane {
+    pub(crate) profile: String,
+    pub(crate) generation: u64,
+    pub(crate) run: CancelToken,
+    pub(crate) start: usize,
 }
 
 /// One statement of a queue that has run, with the result it produced.

@@ -472,7 +472,7 @@ impl Workspace {
         let cancel = cancel.clone();
         let cancel_task = cx
             .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+            .spawn(on_own_thread(move || connection.cancel(&cancel)));
         // Said as `cancel_query` says it: the tab has gone, so a statement
         // still running behind it is all the more worth knowing about.
         cx.spawn(async move |workspace, cx| {

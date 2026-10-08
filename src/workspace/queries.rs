@@ -11,7 +11,7 @@ use gpui_component::table::TableState;
 use crate::db::{Feed, Fetch, QueryResult, Stopped};
 
 use super::*;
-use crate::session::{Finished, PendingRun, Queue, Resume, Step, TabKey, next_step};
+use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -156,7 +156,7 @@ impl Workspace {
         cx.notify();
         let cancel_task = cx
             .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+            .spawn(on_own_thread(move || connection.cancel(&cancel)));
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -470,10 +470,11 @@ impl Workspace {
         let spare = (0..spares)
             .map(|_| crate::result_grid::new_grid(window, cx))
             .collect();
-        let Some(query) = self
-            .profile_mut()
-            .and_then(|profile| profile.session.query_tab_mut(id))
-        else {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let issued = (profile.id.clone(), profile.generation);
+        let Some(query) = profile.session.query_tab_mut(id) else {
             return;
         };
         query.queue = Some(Queue {
@@ -490,60 +491,65 @@ impl Workspace {
             cancel: CancelToken::alongside(),
         };
         for _ in 0..session::STATEMENTS_AT_ONCE {
-            self.start_lane(tab, cx);
+            self.start_lane(tab, &issued.0, issued.1, cx);
         }
         cx.notify();
     }
 
     /// Send the first of a queue's statements still waiting to run at once
-    /// with the others.
-    fn start_lane(&mut self, tab: Tab, cx: &mut Context<Self>) {
+    /// with the others, on the profile the run was issued to.
+    fn start_lane(&mut self, tab: Tab, profile: &str, generation: u64, cx: &mut Context<Self>) {
         let Tab::Query(id) = tab else {
             return;
         };
-        let Some((start, sql)) = self
-            .profile()
-            .and_then(|profile| profile.session.query_tab(id))
-            .and_then(|query| query.queue.as_ref())
-            .and_then(|queue| {
-                queue
-                    .done
-                    .iter()
-                    .find(|finished| matches!(finished.state, QueryState::Idle))
-            })
-            .map(|finished| (finished.start, finished.sql.clone()))
-        else {
+        let Some((lane, sql)) = self.issued_to(profile, generation).and_then(|issued| {
+            let query = issued.session.query_tab(id)?;
+            let QueryState::Running { cancel, .. } = &query.query else {
+                return None;
+            };
+            let waiting = query
+                .queue
+                .as_ref()?
+                .done
+                .iter()
+                .find(|finished| matches!(finished.state, QueryState::Idle))?;
+            let lane = Lane {
+                profile: profile.to_string(),
+                generation,
+                run: cancel.clone(),
+                start: waiting.start,
+            };
+            Some((lane, waiting.sql.clone()))
+        }) else {
             return;
         };
-        self.execute_unchecked(sql, tab, None, false, None, Some(start), cx);
+        self.execute_unchecked(sql, tab, None, false, None, Some(lane), cx);
     }
 
     /// A statement run at once with others has landed in its own entry: put
     /// any further sets of its batch beside it, send the next waiting
     /// statement, and once none is out, hand the tab back.
-    fn land_lane(
-        &mut self,
-        tab: Tab,
-        start: usize,
-        rest: Vec<QueryResult>,
-        cx: &mut Context<Self>,
-    ) {
+    fn land_lane(&mut self, tab: Tab, lane: Lane, rest: Vec<QueryResult>, cx: &mut Context<Self>) {
         let Tab::Query(id) = tab else {
             return;
         };
-        let (mode, client_keys) = self.landing_view(tab);
+        let (mode, client_keys) = Self::landing_view(
+            self.issued_to(&lane.profile, lane.generation)
+                .map(|profile| &*profile),
+            tab,
+        );
         let (extra, dropped, out) = {
             let Some(queue) = self
-                .profile_mut()
+                .issued_to(&lane.profile, lane.generation)
                 .and_then(|profile| profile.session.query_tab_mut(id))
                 .and_then(|query| query.queue.as_mut())
             else {
                 return;
             };
-            let Some(at) = queue.lane(start) else {
+            let Some(at) = queue.lane(lane.start) else {
                 return;
             };
-            let (extra, dropped) = queue.land_sets(at + 1, start, rest);
+            let (extra, dropped) = queue.land_sets(at + 1, lane.start, rest);
             let out = queue.done.iter().any(|finished| {
                 matches!(
                     finished.state,
@@ -554,12 +560,12 @@ impl Workspace {
         };
         self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
         if out {
-            self.start_lane(tab, cx);
+            self.start_lane(tab, &lane.profile, lane.generation, cx);
             return;
         }
 
         let Some(query) = self
-            .profile_mut()
+            .issued_to(&lane.profile, lane.generation)
             .and_then(|profile| profile.session.query_tab_mut(id))
         else {
             return;
@@ -602,7 +608,7 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let (mode, client_keys) = self.landing_view(tab);
+        let (mode, client_keys) = Self::landing_view(self.profile(), tab);
         let (step, extra, dropped) = {
             let Some(profile) = self.profile_mut() else {
                 return;
@@ -677,13 +683,9 @@ impl Workspace {
     /// The mode and in-memory sort a queue's result lands under, read before
     /// the session is borrowed, for the reason the completion handler reads
     /// them before `slot`.
-    fn landing_view(&self, tab: Tab) -> (Mode, Option<Vec<SortKey>>) {
-        let mode = self
-            .profile()
-            .map(|profile| profile.mode)
-            .unwrap_or_default();
-        let client_keys = self
-            .profile()
+    fn landing_view(profile: Option<&Profile>, tab: Tab) -> (Mode, Option<Vec<SortKey>>) {
+        let mode = profile.map(|profile| profile.mode).unwrap_or_default();
+        let client_keys = profile
             .and_then(|profile| profile.session.sorting(tab))
             .and_then(Sorting::client_keys)
             .map(<[SortKey]>::to_vec);
@@ -1509,10 +1511,11 @@ impl Workspace {
     /// would be dropped on the floor. Nothing follows a failure — the error is
     /// what there is to see, and a refresh would replace it with rows.
     ///
-    /// `lane` is a statement of a queue running at once with others (where it
-    /// starts in `Queue::sql`): it lands in its own entry of the queue, runs
-    /// on a connection of its own under the run's shared token, and hands its
-    /// result to `land_lane` rather than `advance_queue`.
+    /// `lane` is a statement of a queue running at once with others: it runs
+    /// on the profile it was issued to rather than the one in front, lands in
+    /// its own entry of the queue, runs on a connection of its own under the
+    /// run's shared token, and hands its result to `land_lane` rather than
+    /// `advance_queue`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_unchecked(
         &mut self,
@@ -1521,23 +1524,24 @@ impl Workspace {
         refresh: Option<Refresh>,
         keep_rows: bool,
         explain: Option<ExplainMode>,
-        lane: Option<usize>,
+        lane: Option<Lane>,
         cx: &mut Context<Self>,
     ) {
-        // Read before the task, which outlives the borrow of `self`.
-        let engine = self.engine();
-        let Some(profile) = self.profile_mut() else {
+        let profile = match &lane {
+            Some(lane) => self.issued_to(&lane.profile, lane.generation),
+            None => self.profile_mut(),
+        };
+        let Some(profile) = profile else {
             return;
         };
+        // Read before the task, which outlives the borrow of `self`.
+        let engine = profile.config.engine();
         let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
         let read_only = profile.mode == Mode::ReadOnly;
-        let shared = match (lane, profile.session.slot(tab)) {
-            (Some(_), Some((QueryState::Running { cancel, .. }, _))) => Some(cancel.clone()),
-            _ => None,
-        };
-        let Some((state, results)) = profile.session.slot_at(tab, lane) else {
+        let alongside = lane.is_some();
+        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
         // Guarded here rather than in each caller: every path that runs SQL
@@ -1553,12 +1557,15 @@ impl Workspace {
                 position: None,
             });
             cx.notify();
-            if let Some(start) = lane {
-                self.land_lane(tab, start, Vec::new(), cx);
+            if let Some(lane) = lane {
+                self.land_lane(tab, lane, Vec::new(), cx);
             }
             return;
         };
-        let cancel = shared.unwrap_or_default();
+        let cancel = lane
+            .as_ref()
+            .map(|lane| lane.run.clone())
+            .unwrap_or_default();
         let started = std::time::Instant::now();
         let previous = std::mem::replace(
             state,
@@ -1574,7 +1581,7 @@ impl Workspace {
         // The spinner beside the clock redraws every frame, but not under
         // reduce motion, so the clock cannot lean on it to tick.
         cx.spawn({
-            let id = id.clone();
+            let (id, lane) = (id.clone(), lane.clone());
             async move |workspace, cx| {
                 loop {
                     cx.background_executor()
@@ -1583,7 +1590,7 @@ impl Workspace {
                     let still_running = workspace.update(cx, |workspace, cx| {
                         let running = workspace
                             .issued_to(&id, generation)
-                            .and_then(|profile| profile.session.slot_at(tab, lane))
+                            .and_then(|profile| profile.session.slot_at(tab, lane.as_ref()))
                             .is_some_and(|(state, _)| {
                                 matches!(state, QueryState::Running { started: at, .. } if *at == started)
                             });
@@ -1687,7 +1694,7 @@ impl Workspace {
         // worth getting back. Only the buffer's — a relation's preview is SQL
         // dbdelve wrote, and nobody asked to keep it.
         if let Some(statement) = &statement
-            && let Some(profile) = self.profile_mut()
+            && let Some(profile) = self.issued_to(&id, generation)
         {
             // A line that could not be written is not worth a notice on every
             // run: the statement is still in the buffer, so nothing is lost.
@@ -1723,7 +1730,7 @@ impl Workspace {
         let streams = matches!(tab, Tab::Object(_)) || !generated;
         let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
-            let (id, results) = (id.clone(), results.clone());
+            let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
             let (names, widths) = (shown.0.clone(), shown.1.clone());
             cx.spawn(async move |workspace, cx| {
                 loop {
@@ -1735,7 +1742,7 @@ impl Workspace {
                             return false;
                         };
                         let mode = profile.mode;
-                        let running = profile.session.slot_at(tab, lane).is_some_and(|(state, _)| {
+                        let running = profile.session.slot_at(tab, lane.as_ref()).is_some_and(|(state, _)| {
                             matches!(state, QueryState::Running { started: at, .. } if *at == started)
                         });
                         // The count in the status bar is the workspace's to
@@ -1755,23 +1762,29 @@ impl Workspace {
         }
         let fed = feed.clone();
         let reads_only = sql::stoppable(engine, &sql);
-        let run = cancel.clone();
-        let query_task = cx.background_executor().spawn(async move {
+        let work = move || {
             let fetch = Fetch {
                 limit,
                 feed: fed.as_ref(),
                 reads_only,
             };
-            let result = match (generated, lane) {
+            let result = match (generated, alongside) {
                 (true, _) => connection.generated(&sql, &cancel, fed.as_ref()),
-                (false, None) => connection.query(&sql, &cancel, fetch),
-                (false, Some(_)) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+                (false, false) => connection.query(&sql, &cancel, fetch),
+                (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
             };
             // A connection of the lane's own that failed is gone with it, and
             // says nothing about the profile's.
-            let lost = lane.is_none() && result.is_err() && connection.is_lost();
+            let lost = !alongside && result.is_err() && connection.is_lost();
             (result, lost)
-        });
+        };
+        // Up to eight of a queue's statements each hold a thread for as long
+        // as the server takes, which on Linux can fill GPUI's background
+        // executor and stall the Cancel spawned behind them.
+        let query_task = match alongside {
+            true => cx.background_executor().spawn(on_own_thread(work)),
+            false => cx.background_executor().spawn(async move { work() }),
+        };
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;
@@ -1782,7 +1795,7 @@ impl Workspace {
                     // it belongs on has to be reached through the same session.
                     let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
-                            workspace.drop_stale_run(&id, tab, lane.map(|start| (start, &run)), cx);
+                            workspace.drop_stale_run(&id, tab, lane.as_ref(), cx);
                             return;
                         };
                         // Read before `slot`, which borrows the session and not
@@ -1816,7 +1829,8 @@ impl Workspace {
                                 queue.remaining.clear();
                             }
                         }
-                        let Some((state, results)) = profile.session.slot_at(tab, lane) else {
+                        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
+                        else {
                             return;
                         };
 
@@ -2082,7 +2096,7 @@ impl Workspace {
                     // not on the queue's presence. `Queue::awaiting` is what
                     // keeps the edit's own result out of `done`.
                     match lane {
-                        Some(start) => workspace.land_lane(tab, start, rest, cx),
+                        Some(lane) => workspace.land_lane(tab, lane, rest, cx),
                         None if !had_refresh => workspace.advance_queue(tab, rest, cx),
                         None => {}
                     }
@@ -2110,21 +2124,21 @@ impl Workspace {
         &mut self,
         id: &str,
         tab: Tab,
-        lane: Option<(usize, &CancelToken)>,
+        lane: Option<&Lane>,
         cx: &mut Context<Self>,
     ) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        if let Some((_, run)) = lane
+        if let Some(lane) = lane
             && !matches!(
                 profile.session.slot(tab),
-                Some((QueryState::Running { cancel, .. }, _)) if cancel.is(run)
+                Some((QueryState::Running { cancel, .. }, _)) if cancel.is(&lane.run)
             )
         {
             return;
         }
-        if let Some((start, _)) = lane
+        if let Some(&Lane { start, .. }) = lane
             && let Tab::Query(query) = tab
             && let Some(queue) = profile
                 .session

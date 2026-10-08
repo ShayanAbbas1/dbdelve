@@ -1802,6 +1802,21 @@ pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 /// chrome stops at 17 because the titlebar does not grow with it: the window
 /// buttons are placed against it once, when the window opens, and past 17 the
 /// controls in it would touch its edges.
+/// Blocking work on a thread of its own, for the background executor to await
+/// without holding one of its threads: on Linux it has only as many as there
+/// are cores, and a run parked on the server for each of them would stall
+/// everything else spawned there, a Cancel included.
+pub(crate) async fn on_own_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || sender.send(work()));
+    // Dropped unsent only by a panic on that thread, which is a panic here.
+    receiver
+        .await
+        .expect("the thread running blocking work panicked")
+}
+
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
     match slot {
         FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
