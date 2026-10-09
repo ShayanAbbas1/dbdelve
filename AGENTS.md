@@ -25,8 +25,9 @@ require it, stop and raise it instead.
    as typed; the row limit bounds it by keeping only that many rows and
    dropping the rest as they arrive, never by changing the statement. A
    read is stopped once it passes the limit instead of being drained only when
-   it is the submission's one statement (`sql::stoppable`: rerunnable, and both
-   parsers count exactly one statement) and stopping it undoes nothing. Postgres
+   it is the submission's one statement (`sql::stoppable`: rerunnable, both
+   parsers count exactly one statement, and no `set_config`, advisory or named
+   lock or `@x :=` the session keeps) and stopping it undoes nothing. Postgres
    cancels it only outside any transaction the user opened, since a cancel
    aborts it, and only if `pg_stat_activity` shows the session's process running
    this statement's exact text, never waiting on the side session to find

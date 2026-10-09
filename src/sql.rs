@@ -1825,7 +1825,9 @@ pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
 /// statements in one submission wherever the user did not separate them.
 ///
 /// Both parsers have to count one: the grammar reads `BEGIN; …; COMMIT` as a
-/// single transaction block.
+/// single transaction block. And it must leave the session alone: a Postgres
+/// cancel aborts the implicit transaction a `set_config` or advisory lock
+/// lives in, so such a read is drained rather than stopped.
 pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
     let parsed_alone = match dialect(engine) {
         Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql)
@@ -1835,6 +1837,7 @@ pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
     rerunnable(engine, sql)
         && parsed_alone
         && Buffer::for_engine(engine, sql).statements().len() == 1
+        && !touches_session(engine, sql)
 }
 
 /// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,
@@ -4468,6 +4471,17 @@ mod tests {
             Engine::SqlServer,
             "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
         ));
+        for (engine, sql) in [
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false), * FROM t",
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1), * FROM t"),
+            (Engine::MySql, "SELECT GET_LOCK('held', 0), t.* FROM t"),
+            (Engine::MySql, "SELECT @n := @n + 1, t.* FROM t"),
+        ] {
+            assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+        }
         assert!(stoppable(Engine::MongoDb, "db.accounts.find({})"));
         assert!(stoppable(
             Engine::MongoDb,
