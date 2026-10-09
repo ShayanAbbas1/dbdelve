@@ -1784,8 +1784,16 @@ impl Workspace {
                         // The count in the status bar is the workspace's to
                         // draw, not the grid's. Only when something arrived:
                         // the clock has a tick of its own.
+                        let began = results.read(cx).delegate().streamed_set();
                         if running && pour(&feed, &results, mode, engine, (&names, &widths), cx) {
                             cx.notify();
+                        }
+                        // A grid started for the rows lacks what the structure
+                        // marked on the one before it, as a landed run's does.
+                        if let Tab::Object(object) = tab
+                            && results.read(cx).delegate().streamed_set() != began
+                        {
+                            workspace.mark_columns(object, cx);
                         }
                         running
                     });
