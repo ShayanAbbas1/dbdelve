@@ -1196,7 +1196,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   user's statements left on the session (`sql::leaves`) -- a transaction
   still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
   `ROLLBACK`, read off what was sent rather than asked of the server), or a
-  `SET`, `USE` or temporary table (`session_changed`, until the next connect)
+  `SET`, `USE`, temporary table or one of those session calls
+  (`session_changed`, until the next connect)
   -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,
   a statement nothing can parse and an autocommitted write or DDL leave
   nothing. A queue of reads held in turn this way says why in the notice.

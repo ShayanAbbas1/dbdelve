@@ -1918,8 +1918,10 @@ pub(crate) struct Leaves {
     /// ends one, `None` when it does neither.
     pub(crate) transaction: Option<bool>,
     /// A `SET` (MySQL's `autocommit` among them), `USE`, `PRAGMA … =`, table
-    /// lock, temporary table or variable `SELECT … INTO`, which
-    /// lasts until the session does.
+    /// lock, temporary table or variable `SELECT … INTO`, which lasts until
+    /// the session does, or a call [`touches_session`] finds: `set_config`, a
+    /// lock, an `@x :=`. One that only reads what the session holds counts
+    /// too, the conservative side.
     pub(crate) settings: bool,
 }
 
@@ -1952,6 +1954,7 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
             };
         }
     }
+    leaves.settings |= touches_session(engine, sql);
     leaves
 }
 
@@ -5088,6 +5091,14 @@ mod tests {
             (Engine::SqlServer, "SELECT * INTO #t FROM s", &settings),
             (Engine::MySql, "SELECT 1 INTO @x", &settings),
             (Engine::Sqlite, "PRAGMA foreign_keys = OFF", &settings),
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false)",
+                &settings,
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1)", &settings),
+            (Engine::MySql, "SELECT GET_LOCK('a', 10)", &settings),
+            (Engine::MySql, "SELECT @x := 1", &settings),
         ] {
             assert_eq!(&leaves(engine, statement), left, "{statement}");
         }
