@@ -68,9 +68,11 @@ pub struct RowPanel {
     /// a tick until the timer in `copy_row_field` clears it.
     pub copied: Option<(usize, usize)>,
     /// Narrows the fields to those whose column name or value contains it.
-    /// One for every tab and kept across rows, so a column found by name
-    /// stays found while the selection moves; one found by value comes and
-    /// goes with the rows that hold it.
+    /// One field for the window, showing the filter of the tab in front
+    /// (`row_panel_filter`), so one tab's filter never hides another's
+    /// columns. Kept across rows: a column found by name stays found while the
+    /// selection moves; one found by value comes and goes with the rows that
+    /// hold it.
     pub search: Entity<InputState>,
     /// Whether the last frame drew `search`, cleared and set as `on_screen`
     /// is. A field unmounted while focused keeps the window's focus, and with

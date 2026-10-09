@@ -255,11 +255,18 @@ impl Workspace {
                 .placeholder("Filter columns and values…")
                 .clean_on_escape()
         });
-        cx.subscribe(&row_panel_search, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })
+        cx.subscribe(
+            &row_panel_search,
+            |workspace, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    if let Some((_, filter)) = workspace.active_row_panel() {
+                        *filter = value;
+                    }
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
@@ -903,6 +910,7 @@ impl Render for Workspace {
         // grid cannot be built without a window.
         self.restore_objects(window, cx);
         self.sync_page_input(window, cx);
+        self.sync_row_panel_filter(window, cx);
         // Where a query tab that reached the front without `activate_tab` gets
         // its snapshot read. `session.active` is written in three places --
         // `Session::new`, `activate_tab` and `escape` -- and the first and last

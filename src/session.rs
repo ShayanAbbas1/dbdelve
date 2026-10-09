@@ -1042,6 +1042,10 @@ pub(crate) struct QueryTab {
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
+    /// What this tab's row panel is filtered by. The field is one for the
+    /// window (`RowPanel::search`); this is what it shows while the tab is in
+    /// front. Not persisted.
+    pub(crate) row_panel_filter: gpui::SharedString,
     /// The row-inspector split's state, per tab: a width dragged to in one
     /// tab must not resize another's. Not persisted -- a fresh tab always
     /// starts at the built-in default.
@@ -1320,6 +1324,7 @@ impl QueryTab {
             row_limit,
             showing_plan: false,
             row_panel_folded: false,
+            row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
         };
         (tab, notice)
@@ -1595,6 +1600,8 @@ pub(crate) enum ObjectBody {
         /// Whether this tab's row-inspector panel is folded away. Per tab:
         /// see `RowPanel`.
         row_panel_folded: bool,
+        /// See [`QueryTab::row_panel_filter`].
+        row_panel_filter: gpui::SharedString,
         /// The row-inspector split's state, per tab. See
         /// [`QueryTab::row_panel_split`].
         row_panel_split: Entity<ResizableState>,

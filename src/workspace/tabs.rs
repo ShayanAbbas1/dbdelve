@@ -31,26 +31,45 @@ impl Workspace {
         if !self.row_panel.on_screen.get() {
             return;
         }
-        let Some(profile) = self.profile_mut() else {
-            return;
-        };
-        match profile.session.active {
-            Tab::Query(id) => {
-                if let Some(tab) = profile.session.query_tab_mut(id) {
-                    tab.row_panel_folded = !tab.row_panel_folded;
-                }
-            }
-            Tab::Object(id) => {
-                if let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
-                    && let ObjectBody::Relation {
-                        row_panel_folded, ..
-                    } = &mut tab.body
-                {
-                    *row_panel_folded = !*row_panel_folded;
-                }
-            }
+        if let Some((folded, _)) = self.active_row_panel() {
+            *folded = !*folded;
         }
         cx.notify();
+    }
+
+    /// The tab in front's row-panel state: whether it is folded, and what it
+    /// is filtered by. `None` for a tab with no rows to inspect.
+    pub(crate) fn active_row_panel(&mut self) -> Option<(&mut bool, &mut gpui::SharedString)> {
+        let session = &mut self.profile_mut()?.session;
+        match session.active {
+            Tab::Query(id) => session
+                .query_tab_mut(id)
+                .map(|tab| (&mut tab.row_panel_folded, &mut tab.row_panel_filter)),
+            Tab::Object(id) => match &mut session.objects.iter_mut().find(|tab| tab.id == id)?.body
+            {
+                ObjectBody::Relation {
+                    row_panel_folded,
+                    row_panel_filter,
+                    ..
+                } => Some((row_panel_folded, row_panel_filter)),
+                _ => None,
+            },
+        }
+    }
+
+    /// Show the tab in front's filter in the row panel's field, which every
+    /// tab shares. From render, before the panel reads the field, for the
+    /// reason `sync_page_input` gives: a tab comes to the front in more places
+    /// than one.
+    pub(crate) fn sync_row_panel_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.row_panel.search.clone();
+        let Some((_, filter)) = self.active_row_panel() else {
+            return;
+        };
+        let filter = filter.clone();
+        if input.read(cx).value() != filter {
+            input.update(cx, |state, cx| state.set_value(filter, window, cx));
+        }
     }
 
     pub(crate) fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
