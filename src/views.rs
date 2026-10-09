@@ -2533,9 +2533,8 @@ fn render_tab_strip(
             )
     });
 
-    // A relation's tab shows the two views of an object from the strip: a
-    // header of its own would be a second bar saying what this one already
-    // says.
+    // A relation's tab shows the two views of an object from the toolbar
+    // under the strip, beside what acts on the view it is showing.
     let structure_toggle = session.active_object().and_then(|tab| match &tab.body {
         ObjectBody::Relation {
             showing_structure, ..
@@ -2620,18 +2619,24 @@ fn render_tab_strip(
     let rename_workspace = workspace.clone();
     let run_workspace = workspace.clone();
 
-    div()
-        .h(px(layout::chrome(layout::TAB_HEIGHT)))
-        .w_full()
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(layout::SPACE_SM))
-        .px(px(layout::SPACE_SM))
-        // Between the tabs and whatever is under them, the filters or the grid.
-        .border_b_1()
-        .border_color(t.border)
-        .text_size(px(layout::chrome(layout::TEXT_SM)))
+    // The strip is for tabs; what acts on the open one sits on a bar of its
+    // own beneath, so a few buttons never squeeze the tabs out of view.
+    let bar = || {
+        div()
+            .h(px(layout::chrome(layout::TAB_HEIGHT)))
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .px(px(layout::SPACE_SM))
+            // Between the bar and whatever is under it, the filters or the grid.
+            .border_b_1()
+            .border_color(t.border)
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+    };
+
+    let strip = bar()
         .child(
             div()
                 .id("query-tabs-scroll")
@@ -2683,9 +2688,19 @@ fn render_tab_strip(
                     });
                 }),
             ),
-        )
+        );
+
+    let has_toolbar = structure_toggle.is_some()
+        || plan_toggle.is_some()
+        || new_row.is_some()
+        || !zoom.is_empty()
+        || runnable
+        || session.naming;
+    // The views of the tab on the left, what acts on it on the right.
+    let toolbar = bar()
         .children(structure_toggle)
         .children(plan_toggle)
+        .child(div().flex_1())
         .children(new_row)
         .children((!zoom.is_empty()).then(|| {
             div()
@@ -2789,7 +2804,15 @@ fn render_tab_strip(
                         workspace.run_query(&RunQuery, window, cx);
                     });
                 })
-        }))
+        }));
+
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .child(strip)
+        .when(has_toolbar, |column| column.child(toolbar))
         .into_any_element()
 }
 
