@@ -242,7 +242,7 @@ impl Workspace {
             move |workspace, input, event, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     let typed = input.read(cx).value().replace([',', '_', ' '], "");
-                    match typed.parse::<usize>() {
+                    match typed.parse::<usize>().map_err(|error| *error.kind()) {
                         Ok(rows) if (1..=explorer::MAX_ROW_LIMIT).contains(&rows) => {
                             // The field goes while it holds focus, and focus
                             // left with nothing holding it takes every
@@ -251,6 +251,13 @@ impl Workspace {
                             workspace.refocus_front();
                             workspace.apply_row_limit(target, rows, window, cx);
                         }
+                        Ok(1..) | Err(std::num::IntErrorKind::PosOverflow) => workspace.note(
+                            format!(
+                                "A row limit is at most {}.",
+                                ui::group_thousands(explorer::MAX_ROW_LIMIT as u64)
+                            ),
+                            cx,
+                        ),
                         _ => workspace.note("A row limit is a whole number above zero.".into(), cx),
                     }
                 }
