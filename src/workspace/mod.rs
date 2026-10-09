@@ -1119,9 +1119,15 @@ impl Render for Workspace {
                     .as_deref()
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
-        // A query tab's own slot rather than the result in front: a queue can
-        // be showing a statement that finished while the next one runs.
+        // A query tab's own slot rather than the result in front: a queue run
+        // in turn can be showing a statement that finished while the next one
+        // runs. Run at once, the slot only holds the run open, and each
+        // statement streams into its own entry, so the one in front is read.
         let running = match profile.session.active_query_tab() {
+            Some(tab) if tab.queue.as_ref().is_some_and(|queue| queue.at_once()) => {
+                let (state, results) = tab.shown();
+                views::render_running(state, Some(results), cx)
+            }
             Some(tab) => views::render_running(&tab.query, Some(&tab.results), cx),
             None => profile.session.active_query().and_then(|query| {
                 views::render_running(query, profile.session.active_results(), cx)

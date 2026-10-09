@@ -1129,6 +1129,19 @@ pub(crate) struct Finished<G = Entity<TableState<ResultGrid>>> {
 }
 
 impl<G: Clone> Queue<G> {
+    /// Whether its statements are running at once and not all back yet. Each
+    /// is then in a slot of its own in `done`, which is what the status bar
+    /// reads and Cancel stops, where a queue run in turn has its one statement
+    /// out in the tab's slot.
+    pub(crate) fn at_once(&self) -> bool {
+        self.done.iter().any(|finished| {
+            matches!(
+                finished.state,
+                QueryState::Running { .. } | QueryState::Idle
+            )
+        })
+    }
+
     /// Where in `done` a statement running at once with others has its
     /// entry: found by where it starts, not by position, since a batch that
     /// lands more than one set puts results ahead of those still running.
@@ -2082,6 +2095,40 @@ mod tests {
         // A set past the last reserved grid is counted, not shown.
         let (extra, dropped) = queue.land_sets(5, 60, vec![QueryResult::default(); 1]);
         assert_eq!((extra.len(), dropped), (0, 1));
+    }
+
+    #[test]
+    fn a_queue_reads_as_at_once_only_while_a_statement_of_it_is_out() {
+        let entry = |start: usize, state: QueryState| Finished {
+            sql: format!("SELECT {start}"),
+            start,
+            state,
+            grid: start,
+        };
+        let complete = QueryState::Complete {
+            rows: 1,
+            bytes: 1,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: None,
+        };
+        let queue = |done| Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done,
+            showing: 0,
+            awaiting: false,
+            spare: Vec::<usize>::new(),
+        };
+        let running = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        assert!(queue(vec![entry(0, complete.clone()), entry(9, running)]).at_once());
+        assert!(queue(vec![entry(0, complete.clone()), entry(9, QueryState::Idle)]).at_once());
+        // Finished, or run in turn: the statement out is in the tab's slot.
+        assert!(!queue(vec![entry(0, complete.clone()), entry(9, complete)]).at_once());
+        assert!(!queue(Vec::new()).at_once());
     }
 
     #[test]
