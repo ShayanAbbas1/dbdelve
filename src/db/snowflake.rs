@@ -2572,7 +2572,11 @@ mod tests {
         let error = connection
             .query_with(LARGE_SQL, &run, Fetch::default())
             .expect_err("a cancelled run is an error");
-        assert_eq!(error.message, "Cancelled.");
+        assert!(
+            crate::db::is_cancel(crate::db::Engine::Snowflake, &error),
+            "{}",
+            error.message
+        );
         assert_eq!(mock.hits("GET", &partition), 0);
     }
 

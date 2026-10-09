@@ -1776,7 +1776,8 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::Postgres => message == "canceling statement due to user request",
         Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
         Engine::Sqlite => message == "interrupted",
-        Engine::Snowflake => message == "SQL execution canceled",
+        // The second is dbdelve's own, a cancel between partitions.
+        Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
         Engine::MongoDb => message == "Cancelled.",
     }
