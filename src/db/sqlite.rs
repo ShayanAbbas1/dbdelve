@@ -985,6 +985,27 @@ SELECT count(*) FROM forever
 ";
 
     #[test]
+    fn a_cancel_reaches_a_statement_run_alongside_on_the_profiles_own_connection() {
+        // An in-memory database cannot be opened again, so the statement falls
+        // back to the connection it was asked on.
+        let connection = crate::db::Connection::Sqlite(memory(ACCOUNTS));
+        let cancel = crate::db::CancelToken::alongside();
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                connection.cancel(&cancel).expect("cancelling cannot fail");
+            });
+            connection.query_alongside(FOREVER, &cancel, Fetch::default(), false)
+        })
+        .expect_err("the statement should be interrupted");
+        assert!(
+            crate::db::is_cancel(Engine::Sqlite, &error),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn a_cancel_from_another_thread_stops_a_statement_and_leaves_the_connection_usable() {
         let connection = memory(ACCOUNTS);
         let canceller = connection.clone();

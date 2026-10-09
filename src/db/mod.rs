@@ -56,7 +56,8 @@ impl CancelToken {
     /// For a run whose statements each go out on a connection of their own
     /// ([`Connection::query_alongside`]). A cancel under it stops those, and
     /// never what the connection it is asked on is running, which is some
-    /// other tab's statement or nothing.
+    /// other tab's statement or nothing, unless one of its statements fell
+    /// back to that connection.
     pub fn alongside() -> Self {
         Self(Arc::new(Mutex::new(Cancelling {
             alongside: Some(Vec::new()),
@@ -1142,19 +1143,21 @@ impl Connection {
             Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
         };
         // A server out of connections still has this one, which the statement
-        // waits its turn on rather than failing.
-        // ponytail: a Cancel does not reach a statement run this way; it is a
-        // read, and ends on its own. SQL Server logs in on the first run, so
-        // its refusal surfaces as the statement's error instead.
-        let Ok(connection) = opened else {
-            if cancel.0.lock().is_ok_and(|running| running.asked) {
-                return Err(plain_error("Cancelled before it was sent.".into()));
+        // waits its turn on rather than failing. SQL Server logs in on the
+        // first run, so its refusal surfaces as the statement's error instead.
+        // ponytail: a Cancel stops it as it stops any run there, by stopping
+        // whatever that connection is running, which while this one waits its
+        // turn is the statement ahead of it. Knowing which is running needs
+        // the connection to say whose statement holds it.
+        let connection = match opened {
+            Ok(connection) => {
+                if read_only {
+                    connection.set_read_only(true)?;
+                }
+                connection
             }
-            return self.query(sql, cancel, fetch);
+            Err(_) => self.clone(),
         };
-        if read_only {
-            connection.set_read_only(true)?;
-        }
         let slot = {
             let mut running = cancel.0.lock().map_err(|_| {
                 plain_error("The run is unavailable after an earlier internal failure.".into())
