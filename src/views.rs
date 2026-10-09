@@ -94,7 +94,14 @@ pub fn render_main_content(
                 .filter(|form| form.tab == profile.session.active),
             cx,
         ),
-        None => render_query_surface(profile, editor_font_size, row_panel, plan_copied, cx),
+        None => render_query_surface(
+            profile,
+            editor_font_size,
+            row_panel,
+            plan_copied,
+            custom_limit,
+            cx,
+        ),
     };
 
     div()
@@ -103,7 +110,7 @@ pub fn render_main_content(
         .flex_col()
         // Chrome, so the strip reads as the frame the surfaces sit in --
         // and chrome is the frost, which is already painted beneath it.
-        .child(render_tab_strip(profile, zoom, strip, custom_limit, cx))
+        .child(render_tab_strip(profile, zoom, strip, cx))
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
@@ -116,6 +123,7 @@ fn render_editor_surface(
     editor: &Entity<EditorState>,
     font_size: f32,
     query: &QueryState,
+    toolbar: AnyElement,
     bottom: AnyElement,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -124,9 +132,10 @@ fn render_editor_surface(
 
     // The editor is the prompt, one tone behind its results -- and one step
     // more transparent, since it is also one step further from the data.
-    let top = div()
+    let buffer = div()
         .key_context("Editor")
-        .size_full()
+        .flex_1()
+        .min_h_0()
         .bg(t.panel_glass())
         .p(px(layout::SPACE_LG))
         .font_family(code)
@@ -157,6 +166,12 @@ fn render_editor_surface(
                         .menu("Toggle Line Comment", Box::new(ToggleComment))
                 }),
         );
+    let top = div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(buffer)
+        .child(toolbar);
 
     let expanded = result_pane_is_expanded(query);
     let (editor_height, results_height) = if expanded {
@@ -168,11 +183,16 @@ fn render_editor_surface(
         (layout::EDITOR_EMPTY_HEIGHT, layout::RESULTS_EMPTY_HEIGHT)
     };
 
+    // The panel holds the toolbar as well, so its bounds grow by the bar and
+    // the buffer keeps the room the constants were tuned for.
+    let bar = layout::chrome(layout::TAB_HEIGHT);
     v_resizable((split, if expanded { "expanded" } else { "compact" }))
         .child(
             resizable_panel()
-                .size(px(editor_height))
-                .size_range(px(layout::EDITOR_MIN_HEIGHT)..px(layout::EDITOR_MAX_HEIGHT))
+                .size(px(editor_height + bar))
+                .size_range(
+                    px(layout::EDITOR_MIN_HEIGHT + bar)..px(layout::EDITOR_MAX_HEIGHT + bar),
+                )
                 .child(top),
         )
         .child(
@@ -189,6 +209,7 @@ fn render_query_surface(
     editor_font_size: f32,
     row_panel: &RowPanel,
     plan_copied: bool,
+    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let Some(tab) = profile.session.active_query_tab() else {
@@ -238,6 +259,7 @@ fn render_query_surface(
         &tab.editor,
         editor_font_size,
         &tab.query,
+        render_query_toolbar(&profile.session, profile.config.engine(), custom_limit, cx),
         bottom,
         cx,
     )
@@ -556,15 +578,30 @@ fn render_object(
         return render_routine(tab, &scope, cx);
     };
 
+    let takes_inserts = tab.takes_inserts(engine);
     if *showing_structure {
         return div()
             .size_full()
-            .min_h_0()
-            .bg(t.data_glass())
-            .child(render_structure(structure, &scope, cx))
+            .flex()
+            .flex_col()
+            .child(
+                control_row()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(div().flex_1())
+                    .child(relation_controls(true, takes_inserts, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(t.data_glass())
+                    .child(render_structure(structure, &scope, cx)),
+            )
             .into_any_element();
     }
 
+    let controls = relation_controls(false, takes_inserts, cx).into_any_element();
     div()
         .size_full()
         .flex()
@@ -574,6 +611,7 @@ fn render_object(
             results.read(cx).delegate().columns(),
             engine,
             *next_join,
+            controls,
             t,
         ))
         .child(div().flex_1().min_h_0().child(render_results(
@@ -603,6 +641,7 @@ fn render_filter_bar(
     columns: &[db::Column],
     engine: Engine,
     next_join: Conjunction,
+    controls: AnyElement,
     t: Theme,
 ) -> AnyElement {
     let names: Vec<SharedString> = columns
@@ -618,7 +657,7 @@ fn render_filter_bar(
         .border_b_1()
         .border_color(t.border)
         .children(filters.iter().enumerate().map(|(row, filter)| {
-            filter_bar_row()
+            control_row()
                 // The first bar joins to nothing above it.
                 .children((row > 0).then(|| {
                     join_button(("filter-join", row), filter.conjunction, t).on_click(
@@ -741,7 +780,7 @@ fn render_filter_bar(
                 )
         }))
         .child(
-            filter_bar_row()
+            control_row()
                 // The joiner the next bar will carry, so it is chosen where the
                 // bar is added rather than after it lands.
                 .children((!filters.is_empty()).then(|| {
@@ -755,7 +794,9 @@ fn render_filter_bar(
                             window.dispatch_action(Box::new(AddFilter), cx);
                         },
                     ),
-                ),
+                )
+                .child(div().flex_1())
+                .child(controls),
         )
         .into_any_element()
 }
@@ -766,8 +807,8 @@ fn join_button(id: impl Into<gpui::ElementId>, conjunction: Conjunction, t: Them
     button(id, conjunction.as_str(), Tone::Quiet, Control::Compact, t).tooltip("AND or OR")
 }
 
-/// One line of the filter stack, at the height every other control strip is.
-fn filter_bar_row() -> gpui::Div {
+/// One line of controls, at the height every other control strip is.
+fn control_row() -> gpui::Div {
     div()
         .w_full()
         .h(px(layout::chrome(layout::TAB_HEIGHT)))
@@ -2164,7 +2205,7 @@ pub(crate) fn render_view_sorting(
     })
 }
 
-/// The tab strip. It sits directly above the editor and starts where the
+/// The tab strip. It sits directly above the tab's surface and starts where the
 /// editor's text does, so a tab labels the surface under it rather than the
 /// window: the active one is lifted to the editor's tone, the rest are names
 /// that reveal a wash on hover. No boxes, no hairlines — tone carries the
@@ -2173,15 +2214,12 @@ fn render_tab_strip(
     profile: &Profile,
     (chrome_zoom, editor_zoom, grid_zoom): (u32, u32, u32),
     strip: &TabStrip,
-    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
     let workspace = cx.entity().downgrade();
     let session = &profile.session;
-    let on_query_tab = matches!(session.active, Tab::Query(_));
     let runnable = session.editor(session.active).is_some();
-    let engine = profile.config.engine();
 
     let chip = |active: bool| {
         div()
@@ -2496,113 +2534,6 @@ fn render_tab_strip(
     placed.sort_by_key(|(key, _)| order.iter().position(|placed| placed == key));
     let tabs: Vec<AnyElement> = placed.into_iter().map(|(_, chip)| chip).collect();
 
-    let confirm_workspace = workspace.clone();
-    let naming_a_rename = on_query_tab && session.open_query().is_some();
-    let naming = session.naming.then(|| {
-        div()
-            .w(px(240.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(layout::SPACE_XS))
-            // The input and the button share one size so the pair sits on a
-            // single centreline instead of jostling.
-            .child(Input::new(&session.save_name).small().flex_1())
-            .child(
-                icon_button(
-                    "confirm-save-query",
-                    if naming_a_rename {
-                        icon::RENAME
-                    } else {
-                        icon::SAVE
-                    },
-                    Tone::Primary,
-                    Control::Compact,
-                    t,
-                )
-                .tooltip(if naming_a_rename {
-                    "Rename query"
-                } else {
-                    "Save query"
-                })
-                .on_click(move |_, window, cx| {
-                    _ = confirm_workspace.update(cx, |workspace, cx| {
-                        workspace.confirm_save(window, cx);
-                    });
-                }),
-            )
-    });
-
-    // A relation's tab shows the two views of an object from the strip: a
-    // header of its own would be a second bar saying what this one already
-    // says.
-    let structure_toggle = session.active_object().and_then(|tab| match &tab.body {
-        ObjectBody::Relation {
-            showing_structure, ..
-        } => Some(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .gap(px(layout::SPACE_XS))
-                .child(preview_tab(
-                    "Data",
-                    icon::TABLE,
-                    !showing_structure,
-                    Command::ShowStructure(false),
-                    cx,
-                ))
-                .child(preview_tab(
-                    "Structure",
-                    icon::STRUCTURE,
-                    *showing_structure,
-                    Command::ShowStructure(true),
-                    cx,
-                )),
-        ),
-        ObjectBody::Routine(_) => None,
-    });
-
-    // Drawn only once there is a plan to turn to. Before that the pair would be
-    // a control with one working half, which is the same as no control at all.
-    let plan_toggle = session
-        .active_query_tab()
-        .filter(|tab| tab.plan.is_some())
-        .map(|tab| {
-            div()
-                .flex_shrink_0()
-                .flex()
-                .gap(px(layout::SPACE_XS))
-                .child(preview_tab(
-                    "Data",
-                    icon::TABLE,
-                    !tab.showing_plan,
-                    Command::ShowPlan(false),
-                    cx,
-                ))
-                .child(preview_tab(
-                    "Plan",
-                    icon::PLAN,
-                    tab.showing_plan,
-                    Command::ShowPlan(true),
-                    cx,
-                ))
-        });
-
-    // On every relation tab, the structure view included: there it takes you
-    // back to the data before opening the form.
-    let new_row = session
-        .active_object()
-        .is_some_and(|tab| tab.takes_inserts(engine))
-        .then(|| {
-            div().flex_shrink_0().child(
-                button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
-                    |_, window, cx| {
-                        window.dispatch_action(Box::new(NewRow), cx);
-                    },
-                ),
-            )
-        });
-
     // 100% is not information; a pane's readout appears only once its zoom
     // has somewhere to return to.
     let zoom: Vec<String> = [
@@ -2614,11 +2545,7 @@ fn render_tab_strip(
     .filter(|&(_, percent, shown)| shown && percent != 100)
     .map(|(pane, percent, _)| format!("{pane} {percent}%"))
     .collect();
-    let named = on_query_tab && session.open_query().is_some();
     let new_workspace = workspace.clone();
-    let save_workspace = workspace.clone();
-    let rename_workspace = workspace.clone();
-    let run_workspace = workspace.clone();
 
     div()
         .h(px(layout::chrome(layout::TAB_HEIGHT)))
@@ -2628,7 +2555,8 @@ fn render_tab_strip(
         .items_center()
         .gap(px(layout::SPACE_SM))
         .px(px(layout::SPACE_SM))
-        // Between the tabs and whatever is under them, the filters or the grid.
+        // Between the tabs and whatever is under them: the editor, the
+        // filters, or the Structure bar.
         .border_b_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
@@ -2684,9 +2612,6 @@ fn render_tab_strip(
                 }),
             ),
         )
-        .children(structure_toggle)
-        .children(plan_toggle)
-        .children(new_row)
         .children((!zoom.is_empty()).then(|| {
             div()
                 .flex_shrink_0()
@@ -2697,11 +2622,100 @@ fn render_tab_strip(
                     keycap_text("secondary-0")
                 ))
         }))
+        .into_any_element()
+}
+
+/// What acts on a query's buffer, between the editor and the rows it produces:
+/// the Data/Plan pair on the left, saving and running it on the right.
+fn render_query_toolbar(
+    session: &Session,
+    engine: Engine,
+    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let t = *theme(cx);
+    let workspace = cx.entity().downgrade();
+    let confirm_workspace = workspace.clone();
+    let naming_a_rename = session.open_query().is_some();
+    let naming = session.naming.then(|| {
+        div()
+            .w(px(240.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            // The input and the button share one size so the pair sits on a
+            // single centreline instead of jostling.
+            .child(Input::new(&session.save_name).small().flex_1())
+            .child(
+                icon_button(
+                    "confirm-save-query",
+                    if naming_a_rename {
+                        icon::RENAME
+                    } else {
+                        icon::SAVE
+                    },
+                    Tone::Primary,
+                    Control::Compact,
+                    t,
+                )
+                .tooltip(if naming_a_rename {
+                    "Rename query"
+                } else {
+                    "Save query"
+                })
+                .on_click(move |_, window, cx| {
+                    _ = confirm_workspace.update(cx, |workspace, cx| {
+                        workspace.confirm_save(window, cx);
+                    });
+                }),
+            )
+    });
+
+    // Drawn only once there is a plan to turn to. Before that the pair would be
+    // a control with one working half, which is the same as no control at all.
+    let plan_toggle = session
+        .active_query_tab()
+        .filter(|tab| tab.plan.is_some())
+        .map(|tab| {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .gap(px(layout::SPACE_XS))
+                .child(preview_tab(
+                    "Data",
+                    icon::TABLE,
+                    !tab.showing_plan,
+                    Command::ShowPlan(false),
+                    cx,
+                ))
+                .child(preview_tab(
+                    "Plan",
+                    icon::PLAN,
+                    tab.showing_plan,
+                    Command::ShowPlan(true),
+                    cx,
+                ))
+        });
+
+    let named = session.open_query().is_some();
+    let save_workspace = workspace.clone();
+    let rename_workspace = workspace.clone();
+    let run_workspace = workspace.clone();
+
+    control_row()
+        .gap(px(layout::SPACE_SM))
+        // Between the buffer and this bar; the split's handle is under it.
+        .border_t_1()
+        .border_color(t.border)
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .children(plan_toggle)
+        .child(div().flex_1())
         .children(naming)
         // A named query is already written to disk on every swap, so there
         // is nothing for a save button to do that has not been done. What
         // it can still do is change the name.
-        .children((runnable && !session.naming && named).then(|| {
+        .children((!session.naming && named).then(|| {
             icon_button(
                 "rename-query",
                 icon::RENAME,
@@ -2716,7 +2730,7 @@ fn render_tab_strip(
                 });
             })
         }))
-        .children((runnable && !session.naming && !named).then(|| {
+        .children((!session.naming && !named).then(|| {
             icon_button("save-query", icon::SAVE, Tone::Quiet, Control::Compact, t)
                 .tooltip_with_action("Save query", &SaveQuery, None)
                 .on_click(move |_, window, cx| {
@@ -2728,7 +2742,7 @@ fn render_tab_strip(
         .children(
             session
                 .active_query_tab()
-                .filter(|_| runnable && !session.naming)
+                .filter(|_| !session.naming)
                 .map(|tab| {
                     let target = LimitTarget::Query(tab.id);
                     let editing = custom_limit
@@ -2743,8 +2757,7 @@ fn render_tab_strip(
         // those on the user's behalf. Absent on an engine with no mode at all,
         // rather than a menu with nothing in it.
         .children(
-            (runnable
-                && !session.naming
+            (!session.naming
                 && ExplainMode::ALL
                     .into_iter()
                     .any(|mode| engine.explain_prefix(mode).is_some()))
@@ -2778,7 +2791,7 @@ fn render_tab_strip(
                 })
             }),
         )
-        .children(runnable.then(|| {
+        .child({
             // Filled where its neighbours are ghosts: running the buffer is
             // what the surface is for, and the fill is the only hierarchy
             // available without spending a colour on it.
@@ -2789,8 +2802,51 @@ fn render_tab_strip(
                         workspace.run_query(&RunQuery, window, cx);
                     });
                 })
-        }))
+        })
         .into_any_element()
+}
+
+/// A relation's two views and its New row, on the right of whatever bar sits
+/// over the view: the filters' last line, or a bar of its own over Structure.
+fn relation_controls(
+    showing_structure: bool,
+    takes_inserts: bool,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let t = *theme(cx);
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_SM))
+        .child(
+            div()
+                .flex()
+                .gap(px(layout::SPACE_XS))
+                .child(preview_tab(
+                    "Data",
+                    icon::TABLE,
+                    !showing_structure,
+                    Command::ShowStructure(false),
+                    cx,
+                ))
+                .child(preview_tab(
+                    "Structure",
+                    icon::STRUCTURE,
+                    showing_structure,
+                    Command::ShowStructure(true),
+                    cx,
+                )),
+        )
+        // On the structure view too: there it takes you back to the data
+        // before opening the form.
+        .children(takes_inserts.then(|| {
+            button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
+                |_, window, cx| {
+                    window.dispatch_action(Box::new(NewRow), cx);
+                },
+            )
+        }))
 }
 
 /// The app-wide settings, on the card every other modal is drawn on.
