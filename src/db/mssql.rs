@@ -508,10 +508,17 @@ impl Session {
 
     /// [`Self::trip`], keeping what `fetch` asks for of the rows.
     ///
-    /// The timeout stops applying once a set's kept rows reach the limit.
-    /// What follows is rows read only to be counted and dropped, and stopping
-    /// them would close the connection and take the user's transaction with
-    /// it for rows nobody sees. Cancel still reaches it.
+    /// The timeout stops applying once a set's kept rows reach the limit, and
+    /// applies again when the next set begins. What comes between is rows read
+    /// only to be counted and dropped, and stopping them would close the
+    /// connection and take the user's transaction with it for rows nobody
+    /// sees. Cancel still reaches it.
+    ///
+    /// ponytail: the timeout does not come back for a statement after the
+    /// batch's last set, which begins no set because tiberius keeps the done
+    /// tokens to itself, nor for any set once it has passed during a drain.
+    /// The first needs the done tokens, the second the deadline checked again
+    /// as each set begins.
     fn fetching(
         &mut self,
         sql: &str,
@@ -1344,7 +1351,7 @@ fn readable_preview(sql: &str, described: &QueryResult) -> Option<String> {
 /// first set alone is fed, since it is the one the grid shows; the sets behind
 /// it are results of their own, kept here until the batch is done.
 ///
-/// `past_limit` is set once any set's kept rows reach the limit.
+/// `past_limit` is set while the current set's kept rows are at the limit.
 async fn collect(
     client: &mut Tds,
     sql: &str,
@@ -1364,6 +1371,7 @@ async fn collect(
             QueryItem::Metadata(meta) => {
                 cap(collected.last_mut(), returned, kept);
                 (returned, kept) = (0, 0);
+                past_limit.set(false);
                 types = meta.columns().iter().map(|c| c.column_type()).collect();
                 let columns: Vec<Column> = meta
                     .columns()
@@ -3969,6 +3977,34 @@ mod tests {
             .unwrap();
         assert_eq!(first(&open), vec![Some("1")]);
         connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_the_timeout_applies_again_to_the_set_after_one_past_the_limit() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        // Each set fills a packet, which is when the server sends it: the
+        // first so it passes the limit, the second's wide row so its
+        // description arrives before the slow rows behind it.
+        let error = connection
+            .query(
+                "SELECT TOP 5000 a.name FROM sys.all_columns a CROSS JOIN sys.all_columns b; \
+                 SELECT REPLICATE('x', 8000) AS w UNION ALL \
+                 SELECT a.name FROM (SELECT TOP 500 name FROM sys.all_columns) a \
+                 CROSS JOIN (SELECT TOP 500 name FROM sys.all_columns) b \
+                 CROSS JOIN (SELECT TOP 500 name FROM sys.all_columns) c \
+                 WHERE CHECKSUM(a.name, b.name, c.name) = 7",
+                Fetch {
+                    limit: Some(10),
+                    ..Fetch::default()
+                },
+            )
+            .expect_err("the second set outlasts the timeout");
+        assert!(error.message.contains("1-second"), "{}", error.message);
     }
 
     #[test]
