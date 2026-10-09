@@ -14,6 +14,7 @@
 //! result column was read from, which is exactly what in-grid editing needs, so
 //! there is no describe step and nothing here can disturb an open transaction.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -24,8 +25,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, NamedDefinition,
-    QueryResult, Reference, Stopped, Structure, assemble_catalog, assemble_references,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, NamedDefinition, QueryResult,
+    Reference, RowBuilder, Stopped, Structure, assemble_catalog, assemble_references,
     assemble_structure, non_utf8_error, percent_decoded, plain_error, required_cell,
 };
 
@@ -202,6 +203,7 @@ impl Connection {
             // profile's queries, and time spent waiting behind the catalog load
             // is not time spent on this statement.
             let started = Instant::now();
+            let mut builder = RowBuilder::default();
             while let Some(mut statement) =
                 batch.next().map_err(|error| query_error(&error, sql))?
             {
@@ -275,19 +277,15 @@ impl Connection {
                             feed.fill();
                         }
                     }
-                    let cells: Vec<Cell> = (0..columns.len())
-                        .map(|index| {
-                            let value = row
-                                .get_ref(index)
-                                .map_err(|error| query_error(&error, sql))?;
-                            render(value, &columns, index)
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    bytes += cells
-                        .iter()
-                        .filter_map(|cell| cell.as_ref().map(String::len))
-                        .sum::<usize>();
+                    for index in 0..columns.len() {
+                        let value = row
+                            .get_ref(index)
+                            .map_err(|error| query_error(&error, sql))?;
+                        let cell = render(value, &columns, index)?;
+                        builder.push(cell.as_deref());
+                    }
+                    let cells = builder.finish()?;
+                    bytes += cells.text_len();
                     match fetch.feed {
                         Some(feed) => feed.push(cells),
                         None => rows.push(cells),
@@ -412,21 +410,18 @@ impl Connection {
             schema_name = Engine::Sqlite.quote_identifier(schema),
             relation = Engine::Sqlite.quote_literal(relation),
         ))?;
-        if result
-            .rows
-            .iter()
-            .any(|row| row.get(3).is_some_and(|cell| cell.as_deref() == Some("")))
-        {
+        if result.rows.iter().any(|row| row.get(3) == Some("")) {
             let key = self.primary_key(schema, relation)?;
+            let only = match key.as_slice() {
+                [only] => Some(only.as_str()),
+                _ => None,
+            };
             for row in &mut result.rows {
-                if row[3].as_deref() == Some("") {
-                    row[3] = match key.as_slice() {
-                        [only] => Some(only.clone()),
-                        _ => None,
-                    };
+                if row.get(3) == Some("") {
+                    row.replace(&[(3, only)]);
                 }
             }
-            result.rows.retain(|row| row[3].is_some());
+            result.rows.retain(|row| row.get(3).is_some());
         }
         assemble_references(&result)
     }
@@ -839,23 +834,27 @@ fn quoted_list(names: &[String]) -> String {
 /// Postgres has the server do this and hands dbdelve the result; here it is
 /// dbdelve's decision, so each one is made to be reversible — what the grid shows
 /// is something SQLite would accept back.
-fn render(value: ValueRef<'_>, columns: &[Column], index: usize) -> Result<Cell, DbError> {
+fn render<'a>(
+    value: ValueRef<'a>,
+    columns: &[Column],
+    index: usize,
+) -> Result<Option<Cow<'a, str>>, DbError> {
     Ok(match value {
         ValueRef::Null => None,
-        ValueRef::Integer(integer) => Some(integer.to_string()),
-        ValueRef::Real(real) => Some(render_real(real)),
+        ValueRef::Integer(integer) => Some(integer.to_string().into()),
+        ValueRef::Real(real) => Some(render_real(real).into()),
         // A database whose text was written as something other than UTF-8 can
         // return bytes that are not text at all. Postgres raises the same error
         // for the same reason, naming the column rather than the row.
         ValueRef::Text(bytes) => Some(
             std::str::from_utf8(bytes)
                 .map_err(|_| non_utf8_error(columns, index))?
-                .to_string(),
+                .into(),
         ),
         // SQLite's own literal syntax for a blob, rather than bare hex, so a
         // value copied out of the grid is a value that can be pasted into a
         // statement.
-        ValueRef::Blob(bytes) => Some(format!("x'{}'", hex::encode_upper(bytes))),
+        ValueRef::Blob(bytes) => Some(format!("x'{}'", hex::encode_upper(bytes)).into()),
     })
 }
 
@@ -1833,7 +1832,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             )
             .expect("query should succeed");
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
+        assert_eq!(result.rows[0].get(0), Some("5000"));
     }
 
     #[test]
@@ -1951,7 +1950,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             )
             .expect("query should succeed");
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("3"));
+        assert_eq!(result.rows[0].get(0), Some("3"));
     }
 
     #[test]

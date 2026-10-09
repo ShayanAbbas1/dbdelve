@@ -42,8 +42,8 @@ use tokio::sync::oneshot;
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, MISSING,
-    NamedDefinition, QueryResult, Relation, RelationKind, Schema, ServerConfig, Sizes, SslMode,
-    Statistics, Stopped, Structure, plain_error,
+    NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema, ServerConfig, Sizes,
+    SslMode, Statistics, Stopped, Structure, plain_error,
 };
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
@@ -691,7 +691,7 @@ impl Connection {
             })
             .unwrap_or_default();
         databases.sort_by(|a, b| a.get_str("name").ok().cmp(&b.get_str("name").ok()));
-        Ok(documents(databases))
+        documents(databases)
     }
 
     fn database_call(
@@ -721,9 +721,7 @@ impl Connection {
                 // The user's command goes as written: no `maxTimeMS` is added,
                 // since the command is theirs to bound, and the client-side
                 // bound still holds.
-                Ok(reply(run.execute(|session| {
-                    target.run_command(sent).session(session)
-                })?))
+                reply(run.execute(|session| target.run_command(sent).session(session))?)
             }
             DbMethod::GetCollectionNames => collection_names(run, &self.named(database)?),
             DbMethod::Stats => {
@@ -737,7 +735,7 @@ impl Connection {
                         sent.insert("scale", scale);
                     }
                 }
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::CreateCollection => {
                 let mut sent = doc! { "create": args.string(0)? };
@@ -766,7 +764,7 @@ impl Connection {
                         "writeConcern",
                     ],
                 )?;
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::CreateView => {
                 let mut sent = doc! {
@@ -780,14 +778,14 @@ impl Connection {
                     args.document(3)?.unwrap_or_default(),
                     &["collation", "comment", "writeConcern"],
                 )?;
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
             DbMethod::DropDatabase => {
                 let mut sent = doc! { "dropDatabase": 1 };
                 if let Some(concern) = args.bson(0)? {
                     sent.insert("writeConcern", concern);
                 }
-                Ok(reply(command(run, &self.named(database)?, sent)?))
+                reply(command(run, &self.named(database)?, sent)?)
             }
         }
     }
@@ -845,7 +843,7 @@ impl Connection {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
                     None => {
                         let whole = !elsewhere && returns_whole_documents(&sent);
-                        let mut result = read_cursor(run, &database, sent, fetch)?.rows();
+                        let mut result = read_cursor(run, &database, sent, fetch)?.rows()?;
                         if whole {
                             result.edit = self.edit_target(collection, &result);
                         }
@@ -881,7 +879,7 @@ impl Connection {
                 )?;
                 match chained(&mut sent, cursor, false)? {
                     Some(verbosity) => explained(run, &database, sent, verbosity),
-                    None => Ok(read_cursor(run, &database, sent, fetch)?.rows()),
+                    None => read_cursor(run, &database, sent, fetch)?.rows(),
                 }
             }
             // As the drivers count: a `$group` over the matching documents,
@@ -911,7 +909,7 @@ impl Connection {
                     .and_then(|counted| counted.get("n"))
                     .cloned()
                     .unwrap_or(Bson::Int32(0));
-                Ok(documents(vec![doc! { "count": n }]))
+                documents(vec![doc! { "count": n }])
             }
             Method::EstimatedDocumentCount => {
                 let mut sent = doc! { "count": collection };
@@ -923,7 +921,7 @@ impl Connection {
                 )?;
                 let counted = command(run, &database, sent)?;
                 let n = counted.get("n").cloned().unwrap_or(Bson::Null);
-                Ok(documents(vec![doc! { "count": n }]))
+                documents(vec![doc! { "count": n }])
             }
             Method::Distinct => {
                 let key = args.string(0)?;
@@ -944,20 +942,20 @@ impl Connection {
                     .get_array("values")
                     .cloned()
                     .unwrap_or_default();
-                Ok(documents(
+                documents(
                     values
                         .into_iter()
                         .map(|value| doc! { key.as_str(): value })
                         .collect(),
-                ))
+                )
             }
-            Method::GetIndexes => Ok(read_cursor(
+            Method::GetIndexes => read_cursor(
                 run,
                 &database,
                 doc! { "listIndexes": collection },
                 Fetch::default(),
             )?
-            .rows()),
+            .rows(),
             Method::InsertOne | Method::InsertMany => {
                 let given = match call.method {
                     Method::InsertOne => vec![args.required_document(0)?],
@@ -988,7 +986,7 @@ impl Connection {
                     }
                     _ => doc! { "acknowledged": true, "insertedIds": ids },
                 };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::UpdateOne | Method::UpdateMany | Method::ReplaceOne => {
                 let update = args.required(1)?;
@@ -1029,7 +1027,7 @@ impl Connection {
                     "modifiedCount": number(written.get("nModified")),
                     "upsertedId": upserted_id,
                 };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::DeleteOne | Method::DeleteMany => {
                 let mut statement = doc! {
@@ -1053,7 +1051,7 @@ impl Connection {
                 sent.insert("deletes", vec![statement]);
                 let written = write(run, &database, sent)?;
                 let shown = doc! { "acknowledged": true, "deletedCount": number(written.get("n")) };
-                Ok(affected(documents(vec![shown]), &written))
+                Ok(affected(documents(vec![shown])?, &written))
             }
             Method::FindOneAndUpdate | Method::FindOneAndReplace | Method::FindOneAndDelete => {
                 let mut sent = doc! {
@@ -1119,7 +1117,7 @@ impl Connection {
                     Some(Bson::Document(found)) => vec![found.clone()],
                     _ => Vec::new(),
                 };
-                let mut result = documents(found);
+                let mut result = documents(found)?;
                 result.rows_affected = written
                     .get_document("lastErrorObject")
                     .ok()
@@ -1153,23 +1151,23 @@ impl Connection {
                     sent.insert("commitQuorum", quorum);
                 }
                 write(run, &database, sent)?;
-                Ok(documents(names))
+                documents(names)
             }
             Method::DropIndex => {
                 let index = args.required(0)?;
-                Ok(reply(command(
+                reply(command(
                     run,
                     &database,
                     doc! { "dropIndexes": collection, "index": index },
-                )?))
+                )?)
             }
             Method::DropIndexes => {
                 let index = args.bson(0)?.unwrap_or_else(|| "*".into());
-                Ok(reply(command(
+                reply(command(
                     run,
                     &database,
                     doc! { "dropIndexes": collection, "index": index },
-                )?))
+                )?)
             }
             Method::Drop => {
                 let mut sent = doc! { "drop": collection };
@@ -1179,7 +1177,7 @@ impl Connection {
                     args.document(0)?.unwrap_or_default(),
                     &["comment", "writeConcern"],
                 )?;
-                Ok(reply(command(run, &database, sent)?))
+                reply(command(run, &database, sent)?)
             }
             Method::RenameCollection => {
                 let name = database.name();
@@ -1191,7 +1189,7 @@ impl Connection {
                     sent.insert("dropTarget", drop_target);
                 }
                 let admin = self.client().database("admin");
-                Ok(reply(command(run, &admin, sent)?))
+                reply(command(run, &admin, sent)?)
             }
         }
     }
@@ -1936,16 +1934,16 @@ struct Fetched {
 impl Fetched {
     /// The kept documents as rows. `elapsed` is how long the run went on past
     /// the last kept one, for [`Connection::query`] to take off its clock.
-    fn rows(self) -> QueryResult {
+    fn rows(self) -> Result<QueryResult, DbError> {
         let past = self.returned > self.documents.len();
-        let mut result = documents(self.documents);
+        let mut result = documents(self.documents)?;
         result.rows_affected = Some(self.returned as u64);
         result.capped_from = (past && !self.stopped).then_some(self.returned);
         result.stopped = self.stopped.then_some(Stopped::AtLimit);
         if past && let Some(filled) = self.filled {
             result.elapsed = filled.elapsed();
         }
-        result
+        Ok(result)
     }
 }
 
@@ -1990,12 +1988,12 @@ fn collection_names(run: Run, database: &Database) -> Result<QueryResult, DbErro
         .filter_map(|listed| listed.get_str("name").ok())
         .collect();
     names.sort_unstable();
-    Ok(documents(
+    documents(
         names
             .into_iter()
             .map(|name| doc! { "name": name })
             .collect(),
-    ))
+    )
 }
 
 /// The cursor methods chained after `find` or `aggregate`, as the fields of
@@ -2091,9 +2089,7 @@ fn explained(
             .into_iter()
             .map(|(field, value)| (field.to_string(), value)),
     );
-    Ok(reply(run.execute(|session| {
-        database.run_command(explain).session(session)
-    })?))
+    reply(run.execute(|session| database.run_command(explain).session(session))?)
 }
 
 /// mongosh refuses an update that would replace the document, and a
@@ -2170,7 +2166,7 @@ fn affected(mut result: QueryResult, written: &Document) -> QueryResult {
 }
 
 /// A reply as one row of its fields.
-fn reply(reply: Document) -> QueryResult {
+fn reply(reply: Document) -> Result<QueryResult, DbError> {
     documents(vec![reply])
 }
 
@@ -2345,7 +2341,7 @@ fn bson(value: &Value) -> Result<Bson, DbError> {
 /// Documents as rows. Every top-level field any of them has is a column, `_id`
 /// first and the rest in the order first seen; a document without the field
 /// leaves its cell [`MISSING`], which is not the null a document can hold.
-fn documents(documents: Vec<Document>) -> QueryResult {
+fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
     let mut names: Vec<&str> = Vec::new();
     let mut positions = HashMap::new();
     for document in &documents {
@@ -2372,7 +2368,8 @@ fn documents(documents: Vec<Document>) -> QueryResult {
             row[at] = cell(value);
             types[at] = type_alias(value);
         }
-        bytes += row.iter().flatten().map(String::len).sum::<usize>();
+        let row = Row::try_from(row)?;
+        bytes += row.text_len();
         rows.push(row);
         cell_types.push(types);
     }
@@ -2384,14 +2381,14 @@ fn documents(documents: Vec<Document>) -> QueryResult {
             data_type: Some(shared_type(cell_types.iter().map(|types| types[at])).into()),
         })
         .collect();
-    QueryResult {
+    Ok(QueryResult {
         columns,
         rows_affected: Some(rows.len() as u64),
         rows,
         cell_types,
         bytes,
         ..QueryResult::default()
-    }
+    })
 }
 
 /// A column's one type when its values agree, else `mixed`. A null or a
@@ -3177,7 +3174,8 @@ mod tests {
             doc! { "name": "Ada", "_id": 1, "email": "ada@example.test" },
             doc! { "_id": 2, "email": null, "seats": 3 },
             doc! { "_id": "three", "seats": 4.5 },
-        ]);
+        ])
+        .unwrap();
         let columns = result
             .columns
             .iter()
@@ -3195,13 +3193,13 @@ mod tests {
         );
         assert_eq!(
             result.rows[1],
-            [Some("2".into()), None, None, Some("3".into())]
+            vec![Some("2".into()), None, None, Some("3".into())]
         );
         // The two empty cells are not the same emptiness.
         assert_eq!(result.cell_types[1], ["int", MISSING, "null", "int"]);
         assert_eq!(result.rows_affected, Some(3));
         assert_eq!(
-            documents(vec![doc! { "a": null }]).columns[0]
+            documents(vec![doc! { "a": null }]).unwrap().columns[0]
                 .data_type
                 .as_deref(),
             Some("null")
@@ -3265,8 +3263,8 @@ mod tests {
             connection,
             &format!("db.getCollection('{collection}').countDocuments()"),
         );
-        counted.rows[0][0]
-            .as_deref()
+        counted.rows[0]
+            .get(0)
             .and_then(|n| n.parse().ok())
             .expect("a count")
     }
@@ -3282,7 +3280,7 @@ mod tests {
             .iter()
             .position(|column| column.name == name)
             .unwrap_or_else(|| panic!("no column {name}: {:?}", result.columns));
-        (result.rows[row][at].as_deref(), result.cell_types[row][at])
+        (result.rows[row].get(at), result.cell_types[row][at])
     }
 
     fn names(result: &QueryResult) -> Vec<&str> {
@@ -3356,7 +3354,7 @@ mod tests {
             &connection,
             "db.getCollection('accounts').findOne({ plan: 'team' }, { _id: 0, plan: 1 })",
         );
-        assert_eq!(one.rows, [[Some("team".to_string())]]);
+        assert_eq!(one.rows, vec![vec![Some("team".to_string())]]);
         let grouped = ran(
             &connection,
             "db.accounts.aggregate([{ $group: { _id: '$plan', n: { $sum: 1 } } }, { $sort: { _id: 1 } }])",
@@ -3378,7 +3376,12 @@ mod tests {
 
         let collections = ran(&connection, "show collections");
         assert_eq!(names(&collections), ["name"]);
-        assert!(collections.rows.contains(&vec![Some("accounts".into())]));
+        assert!(
+            collections
+                .rows
+                .iter()
+                .any(|row| *row == vec![Some("accounts".into())])
+        );
         let databases = ran(&connection, "show dbs");
         assert_eq!(names(&databases), ["name", "sizeOnDisk"]);
         assert_eq!(field(&databases, 1, "name").0, Some("dbdelve_dev"));
@@ -3692,7 +3695,7 @@ mod tests {
             );
         }
         // The document's own text, edited, keeps the types written inside it.
-        let doc = fetched.rows[0][at("doc")].clone().unwrap();
+        let doc = fetched.rows[0].get(at("doc")).unwrap().to_string();
         let edited = doc.replace("\"7\"", "\"8\"");
         assert_ne!(doc, edited, "{doc}");
         assert!(grid.set_pending(0, at("doc"), NewValue::Value(edited.into())));
@@ -3945,10 +3948,7 @@ mod tests {
         }
         let listed = ran(&connection, "db.getCollectionNames()");
         assert!(
-            !listed
-                .rows
-                .iter()
-                .any(|row| row[0].as_deref() == Some(&scratch.1)),
+            !listed.rows.iter().any(|row| row.get(0) == Some(&scratch.1)),
             "a refused statement reached the server"
         );
         assert_eq!(count(&connection, "accounts"), 5);
@@ -4213,9 +4213,7 @@ mod tests {
             let statement =
                 crate::explorer::count_sql(Engine::MongoDb, "dbdelve_dev", "accounts", filter);
             let result = generated(&connection, &statement);
-            result.rows[0][0]
-                .as_deref()
-                .and_then(|n| n.parse::<u64>().ok())
+            result.rows[0].get(0).and_then(|n| n.parse::<u64>().ok())
         };
         let previewed = |filter: &str| {
             let statement = crate::explorer::preview_sql(

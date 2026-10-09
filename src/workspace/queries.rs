@@ -8,7 +8,7 @@ use std::ops::Range;
 use gpui::Pixels;
 use gpui_component::table::TableState;
 
-use crate::db::{Feed, Fetch, QueryResult, Stopped};
+use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
 
 use super::*;
 use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
@@ -1992,13 +1992,7 @@ impl Workspace {
                                     // A cancelled stream's size was never
                                     // reported; it is what arrived.
                                     if result.stopped == Some(Stopped::Cancelled) {
-                                        result.bytes = result
-                                            .rows
-                                            .iter()
-                                            .flatten()
-                                            .flatten()
-                                            .map(String::len)
-                                            .sum();
+                                        result.bytes = result.rows.iter().map(Row::text_len).sum();
                                     }
                                 }
                                 // Off the result before it reaches the grid:

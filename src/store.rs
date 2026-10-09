@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Cell, EditTarget, RelationKind, SshTunnel};
+use crate::db::{EditTarget, RelationKind, Row, SshTunnel};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -235,7 +235,7 @@ pub struct StoredFilter {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredGrid {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// The row count before [`GRID_ROW_CAP`] trimmed it, so the UI can say
     /// "5000 of N" for a result that did not fit whole.
     pub total_rows: usize,
@@ -1116,6 +1116,7 @@ fn secure(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::rows;
     use crate::theme::ConnectionColor;
 
     #[test]
@@ -2361,7 +2362,7 @@ open_objects = []
         with_home(|| {
             let grid = StoredGrid {
                 columns: vec!["n".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
                 stopped: None,
                 sort: Vec::new(),
@@ -2410,7 +2411,7 @@ open_objects = []
         with_home(|| {
             let small = StoredGrid {
                 columns: vec!["id".into(), "name".into()],
-                rows: vec![vec![Some("1".into()), None]],
+                rows: rows(vec![vec![Some("1".into()), None]]),
                 total_rows: 1,
                 stopped: None,
                 sort: vec![(0, true)],
@@ -2444,9 +2445,11 @@ open_objects = []
             // says the rest existed.
             let oversized = StoredGrid {
                 columns: vec!["n".into()],
-                rows: (0..GRID_ROW_CAP + 10)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP + 10)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 total_rows: GRID_ROW_CAP + 10,
                 stopped: None,
                 sort: Vec::new(),
@@ -2496,7 +2499,7 @@ open_objects = []
         with_home(|| {
             let filtered = StoredGrid {
                 columns: vec!["id".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
                 stopped: None,
                 sort: Vec::new(),

@@ -22,9 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::{
-    CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, Fetch, ForeignKey,
-    NamedDefinition, QueryResult, RelationKind, Stopped, Structure, assemble_catalog,
-    assemble_structure, plain_error, terminated,
+    CancelToken, Cancelling, Catalog, Column, DbError, Engine, Fetch, ForeignKey, NamedDefinition,
+    QueryResult, RelationKind, Row, Stopped, Structure, assemble_catalog, assemble_structure,
+    plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -531,17 +531,18 @@ fn partition_count(body: &Value) -> usize {
 
 /// One partition's rows, rendered. A JSON `null` is SQL NULL and stays
 /// distinct from the empty string.
-fn rows(body: &Value, row_types: &[RowType]) -> Vec<Vec<Cell>> {
+fn rows(body: &Value, row_types: &[RowType]) -> Result<Vec<Row>, DbError> {
     let Some(data) = body["data"].as_array() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     data.iter()
         .filter_map(Value::as_array)
         .map(|row| {
-            row.iter()
-                .zip(row_types)
-                .map(|(cell, row_type)| cell.as_str().map(|value| render(value, row_type)))
-                .collect()
+            Row::new(
+                row.iter()
+                    .zip(row_types)
+                    .map(|(cell, row_type)| cell.as_str().map(|value| render(value, row_type))),
+            )
         })
         .collect()
 }
@@ -867,7 +868,7 @@ impl Connection {
         let mut partition = 0;
         let mut body = finished;
         loop {
-            for cells in rows(&body, &row_types) {
+            for cells in rows(&body, &row_types)? {
                 returned += 1;
                 if full(kept) {
                     continue;
@@ -879,7 +880,7 @@ impl Connection {
                         feed.fill();
                     }
                 }
-                result.bytes += cells.iter().flatten().map(String::len).sum::<usize>();
+                result.bytes += cells.text_len();
                 match fetch.feed {
                     Some(feed) => feed.push(cells),
                     None => result.rows.push(cells),
@@ -1048,7 +1049,7 @@ impl Connection {
         result
             .rows
             .first()
-            .and_then(|row| row.first()?.as_deref())
+            .and_then(|row| row.get(0))
             .map(terminated)
             .ok_or_else(|| plain_error(format!("{name} has no definition to show.")))
     }
@@ -1142,10 +1143,12 @@ fn strip_signature_parens(mut result: QueryResult) -> QueryResult {
         return result;
     };
     for row in &mut result.rows {
-        if let Some(value) = row.get_mut(index).and_then(|cell| cell.as_mut())
-            && let Some(stripped) = value.strip_prefix('(').and_then(|v| v.strip_suffix(')'))
+        if let Some(stripped) = row
+            .get(index)
+            .and_then(|value| value.strip_prefix('(')?.strip_suffix(')'))
         {
-            *value = stripped.to_string();
+            let stripped = stripped.to_string();
+            row.replace(&[(index, Some(&stripped))]);
         }
     }
     result
@@ -1188,16 +1191,16 @@ WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}
 ORDER BY ORDINAL_POSITION"#;
 
 /// A cell of a `SHOW` result by its column's fixed name.
-fn shown<'a>(result: &'a QueryResult, row: &'a [Cell], name: &str) -> Option<&'a str> {
+fn shown<'a>(result: &'a QueryResult, row: &'a Row, name: &str) -> Option<&'a str> {
     let index = result
         .columns
         .iter()
         .position(|column| column.name == name)?;
-    row.get(index)?.as_deref()
+    row.get(index)
 }
 
 /// The rows of a key `SHOW` that belong to `relation`, in key order.
-fn key_rows<'a>(result: &'a QueryResult, table_column: &str, relation: &str) -> Vec<&'a Vec<Cell>> {
+fn key_rows<'a>(result: &'a QueryResult, table_column: &str, relation: &str) -> Vec<&'a Row> {
     let mut rows: Vec<_> = result
         .rows
         .iter()
@@ -1229,7 +1232,7 @@ fn key_definitions(
         "column_name"
     };
 
-    let mut constraints = std::collections::BTreeMap::<&str, Vec<&Vec<Cell>>>::new();
+    let mut constraints = std::collections::BTreeMap::<&str, Vec<&Row>>::new();
     for row in key_rows(result, table_column, relation) {
         let name = shown(result, row, name_column).unwrap_or_default();
         constraints.entry(name).or_default().push(row);
@@ -1570,7 +1573,7 @@ mod tests {
         );
         // NULL and the empty string are different answers and stay different.
         assert_eq!(
-            rows(&finished, &types),
+            rows(&finished, &types).unwrap(),
             vec![
                 vec![
                     Some("1".into()),
@@ -2187,7 +2190,7 @@ mod tests {
             .query(&sql)?
             .rows
             .into_iter()
-            .filter_map(|row| row.into_iter().next().flatten())
+            .filter_map(|row| row.get(0).map(str::to_string))
             .collect())
     }
 

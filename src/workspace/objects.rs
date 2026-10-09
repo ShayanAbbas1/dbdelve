@@ -335,7 +335,7 @@ impl Workspace {
                     result
                         .rows
                         .first()
-                        .and_then(|row| row.first()?.as_deref()?.trim().parse::<u64>().ok())
+                        .and_then(|row| row.get(0)?.trim().parse::<u64>().ok())
                 });
                 *count = match rows {
                     Ok(Some(rows)) if current => RowCount::Counted(asked, rows),

@@ -33,9 +33,9 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RelationKind, ServerConfig, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
-    assemble_foreign_keys, assemble_references, assemble_structure, create_table, plain_error,
-    required_cell, terminated,
+    RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_structure,
+    create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -977,7 +977,7 @@ impl Connection {
             collected.result.rows_affected = session
                 .trip("SELECT @@ROWCOUNT")
                 .and_then(Result::ok)
-                .and_then(|count| count.result.rows.first()?.first()?.clone()?.parse().ok());
+                .and_then(|count| count.result.rows.first()?.get(0)?.parse().ok());
         }
         // After a failure too: a batch that moved the session and then failed
         // leaves it moved all the same.
@@ -1128,7 +1128,7 @@ impl Connection {
             return result
                 .rows
                 .first()
-                .and_then(|row| row.first()?.as_deref())
+                .and_then(|row| row.get(0))
                 .map(terminated)
                 .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
         }
@@ -1244,12 +1244,12 @@ struct Ran {
 }
 
 /// A column of a result dbdelve asked for, by name, null or absent alike.
-fn named<'a>(result: &QueryResult, row: &'a [Cell], name: &str) -> Option<&'a str> {
+fn named<'a>(result: &QueryResult, row: &'a Row, name: &str) -> Option<&'a str> {
     let index = result
         .columns
         .iter()
         .position(|column| column.name == name)?;
-    row.get(index)?.as_deref()
+    row.get(index)
 }
 
 /// dbdelve's own SQL, run inside `sp_executesql` behind [`SESSION_OPTIONS`]: a
@@ -1418,12 +1418,13 @@ async fn collect(
                         retyped = true;
                     }
                 }
-                let cells: Vec<Cell> = row
-                    .into_iter()
-                    .zip(&types)
-                    .map(|(value, kind)| render(&value, *kind))
-                    .collect();
-                result.bytes += cells.iter().flatten().map(String::len).sum::<usize>();
+                let cells = Row::new(
+                    row.into_iter()
+                        .zip(&types)
+                        .map(|(value, kind)| render(&value, *kind)),
+                )
+                .map_err(|error| tiberius::error::Error::Conversion(error.message.into()))?;
+                result.bytes += cells.text_len();
                 match fetch.feed.filter(|_| fed) {
                     Some(feed) => {
                         if retyped {
@@ -1713,9 +1714,9 @@ fn describe_columns(
         return Vec::new();
     };
     let described = &collected.result;
-    let cell = |row: &[Cell], name: &str| -> Option<String> {
+    let cell = |row: &Row, name: &str| -> Option<String> {
         let index = described.columns.iter().position(|c| c.name == name)?;
-        row.get(index)?.clone()
+        row.get(index).map(str::to_string)
     };
 
     let probed: Vec<ProbedColumn> = described
@@ -1919,7 +1920,8 @@ fn current_database(session: &mut Session) -> Result<String, DbError> {
         .result
         .rows
         .first()
-        .and_then(|row| row.first()?.clone())
+        .and_then(|row| row.get(0))
+        .map(str::to_string)
         .unwrap_or_default())
 }
 
@@ -1955,16 +1957,9 @@ fn transaction_outcome(
         return error;
     };
     let mut ask = |statement: &str| session.trip(statement).and_then(Result::ok);
-    let Some(after) = ask("SELECT @@TRANCOUNT").and_then(|collected| {
-        collected
-            .result
-            .rows
-            .first()?
-            .first()?
-            .as_deref()?
-            .parse::<u64>()
-            .ok()
-    }) else {
+    let Some(after) = ask("SELECT @@TRANCOUNT")
+        .and_then(|collected| collected.result.rows.first()?.get(0)?.parse::<u64>().ok())
+    else {
         return error;
     };
     // Only a batch dbdelve wrote is known to end at its own `COMMIT`.
@@ -2067,7 +2062,7 @@ mod tests {
     }
 
     fn first(result: &QueryResult) -> Vec<Option<&str>> {
-        result.rows[0].iter().map(Option::as_deref).collect()
+        result.rows[0].iter().collect()
     }
 
     fn probed(columns: &[(Option<&str>, Option<&str>)]) -> Vec<ProbedColumn> {
@@ -2281,10 +2276,19 @@ mod tests {
     fn every_result_set_of_a_batch_is_kept_in_the_order_the_batch_returned_them() {
         let mut sets = Vec::new();
         open_set(&mut sets, vec![named_column("a")]);
-        sets.last_mut().unwrap().rows.push(vec![Some("1".into())]);
+        sets.last_mut()
+            .unwrap()
+            .rows
+            .push(Row::new([Some("1")]).unwrap());
         open_set(&mut sets, vec![named_column("b")]);
-        sets.last_mut().unwrap().rows.push(vec![Some("2".into())]);
-        sets.last_mut().unwrap().rows.push(vec![Some("3".into())]);
+        sets.last_mut()
+            .unwrap()
+            .rows
+            .push(Row::new([Some("2")]).unwrap());
+        sets.last_mut()
+            .unwrap()
+            .rows
+            .push(Row::new([Some("3")]).unwrap());
 
         let collected = collected_sets(sets);
         assert_eq!(collected.sets, 2);
@@ -2316,7 +2320,7 @@ mod tests {
                 })
                 .to_vec(),
             rows: [("id", "56"), ("place", "240"), ("extra", "98")]
-                .map(|(name, kind)| vec![Some(name.to_string()), Some(kind.to_string())])
+                .map(|(name, kind)| Row::new([Some(name), Some(kind)]).unwrap())
                 .to_vec(),
             ..QueryResult::default()
         };
@@ -2338,7 +2342,7 @@ mod tests {
         // The grammar does not read a doubled quote inside a name, so neither
         // does the gate: refused, as a preview of such a table already is.
         let mut odd = described.clone();
-        odd.rows[2][0] = Some("any\"thing".into());
+        odd.rows[2].replace(&[(0, Some("any\"thing"))]);
         assert_eq!(readable_preview(paged, &odd), None);
         assert_eq!(
             unreadable_columns(&described)
@@ -3255,8 +3259,8 @@ mod tests {
         .unwrap();
         let page = preview(&equals, 20);
         assert_eq!(page.rows.len(), 10);
-        assert_eq!(page.rows[0][0].as_deref(), Some("4515"));
-        assert_eq!(page.rows[9][0].as_deref(), Some("4299"));
+        assert_eq!(page.rows[0].get(0), Some("4515"));
+        assert_eq!(page.rows[9].get(0), Some("4299"));
         // An object tab's rows are editable by their key, like any single
         // table's.
         assert_eq!(
@@ -3427,7 +3431,7 @@ mod tests {
                 .unwrap()
                 .rows
                 .first()
-                .and_then(|row| row[0].clone())
+                .and_then(|row| row.get(0).map(str::to_string))
         };
         let row = |id: &str, name: &str| PendingRow {
             schema: "dbo".into(),
@@ -3550,7 +3554,7 @@ mod tests {
                 let select = format!("SELECT id, name FROM dbo.{table}");
                 let name = || {
                     let rows = connection.query(&select, Fetch::default()).unwrap().rows;
-                    rows.first().and_then(|row| row[1].clone())
+                    rows.first().and_then(|row| row.get(1).map(str::to_string))
                 };
                 let run = |sql: &str| {
                     assert!(sql::is_generated_write(sql), "the gate refused {sql}");
@@ -3638,14 +3642,14 @@ mod tests {
                 .generated(&batch, Fetch::default())
                 .expect("the edit should run");
             let rows = connection.query(&select, Fetch::default()).unwrap().rows;
-            assert_eq!(rows[0][1].as_deref(), Some(after), "{batch}");
-            assert_eq!(rows[1][1].as_deref(), Some(untouched), "{batch}");
+            assert_eq!(rows[0].get(1), Some(after), "{batch}");
+            assert_eq!(rows[1].get(1), Some(untouched), "{batch}");
 
             // The filter bar names the same row by the same literal.
             let structure = connection.structure("dbo", table).unwrap();
             let bar = FilterBar {
                 column: Some(key.into()),
-                value: rows[0][0].clone().unwrap(),
+                value: rows[0].get(0).unwrap().to_string(),
                 ..FilterBar::default()
             };
             let filter = derived_filter(Engine::SqlServer, &[bar], &structure.columns);
@@ -3659,7 +3663,7 @@ mod tests {
                 .generated(&paged, Fetch::default())
                 .expect("the preview should run");
             assert_eq!(found.rows.len(), 1, "{paged}");
-            assert_eq!(found.rows[0][1].as_deref(), Some(after), "{paged}");
+            assert_eq!(found.rows[0].get(1), Some(after), "{paged}");
         }
         reset();
     }
@@ -3677,11 +3681,8 @@ mod tests {
         let page = connection
             .generated(&paged, Fetch::default())
             .expect("the preview should run");
-        let rows: Vec<Vec<Option<&str>>> = page
-            .rows
-            .iter()
-            .map(|row| row.iter().map(Option::as_deref).collect())
-            .collect();
+        let rows: Vec<Vec<Option<&str>>> =
+            page.rows.iter().map(|row| row.iter().collect()).collect();
         assert_eq!(
             rows,
             vec![
@@ -4156,7 +4157,7 @@ mod tests {
                 Fetch::default(),
             )
             .unwrap();
-        assert_eq!(names.rows[0][0].as_deref(), Some("first"));
+        assert_eq!(names.rows[0].get(0), Some("first"));
         // Committed, not left in a transaction `IMPLICIT_TRANSACTIONS` opened.
         let update = connection
             .generated(
@@ -4248,7 +4249,7 @@ mod tests {
         let quoted = connection
             .query("SELECT \"position\" AS p FROM places", Fetch::default())
             .unwrap();
-        assert_eq!(quoted.rows[0][0].as_deref(), Some("position"));
+        assert_eq!(quoted.rows[0].get(0), Some("position"));
         // And the user's `ROWCOUNT` does not hide a column from the check.
         connection
             .query("SET QUOTED_IDENTIFIER ON; SET ROWCOUNT 1", Fetch::default())
@@ -4318,7 +4319,7 @@ mod tests {
                 Fetch::default(),
             )
             .unwrap();
-        let version = versions.rows[0][0].clone().unwrap();
+        let version = versions.rows[0].get(0).unwrap().to_string();
         // `timestamp` is the name the catalog gives it, and a pasted value may
         // wear an uppercase prefix.
         for value in [version.clone(), version.replacen("0x", "0X", 1)] {

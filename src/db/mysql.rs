@@ -17,6 +17,7 @@
 //! below alias their columns to the names the shared assemblers in `mod.rs`
 //! read and nothing else here has to know how a `Catalog` is built.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference, RowBuilder,
     ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
     assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, non_utf8_error,
     plain_error, required_cell,
@@ -511,6 +512,7 @@ impl Connection {
             // profile's queries, and time spent waiting behind the catalog load
             // is not time the server spent on this statement.
             let started = Instant::now();
+            let mut builder = RowBuilder::default();
             let mut sets = connection
                 .query_iter(sql)
                 .map_err(|error| query_error(&error))?;
@@ -579,17 +581,13 @@ impl Connection {
                             feed.fill();
                         }
                     }
-                    let cells: Vec<Cell> = (0..columns.len())
-                        .map(|index| {
-                            let value = row.as_ref(index).unwrap_or(&Value::NULL);
-                            render(value, described[index].binary, &columns, index)
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    bytes += cells
-                        .iter()
-                        .filter_map(|cell| cell.as_ref().map(String::len))
-                        .sum::<usize>();
+                    for (index, column) in described.iter().enumerate() {
+                        let value = row.as_ref(index).unwrap_or(&Value::NULL);
+                        let cell = render(value, column.binary, &columns, index)?;
+                        builder.push(cell.as_deref());
+                    }
+                    let cells = builder.finish()?;
+                    bytes += cells.text_len();
                     match fetch.feed {
                         Some(feed) => feed.push(cells),
                         None => rows.push(cells),
@@ -720,7 +718,7 @@ impl Connection {
         shown
             .rows
             .first()
-            .and_then(|row| row.get(1)?.as_deref())
+            .and_then(|row| row.get(1))
             .map(|definition| format!("{definition};"))
             .ok_or_else(|| plain_error(format!("{schema}.{relation} has no definition to show.")))
     }
@@ -839,25 +837,30 @@ fn is_binary(column: &::mysql::Column) -> bool {
 /// The text protocol has already done almost all of this: every non-null value
 /// arrives as the bytes the server formatted, so the only decision left is
 /// whether those bytes are text.
-fn render(value: &Value, binary: bool, columns: &[Column], index: usize) -> Result<Cell, DbError> {
+fn render<'a>(
+    value: &'a Value,
+    binary: bool,
+    columns: &[Column],
+    index: usize,
+) -> Result<Option<Cow<'a, str>>, DbError> {
     Ok(match value {
         Value::NULL => None,
         // MySQL's own literal syntax for a blob, rather than bare hex, so a
         // value copied out of the grid is a value that can be pasted into a
         // statement.
-        Value::Bytes(bytes) if binary => Some(format!("0x{}", hex::encode_upper(bytes))),
+        Value::Bytes(bytes) if binary => Some(format!("0x{}", hex::encode_upper(bytes)).into()),
         Value::Bytes(bytes) => Some(
             // A column whose declared character set does not match what was
             // stored can return bytes that are not text at all. Postgres raises
             // the same error for the same reason, naming the column.
             std::str::from_utf8(bytes)
                 .map_err(|_| non_utf8_error(columns, index))?
-                .to_string(),
+                .into(),
         ),
         // Unreachable through the text protocol, which sends everything as
         // bytes. `Value` is shared with the binary protocol, and a driver that
         // surprised us here should still render something true.
-        other => Some(other.as_sql(true).trim_matches('\'').to_string()),
+        other => Some(other.as_sql(true).trim_matches('\'').to_string().into()),
     })
 }
 
@@ -1568,7 +1571,7 @@ mod tests {
             )
             .expect("query should succeed");
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
+        assert_eq!(result.rows[0].get(0), Some("5000"));
     }
 
     fn live_the_databases_list_flags_the_one_connected_to(engine: Engine) {
@@ -1816,7 +1819,7 @@ mod tests {
                 Fetch::default(),
             )
             .expect("query should succeed");
-        assert_eq!(items.rows[0][0].as_deref(), Some("3"));
+        assert_eq!(items.rows[0].get(0), Some("3"));
 
         let closed = connection
             .query(
@@ -1824,7 +1827,7 @@ mod tests {
                 Fetch::default(),
             )
             .expect("query should succeed");
-        assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
+        assert_eq!(closed.rows[0].get(0), Some("2"));
     }
 
     fn live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order(engine: Engine) {
