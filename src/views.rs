@@ -67,6 +67,10 @@ pub struct RowPanel {
     /// The (row, column) whose value was just copied, so its button can show
     /// a tick until the timer in `copy_row_field` clears it.
     pub copied: Option<(usize, usize)>,
+    /// Narrows the fields to columns whose name contains it. One for every
+    /// tab and kept across rows, so a column found once stays found while
+    /// the selection moves.
+    pub search: Entity<InputState>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1565,6 +1569,13 @@ fn render_row_inspector(
         );
     }
 
+    let query = row_panel.search.read(cx).value().to_lowercase();
+    let fields: Vec<_> = fields
+        .into_iter()
+        .enumerate()
+        .filter(|(_, field)| field.name.to_lowercase().contains(query.as_str()))
+        .collect();
+
     let table = results.clone();
     Some(
         div()
@@ -1614,6 +1625,26 @@ fn render_row_inspector(
             )
             .child(
                 div()
+                    .mx(px(layout::SPACE_SM))
+                    .mb(px(layout::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .child(row_icon(t, icon::SEARCH))
+                    // Clipped by a box of its own, as the explorer's filter
+                    // is: the placeholder is laid out at the input's full width.
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().child(
+                            Input::new(&row_panel.search)
+                                .small()
+                                .w_full()
+                                .min_w_0()
+                                .cleanable(true),
+                        ),
+                    ),
+            )
+            .child(
+                div()
                     .id("row-inspector")
                     .flex_1()
                     .min_h_0()
@@ -1624,7 +1655,15 @@ fn render_row_inspector(
                     .flex()
                     .flex_col()
                     .gap(px(layout::SPACE_MD))
-                    .children(fields.into_iter().enumerate().map(|(col_ix, field)| {
+                    .when(fields.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child("No matching columns"),
+                        )
+                    })
+                    .children(fields.into_iter().map(|(col_ix, field)| {
                         let group = format!("row-field-{col_ix}");
                         let copy = field.value.is_some().then(|| {
                             if row_panel.copied == Some((row_ix, col_ix)) {

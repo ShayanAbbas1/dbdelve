@@ -250,6 +250,14 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let row_panel_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search columns…"));
+        cx.subscribe(&row_panel_search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
         // blur both count as done: a percentage is short enough that clicking
@@ -300,6 +308,7 @@ impl Workspace {
             row_panel: views::RowPanel {
                 on_screen: Default::default(),
                 copied: None,
+                search: row_panel_search,
             },
             plan_copied: false,
             pending_removal: None,
