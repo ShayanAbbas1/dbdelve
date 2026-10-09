@@ -17,5 +17,5 @@ fi
 
 start=$SECONDS
 sed "s/@ROWS@/$rows/g" dev/load/postgres.sql | docker compose exec -T postgres \
-    psql -q -v ON_ERROR_STOP=1 -U dbdelve -d dbdelve_dev
+    psql -q --single-transaction -v ON_ERROR_STOP=1 -U dbdelve -d dbdelve_dev
 echo "loaded $rows rows in $((SECONDS - start))s"
