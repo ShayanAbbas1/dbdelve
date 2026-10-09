@@ -114,49 +114,84 @@ impl Workspace {
             self.cancel_count(id, cx);
             return;
         }
-        // ponytail: per-slot UI truth about a request having been sent, not
-        // a claim that anything stopped. It bounds the repeat clicks to one
-        // cancel per run; a cancel that the server ignores has no answer
-        // here, and would need the driver to report one.
-        let Some((
-            QueryState::Running {
-                cancelling, cancel, ..
-            },
-            _,
-        )) = profile.session.slot(tab)
-        else {
-            return;
-        };
-        if cancelling.is_some() {
-            return;
-        }
         let now = std::time::Instant::now();
-        *cancelling = Some(now);
-        let cancel = cancel.clone();
-        // A queue's statements running at once went out under that same
-        // token, and each one's own slot is what its chip reads and what
-        // decides whether it keeps the rows it had.
-        if let Tab::Query(id) = tab
+        // A queue's statement running at once is stopped on its own when it is
+        // the one on screen, and the rest carry on. Read off its own slot,
+        // which is what its chip and the status bar show.
+        let cancels = if let Tab::Query(id) = tab
             && let Some(queue) = profile
                 .session
                 .query_tab_mut(id)
                 .and_then(|query| query.queue.as_mut())
+            && let Some(Finished {
+                state:
+                    QueryState::Running {
+                        cancelling, cancel, ..
+                    },
+                ..
+            }) = queue.done.get_mut(queue.showing)
         {
-            for finished in &mut queue.done {
-                if let QueryState::Running { cancelling, .. } = &mut finished.state {
-                    *cancelling = Some(now);
+            if cancelling.is_some() {
+                return;
+            }
+            *cancelling = Some(now);
+            vec![cancel.clone()]
+        } else {
+            // ponytail: per-slot UI truth about a request having been sent,
+            // not a claim that anything stopped. It bounds the repeat clicks
+            // to one cancel per run; a cancel that the server ignores has no
+            // answer here, and would need the driver to report one.
+            let Some((
+                QueryState::Running {
+                    cancelling, cancel, ..
+                },
+                _,
+            )) = profile.session.slot(tab)
+            else {
+                return;
+            };
+            if cancelling.is_some() {
+                return;
+            }
+            *cancelling = Some(now);
+            let mut cancels = vec![cancel.clone()];
+            // With a finished result in front, Cancel means the whole run, so
+            // a queue's statements still running at once are stopped too,
+            // each by its own token, and each slot marked, since that is what
+            // decides whether it keeps the rows it had.
+            if let Tab::Query(id) = tab
+                && let Some(queue) = profile
+                    .session
+                    .query_tab_mut(id)
+                    .and_then(|query| query.queue.as_mut())
+            {
+                for finished in &mut queue.done {
+                    if let QueryState::Running {
+                        cancelling: cancelling @ None,
+                        cancel,
+                        ..
+                    } = &mut finished.state
+                    {
+                        *cancelling = Some(now);
+                        cancels.push(cancel.clone());
+                    }
                 }
             }
-        }
-        // An explicit stop ends the queue the statement was part of: nothing
-        // behind it is sent, and no decision is raised -- this was the
-        // decision. The cancelled statement itself still lands, as the queue's
-        // last result, with whatever rows it kept or the error it ended in.
-        self.drop_rest_of_queue(tab);
+            // An explicit stop ends the queue the statement was part of:
+            // nothing behind it is sent, and no decision is raised -- this was
+            // the decision. The cancelled statement itself still lands, as the
+            // queue's last result, with whatever rows it kept or the error it
+            // ended in.
+            self.drop_rest_of_queue(tab);
+            cancels
+        };
         cx.notify();
-        let cancel_task = cx
-            .background_executor()
-            .spawn(on_own_thread(move || connection.cancel(&cancel)));
+        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+            cancels
+                .iter()
+                .map(|cancel| connection.cancel(cancel))
+                .fold(Ok(()), Result::and)
+        }));
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -438,10 +473,10 @@ impl Workspace {
     /// reads, with nothing to keep in order and nothing for a failure to
     /// protect, so one that fails says so on its chip and the rest carry on.
     ///
-    /// The tab's own slot holds the run while it is out, under one token every
-    /// statement shares, so a Cancel reaches all of them and nothing else is
-    /// run on the tab meanwhile. It is given the last statement's result once
-    /// the last has landed, as a queue run in turn leaves it.
+    /// The tab's own slot holds the run while it is out, under a token that
+    /// names it (each statement is stopped by one of its own), so nothing else
+    /// is run on the tab meanwhile. It is given the last statement's result
+    /// once the last has landed, as a queue run in turn leaves it.
     fn run_at_once(
         &mut self,
         tab: Tab,
@@ -1513,8 +1548,8 @@ impl Workspace {
     ///
     /// `lane` is a statement of a queue running at once with others: it runs
     /// on the profile it was issued to rather than the one in front, lands in
-    /// its own entry of the queue, runs on a connection of its own under the
-    /// run's shared token, and hands its result to `land_lane` rather than
+    /// its own entry of the queue, runs on a connection of its own under a
+    /// token of its own, and hands its result to `land_lane` rather than
     /// `advance_queue`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_unchecked(
@@ -1562,10 +1597,11 @@ impl Workspace {
             }
             return;
         };
-        let cancel = lane
-            .as_ref()
-            .map(|lane| lane.run.clone())
-            .unwrap_or_default();
+        // A lane's own, so a Cancel on its chip stops it and not the others.
+        let cancel = match lane {
+            Some(_) => CancelToken::alongside(),
+            None => CancelToken::default(),
+        };
         let started = std::time::Instant::now();
         let previous = std::mem::replace(
             state,

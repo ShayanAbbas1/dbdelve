@@ -1212,12 +1212,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   out together; the rest start as those land. Each is the lone statement on
   its connection, so it streams and stops at the row limit as a single run
   does. A failure stays on its own chip and the rest carry on, with no
-  Stop/Continue to raise. The tab's own slot is `Running` under one
-  `CancelToken::alongside` every statement shares, so Cancel and closing the
-  tab stop all of them, statements not yet sent are dropped, and nothing else
-  runs on or is written over the tab (a refusal goes to the notice) until the
-  last has landed and `land_lane` gives the slot the
-  last statement's result, as a queue run in turn leaves it.
+  Stop/Continue to raise. The tab's own slot is `Running` under a
+  `CancelToken::alongside` that only names the run; each statement runs under
+  one of its own. So Cancel stops the statement on screen and the rest carry
+  on, while with a finished result on screen it stops every one still out, as
+  closing the tab does, and drops those not yet sent. Nothing else runs on or
+  is written over the tab (a refusal goes to the notice) until the last has
+  landed and `land_lane` gives the slot the last statement's result, as a
+  queue run in turn leaves it. The slot streams nothing meanwhile, so the
+  status bar reads the statement on screen instead (`Queue::at_once`).
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
   reaches `advance_queue`. Without the flag an ordinary Run, a header sort or

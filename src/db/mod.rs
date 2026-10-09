@@ -2429,6 +2429,25 @@ pub(super) mod at_once {
         );
     }
 
+    /// Wait for `count` statements under `cancel` to hold a connection of
+    /// their own, and a moment more for them to reach the server. A fixed
+    /// wait loses to a slow connect, and the cancel then lands before
+    /// anything was sent.
+    fn connected(cancel: &CancelToken, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline
+            && cancel.0.lock().map_or(0, |running| {
+                running
+                    .alongside
+                    .as_ref()
+                    .map_or(0, |alongside| alongside.iter().flatten().count())
+            }) < count
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
     /// A cancel under the run's token stops every statement running at once,
     /// each on its own connection, and leaves the profile's connection be.
     pub(in crate::db) fn a_cancel_stops_them_all(
@@ -2439,8 +2458,7 @@ pub(super) mod at_once {
         let cancel = CancelToken::alongside();
         let (elapsed, outcomes) = std::thread::scope(|scope| {
             scope.spawn(|| {
-                // Long enough for both to have connected and started.
-                std::thread::sleep(Duration::from_millis(1500));
+                connected(&cancel, 2);
                 connection
                     .cancel(&cancel)
                     .expect("the cancel should reach each connection");
@@ -2456,6 +2474,38 @@ pub(super) mod at_once {
         connection
             .query("SELECT 1", &CancelToken::default(), Fetch::default())
             .expect("the profile's own connection should be untouched");
+    }
+
+    /// A cancel under one statement's own token stops that statement alone:
+    /// the one beside it, under a token of its own, runs to its end, as a
+    /// Cancel on one chip of a queue run at once leaves the others.
+    pub(in crate::db) fn a_cancel_stops_only_its_own(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+        slow: &str,
+    ) {
+        let (theirs, mine) = (CancelToken::alongside(), CancelToken::alongside());
+        let (stopped, finished) = std::thread::scope(|scope| {
+            let stopped = scope
+                .spawn(|| connection.query_alongside(runaway, &theirs, Fetch::default(), false));
+            let finished =
+                scope.spawn(|| connection.query_alongside(slow, &mine, Fetch::default(), false));
+            connected(&theirs, 1);
+            connected(&mine, 1);
+            connection
+                .cancel(&theirs)
+                .expect("the cancel should reach its connection");
+            let join = |thread: std::thread::ScopedJoinHandle<'_, _>| {
+                thread
+                    .join()
+                    .expect("the statement's thread should not panic")
+            };
+            (join(stopped), join(finished))
+        });
+        let error = stopped.expect_err("the statement cancelled should have been stopped");
+        assert!(is_cancel(engine, &error), "{}", error.message);
+        finished.expect("the statement beside it should run to its end");
     }
 }
 

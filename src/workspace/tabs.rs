@@ -469,10 +469,30 @@ impl Workspace {
         let Some((QueryState::Running { cancel, .. }, _)) = profile.session.slot(tab) else {
             return;
         };
-        let cancel = cancel.clone();
-        let cancel_task = cx
-            .background_executor()
-            .spawn(on_own_thread(move || connection.cancel(&cancel)));
+        let mut cancels = vec![cancel.clone()];
+        // A queue's statements running at once are each stopped by their own.
+        if let Tab::Query(id) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab(id)
+                .and_then(|query| query.queue.as_ref())
+        {
+            cancels.extend(
+                queue
+                    .done
+                    .iter()
+                    .filter_map(|finished| match &finished.state {
+                        QueryState::Running { cancel, .. } => Some(cancel.clone()),
+                        _ => None,
+                    }),
+            );
+        }
+        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+            cancels
+                .iter()
+                .map(|cancel| connection.cancel(cancel))
+                .fold(Ok(()), Result::and)
+        }));
         // Said as `cancel_query` says it: the tab has gone, so a statement
         // still running behind it is all the more worth knowing about.
         cx.spawn(async move |workspace, cx| {

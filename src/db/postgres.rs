@@ -2185,6 +2185,17 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_of_one_read_run_at_once_leaves_the_other_running() {
+        super::super::at_once::a_cancel_stops_only_its_own(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(30), 1",
+            "SELECT pg_sleep(6), 1",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_terminated_session_is_lost_and_a_failed_statement_is_not() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection

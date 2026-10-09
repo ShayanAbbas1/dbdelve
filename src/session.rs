@@ -1103,8 +1103,9 @@ pub(crate) struct Queue<G = Entity<TableState<ResultGrid>>> {
 }
 
 /// A statement of a queue running at once with others, as it was issued: to
-/// which profile's connection, under which run's shared token, and where it
-/// starts in [`Queue::sql`]. The profile is named rather than taken to be the
+/// which profile's connection, for which run (the token in the tab's slot,
+/// which names the run; each statement is stopped by a token of its own), and
+/// where it starts in [`Queue::sql`]. The profile is named rather than taken to be the
 /// one in front, which the user may have switched away from by the time it
 /// lands.
 #[derive(Clone)]
