@@ -568,6 +568,27 @@ impl ResultGrid {
         &self.result.columns
     }
 
+    /// The grid column that shows the relation's column `name`, as Structure
+    /// lists it. The source column comes first: a `SELECT body AS note` shows
+    /// `note`, but Structure says `body`. The header is the fallback, for a
+    /// result with no edit target behind it.
+    pub fn column_named(&self, name: &str) -> Option<usize> {
+        self.result
+            .edit
+            .as_ref()
+            .and_then(|edit| {
+                edit.columns
+                    .iter()
+                    .position(|source| source.as_deref() == Some(name))
+            })
+            .or_else(|| {
+                self.result
+                    .columns
+                    .iter()
+                    .position(|column| column.name == name)
+            })
+    }
+
     pub fn layout(&self) -> (Vec<String>, Vec<gpui::Pixels>) {
         (
             self.result
@@ -1075,6 +1096,11 @@ impl ResultGrid {
     /// that cannot be sorted the ring sitting at the top of the column the
     /// user just pointed at is where their last action was.
     pub fn select_col(&mut self, col: usize) {
+        // A result with no rows has no cell for the ring to sit on, and every
+        // reader of `active` takes its row to be one that exists.
+        if self.result.rows.is_empty() {
+            return;
+        }
         self.set_active(self.active.map_or(0, |(row, _)| row), col);
     }
 
@@ -1583,6 +1609,23 @@ pub(crate) fn step_pending(
     table.delegate_mut().set_active(row, col);
     table.set_selected_row(row, cx);
     table.scroll_to_col(col + GUTTER, cx);
+}
+
+/// Put the ring on a column and bring it into view, for "Go to column". The
+/// ring stays on the row it was on, so the eye lands on the same record.
+pub(crate) fn reveal_column(
+    table: &mut TableState<ResultGrid>,
+    col: usize,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    if col >= table.delegate().columns().len() {
+        return;
+    }
+    table.focus_handle(cx).focus(window, cx);
+    table.delegate_mut().select_col(col);
+    table.scroll_to_col(col + GUTTER, cx);
+    cx.notify();
 }
 
 /// Scroll the active cell back into view when the grid's width changes under
@@ -3735,6 +3778,35 @@ mod tests {
         assert_eq!(grid.relaid_out(px(300.), px(0.)), Some(2));
         assert_eq!(grid.relaid_out(px(250.), px(0.)), None);
         assert_eq!(grid.relaid_out(px(300.), px(-540.)), None);
+    }
+
+    #[test]
+    fn a_column_from_structure_is_found_by_its_source_name_before_its_header() {
+        // `editable_grid` shows `note` for the relation's `body`: Structure
+        // lists `body`, and that is the column it has to land on.
+        let grid = editable_grid();
+        assert_eq!(grid.column_named("body"), Some(1));
+        assert_eq!(grid.column_named("id"), Some(0));
+        // `total` has no source column; its header is all there is.
+        assert_eq!(grid.column_named("total"), Some(2));
+        // Identifiers are compared exactly: a quoted `"ID"` is another column.
+        assert_eq!(grid.column_named("ID"), None);
+        assert_eq!(grid.column_named("missing"), None);
+    }
+
+    #[test]
+    fn a_column_picked_on_a_result_with_no_rows_puts_the_ring_nowhere() {
+        // "Copy row" slices the ring's row out of the result, so a ring on
+        // row 0 of an empty one took the app down.
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("a"), column("b")],
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        );
+        grid.select_col(1);
+        assert_eq!(grid.active(), None);
     }
 
     #[test]

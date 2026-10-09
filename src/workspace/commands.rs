@@ -16,6 +16,55 @@ impl Workspace {
         self.open_palette(PaletteMode::Jump, window, cx);
     }
 
+    pub(crate) fn go_to_column(
+        &mut self,
+        _: &GoToColumn,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_results(cx) {
+            return;
+        }
+        self.open_palette(PaletteMode::Columns, window, cx);
+    }
+
+    /// Scroll the grid in front to a column and put the ring on it.
+    pub(crate) fn reveal_column(
+        &mut self,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results().cloned())
+        else {
+            return;
+        };
+        results.update(cx, |table, cx| {
+            crate::result_grid::reveal_column(table, col, window, cx)
+        });
+    }
+
+    /// From a column listed in Structure: back to the rows, at that column.
+    pub(crate) fn reveal_column_named(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_structure(false, cx);
+        let Some(col) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .and_then(|results| results.read(cx).delegate().column_named(name))
+        else {
+            self.note(format!("The rows on screen have no column {name}."), cx);
+            return;
+        };
+        self.reveal_column(col, window, cx);
+    }
+
     pub(crate) fn command_palette(
         &mut self,
         _: &CommandPalette,
@@ -283,6 +332,8 @@ impl Workspace {
             // read as the chrome.
             Command::ResetEditorZoom => self.set_zoom(FontSlot::Editor, 100, cx),
             Command::OpenSettings => self.open_settings(&OpenSettings, window, cx),
+            Command::GoToColumn => self.go_to_column(&GoToColumn, window, cx),
+            Command::RevealColumn(col) => self.reveal_column(col, window, cx),
         }
     }
 
