@@ -378,6 +378,9 @@ const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 /// there waits on the same locks the user's statement took, and the user's
 /// own open transaction can hold them for as long as it likes.
 const SIDE_TIMEOUT_SECONDS: u32 = 2;
+/// How long a streamed run's first rows wait for the describe beside it
+/// before they are shown untyped, to be restyled once it answers.
+const TYPES_PATIENCE: Duration = Duration::from_secs(1);
 
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let url_parts =
@@ -727,7 +730,11 @@ impl Connection {
     /// dropped, so the statement runs to completion exactly as typed. Kept
     /// rows go to `feed` when there is one; see [`super::Connection::query`].
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, true, fetch)
+        let result = self.run(sql, true, fetch);
+        if let Some(feed) = fetch.feed {
+            feed.release();
+        }
+        result
     }
 
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
@@ -865,18 +872,29 @@ impl Connection {
     /// [`Self::run`]), and the side session has none of the user's to abort.
     /// One that cannot see what this session sees -- a temporary table, a
     /// `SET search_path` -- learns nothing, and the rows are rendered at the
-    /// end as before. So does one that times out on a lock, or finds the side
-    /// session still busy with an earlier one.
+    /// end as before. So does one that times out on a lock, or waits out
+    /// another statement's describe or stop on the side session.
+    ///
+    /// The first rows are held for it ([`Feed::await_types`]). Sent beside
+    /// the statement, it usually answers before them; the wait is felt while
+    /// the side session is first opened, or queued behind the describes of
+    /// statements run at once.
     fn describe_aside(&self, sql: &str, feed: &Feed) {
+        feed.await_types(Instant::now() + TYPES_PATIENCE);
         let (this, sql, feed) = (self.clone(), sql.to_string(), feed.clone());
         std::thread::spawn(move || {
-            let types = this.aside(Duration::ZERO, |side| {
+            let wait = Duration::from_secs(SIDE_TIMEOUT_SECONDS.into());
+            let types = this.aside(wait, |side| {
                 let mut client = side.client.lock().ok()?;
                 Some(describe_columns(&mut client, &sql))
             });
-            if let Some(types) = types {
-                feed.describe(types.into_iter().map(|column| column.type_name).collect());
-            }
+            feed.describe(
+                types
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|column| column.type_name)
+                    .collect(),
+            );
         });
     }
 
@@ -1436,7 +1454,7 @@ pub(super) fn is_spatial(type_name: &str) -> bool {
 
 /// A value that is not hex EWKB is left alone, which is what lets rows already
 /// rendered as they streamed in go through this a second time.
-fn format_spatial_row(row: &mut [Cell], spatial: &[bool]) {
+pub(super) fn format_spatial_row(row: &mut [Cell], spatial: &[bool]) {
     for (cell, spatial) in row.iter_mut().zip(spatial) {
         if let (true, Some(value)) = (spatial, cell)
             && let Some(wkt) = render_spatial(value)
@@ -2541,6 +2559,43 @@ mod tests {
         assert!(pooled.stop_at_limit(sql));
         let error = reader.join().unwrap().expect_err("it was cancelled");
         assert!(error.message.contains("cancel"), "{}", error.message);
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_the_first_rows_fed_are_typed_on_a_cold_side_session_and_beside_each_other() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        // Run at once, the two share one side session: the second describe
+        // waits its turn rather than being skipped.
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let lane = connection.alongside().expect("lane should open");
+                let feed = crate::db::Feed::default();
+                let fed = feed.clone();
+                let run = std::thread::spawn(move || {
+                    lane.query(
+                        "SELECT n FROM generate_series(1, 200000) AS n",
+                        Fetch {
+                            feed: Some(&fed),
+                            ..Fetch::default()
+                        },
+                    )
+                });
+                (feed, run)
+            })
+            .collect();
+        for (feed, run) in runs {
+            let first = loop {
+                let fed = feed.take();
+                if !fed.rows.is_empty() || run.is_finished() {
+                    break fed;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            run.join().unwrap().expect("query should succeed");
+            assert!(!first.rows.is_empty());
+            assert_eq!(first.columns[0].data_type.as_deref(), Some("int4"));
+        }
     }
 
     #[test]

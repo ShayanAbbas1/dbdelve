@@ -719,10 +719,13 @@ Decided, and not to be re-litigated:
   reset, Postgres's aborted transaction, a SQLite write's rolled-back
   transaction.
 - **Postgres's side session** (describe, and the check before a stop at the
-  limit) opens with a 2-second `statement_timeout`, and neither ever blocks on
-  it: a describe that finds it busy is skipped, and a stop that cannot get it
-  quickly drains instead. A describe waits on the same locks as the user's
-  statement, which their own open transaction can hold for good.
+  limit) opens with a 2-second `statement_timeout`, and neither ever blocks
+  the run on it: a describe waits its turn there on a thread of its own, and a
+  stop that cannot get it quickly drains instead. A describe waits on the same
+  locks as the user's statement, which their own open transaction can hold for
+  good. The run's first rows are held for the describe for up to a second
+  (`Feed::await_types`), so they are first shown by type rather than restyled
+  once it answers.
 - **SQL Server's Cancel closes the connection** (a read stopped at the row
   limit does not: that is `SET ROWCOUNT`). tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary

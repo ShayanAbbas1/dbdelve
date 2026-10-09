@@ -2473,6 +2473,59 @@ mod tests {
     }
 
     #[test]
+    fn rows_held_for_their_types_stream_in_as_the_finished_result_shows_them() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n"), column("p")]);
+        feed.push(vec![Some("1234567".into()), Some(point.into())]);
+        assert_eq!(feed.take().set, 0, "held until the describe answers");
+
+        feed.describe(vec!["int4".into(), "geometry".into()]);
+        let fed = feed.take();
+        let mut streamed = ResultGrid::new(
+            QueryResult {
+                columns: fed.columns,
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .streaming(fed.set);
+        streamed.append_rows(fed.rows);
+
+        let mut finished = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "int4"), typed("p", "geometry")],
+                rows: vec![vec![Some("1234567".into()), Some(point.into())]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        finished.apply_rendered(db::render(db::unrendered(
+            db::Engine::Postgres,
+            finished.result(),
+        )));
+
+        for col in 0..2 {
+            assert_eq!(streamed.shown(0, col), finished.shown(0, col));
+        }
+        assert!(streamed.is_numeric_column(0));
+        assert!(db::unrendered(db::Engine::Postgres, streamed.result()).is_empty());
+    }
+
+    #[test]
+    fn rows_held_for_a_describe_go_once_the_statement_is_over() {
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n")]);
+        feed.push(vec![Some("1".into())]);
+        assert!(feed.take().rows.is_empty());
+
+        feed.release();
+        assert_eq!(feed.take().rows, vec![vec![Some("1".to_string())]]);
+    }
+
+    #[test]
     fn rows_streamed_in_before_their_types_are_rendered_once_the_types_arrive() {
         let point = "0101000000000000000000F03F000000000000F03F";
         let mut grid = ResultGrid::new(

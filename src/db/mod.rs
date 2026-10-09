@@ -1839,6 +1839,10 @@ pub struct Fed {
     /// has said, so rows can be shown by type before the statement is done.
     /// Empty until then.
     types: Vec<String>,
+    /// Until when the first set's rows are held back for that describe, so
+    /// they are first shown by type rather than restyled under the user's
+    /// eye. Cleared once it has answered, or the statement is over.
+    awaiting: Option<std::time::Instant>,
     /// When the current set's kept rows reached the limit. Whatever the run
     /// does after that is not fetching rows anyone will see.
     pub filled: Option<std::time::Instant>,
@@ -1869,6 +1873,13 @@ impl Feed {
     /// column is worse than none.
     pub fn take(&self) -> Fed {
         let mut fed = self.lock();
+        if fed.set == 1
+            && fed
+                .awaiting
+                .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return Fed::default();
+        }
         let mut columns = fed.columns.clone();
         if fed.set == 1 && fed.types.len() == columns.len() {
             for (column, data_type) in columns.iter_mut().zip(&fed.types) {
@@ -1880,6 +1891,7 @@ impl Feed {
             columns,
             rows: std::mem::take(&mut fed.rows),
             types: Vec::new(),
+            awaiting: None,
             filled: fed.filled,
         }
     }
@@ -1893,8 +1905,34 @@ impl Feed {
         self.lock().filled = Some(std::time::Instant::now());
     }
 
+    /// Hold the first set's rows until [`Feed::describe`] or `until`.
+    pub(crate) fn await_types(&self, until: std::time::Instant) {
+        self.lock().awaiting = Some(until);
+    }
+
+    /// The describe's answer, empty when it learned nothing. Rows held for it
+    /// have their geometry rendered here, off the frame thread, as the
+    /// driver renders every row after them.
     pub(crate) fn describe(&self, types: Vec<String>) {
-        self.lock().types = types;
+        let mut fed = self.lock();
+        fed.awaiting = None;
+        if fed.set == 1 && types.len() == fed.columns.len() {
+            let spatial: Vec<bool> = types
+                .iter()
+                .map(|name| postgres::is_spatial(name))
+                .collect();
+            if spatial.contains(&true) {
+                for row in &mut fed.rows {
+                    postgres::format_spatial_row(row, &spatial);
+                }
+            }
+        }
+        fed.types = types;
+    }
+
+    /// Let held rows go: the statement is over, and the rows are its result.
+    pub(crate) fn release(&self) {
+        self.lock().awaiting = None;
     }
 
     /// `None` until [`Feed::describe`] has been told.
