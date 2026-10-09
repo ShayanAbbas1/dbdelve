@@ -183,11 +183,16 @@ fn render_editor_surface(
         (layout::EDITOR_EMPTY_HEIGHT, layout::RESULTS_EMPTY_HEIGHT)
     };
 
+    // The panel holds the toolbar as well, so its bounds grow by the bar and
+    // the buffer keeps the room the constants were tuned for.
+    let bar = layout::chrome(layout::TAB_HEIGHT);
     v_resizable((split, if expanded { "expanded" } else { "compact" }))
         .child(
             resizable_panel()
-                .size(px(editor_height))
-                .size_range(px(layout::EDITOR_MIN_HEIGHT)..px(layout::EDITOR_MAX_HEIGHT))
+                .size(px(editor_height + bar))
+                .size_range(
+                    px(layout::EDITOR_MIN_HEIGHT + bar)..px(layout::EDITOR_MAX_HEIGHT + bar),
+                )
                 .child(top),
         )
         .child(
@@ -2200,7 +2205,7 @@ pub(crate) fn render_view_sorting(
     })
 }
 
-/// The tab strip. It sits directly above the editor and starts where the
+/// The tab strip. It sits directly above the tab's surface and starts where the
 /// editor's text does, so a tab labels the surface under it rather than the
 /// window: the active one is lifted to the editor's tone, the rest are names
 /// that reveal a wash on hover. No boxes, no hairlines — tone carries the
@@ -2550,7 +2555,8 @@ fn render_tab_strip(
         .items_center()
         .gap(px(layout::SPACE_SM))
         .px(px(layout::SPACE_SM))
-        // Between the tabs and whatever is under them, the filters or the grid.
+        // Between the tabs and whatever is under them: the editor, the
+        // filters, or the Structure bar.
         .border_b_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
