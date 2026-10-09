@@ -250,8 +250,11 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let row_panel_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search columns…"));
+        let row_panel_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Filter columns…")
+                .clean_on_escape()
+        });
         cx.subscribe(&row_panel_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -309,6 +312,7 @@ impl Workspace {
                 on_screen: Default::default(),
                 copied: None,
                 search: row_panel_search,
+                searched: Default::default(),
             },
             plan_copied: false,
             pending_removal: None,
@@ -884,6 +888,7 @@ impl Render for Workspace {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
+        self.row_panel.searched.set(false);
         // Every way the switcher closes ends here, so this is the one place
         // its name field is put away -- before the focus handoff below. The
         // welcome surface has the field too, and keeps it while in front.
@@ -1577,6 +1582,17 @@ impl Render for Workspace {
                 cx,
             )))
             .children(results_status);
+        // Only now, with the frame built, is it known whether the panel's
+        // field went away -- folded, closed, or emptied by a run -- and the
+        // handoff above has already run, so it lands on the next frame.
+        if !self.row_panel.searched.get()
+            && self.row_panel.search.focus_handle(cx).is_focused(window)
+        {
+            cx.defer_in(window, |workspace, _, cx| {
+                workspace.refocus_front();
+                cx.notify();
+            });
+        }
         // The strip's chips glide for as long as the render above found one
         // still on its way.
         self.tab_strip.shift.drive(window);

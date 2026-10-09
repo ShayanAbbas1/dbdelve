@@ -71,6 +71,10 @@ pub struct RowPanel {
     /// tab and kept across rows, so a column found once stays found while
     /// the selection moves.
     pub search: Entity<InputState>,
+    /// Whether the last frame drew `search`, cleared and set as `on_screen`
+    /// is. A field unmounted while focused keeps the window's focus, and with
+    /// it every keybinding; render hands focus back when this comes up false.
+    pub searched: std::cell::Cell<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1569,13 +1573,14 @@ fn render_row_inspector(
         );
     }
 
-    let query = row_panel.search.read(cx).value().to_lowercase();
+    let query = row_panel.search.read(cx).value().trim().to_lowercase();
     let fields: Vec<_> = fields
         .into_iter()
         .enumerate()
         .filter(|(_, field)| field.name.to_lowercase().contains(query.as_str()))
         .collect();
 
+    row_panel.searched.set(true);
     let table = results.clone();
     Some(
         div()
@@ -1625,20 +1630,24 @@ fn render_row_inspector(
             )
             .child(
                 div()
-                    .mx(px(layout::SPACE_SM))
-                    .mb(px(layout::SPACE_SM))
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_XS))
+                    .px(px(layout::SPACE_SM))
+                    .mb(px(layout::SPACE_SM))
+                    .border_y_1()
+                    .border_color(t.border)
                     .child(row_icon(t, icon::SEARCH))
                     // Clipped by a box of its own, as the explorer's filter
                     // is: the placeholder is laid out at the input's full width.
                     .child(
                         div().flex_1().min_w_0().overflow_hidden().child(
                             Input::new(&row_panel.search)
-                                .small()
                                 .w_full()
                                 .min_w_0()
+                                .appearance(false)
                                 .cleanable(true),
                         ),
                     ),
