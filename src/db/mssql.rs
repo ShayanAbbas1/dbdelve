@@ -3668,6 +3668,38 @@ mod tests {
         );
     }
 
+    /// A batch of plain reads is cut into its statements and each runs on a
+    /// lane of its own, so each lands as a result of its own rather than as a
+    /// second set behind the first.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_batch_of_plain_reads_runs_a_statement_per_lane() {
+        let sql = "SELECT 1 AS a, 2 AS b; SELECT 4 AS d";
+        let batches = crate::sql::queued_statements(Engine::SqlServer, sql, Some(0..sql.len()));
+        assert_eq!(batches.len(), 1);
+        let reads = crate::sql::split_reads(Engine::SqlServer, sql, &batches, 0..sql.len());
+        let texts: Vec<&str> = reads.iter().map(|range| &sql[range.clone()]).collect();
+        assert_eq!(texts, vec!["SELECT 1 AS a, 2 AS b", "SELECT 4 AS d"]);
+
+        let (_, outcomes) = super::super::at_once::run(
+            &super::super::Connection::SqlServer(live()),
+            &texts,
+            &super::super::CancelToken::alongside(),
+        );
+        let results: Vec<_> = outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("each read should run on its lane"))
+            .collect();
+        assert_eq!(names(&results[0]), vec!["a", "b"]);
+        assert_eq!(
+            results[0].rows,
+            vec![vec![Some("1".into()), Some("2".into())]]
+        );
+        assert_eq!(names(&results[1]), vec!["d"]);
+        assert_eq!(results[1].rows, vec![vec![Some("4".into())]]);
+        assert!(results.iter().all(|result| result.rest.is_empty()));
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_cancel_stops_the_statement_on_the_server_and_reconnects() {

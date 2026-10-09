@@ -866,7 +866,11 @@ Decided, and not to be re-litigated:
   selection covering one batch is sent as that batch; one covering several runs
   them in turn, a submission apiece (`sql::queued_batches`), because the batch
   is the scope boundary a `DECLARE` or a temp table ends with, and splitting
-  below it would send a declaration and its reader as two batches. `GO n` is
+  below it would send a declaration and its reader as two batches. The
+  exception is a selection whose batches are nothing but plain reads naming no
+  `@variable` or `#temp` table (`sql::split_reads`): when it would run at once,
+  `run_query` cuts it into its statements and each goes out on a lane of its
+  own, every chip up front, as on the other engines. `GO n` is
   still refused (`sql::batch_counts`): the count repeats its batch, and running
   it once is not what the buffer says.
   Format Query reflows each batch alone with sqlformat's SQL Server dialect,

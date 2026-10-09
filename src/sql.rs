@@ -185,6 +185,38 @@ fn queued_batches(sql: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// A SQL Server selection's batches cut into their statements, so a run of
+/// reads can send each at once on a connection of its own as every other
+/// engine does. Only when every batch is plain reads (`plain_read`) naming no
+/// `@variable` and no `#temp` table, which is what a batch scopes: nothing in
+/// one needs another statement beside it. Like `queued_statements`, only the
+/// statements `selection` touches. Empty for anything else, and on every other
+/// engine, whose units are statements already.
+pub(crate) fn split_reads(
+    engine: Engine,
+    sql: &str,
+    batches: &[Range<usize>],
+    selection: Range<usize>,
+) -> Vec<Range<usize>> {
+    let reads_alone = |batch: &str| {
+        plain_read(engine, batch)
+            && !tsql_scan(batch).0.iter().any(|word| {
+                let word = &batch[word.clone()];
+                word.starts_with('#') || word.starts_with('@') && !word.starts_with("@@")
+            })
+    };
+    if engine != Engine::SqlServer || !batches.iter().all(|batch| reads_alone(&sql[batch.clone()]))
+    {
+        return Vec::new();
+    }
+    batches
+        .iter()
+        .flat_map(|batch| tsql_statements(sql, batch.clone()))
+        .filter_map(|statement| trim_range(sql, statement))
+        .filter(|range| range.start < selection.end && selection.start < range.end)
+        .collect()
+}
+
 /// One key of an `ORDER BY`, as dbdelve reads and writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SortKey {
@@ -2778,6 +2810,53 @@ mod tests {
         // The same text is two statements on an engine whose session carries
         // the declaration across submissions.
         assert_eq!(queued_statements(Engine::Postgres, sql, None).len(), 2);
+    }
+
+    fn split_texts(engine: Engine, sql: &str) -> Vec<&str> {
+        let batches = queued_statements(engine, sql, Some(0..sql.len()));
+        queued_texts(sql, &split_reads(engine, sql, &batches, 0..sql.len()))
+    }
+
+    #[test]
+    fn a_sql_server_batch_of_plain_reads_splits_into_its_statements() {
+        let sql = "SELECT 1 AS a;\nSELECT [b] FROM t WHERE n = '@x #y';";
+        assert_eq!(
+            split_texts(Engine::SqlServer, sql),
+            vec!["SELECT 1 AS a", "SELECT [b] FROM t WHERE n = '@x #y'"]
+        );
+        assert_eq!(
+            split_texts(
+                Engine::SqlServer,
+                "SELECT 1;\nGO\nSELECT 2; SELECT @@VERSION;"
+            ),
+            vec!["SELECT 1", "SELECT 2", "SELECT @@VERSION"]
+        );
+
+        // Only the statements the selection touches.
+        let batches = queued_statements(Engine::SqlServer, sql, Some(0..3));
+        assert_eq!(split_reads(Engine::SqlServer, sql, &batches, 0..3).len(), 1);
+
+        assert!(split_texts(Engine::Postgres, "SELECT 1; SELECT 2;").is_empty());
+    }
+
+    /// Each of these needs the rest of its batch beside it, or is no plain
+    /// read, so the batch is sent whole as it always was.
+    #[test]
+    fn a_sql_server_batch_with_anything_but_plain_reads_stays_whole() {
+        for sql in [
+            "DECLARE @x int = 1; SELECT @x;",
+            "SELECT 1; SELECT @x;",
+            "SELECT 1; SELECT * FROM #t;",
+            "SELECT 1; SELECT * FROM ##t;",
+            "SELECT 1; EXEC sp_who;",
+            "SET NOCOUNT ON; SELECT 1;",
+            "SELECT 1; IF 1 = 1 BEGIN SELECT 2; END",
+            "BEGIN SELECT 1; SELECT 2; END",
+            "SELECT 1;\nGO\nSELECT 2; SELECT @x;",
+            "SELECT 1; UPDATE t SET a = 1;",
+        ] {
+            assert!(split_texts(Engine::SqlServer, sql).is_empty(), "{sql}");
+        }
     }
 
     /// A batch is what SQL Server is sent, so a grid is reserved per statement

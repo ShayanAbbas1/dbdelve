@@ -325,6 +325,27 @@ impl Workspace {
         if !selection.is_empty() {
             let engine = self.engine();
             let statements = sql::queued_statements(engine, &text, Some(selection.clone()));
+            // SQL Server's unit is the batch, so `SELECT 1; SELECT 2` is one
+            // submission whose sets arrive in turn. Plain reads go out a
+            // statement apiece at once instead, as they do on every other
+            // engine; any batch a split would change stays whole.
+            let reads = sql::split_reads(engine, &text, &statements, selection.clone());
+            let reads_at_once = reads.len() > 1
+                && self.profile().is_some_and(|profile| {
+                    profile.in_turn().is_none() && {
+                        let texts: Vec<&str> =
+                            reads.iter().map(|range| &text[range.clone()]).collect();
+                        session::runs_at_once(engine, profile.mode, &texts)
+                    }
+                });
+            if reads_at_once {
+                if let Err(message) = sql::batch_counts(engine, &text[selection]) {
+                    self.refuse_run(tab, message, cx);
+                    return;
+                }
+                self.run_at_once(tab, text, reads, window, cx);
+                return;
+            }
             if statements.len() > 1 {
                 // A `GO 5` repeats its batch, and running it once is not what
                 // the selection says. Refused by name here as it is for a
