@@ -250,6 +250,24 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let row_panel_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Filter columns and values…")
+                .clean_on_escape()
+        });
+        cx.subscribe(
+            &row_panel_search,
+            |workspace, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    if let Some((_, filter)) = workspace.active_row_panel() {
+                        *filter = value;
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
         // blur both count as done: a percentage is short enough that clicking
@@ -300,6 +318,8 @@ impl Workspace {
             row_panel: views::RowPanel {
                 on_screen: Default::default(),
                 copied: None,
+                search: row_panel_search,
+                searched: Default::default(),
             },
             plan_copied: false,
             pending_removal: None,
@@ -875,6 +895,7 @@ impl Render for Workspace {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
         self.row_panel.on_screen.set(false);
+        self.row_panel.searched.set(false);
         // Every way the switcher closes ends here, so this is the one place
         // its name field is put away -- before the focus handoff below. The
         // welcome surface has the field too, and keeps it while in front.
@@ -889,6 +910,7 @@ impl Render for Workspace {
         // grid cannot be built without a window.
         self.restore_objects(window, cx);
         self.sync_page_input(window, cx);
+        self.sync_row_panel_filter(window, cx);
         // Where a query tab that reached the front without `activate_tab` gets
         // its snapshot read. `session.active` is written in three places --
         // `Session::new`, `activate_tab` and `escape` -- and the first and last
@@ -1568,6 +1590,17 @@ impl Render for Workspace {
                 cx,
             )))
             .children(results_status);
+        // Only now, with the frame built, is it known whether the panel's
+        // field went away -- folded, closed, or emptied by a run -- and the
+        // handoff above has already run, so it lands on the next frame.
+        if !self.row_panel.searched.get()
+            && self.row_panel.search.focus_handle(cx).is_focused(window)
+        {
+            cx.defer_in(window, |workspace, _, cx| {
+                workspace.refocus_front();
+                cx.notify();
+            });
+        }
         // The strip's chips glide for as long as the render above found one
         // still on its way.
         self.tab_strip.shift.drive(window);

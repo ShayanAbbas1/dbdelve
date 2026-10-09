@@ -67,6 +67,17 @@ pub struct RowPanel {
     /// The (row, column) whose value was just copied, so its button can show
     /// a tick until the timer in `copy_row_field` clears it.
     pub copied: Option<(usize, usize)>,
+    /// Narrows the fields to those whose column name or value contains it.
+    /// One field for the window, showing the filter of the tab in front
+    /// (`row_panel_filter`), so one tab's filter never hides another's
+    /// columns. Kept across rows: a column found by name stays found while the
+    /// selection moves; one found by value comes and goes with the rows that
+    /// hold it.
+    pub search: Entity<InputState>,
+    /// Whether the last frame drew `search`, cleared and set as `on_screen`
+    /// is. A field unmounted while focused keeps the window's focus, and with
+    /// it every keybinding; render hands focus back when this comes up false.
+    pub searched: std::cell::Cell<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1565,6 +1576,23 @@ fn render_row_inspector(
         );
     }
 
+    let query = row_panel.search.read(cx).value().trim().to_lowercase();
+    let fields: Vec<_> = fields
+        .into_iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            // Checked before lowercasing anything: a value can be a whole
+            // JSON document, and this runs every frame.
+            query.is_empty()
+                || field.name.to_lowercase().contains(query.as_str())
+                || field
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| value.to_lowercase().contains(query.as_str()))
+        })
+        .collect();
+
+    row_panel.searched.set(true);
     let table = results.clone();
     Some(
         div()
@@ -1614,6 +1642,30 @@ fn render_row_inspector(
             )
             .child(
                 div()
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .px(px(layout::SPACE_SM))
+                    .mb(px(layout::SPACE_SM))
+                    .border_y_1()
+                    .border_color(t.border)
+                    .child(row_icon(t, icon::SEARCH))
+                    // Clipped by a box of its own, as the explorer's filter
+                    // is: the placeholder is laid out at the input's full width.
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().child(
+                            Input::new(&row_panel.search)
+                                .w_full()
+                                .min_w_0()
+                                .appearance(false)
+                                .cleanable(true),
+                        ),
+                    ),
+            )
+            .child(
+                div()
                     .id("row-inspector")
                     .flex_1()
                     .min_h_0()
@@ -1624,7 +1676,15 @@ fn render_row_inspector(
                     .flex()
                     .flex_col()
                     .gap(px(layout::SPACE_MD))
-                    .children(fields.into_iter().enumerate().map(|(col_ix, field)| {
+                    .when(fields.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child("No matching columns"),
+                        )
+                    })
+                    .children(fields.into_iter().map(|(col_ix, field)| {
                         let group = format!("row-field-{col_ix}");
                         let copy = field.value.is_some().then(|| {
                             if row_panel.copied == Some((row_ix, col_ix)) {
