@@ -33,8 +33,9 @@ require it, stop and raise it instead.
    out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
    rolled back alone; SQLite interrupts it; MongoDB drops the cursor; SQL Server
    sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
-   `SET ROWCOUNT 0` after, reconnecting if that reset fails. Anything else is
-   drained. Either way the limit is visible in the UI, and a capped
+   `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
+   `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
+   Anything else is drained. Either way the limit is visible in the UI, and a capped
    result says how many rows the statement returned, or that it was stopped.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always

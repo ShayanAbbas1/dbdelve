@@ -486,6 +486,9 @@ struct Session {
     /// Set when a round trip left the session unusable: a read abandoned part
     /// way, or a driver panic, leaves the stream where nothing can resume it.
     lost: Option<Lost>,
+    /// The user's own `SET ROWCOUNT` is in force, which a capped read's reset
+    /// would take with it, so reads are drained instead.
+    rowcount: bool,
 }
 
 enum Lost {
@@ -670,6 +673,7 @@ impl Connection {
             client,
             timeout: self.server.statement_timeout,
             lost: None,
+            rowcount: false,
         })
     }
 
@@ -719,10 +723,11 @@ impl Connection {
     ///
     /// The SQL is never rewritten — no limit injected, no reformatting. A
     /// lone read is stopped at the limit by `SET ROWCOUNT`, sent as a batch of
-    /// its own before it and taken back after it. Anything else has the rows
-    /// past the limit read and dropped: the only other stop the driver has is
-    /// closing the connection, which takes the user's transaction and
-    /// temporary tables with it.
+    /// its own before it and taken back after it, unless the user's own
+    /// `SET ROWCOUNT` is in force. Anything else has the rows past the limit
+    /// read and dropped: the only other stop the driver has is closing the
+    /// connection, which takes the user's transaction and temporary tables
+    /// with it.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
         self.run(sql, Origin::User, fetch)
     }
@@ -883,7 +888,10 @@ impl Connection {
         // line number the server reports. Never a write: `SET ROWCOUNT` caps
         // those too, and `sql::stoppable` admits none.
         let capped = fetch.limit.filter(|limit| {
-            origin == Origin::User && fetch.reads_only && *limit <= MAX_ROWCOUNT_LIMIT
+            origin == Origin::User
+                && fetch.reads_only
+                && *limit <= MAX_ROWCOUNT_LIMIT
+                && !session.rowcount
         });
         let capped = match capped {
             Some(limit) => match session.trip(&format!("SET ROWCOUNT {}", limit + 1))? {
@@ -899,6 +907,11 @@ impl Connection {
         let started = Instant::now();
         let outcome = session.fetching(&submitted, fetch)?;
         let elapsed = started.elapsed();
+        if origin == Origin::User
+            && let Some(set) = sets_rowcount(sql)
+        {
+            session.rowcount = set;
+        }
         let mut result = match outcome {
             Ok(mut collected) => {
                 // One submission, one duration: every set of a batch carries
@@ -1866,6 +1879,25 @@ fn mentions_use(sql: &str) -> bool {
         .any(|word| word.eq_ignore_ascii_case("use"))
 }
 
+/// Whether `sql` leaves a `SET ROWCOUNT` of its own in force: `Some(false)`
+/// when its last one is `0`, `None` when it has none.
+///
+/// ponytail: a word scan, like [`mentions_use`], so one in a comment or a
+/// literal counts too; a parse if that ever costs more than a drained read.
+fn sets_rowcount(sql: &str) -> Option<bool> {
+    let words: Vec<&str> = sql
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+        .collect();
+    words
+        .windows(3)
+        .rev()
+        .find(|window| {
+            window[0].eq_ignore_ascii_case("set") && window[1].eq_ignore_ascii_case("rowcount")
+        })
+        .map(|window| window[2].parse::<u64>() != Ok(0))
+}
+
 fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
     match session.trip(statement) {
         Some(result) => result.map_err(|error| plain_error(describe(&error))),
@@ -2323,6 +2355,15 @@ mod tests {
         assert!(mentions_use("USE master; SELECT 1"));
         assert!(mentions_use("select 1;\nuse [x]"));
         assert!(!mentions_use("SELECT used, user_id FROM reuse"));
+    }
+
+    #[test]
+    fn the_last_set_rowcount_says_whether_the_users_is_in_force() {
+        assert_eq!(sets_rowcount("SELECT 1"), None);
+        assert_eq!(sets_rowcount("SET ROWCOUNT 5"), Some(true));
+        assert_eq!(sets_rowcount("set rowcount @n; SELECT 1"), Some(true));
+        assert_eq!(sets_rowcount("SET ROWCOUNT 5; SET ROWCOUNT 0"), Some(false));
+        assert_eq!(sets_rowcount("SET NOCOUNT ON"), None);
     }
 
     #[test]
@@ -3832,6 +3873,26 @@ mod tests {
         assert_eq!(result.capped_from, None);
         assert_eq!(result.rows.len(), 10);
         touches_every_row(&connection, "#dbdelve_rowcount_probe", 50);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_read_under_the_users_own_rowcount_is_drained_and_the_rowcount_kept() {
+        let connection = live();
+        connection
+            .query("SET ROWCOUNT 20", Fetch::default())
+            .unwrap();
+        let read = "SELECT name FROM sys.all_columns";
+        let drained = connection.query(read, stoppable(10)).unwrap();
+        assert_eq!(drained.stopped, None);
+        assert_eq!(drained.capped_from, Some(20));
+        let kept = connection.query(read, Fetch::default()).unwrap();
+        assert_eq!(kept.rows.len(), 20);
+        connection
+            .query("SET ROWCOUNT 0", Fetch::default())
+            .unwrap();
+        let stopped = connection.query(read, stoppable(10)).unwrap();
+        assert_eq!(stopped.stopped, Some(Stopped::AtLimit));
     }
 
     #[test]
