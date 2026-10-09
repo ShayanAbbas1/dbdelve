@@ -1093,6 +1093,11 @@ impl ResultGrid {
     /// that cannot be sorted the ring sitting at the top of the column the
     /// user just pointed at is where their last action was.
     pub fn select_col(&mut self, col: usize) {
+        // A result with no rows has no cell for the ring to sit on, and every
+        // reader of `active` takes its row to be one that exists.
+        if self.result.rows.is_empty() {
+            return;
+        }
         self.set_active(self.active.map_or(0, |(row, _)| row), col);
     }
 
@@ -3773,6 +3778,21 @@ mod tests {
         // Identifiers are compared exactly: a quoted `"ID"` is another column.
         assert_eq!(grid.column_named("ID"), None);
         assert_eq!(grid.column_named("missing"), None);
+    }
+
+    #[test]
+    fn a_column_picked_on_a_result_with_no_rows_puts_the_ring_nowhere() {
+        // "Copy row" slices the ring's row out of the result, so a ring on
+        // row 0 of an empty one took the app down.
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("a"), column("b")],
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        );
+        grid.select_col(1);
+        assert_eq!(grid.active(), None);
     }
 
     #[test]
