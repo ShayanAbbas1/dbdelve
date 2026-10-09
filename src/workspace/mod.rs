@@ -252,7 +252,7 @@ impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let row_panel_search = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Filter columns…")
+                .placeholder("Filter columns and values…")
                 .clean_on_escape()
         });
         cx.subscribe(&row_panel_search, |_, _, event: &InputEvent, cx| {

@@ -67,9 +67,10 @@ pub struct RowPanel {
     /// The (row, column) whose value was just copied, so its button can show
     /// a tick until the timer in `copy_row_field` clears it.
     pub copied: Option<(usize, usize)>,
-    /// Narrows the fields to columns whose name contains it. One for every
-    /// tab and kept across rows, so a column found once stays found while
-    /// the selection moves.
+    /// Narrows the fields to those whose column name or value contains it.
+    /// One for every tab and kept across rows, so a column found by name
+    /// stays found while the selection moves; one found by value comes and
+    /// goes with the rows that hold it.
     pub search: Entity<InputState>,
     /// Whether the last frame drew `search`, cleared and set as `on_screen`
     /// is. A field unmounted while focused keeps the window's focus, and with
@@ -1577,7 +1578,16 @@ fn render_row_inspector(
     let fields: Vec<_> = fields
         .into_iter()
         .enumerate()
-        .filter(|(_, field)| field.name.to_lowercase().contains(query.as_str()))
+        .filter(|(_, field)| {
+            // Checked before lowercasing anything: a value can be a whole
+            // JSON document, and this runs every frame.
+            query.is_empty()
+                || field.name.to_lowercase().contains(query.as_str())
+                || field
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| value.to_lowercase().contains(query.as_str()))
+        })
         .collect();
 
     row_panel.searched.set(true);
