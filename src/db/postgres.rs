@@ -748,6 +748,7 @@ impl Connection {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
+        fetch.hold()?;
 
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
@@ -2507,6 +2508,7 @@ mod tests {
                     limit: Some(3),
                     reads_only: true,
                     feed: Some(&feed),
+                    held: None,
                 },
             );
             let _ = sender.send(result);

@@ -1216,9 +1216,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   its side session; the Read-only hold is put on it too) and drops it when the
   statement ends; Snowflake and MongoDB run it on the profile's own, which
   already runs statements side by side, and so does any engine whose server
-  refuses another connection, behind the profile's other statements, where
-  Cancel stops whatever that connection is running, as it does a single run
-  there. At most `STATEMENTS_AT_ONCE` (8) are
+  refuses another connection, behind the profile's other statements. There
+  Cancel stops it only once it holds that connection (`Fetch::held`); while
+  it still waits its turn, Cancel drops it unsent and leaves the statement
+  ahead of it alone. At most `STATEMENTS_AT_ONCE` (8) are
   out together; the rest start as those land. Each is the lone statement on
   its connection, so it streams and stops at the row limit as a single run
   does. A failure stays on its own chip and the rest carry on, with no

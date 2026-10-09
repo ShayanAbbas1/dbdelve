@@ -177,6 +177,7 @@ impl Connection {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
+        fetch.hold()?;
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
@@ -1003,6 +1004,35 @@ SELECT count(*) FROM forever
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn a_cancel_while_the_fallback_waits_drops_it_and_spares_the_statement_ahead() {
+        let connection = crate::db::Connection::Sqlite(memory(""));
+        let cancel = crate::db::CancelToken::alongside();
+        let counted = "
+WITH RECURSIVE counting(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counting WHERE n < 10000000)
+SELECT count(*) FROM counting
+";
+        let (ahead, lane) = std::thread::scope(|scope| {
+            let ahead = scope.spawn(|| {
+                connection.query(
+                    counted,
+                    &crate::db::CancelToken::default(),
+                    Fetch::default(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            let lane = scope
+                .spawn(|| connection.query_alongside("SELECT 1", &cancel, Fetch::default(), false));
+            std::thread::sleep(Duration::from_millis(100));
+            connection.cancel(&cancel).expect("cancelling cannot fail");
+            (ahead.join().unwrap(), lane.join().unwrap())
+        });
+        let ahead = ahead.expect("the statement ahead should not be stopped");
+        assert_eq!(ahead.rows, vec![vec![Some("10000000".to_string())]]);
+        let lane = lane.expect_err("the waiting statement should be dropped");
+        assert_eq!(lane.message, "Cancelled before it was sent.");
     }
 
     #[test]

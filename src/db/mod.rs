@@ -57,7 +57,7 @@ impl CancelToken {
     /// ([`Connection::query_alongside`]). A cancel under it stops those, and
     /// never what the connection it is asked on is running, which is some
     /// other tab's statement or nothing, unless one of its statements fell
-    /// back to that connection.
+    /// back to that connection and is running there.
     pub fn alongside() -> Self {
         Self(Arc::new(Mutex::new(Cancelling {
             alongside: Some(Vec::new()),
@@ -1145,32 +1145,49 @@ impl Connection {
         // A server out of connections still has this one, which the statement
         // waits its turn on rather than failing. SQL Server logs in on the
         // first run, so its refusal surfaces as the statement's error instead.
-        // ponytail: a Cancel stops it as it stops any run there, by stopping
-        // whatever that connection is running, which while this one waits its
-        // turn is the statement ahead of it. Knowing which is running needs
-        // the connection to say whose statement holds it.
-        let connection = match opened {
+        let (connection, shared) = match opened {
             Ok(connection) => {
                 if read_only {
                     connection.set_read_only(true)?;
                 }
-                connection
+                (connection, false)
             }
-            Err(_) => self.clone(),
+            Err(_) => (self.clone(), true),
         };
-        let slot = {
-            let mut running = cancel.0.lock().map_err(|_| {
-                plain_error("The run is unavailable after an earlier internal failure.".into())
-            })?;
+        let slot = std::cell::Cell::new(None);
+        // A shared connection becomes the run's to stop only once this
+        // statement holds it; until then a Cancel just marks the run, and
+        // the statement is dropped unsent when its turn comes.
+        // ponytail: it is let go of just after the connection is, so a Cancel
+        // in between reaches whatever took the connection next. Closing that
+        // gap needs the engine to clear it under its own lock.
+        let hold = || {
+            let mut running = cancel
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if running.asked {
-                return Err(plain_error("Cancelled before it was sent.".into()));
+                return false;
             }
             let alongside = running.alongside.get_or_insert_default();
             alongside.push(Some(connection.clone()));
-            alongside.len() - 1
+            slot.set(Some(alongside.len() - 1));
+            true
         };
-        let result = connection.query(sql, cancel, fetch);
-        if let Ok(mut running) = cancel.0.lock()
+        let result = match shared {
+            true => connection.query(
+                sql,
+                cancel,
+                Fetch {
+                    held: Some(&hold),
+                    ..fetch
+                },
+            ),
+            false if hold() => connection.query(sql, cancel, fetch),
+            false => Err(plain_error("Cancelled before it was sent.".into())),
+        };
+        if let Some(slot) = slot.get()
+            && let Ok(mut running) = cancel.0.lock()
             && let Some(alongside) = &mut running.alongside
         {
             alongside[slot] = None;
@@ -1823,6 +1840,21 @@ pub struct Fetch<'a> {
     /// judges it, so stopping it at the limit loses nothing it was going to
     /// do.
     pub reads_only: bool,
+    /// Asked once the statement holds its connection, before anything is
+    /// sent: `false` drops it unsent. For a statement queued behind another
+    /// on a connection it shares ([`Connection::query_alongside`]'s fallback),
+    /// so a Cancel before then drops it rather than stopping the other.
+    pub held: Option<&'a dyn Fn() -> bool>,
+}
+
+impl Fetch<'_> {
+    /// [`Fetch::held`], as the error an engine returns before sending.
+    fn hold(&self) -> Result<(), DbError> {
+        match self.held.is_none_or(|held| held()) {
+            true => Ok(()),
+            false => Err(plain_error("Cancelled before it was sent.".into())),
+        }
+    }
 }
 
 /// Rows handed over while a statement is still running, so the first of a

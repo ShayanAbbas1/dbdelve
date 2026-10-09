@@ -1839,6 +1839,7 @@ impl Workspace {
                 limit,
                 feed: fed.as_ref(),
                 reads_only,
+                held: None,
             };
             let result = match (generated, alongside) {
                 (true, _) => connection.generated(&sql, &cancel, fed.as_ref()),
