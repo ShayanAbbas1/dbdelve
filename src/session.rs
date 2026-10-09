@@ -23,7 +23,7 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, Relation, RelationKind, Routine, Structure, Syntax,
+        ExplainMode, QueryResult, Relation, RelationKind, Routine, Structure, Syntax,
     },
     explain::Plan,
     explorer::{ExplorerLeaf, ObjectKind},
@@ -33,7 +33,7 @@ use crate::{
     },
     result_grid,
     result_grid::{NewValue, ResultGrid},
-    sql::{Destructive, Mode, SortKey, Verdict},
+    sql::{self, Destructive, Mode, SortKey, Verdict},
     store,
     theme::ConnectionColor,
     ui::row_readout,
@@ -58,6 +58,14 @@ pub(crate) struct Profile {
     pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
+    /// Whether the user's statements on this connection have left a
+    /// transaction open (`sql::Leaves`), which a fresh one opened for a
+    /// queue's reads would not see. Read off what was sent, not asked of the
+    /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
+    pub(crate) in_transaction: bool,
+    /// Whether they have changed the session in a way that lasts as long as
+    /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
+    pub(crate) session_changed: bool,
     pub(crate) catalog: CatalogState,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
@@ -65,6 +73,18 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
+    /// Why a queue of reads on this connection runs in turn rather than at
+    /// once, said to the user when one does.
+    pub(crate) fn in_turn(&self) -> Option<&'static str> {
+        if self.in_transaction {
+            Some("Ran one at a time: a transaction is open on this connection.")
+        } else if self.session_changed {
+            Some("Ran one at a time: this connection's session settings were changed.")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),
@@ -365,6 +385,7 @@ impl Session {
         pending_objects: Vec<store::StoredObject>,
         engine: Engine,
         sorting: Sorting,
+        row_limit: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -430,7 +451,7 @@ impl Session {
             .iter()
             .map(|stored| {
                 let (tab, failure) =
-                    QueryTab::restore(&id, stored, engine, sorting.clone(), window, cx);
+                    QueryTab::restore(&id, stored, engine, sorting.clone(), row_limit, window, cx);
                 notice = notice.take().or(failure);
                 tab
             })
@@ -628,6 +649,23 @@ impl Session {
         }
     }
 
+    /// Whether one named tab has a statement in flight: its own slot, not
+    /// whichever of a queue's results the switcher is showing.
+    pub(crate) fn running(&self, tab: Tab) -> bool {
+        let state = match tab {
+            Tab::Query(id) => self.query_tab(id).map(|tab| &tab.query),
+            Tab::Object(id) => self
+                .objects
+                .iter()
+                .find(|tab| tab.id == id)
+                .and_then(|tab| match &tab.body {
+                    ObjectBody::Relation { query, .. } => Some(query),
+                    ObjectBody::Routine(_) => None,
+                }),
+        };
+        matches!(state, Some(QueryState::Running { .. }))
+    }
+
     /// Who orders one named tab's rows. `None` for a routine, which has none.
     pub(crate) fn sorting(&self, tab: Tab) -> Option<&Sorting> {
         match tab {
@@ -689,6 +727,33 @@ impl Session {
                 ObjectBody::Routine(_) => None,
             },
         }
+    }
+
+    /// `slot`, or for a queue's statement running at once with others, that
+    /// statement's own entry in `done`. Keyed by statement rather than
+    /// position, because a batch that lands more than one set puts results
+    /// ahead of those still running; and only while the tab is still running
+    /// the lane's own run, since a later run of the same text has statements
+    /// starting at the same places.
+    pub(crate) fn slot_at(
+        &mut self,
+        tab: Tab,
+        lane: Option<&Lane>,
+    ) -> Option<(&mut QueryState, Entity<TableState<ResultGrid>>)> {
+        let Some(lane) = lane else {
+            return self.slot(tab);
+        };
+        let Tab::Query(id) = tab else {
+            return None;
+        };
+        let query = self.query_tab_mut(id)?;
+        if !matches!(&query.query, QueryState::Running { cancel, .. } if cancel.is(&lane.run)) {
+            return None;
+        }
+        let queue = query.queue.as_mut()?;
+        let at = queue.lane(lane.start)?;
+        let finished = &mut queue.done[at];
+        Some((&mut finished.state, finished.grid.clone()))
     }
 
     /// Drop every confirmation and half-finished prompt this session is holding.
@@ -970,6 +1035,10 @@ pub(crate) struct QueryTab {
     /// Who orders this tab's rows on a header click. Per tab rather than per
     /// result: a queue's results are one view, read through one switcher.
     pub(crate) sorting: Sorting,
+    /// How many rows of a statement's result this tab keeps, or `None` for
+    /// all of them. Starts at the Settings row limit and is not persisted, so
+    /// a limit picked for one tab lasts only as long as the tab does.
+    pub(crate) row_limit: Option<usize>,
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
@@ -997,12 +1066,16 @@ pub(crate) struct Explained {
 /// the user is free to keep typing while the queue runs, and every range in
 /// `remaining` is an offset into the text as it was when Run was
 /// pressed.
-pub(crate) struct Queue {
+///
+/// Generic over the grid only so its bookkeeping can be checked without a
+/// window to build one in.
+pub(crate) struct Queue<G = Entity<TableState<ResultGrid>>> {
     pub(crate) sql: String,
     /// Statements not yet sent, in order.
     pub(crate) remaining: Vec<Range<usize>>,
-    /// One per statement already run, in order.
-    pub(crate) done: Vec<Finished>,
+    /// One per statement already run, in order; for a queue run at once,
+    /// one per statement from the start, waiting in `Idle` until it is sent.
+    pub(crate) done: Vec<Finished<G>>,
     /// Which of `done` is the result on screen, or `done.len()` for the
     /// statement still in flight, whose result is in the tab's own slot.
     ///
@@ -1026,11 +1099,25 @@ pub(crate) struct Queue {
     /// with. ponytail: the whole queue's grids are allocated up front, which
     /// is the same count they reach anyway; take a window into
     /// `execute_unchecked` if one ever needs to be built later than this.
-    pub(crate) spare: Vec<Entity<TableState<ResultGrid>>>,
+    pub(crate) spare: Vec<G>,
+}
+
+/// A statement of a queue running at once with others, as it was issued: to
+/// which profile's connection, for which run (the token in the tab's slot,
+/// which names the run; each statement is stopped by a token of its own), and
+/// where it starts in [`Queue::sql`]. The profile is named rather than taken to be the
+/// one in front, which the user may have switched away from by the time it
+/// lands.
+#[derive(Clone)]
+pub(crate) struct Lane {
+    pub(crate) profile: String,
+    pub(crate) generation: u64,
+    pub(crate) run: CancelToken,
+    pub(crate) start: usize,
 }
 
 /// One statement of a queue that has run, with the result it produced.
-pub(crate) struct Finished {
+pub(crate) struct Finished<G = Entity<TableState<ResultGrid>>> {
     /// The statement that produced this result, which is both what the chip is
     /// labelled from and what the snapshot carries. Held rather than sliced out
     /// of [`Queue::sql`] on demand because a queue restored from disk has no
@@ -1039,7 +1126,82 @@ pub(crate) struct Finished {
     /// Where the statement begins in [`Queue::sql`].
     pub(crate) start: usize,
     pub(crate) state: QueryState,
-    pub(crate) grid: Entity<TableState<ResultGrid>>,
+    pub(crate) grid: G,
+}
+
+impl<G: Clone> Queue<G> {
+    /// Whether its statements are running at once and not all back yet. Each
+    /// is then in a slot of its own in `done`, which is what the status bar
+    /// reads and Cancel stops, where a queue run in turn has its one statement
+    /// out in the tab's slot.
+    pub(crate) fn at_once(&self) -> bool {
+        self.done.iter().any(|finished| {
+            matches!(
+                finished.state,
+                QueryState::Running { .. } | QueryState::Idle
+            )
+        })
+    }
+
+    /// Where in `done` a statement running at once with others has its
+    /// entry: found by where it starts, not by position, since a batch that
+    /// lands more than one set puts results ahead of those still running.
+    pub(crate) fn lane(&self, start: usize) -> Option<usize> {
+        self.done
+            .iter()
+            .position(|finished| finished.start == start)
+    }
+
+    /// A submission's result sets after its first, put into `done` at `at` as
+    /// results of their own, with the grids they will be shown in, and how
+    /// many there was no grid for. A result being read past `at` stays the
+    /// one on screen.
+    ///
+    /// The grids are the ones the run reserved, because the completion that
+    /// lands them has no `Window` to build another with.
+    ///
+    /// ponytail: the reservation is one per statement in the batch, which is
+    /// an upper bound for an ordinary batch and not for a procedure, a loop or
+    /// a trigger; a set past the last spare is dropped and said so rather than
+    /// shown. Take a window into `execute_unchecked` if a set has to be able
+    /// to arrive unreserved.
+    pub(crate) fn land_sets(
+        &mut self,
+        at: usize,
+        start: usize,
+        rest: Vec<QueryResult>,
+    ) -> (Vec<(G, QueryResult)>, usize) {
+        let mut extra = Vec::new();
+        let mut dropped = 0;
+        for (offset, set) in rest.into_iter().enumerate() {
+            let Some(grid) = self.spare.pop() else {
+                dropped += 1;
+                continue;
+            };
+            self.done.insert(
+                at + extra.len(),
+                Finished {
+                    // A set after the first has no statement of its own to be
+                    // named after: one batch produced them all, and the chip
+                    // says which of its results this is.
+                    sql: format!("Result {}", offset + 2),
+                    start,
+                    state: QueryState::Complete {
+                        rows: set.total_rows(),
+                        bytes: set.bytes,
+                        elapsed: set.elapsed,
+                        rows_affected: set.rows_affected,
+                    },
+                    grid: grid.clone(),
+                },
+            );
+            extra.push((grid, set));
+        }
+        if self.showing >= at {
+            self.showing += extra.len();
+        }
+        (extra, dropped)
+    }
 }
 
 const QUERY_LABEL_LIMIT: usize = 32;
@@ -1075,6 +1237,23 @@ pub(crate) fn next_step(failed: bool, remaining: &[Range<usize>]) -> Step {
     }
 }
 
+/// How many of a queue's statements run at once, each on a connection of its
+/// own; the rest start as those finish. A bound on what one Run asks of the
+/// server's connection limit.
+pub(crate) const STATEMENTS_AT_ONCE: usize = 8;
+
+/// Whether a queue's statements can all go out at once rather than in turn:
+/// only when each is a plain read the gate lets through as it stands, and
+/// (`Profile::in_turn`, asked separately so it can be said) nothing run on the
+/// session so far makes a fresh connection read differently from it. Anything
+/// else runs in turn, as it always has.
+pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> bool {
+    statements.iter().all(|statement| {
+        sql::plain_read(engine, statement)
+            && sql::gate(&sql::classify(engine, statement), mode, &[]).is_none()
+    })
+}
+
 impl QueryTab {
     /// The result on screen: whichever of a queue's finished statements the
     /// switcher has selected, else the tab's own slot, which is what a run
@@ -1102,6 +1281,7 @@ impl QueryTab {
         stored: &store::StoredQueryTab,
         engine: Engine,
         sorting: Sorting,
+        row_limit: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
@@ -1137,6 +1317,7 @@ impl QueryTab {
             queue: None,
             queued_results: stored.queued_results,
             sorting,
+            row_limit,
             showing_plan: false,
             row_panel_folded: false,
             row_panel_split: cx.new(|_| ResizableState::default()),
@@ -1389,14 +1570,15 @@ pub(crate) enum ObjectBody {
         /// row. Not persisted: it is a choice about a bar that does not exist
         /// yet, and a restart that forgot it has forgotten nothing.
         next_join: Conjunction,
-        /// How many rows this preview asks for. Every result set is capped
-        /// (spec §4.3); this is the tab's own copy of the cap, so raising it
-        /// for one wide table does not raise it everywhere.
-        limit: usize,
+        /// How many rows this preview asks for, `None` for every row. This is
+        /// the tab's own copy of the cap, so raising it for one wide table does
+        /// not raise it everywhere.
+        limit: Option<usize>,
         /// How far into the relation this preview's page starts, in rows.
-        /// Always a multiple of `limit`: paging moves it by one page, and a
-        /// change of sort or limit puts it back to zero, because a window into
-        /// an ordering that no longer exists is not a page of anything.
+        /// Always a multiple of `limit`, and zero without one: paging moves it
+        /// by one page, and a change of sort or limit puts it back to zero,
+        /// because a window into an ordering that no longer exists is not a
+        /// page of anything.
         offset: usize,
         /// Whether the rows on screen are owed a refresh that keeps them on
         /// screen until it lands: rows that came off disk or over a connection
@@ -1602,6 +1784,11 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             .iter()
             .flat_map(|queue| queue.done.iter().enumerate())
         {
+            // A statement still running at once with others has rows in its
+            // grid that are not yet its result.
+            if !matches!(finished.state, QueryState::Complete { .. }) {
+                continue;
+            }
             let grid = finished.grid.read(cx).delegate().stored();
             if grid.columns.is_empty() {
                 continue;
@@ -1661,7 +1848,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             &profile.id,
             &store::object_grid_key(&tab.schema, &tab.name, filter),
             &store::StoredGrid {
-                limit: Some(*limit),
+                limit: Some(limit.unwrap_or(0)),
                 filter: filter.clone(),
                 showing_structure: *showing_structure,
                 order_by: sort
@@ -1791,6 +1978,158 @@ mod tests {
         assert_eq!(next_step(true, &remaining), Step::Ask);
         assert_eq!(next_step(true, &[]), Step::Finished);
         assert_eq!(next_step(false, &[]), Step::Finished);
+    }
+
+    #[test]
+    fn only_plain_reads_run_at_once() {
+        let at_once =
+            |engine, statements: &[&str]| runs_at_once(engine, Mode::ReadOnly, statements);
+        assert!(at_once(
+            Engine::Postgres,
+            &[
+                "SELECT pg_sleep(1), 1",
+                "WITH a AS (SELECT 1) SELECT * FROM a"
+            ]
+        ));
+        assert!(at_once(Engine::MySql, &["SELECT SLEEP(1)", "(SELECT 1)"]));
+        // A batch of reads is one unit, however many sets it answers with.
+        assert!(at_once(
+            Engine::SqlServer,
+            &["SELECT 1; SELECT 2", "SELECT 3"]
+        ));
+        assert!(at_once(
+            Engine::MongoDb,
+            &["db.a.find({})", "db.b.aggregate([{ $match: {} }])"]
+        ));
+
+        for unsafe_one in [
+            "INSERT INTO t VALUES (1)",
+            "SELECT * INTO t2 FROM t",
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "SET search_path TO other",
+            "BEGIN",
+            "COMMIT",
+            "CREATE TEMPORARY TABLE t (a int)",
+            "SELEC 1",
+        ] {
+            assert!(
+                !at_once(Engine::Postgres, &["SELECT 1", unsafe_one]),
+                "{unsafe_one}"
+            );
+        }
+        assert!(!at_once(Engine::MySql, &["USE other", "SELECT 1"]));
+        assert!(!at_once(
+            Engine::SqlServer,
+            &["DECLARE @a int = 1; SELECT @a", "SELECT 1"]
+        ));
+        for unsafe_one in [
+            "db.a.aggregate([{ $out: 'b' }])",
+            "db.a.aggregate([{ $merge: 'b' }])",
+            "db.a.insertOne({ x: 1 })",
+        ] {
+            assert!(
+                !at_once(Engine::MongoDb, &["db.a.find({})", unsafe_one]),
+                "{unsafe_one}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_statement_run_at_once_lands_in_its_own_entry_whatever_lands_ahead_of_it() {
+        let entry = |start: usize, state: QueryState| Finished {
+            sql: format!("SELECT {start}"),
+            start,
+            state,
+            grid: start,
+        };
+        let running = || QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        let complete = QueryState::Complete {
+            rows: 1,
+            bytes: 1,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: None,
+        };
+        let mut queue = Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done: vec![
+                entry(0, running()),
+                entry(30, complete.clone()),
+                entry(60, running()),
+                entry(90, QueryState::Idle),
+            ],
+            // Reading the statement that finished first.
+            showing: 1,
+            awaiting: false,
+            spare: vec![100, 101],
+        };
+
+        // The batch at 0 finishes last of the three and answers with three
+        // sets: the two after its first go right behind it.
+        let at = queue.lane(0).unwrap();
+        let (extra, dropped) = queue.land_sets(at + 1, 0, vec![QueryResult::default(); 2]);
+        assert_eq!((extra.len(), dropped), (2, 0));
+        let labels: Vec<_> = queue.done.iter().map(|f| f.sql.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "SELECT 0",
+                "Result 2",
+                "Result 3",
+                "SELECT 30",
+                "SELECT 60",
+                "SELECT 90"
+            ]
+        );
+        // Every statement still finds its own entry, not the one now at the
+        // position it started in.
+        assert_eq!(queue.lane(30), Some(3));
+        assert_eq!(queue.lane(60), Some(4));
+        assert_eq!(queue.done[4].grid, 60);
+        assert_eq!(queue.lane(90), Some(5));
+        // And the result being read is still the one on screen.
+        assert_eq!(queue.done[queue.showing].sql, "SELECT 30");
+        // A set past the last reserved grid is counted, not shown.
+        let (extra, dropped) = queue.land_sets(5, 60, vec![QueryResult::default(); 1]);
+        assert_eq!((extra.len(), dropped), (0, 1));
+    }
+
+    #[test]
+    fn a_queue_reads_as_at_once_only_while_a_statement_of_it_is_out() {
+        let entry = |start: usize, state: QueryState| Finished {
+            sql: format!("SELECT {start}"),
+            start,
+            state,
+            grid: start,
+        };
+        let complete = QueryState::Complete {
+            rows: 1,
+            bytes: 1,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: None,
+        };
+        let queue = |done| Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done,
+            showing: 0,
+            awaiting: false,
+            spare: Vec::<usize>::new(),
+        };
+        let running = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        assert!(queue(vec![entry(0, complete.clone()), entry(9, running)]).at_once());
+        assert!(queue(vec![entry(0, complete.clone()), entry(9, QueryState::Idle)]).at_once());
+        // Finished, or run in turn: the statement out is in the tab's slot.
+        assert!(!queue(vec![entry(0, complete.clone()), entry(9, complete)]).at_once());
+        assert!(!queue(Vec::new()).at_once());
     }
 
     #[test]

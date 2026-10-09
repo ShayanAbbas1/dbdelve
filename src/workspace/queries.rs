@@ -5,8 +5,13 @@
 
 use std::ops::Range;
 
+use gpui::Pixels;
+use gpui_component::table::TableState;
+
+use crate::db::{Feed, Fetch, QueryResult, Stopped};
+
 use super::*;
-use crate::session::{Finished, PendingRun, Queue, Resume, Step, TabKey, next_step};
+use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -109,32 +114,84 @@ impl Workspace {
             self.cancel_count(id, cx);
             return;
         }
-        // ponytail: per-slot UI truth about a request having been sent, not
-        // a claim that anything stopped. It bounds the repeat clicks to one
-        // cancel per run; a cancel that the server ignores has no answer
-        // here, and would need the driver to report one.
-        let Some((
-            QueryState::Running {
-                cancelling, cancel, ..
-            },
-            _,
-        )) = profile.session.slot(tab)
-        else {
-            return;
+        let now = std::time::Instant::now();
+        // A queue's statement running at once is stopped on its own when it is
+        // the one on screen, and the rest carry on. Read off its own slot,
+        // which is what its chip and the status bar show.
+        let cancels = if let Tab::Query(id) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(id)
+                .and_then(|query| query.queue.as_mut())
+            && let Some(Finished {
+                state:
+                    QueryState::Running {
+                        cancelling, cancel, ..
+                    },
+                ..
+            }) = queue.done.get_mut(queue.showing)
+        {
+            if cancelling.is_some() {
+                return;
+            }
+            *cancelling = Some(now);
+            vec![cancel.clone()]
+        } else {
+            // ponytail: per-slot UI truth about a request having been sent,
+            // not a claim that anything stopped. It bounds the repeat clicks
+            // to one cancel per run; a cancel that the server ignores has no
+            // answer here, and would need the driver to report one.
+            let Some((
+                QueryState::Running {
+                    cancelling, cancel, ..
+                },
+                _,
+            )) = profile.session.slot(tab)
+            else {
+                return;
+            };
+            if cancelling.is_some() {
+                return;
+            }
+            *cancelling = Some(now);
+            let mut cancels = vec![cancel.clone()];
+            // With a finished result in front, Cancel means the whole run, so
+            // a queue's statements still running at once are stopped too,
+            // each by its own token, and each slot marked, since that is what
+            // decides whether it keeps the rows it had.
+            if let Tab::Query(id) = tab
+                && let Some(queue) = profile
+                    .session
+                    .query_tab_mut(id)
+                    .and_then(|query| query.queue.as_mut())
+            {
+                for finished in &mut queue.done {
+                    if let QueryState::Running {
+                        cancelling: cancelling @ None,
+                        cancel,
+                        ..
+                    } = &mut finished.state
+                    {
+                        *cancelling = Some(now);
+                        cancels.push(cancel.clone());
+                    }
+                }
+            }
+            // An explicit stop ends the queue the statement was part of:
+            // nothing behind it is sent, and no decision is raised -- this was
+            // the decision. The cancelled statement itself still lands, as the
+            // queue's last result, with whatever rows it kept or the error it
+            // ended in.
+            self.drop_rest_of_queue(tab);
+            cancels
         };
-        if cancelling.is_some() {
-            return;
-        }
-        *cancelling = Some(std::time::Instant::now());
-        let cancel = cancel.clone();
-        // An explicit stop ends the queue the statement was part of: the
-        // cancelled statement's error lands like any other, and nothing behind
-        // it is sent. No decision is raised -- this was the decision.
-        self.stop_queue_on(tab, cx);
         cx.notify();
-        let cancel_task = cx
-            .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+            cancels
+                .iter()
+                .map(|cancel| connection.cancel(cancel))
+                .fold(Ok(()), Result::and)
+        }));
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -142,6 +199,103 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn set_query_limit(
+        &mut self,
+        action: &SetQueryLimit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.profile_mut().and_then(|profile| {
+            let Tab::Query(id) = profile.session.active else {
+                return None;
+            };
+            profile.session.query_tab_mut(id)
+        }) else {
+            return;
+        };
+        tab.row_limit = action.rows;
+        cx.notify();
+    }
+
+    pub(crate) fn set_default_row_limit_action(
+        &mut self,
+        action: &SetDefaultRowLimit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_default_row_limit(action.rows, cx);
+    }
+
+    pub(crate) fn custom_row_limit(
+        &mut self,
+        action: &CustomRowLimit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = action.target;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Rows"));
+        cx.subscribe_in(
+            &input,
+            window,
+            move |workspace, input, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let typed = input.read(cx).value().replace([',', '_', ' '], "");
+                    match typed.parse::<usize>().map_err(|error| *error.kind()) {
+                        Ok(rows) if (1..=explorer::MAX_ROW_LIMIT).contains(&rows) => {
+                            // The field goes while it holds focus, and focus
+                            // left with nothing holding it takes every
+                            // keybinding with it.
+                            workspace.custom_limit = None;
+                            workspace.refocus_front();
+                            workspace.apply_row_limit(target, rows, window, cx);
+                        }
+                        Ok(1..) | Err(std::num::IntErrorKind::PosOverflow) => workspace.note(
+                            format!(
+                                "A row limit is at most {}.",
+                                ui::group_thousands(explorer::MAX_ROW_LIMIT as u64)
+                            ),
+                            cx,
+                        ),
+                        _ => workspace.note("A row limit is a whole number above zero.".into(), cx),
+                    }
+                }
+                InputEvent::Blur => {
+                    workspace.custom_limit = None;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        self.custom_limit = Some((target, input));
+        self.custom_limit_needs_focus = true;
+        cx.notify();
+    }
+
+    fn apply_row_limit(
+        &mut self,
+        target: LimitTarget,
+        rows: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            LimitTarget::Query(id) => {
+                if let Some(tab) = self
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_tab_mut(id))
+                {
+                    tab.row_limit = Some(rows);
+                }
+                cx.notify();
+            }
+            LimitTarget::Relation(_) => {
+                self.set_row_limit(&SetRowLimit { rows: Some(rows) }, window, cx)
+            }
+            LimitTarget::Default => self.set_default_row_limit(Some(rows), cx),
+        }
     }
 
     pub(crate) fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
@@ -154,6 +308,12 @@ impl Workspace {
         // of the rows dbdelve fetched, which is the only thing there is to run.
         if let Tab::Object(id) = tab {
             self.refresh_relation(id, cx);
+            return;
+        }
+        // Before anything on the tab is touched: a new queue in place of one
+        // with a statement still out would take that statement's result as
+        // one of its own, or leave a queue run at once nowhere to land.
+        if profile.session.running(tab) {
             return;
         }
         let Some(editor) = profile.session.editor(tab) else {
@@ -172,6 +332,27 @@ impl Workspace {
         if !selection.is_empty() {
             let engine = self.engine();
             let statements = sql::queued_statements(engine, &text, Some(selection.clone()));
+            // SQL Server's unit is the batch, so `SELECT 1; SELECT 2` is one
+            // submission whose sets arrive in turn. Plain reads go out a
+            // statement apiece at once instead, as they do on every other
+            // engine; any batch a split would change stays whole.
+            let reads = sql::split_reads(engine, &text, &statements, selection.clone());
+            let reads_at_once = reads.len() > 1
+                && self.profile().is_some_and(|profile| {
+                    profile.in_turn().is_none() && {
+                        let texts: Vec<&str> =
+                            reads.iter().map(|range| &text[range.clone()]).collect();
+                        session::runs_at_once(engine, profile.mode, &texts)
+                    }
+                });
+            if reads_at_once {
+                if let Err(message) = sql::batch_counts(engine, &text[selection]) {
+                    self.refuse_run(tab, message, cx);
+                    return;
+                }
+                self.run_at_once(tab, text, reads, window, cx);
+                return;
+            }
             if statements.len() > 1 {
                 // A `GO 5` repeats its batch, and running it once is not what
                 // the selection says. Refused by name here as it is for a
@@ -230,15 +411,18 @@ impl Workspace {
     }
 
     /// Say why nothing ran, where the result would have gone. A refusal is the
-    /// tab's answer to the run, not a notice beside it.
+    /// tab's answer to the run, not a notice beside it -- unless a run is still
+    /// out there, which owns the slot and the token Cancel reaches it by.
     fn refuse_run(&mut self, tab: Tab, message: String, cx: &mut Context<Self>) {
-        if let Some(profile) = self.profile_mut()
-            && let Some((state, _)) = profile.session.slot(tab)
-        {
-            *state = QueryState::Failed(DbError {
-                message,
-                position: None,
-            });
+        if let Some(profile) = self.profile_mut() {
+            if profile.session.running(tab) {
+                profile.session.notice = Some(message);
+            } else if let Some((state, _)) = profile.session.slot(tab) {
+                *state = QueryState::Failed(DbError {
+                    message,
+                    position: None,
+                });
+            }
         }
         cx.notify();
     }
@@ -262,13 +446,29 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let engine = profile.config.engine();
+        let texts: Vec<&str> = statements
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect();
+        if session::runs_at_once(engine, profile.mode, &texts) {
+            match profile.in_turn() {
+                Some(why) => profile.session.notice = Some(why.into()),
+                None => {
+                    self.run_at_once(tab, text, statements, window, cx);
+                    return;
+                }
+            }
+        }
         let Some((first, rest)) = statements.split_first() else {
             return;
         };
         // One grid per result the run can land, less the first, which the tab's
         // own slot holds. That is one per statement on four engines; on SQL
         // Server a batch can answer with a set per statement inside it.
-        let engine = self.engine();
         let spares = statements
             .iter()
             .map(|range| sql::expected_sets(engine, &text[range.clone()]))
@@ -295,6 +495,171 @@ impl Workspace {
         self.execute_sql(sql, tab, cx);
     }
 
+    /// Run a selection's statements all at once, each on a connection of its
+    /// own, keeping every result in its own place in the strip whatever order
+    /// they finish in. Only for a queue `session::runs_at_once` admits: plain
+    /// reads, with nothing to keep in order and nothing for a failure to
+    /// protect, so one that fails says so on its chip and the rest carry on.
+    ///
+    /// The tab's own slot holds the run while it is out, under a token that
+    /// names it (each statement is stopped by one of its own), so nothing else
+    /// is run on the tab meanwhile. It is given the last statement's result
+    /// once the last has landed, as a queue run in turn leaves it.
+    fn run_at_once(
+        &mut self,
+        tab: Tab,
+        text: String,
+        statements: Vec<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let engine = self.engine();
+        let spares = statements
+            .iter()
+            .map(|range| sql::expected_sets(engine, &text[range.clone()]) - 1)
+            .sum::<usize>();
+        let done = statements
+            .iter()
+            .map(|range| Finished {
+                sql: text[range.clone()].to_string(),
+                start: range.start,
+                state: QueryState::Idle,
+                grid: crate::result_grid::new_grid(window, cx),
+            })
+            .collect();
+        let spare = (0..spares)
+            .map(|_| crate::result_grid::new_grid(window, cx))
+            .collect();
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let issued = (profile.id.clone(), profile.generation);
+        let Some(query) = profile.session.query_tab_mut(id) else {
+            return;
+        };
+        query.queue = Some(Queue {
+            sql: text,
+            remaining: Vec::new(),
+            done,
+            showing: 0,
+            awaiting: false,
+            spare,
+        });
+        query.query = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        for _ in 0..session::STATEMENTS_AT_ONCE {
+            self.start_lane(tab, &issued.0, issued.1, cx);
+        }
+        cx.notify();
+    }
+
+    /// Send the first of a queue's statements still waiting to run at once
+    /// with the others, on the profile the run was issued to.
+    fn start_lane(&mut self, tab: Tab, profile: &str, generation: u64, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some((lane, sql)) = self.issued_to(profile, generation).and_then(|issued| {
+            let query = issued.session.query_tab(id)?;
+            let QueryState::Running { cancel, .. } = &query.query else {
+                return None;
+            };
+            let waiting = query
+                .queue
+                .as_ref()?
+                .done
+                .iter()
+                .find(|finished| matches!(finished.state, QueryState::Idle))?;
+            let lane = Lane {
+                profile: profile.to_string(),
+                generation,
+                run: cancel.clone(),
+                start: waiting.start,
+            };
+            Some((lane, waiting.sql.clone()))
+        }) else {
+            return;
+        };
+        self.execute_unchecked(sql, tab, None, false, None, Some(lane), cx);
+    }
+
+    /// A statement run at once with others has landed in its own entry: put
+    /// any further sets of its batch beside it, send the next waiting
+    /// statement, and once none is out, hand the tab back.
+    fn land_lane(&mut self, tab: Tab, lane: Lane, rest: Vec<QueryResult>, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let (mode, client_keys) = Self::landing_view(
+            self.issued_to(&lane.profile, lane.generation)
+                .map(|profile| &*profile),
+            tab,
+        );
+        let (extra, dropped, out) = {
+            let Some(queue) = self
+                .issued_to(&lane.profile, lane.generation)
+                .and_then(|profile| profile.session.query_tab_mut(id))
+                .and_then(|query| query.queue.as_mut())
+            else {
+                return;
+            };
+            let Some(at) = queue.lane(lane.start) else {
+                return;
+            };
+            let (extra, dropped) = queue.land_sets(at + 1, lane.start, rest);
+            let out = queue.done.iter().any(|finished| {
+                matches!(
+                    finished.state,
+                    QueryState::Running { .. } | QueryState::Idle
+                )
+            });
+            (extra, dropped, out)
+        };
+        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
+        if out {
+            self.start_lane(tab, &lane.profile, lane.generation, cx);
+            return;
+        }
+
+        let Some(query) = self
+            .issued_to(&lane.profile, lane.generation)
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        let Some(queue) = &mut query.queue else {
+            return;
+        };
+        let last = queue.done.iter().map(|finished| finished.start).max();
+        if let Some(last) = queue
+            .done
+            .iter()
+            .find(|finished| Some(finished.start) == last)
+        {
+            query.query = last.state.clone();
+            query.results = last.grid.clone();
+            query.ran_from = Some((last.start, last.sql.clone()));
+            if matches!(last.state, QueryState::Complete { .. })
+                && !last.grid.read(cx).delegate().result().columns.is_empty()
+            {
+                query.last_query = Some(last.sql.clone());
+            }
+        } else {
+            query.query = QueryState::Idle;
+        }
+        // Cancelled before the rest went out, one result is no queue at all.
+        if queue.done.len() < 2 {
+            query.queue = None;
+        }
+        cx.notify();
+    }
+
     /// Land the statement that just finished in the queue's history, and send
     /// the next one — or park the decision when it failed with more to run.
     ///
@@ -306,18 +671,7 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let engine = self.engine();
-        // Read before the session is borrowed, for the reason the completion
-        // handler reads it before `slot`.
-        let mode = self
-            .profile()
-            .map(|profile| profile.mode)
-            .unwrap_or_default();
-        let client_keys = self
-            .profile()
-            .and_then(|profile| profile.session.sorting(tab))
-            .and_then(Sorting::client_keys)
-            .map(<[SortKey]>::to_vec);
+        let (mode, client_keys) = Self::landing_view(self.profile(), tab);
         let (step, extra, dropped) = {
             let Some(profile) = self.profile_mut() else {
                 return;
@@ -352,70 +706,14 @@ impl Workspace {
                 grid,
             });
 
-            // The grids are the ones the run reserved, because there is no
-            // `Window` here to build another with.
-            //
-            // ponytail: the reservation is one per statement in the batch,
-            // which is an upper bound for an ordinary batch and not for a
-            // procedure, a loop or a trigger; a set past the last spare is
-            // dropped and said so rather than shown. Take a window into
-            // `execute_unchecked` if a set has to be able to arrive
-            // unreserved.
-            let mut extra = Vec::new();
-            let mut dropped = 0;
-            for (offset, set) in rest.into_iter().enumerate() {
-                let Some(grid) = queue.spare.pop() else {
-                    dropped += 1;
-                    continue;
-                };
-                queue.done.push(Finished {
-                    // A set after the first has no statement of its own to be
-                    // named after: one batch produced them all, and the chip
-                    // says which of its results this is.
-                    sql: format!("Result {}", offset + 2),
-                    start,
-                    state: QueryState::Complete {
-                        rows: set.rows.len(),
-                        bytes: set.bytes,
-                        elapsed: set.elapsed,
-                        rows_affected: set.rows_affected,
-                    },
-                    grid: grid.clone(),
-                });
-                extra.push((grid, set));
-            }
+            let (extra, dropped) = queue.land_sets(queue.done.len(), start, rest);
             if following {
                 queue.showing = queue.done.len() - 1;
             }
             (next_step(failed, &queue.remaining), extra, dropped)
         };
 
-        for (grid, set) in extra {
-            // The server's sort is not carried over -- a header click reads
-            // the statement in the buffer, and this set is not the one the
-            // buffer names -- but the view's in-memory keys are, and there is
-            // no layout to carry. A multi-set batch is uneditable, so there is
-            // no target.
-            grid.update(cx, |table, cx| {
-                *table.delegate_mut() = ResultGrid::new(set, mode)
-                    .with_engine(engine)
-                    .with_client_sort(client_keys.as_deref());
-                table.refresh(cx);
-            });
-        }
-        if dropped > 0 {
-            let (sets, them) = match dropped {
-                1 => ("set", "it is"),
-                _ => ("sets", "they are"),
-            };
-            self.note(
-                format!(
-                    "The batch returned {dropped} more result {sets} than there were grids \
-                     reserved for it, and {them} not shown."
-                ),
-                cx,
-            );
-        }
+        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
 
         match step {
             Step::Finished => {
@@ -442,6 +740,57 @@ impl Workspace {
                 cx.notify();
             }
             Step::Next(_) => self.send_next_statement(tab, cx),
+        }
+    }
+
+    /// The mode and in-memory sort a queue's result lands under, read before
+    /// the session is borrowed, for the reason the completion handler reads
+    /// them before `slot`.
+    fn landing_view(profile: Option<&Profile>, tab: Tab) -> (Mode, Option<Vec<SortKey>>) {
+        let mode = profile.map(|profile| profile.mode).unwrap_or_default();
+        let client_keys = profile
+            .and_then(|profile| profile.session.sorting(tab))
+            .and_then(Sorting::client_keys)
+            .map(<[SortKey]>::to_vec);
+        (mode, client_keys)
+    }
+
+    /// Fill the grids `Queue::land_sets` took for a batch's further sets, and say
+    /// how many found none.
+    fn show_sets(
+        &mut self,
+        extra: Vec<(Entity<TableState<ResultGrid>>, QueryResult)>,
+        dropped: usize,
+        mode: Mode,
+        client_keys: Option<&[SortKey]>,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine();
+        for (grid, set) in extra {
+            // The server's sort is not carried over -- a header click reads
+            // the statement in the buffer, and this set is not the one the
+            // buffer names -- but the view's in-memory keys are, and there is
+            // no layout to carry. A multi-set batch is uneditable, so there is
+            // no target.
+            grid.update(cx, |table, cx| {
+                *table.delegate_mut() = ResultGrid::new(set, mode)
+                    .with_engine(engine)
+                    .with_client_sort(client_keys);
+                table.refresh(cx);
+            });
+        }
+        if dropped > 0 {
+            let (sets, them) = match dropped {
+                1 => ("set", "it is"),
+                _ => ("sets", "they are"),
+            };
+            self.note(
+                format!(
+                    "The batch returned {dropped} more result {sets} than there were grids \
+                     reserved for it, and {them} not shown."
+                ),
+                cx,
+            );
         }
     }
 
@@ -502,9 +851,16 @@ impl Workspace {
         else {
             return;
         };
-        // The in-flight slot is only a chip while something is in it.
+        // The in-flight slot is only a chip while something is in it, and a
+        // statement not yet sent has nothing to show.
         let last = queue.done.len();
-        if index > last || (index == last && !queue.awaiting) {
+        if index > last
+            || (index == last && !queue.awaiting)
+            || queue
+                .done
+                .get(index)
+                .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
+        {
             return;
         }
         queue.showing = index;
@@ -542,6 +898,13 @@ impl Workspace {
     /// Stop whatever queue the named tab is part way through. Nothing that
     /// has run is touched: the results already on it are still results.
     pub(crate) fn stop_queue_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.drop_rest_of_queue(tab);
+        self.release_queue(tab, cx);
+    }
+
+    /// Unsend whatever of a queue has not gone out, leaving the statement in
+    /// flight to land.
+    fn drop_rest_of_queue(&mut self, tab: Tab) {
         let Tab::Query(id) = tab else {
             return;
         };
@@ -555,12 +918,17 @@ impl Workspace {
             && let Some(queue) = &mut query.queue
         {
             queue.remaining.clear();
+            // Statements waiting to run at once with others are always the
+            // last of `done`, and never the one on screen, so dropping them
+            // moves no other result.
+            queue
+                .done
+                .retain(|finished| !matches!(finished.state, QueryState::Idle));
         }
-        self.release_queue(tab, cx);
     }
 
     /// Let go of a statement the queue sent that will never land: one the
-    /// mode gate refused, or one a cancel ended before it ran.
+    /// mode gate refused, or one a reconnect abandoned.
     ///
     /// Only `advance_queue` clears `awaiting` otherwise, and it runs on a
     /// result. A statement that produces none would leave the flag set for
@@ -625,15 +993,7 @@ impl Workspace {
         let engine = profile.config.engine();
 
         let failure = |workspace: &mut Self, message: &str, cx: &mut Context<Self>| {
-            if let Some(profile) = workspace.profile_mut()
-                && let Some((state, _)) = profile.session.slot(tab)
-            {
-                *state = QueryState::Failed(DbError {
-                    message: message.into(),
-                    position: None,
-                });
-            }
-            cx.notify();
+            workspace.refuse_run(tab, message.into(), cx);
         };
 
         let Some(prefix) = engine.explain_prefix(action.mode) else {
@@ -894,6 +1254,7 @@ impl Workspace {
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -997,6 +1358,7 @@ impl Workspace {
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -1187,7 +1549,7 @@ impl Workspace {
             return;
         }
 
-        self.execute_unchecked(sql, tab, refresh, keep_rows, explain, cx);
+        self.execute_unchecked(sql, tab, refresh, keep_rows, explain, None, cx);
     }
 
     /// Runs a statement without consulting the connection's mode. Only two
@@ -1211,6 +1573,13 @@ impl Workspace {
     /// refuses to start while a query is running, so a second call made here
     /// would be dropped on the floor. Nothing follows a failure — the error is
     /// what there is to see, and a refresh would replace it with rows.
+    ///
+    /// `lane` is a statement of a queue running at once with others: it runs
+    /// on the profile it was issued to rather than the one in front, lands in
+    /// its own entry of the queue, runs on a connection of its own under a
+    /// token of its own, and hands its result to `land_lane` rather than
+    /// `advance_queue`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_unchecked(
         &mut self,
         sql: String,
@@ -1218,17 +1587,24 @@ impl Workspace {
         refresh: Option<Refresh>,
         keep_rows: bool,
         explain: Option<ExplainMode>,
+        lane: Option<Lane>,
         cx: &mut Context<Self>,
     ) {
-        // Read before the task, which outlives the borrow of `self`.
-        let engine = self.engine();
-        let Some(profile) = self.profile_mut() else {
+        let profile = match &lane {
+            Some(lane) => self.issued_to(&lane.profile, lane.generation),
+            None => self.profile_mut(),
+        };
+        let Some(profile) = profile else {
             return;
         };
+        // Read before the task, which outlives the borrow of `self`.
+        let engine = profile.config.engine();
         let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
-        let Some((state, results)) = profile.session.slot(tab) else {
+        let read_only = profile.mode == Mode::ReadOnly;
+        let alongside = lane.is_some();
+        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
         // Guarded here rather than in each caller: every path that runs SQL
@@ -1244,9 +1620,16 @@ impl Workspace {
                 position: None,
             });
             cx.notify();
+            if let Some(lane) = lane {
+                self.land_lane(tab, lane, Vec::new(), cx);
+            }
             return;
         };
-        let cancel = CancelToken::default();
+        // A lane's own, so a Cancel on its chip stops it and not the others.
+        let cancel = match lane {
+            Some(_) => CancelToken::alongside(),
+            None => CancelToken::default(),
+        };
         let started = std::time::Instant::now();
         let previous = std::mem::replace(
             state,
@@ -1262,7 +1645,7 @@ impl Workspace {
         // The spinner beside the clock redraws every frame, but not under
         // reduce motion, so the clock cannot lean on it to tick.
         cx.spawn({
-            let id = id.clone();
+            let (id, lane) = (id.clone(), lane.clone());
             async move |workspace, cx| {
                 loop {
                     cx.background_executor()
@@ -1271,7 +1654,7 @@ impl Workspace {
                     let still_running = workspace.update(cx, |workspace, cx| {
                         let running = workspace
                             .issued_to(&id, generation)
-                            .and_then(|profile| profile.session.slot(tab))
+                            .and_then(|profile| profile.session.slot_at(tab, lane.as_ref()))
                             .is_some_and(|(state, _)| {
                                 matches!(state, QueryState::Running { started: at, .. } if *at == started)
                             });
@@ -1362,6 +1745,7 @@ impl Workspace {
             bare.strip_suffix(suffix).unwrap_or(bare).to_string()
         });
         if let Tab::Query(query) = tab
+            && lane.is_none()
             && let Some(tab) = self
                 .profile_mut()
                 .and_then(|profile| profile.session.query_tab_mut(query))
@@ -1374,7 +1758,7 @@ impl Workspace {
         // worth getting back. Only the buffer's — a relation's preview is SQL
         // dbdelve wrote, and nobody asked to keep it.
         if let Some(statement) = &statement
-            && let Some(profile) = self.profile_mut()
+            && let Some(profile) = self.issued_to(&id, generation)
         {
             // A line that could not be written is not worth a notice on every
             // run: the statement is still in the buffer, so nothing is lost.
@@ -1385,14 +1769,95 @@ impl Workspace {
         // dbdelve's statement only when an edit is applied from its grid, the
         // one run that carries a refresh.
         let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
-        let query_task = cx.background_executor().spawn(async move {
-            let result = match generated {
-                true => connection.generated(&sql, &cancel),
-                false => connection.query(&sql, &cancel),
+        // Marked on the way out, like the history: a statement that failed
+        // part way may still have opened a transaction.
+        if !generated && let Some(profile) = self.issued_to(&id, generation) {
+            let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
+            if let Some(open) = leaves.transaction {
+                profile.in_transaction = open;
+            }
+            profile.session_changed |= leaves.settings;
+        }
+        // A plan is never cut short: its rows are the plan, not data.
+        let limit = match tab {
+            Tab::Query(query) if explain.is_none() => self
+                .issued_to(&id, generation)
+                .and_then(|profile| profile.session.query_tab(query))
+                .and_then(|query| query.row_limit),
+            _ => None,
+        };
+        // Rows land in the grid as they arrive, but only in a grid cleared for
+        // them: a refresh keeps the rows it is replacing until the new ones are
+        // whole, and a plan's rows never reach the grid at all. A relation's
+        // preview is dbdelve's statement and streams like the user's; a query
+        // tab's generated run is an edit, with no rows to stream.
+        let streams = matches!(tab, Tab::Object(_)) || !generated;
+        let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
+        if let Some(feed) = feed.clone() {
+            let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
+            let (names, widths) = (shown.0.clone(), shown.1.clone());
+            cx.spawn(async move |workspace, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                    let running = workspace.update(cx, |workspace, cx| {
+                        let Some(profile) = workspace.issued_to(&id, generation) else {
+                            return false;
+                        };
+                        let mode = profile.mode;
+                        let running = profile.session.slot_at(tab, lane.as_ref()).is_some_and(|(state, _)| {
+                            matches!(state, QueryState::Running { started: at, .. } if *at == started)
+                        });
+                        // The count in the status bar is the workspace's to
+                        // draw, not the grid's. Only when something arrived:
+                        // the clock has a tick of its own.
+                        let began = results.read(cx).delegate().streamed_set();
+                        if running && pour(&feed, &results, mode, engine, (&names, &widths), cx) {
+                            cx.notify();
+                        }
+                        // A grid started for the rows lacks what the structure
+                        // marked on the one before it, as a landed run's does.
+                        if let Tab::Object(object) = tab
+                            && results.read(cx).delegate().streamed_set() != began
+                        {
+                            workspace.mark_columns(object, cx);
+                        }
+                        running
+                    });
+                    if !matches!(running, Ok(true)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        let fed = feed.clone();
+        let reads_only = sql::stoppable(engine, &sql);
+        let work = move || {
+            let fetch = Fetch {
+                limit,
+                feed: fed.as_ref(),
+                reads_only,
+                held: None,
             };
-            let lost = result.is_err() && connection.is_lost();
+            let result = match (generated, alongside) {
+                (true, _) => connection.generated(&sql, &cancel, fed.as_ref()),
+                (false, false) => connection.query(&sql, &cancel, fetch),
+                (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            };
+            // A connection of the lane's own that failed is gone with it, and
+            // says nothing about the profile's.
+            let lost = !alongside && result.is_err() && connection.is_lost();
             (result, lost)
-        });
+        };
+        // Up to eight of a queue's statements each hold a thread for as long
+        // as the server takes, which on Linux can fill GPUI's background
+        // executor and stall the Cancel spawned behind them.
+        let query_task = match alongside {
+            true => cx.background_executor().spawn(on_own_thread(work)),
+            false => cx.background_executor().spawn(async move { work() }),
+        };
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;
@@ -1401,9 +1866,9 @@ impl Workspace {
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
-                    let (succeeded, produced_grid, plan, rest) = {
+                    let (succeeded, produced_grid, plan, rest, notice) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
-                            workspace.drop_stale_run(&id, tab, cx);
+                            workspace.drop_stale_run(&id, tab, lane.as_ref(), cx);
                             return;
                         };
                         // Read before `slot`, which borrows the session and not
@@ -1437,10 +1902,48 @@ impl Workspace {
                                 queue.remaining.clear();
                             }
                         }
-                        let Some((state, results)) = profile.session.slot(tab) else {
+                        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
+                        else {
                             return;
                         };
 
+                        let cancelled = matches!(
+                            state,
+                            QueryState::Running {
+                                cancelling: Some(_),
+                                ..
+                            }
+                        );
+                        // Cancelled part way, a lone read keeps the rows it
+                        // had: they are what the user stopped it to look at.
+                        // Not a write's, which the cancel undid, and not when
+                        // something other than the cancel ended it. Whatever
+                        // the cancel cost besides is said either way.
+                        let result = match result {
+                            Err(error)
+                                if cancelled
+                                    && reads_only
+                                    && db::is_cancel(engine, &error)
+                                    && results.read(cx).delegate().streamed_set().is_some() =>
+                            {
+                                Ok(QueryResult {
+                                    columns: results.read(cx).delegate().result().columns.clone(),
+                                    elapsed: started.elapsed(),
+                                    stopped: Some(Stopped::Cancelled),
+                                    notice: db::cancel_cost(engine, &error, true),
+                                    ..QueryResult::default()
+                                })
+                            }
+                            Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
+                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only)
+                                    && cost != error.message
+                                {
+                                    error.message = format!("{}\n\n{cost}", error.message);
+                                }
+                                Err(error)
+                            }
+                            result => result,
+                        };
                         match result {
                             // An `EXPLAIN` describes a statement rather than
                             // returning its rows, so nothing here reaches the
@@ -1458,14 +1961,52 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan), Vec::new())
+                                (true, false, Some(plan), Vec::new(), result.notice)
                             }
                             Ok(mut result) => {
+                                // Rows that streamed in were scrolled through as
+                                // they came, so the grid stays where the user
+                                // took it rather than where the last run left it.
+                                let streamed = results.read(cx).delegate().streamed_set().is_some();
+                                if let Some(feed) = &feed {
+                                    let (names, widths) = (&shown.0, &shown.1);
+                                    pour(feed, &results, mode, engine, (names, widths), cx);
+                                    let (mut rows, streamed_columns) =
+                                        results.update(cx, |table, _| {
+                                            let grid = table.delegate_mut();
+                                            (grid.take_rows(), grid.result().columns.clone())
+                                        });
+                                    // The describe after the statement can learn
+                                    // nothing (a cancel, several statements) where
+                                    // the one beside it already had.
+                                    if result
+                                        .columns
+                                        .iter()
+                                        .all(|column| column.data_type.is_none())
+                                        && streamed_columns.len() == result.columns.len()
+                                    {
+                                        result.columns = streamed_columns;
+                                    }
+                                    rows.append(&mut result.rows);
+                                    result.rows = rows;
+                                    // A cancelled stream's size was never
+                                    // reported; it is what arrived.
+                                    if result.stopped == Some(Stopped::Cancelled) {
+                                        result.bytes = result
+                                            .rows
+                                            .iter()
+                                            .flatten()
+                                            .flatten()
+                                            .map(String::len)
+                                            .sum();
+                                    }
+                                }
                                 // Off the result before it reaches the grid:
                                 // the sets behind the first become results of
                                 // their own and have no business inside this
                                 // one's snapshot.
                                 let rest = std::mem::take(&mut result.rest);
+                                let notice = result.notice.take();
                                 // An `INSERT … RETURNING` grid traces to its
                                 // table like any select, but applying an edit
                                 // re-runs the statement behind the grid to
@@ -1477,13 +2018,18 @@ impl Workspace {
                                     result.edit = None;
                                 }
                                 *state = QueryState::Complete {
-                                    rows: result.rows.len(),
+                                    rows: result.total_rows(),
                                     bytes: result.bytes,
                                     elapsed: result.elapsed,
                                     rows_affected: result.rows_affected,
                                 };
                                 let produced_grid = !result.columns.is_empty();
+                                // Sorted in memory as it lands, the rows move
+                                // out from under any index into them.
+                                let reordered =
+                                    client_keys.as_deref().is_some_and(|keys| !keys.is_empty());
                                 results.update(cx, |table, cx| {
+                                    let selection = table.delegate().selection();
                                     let sort = sort_columns(engine, &keys, &result.columns);
                                     let (names, widths, vertical, horizontal) = &shown;
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
@@ -1491,12 +2037,21 @@ impl Workspace {
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
                                         .with_layout(names, widths);
-                                    // Rows kept through a refresh kept their
-                                    // selection too, and its index now names
-                                    // whichever row the new result put there.
-                                    table.clear_selection(cx);
+                                    // Streamed rows are the finished result's
+                                    // first rows, in order, so what was picked
+                                    // out of them as they came still names
+                                    // them. Rows kept through a refresh kept
+                                    // their selection too, but its index now
+                                    // names whichever row the new result put
+                                    // there.
+                                    let kept = streamed
+                                        && !reordered
+                                        && table.delegate_mut().select(selection);
+                                    if !kept {
+                                        table.clear_selection(cx);
+                                    }
                                     table.refresh(cx);
-                                    if table.delegate().layout().0 == *names {
+                                    if !streamed && table.delegate().layout().0 == *names {
                                         table
                                             .vertical_scroll_handle
                                             .0
@@ -1506,9 +2061,26 @@ impl Workspace {
                                         table.horizontal_scroll_handle.set_offset(*horizontal);
                                     }
                                 });
-                                (true, produced_grid, None, rest)
+                                // Rows that arrived before their types, all of
+                                // them if the describe beside the run learned
+                                // nothing.
+                                if feed.is_some() {
+                                    render_aside(&results, engine, cx);
+                                }
+                                (true, produced_grid, None, rest, notice)
                             }
                             Err(mut error) => {
+                                // Rows of a statement that failed part way are
+                                // not its result, and nothing on screen would
+                                // say they were cut short.
+                                if feed.is_some() {
+                                    results.update(cx, |table, cx| {
+                                        if table.delegate().streamed_set().is_some() {
+                                            *table.delegate_mut() = ResultGrid::empty();
+                                            table.refresh(cx);
+                                        }
+                                    });
+                                }
                                 // Into the user's statement, not the prefix
                                 // dbdelve put in front of it, which is on no
                                 // screen to count from.
@@ -1518,18 +2090,11 @@ impl Workspace {
                                 error.position = error
                                     .position
                                     .and_then(|position| position.checked_sub(prefix));
-                                let cancelled = matches!(
-                                    state,
-                                    QueryState::Running {
-                                        cancelling: Some(_),
-                                        ..
-                                    }
-                                );
                                 *state = match restored {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new())
+                                (false, false, None, Vec::new(), None)
                             }
                         }
                     };
@@ -1540,12 +2105,20 @@ impl Workspace {
                     {
                         profile.session.notice = None;
                     }
+                    if let Some(notice) = notice
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                    {
+                        profile.session.notice = Some(notice);
+                    }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
                         // so it is not the statement to go back to — which is
                         // what keeps an applied UPDATE from becoming the query
                         // an apply re-runs.
+                        // A lane's is set once the last of the queue lands,
+                        // since the order they finish in is not the buffer's.
                         if produced_grid
+                            && lane.is_none()
                             && let Some(statement) = statement
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
@@ -1595,8 +2168,10 @@ impl Workspace {
                     // switchable -- which is why this turns on the refresh and
                     // not on the queue's presence. `Queue::awaiting` is what
                     // keeps the edit's own result out of `done`.
-                    if !had_refresh {
-                        workspace.advance_queue(tab, rest, cx);
+                    match lane {
+                        Some(lane) => workspace.land_lane(tab, lane, rest, cx),
+                        None if !had_refresh => workspace.advance_queue(tab, rest, cx),
+                        None => {}
                     }
                 })
                 .ok();
@@ -1612,16 +2187,78 @@ impl Workspace {
     /// that is not `Idle` or `Failed`. `Idle` rather than `Failed`, because
     /// nothing failed: the run was abandoned, and `Idle` is what makes the next
     /// visit to the tab run it again.
-    pub(crate) fn drop_stale_run(&mut self, id: &str, tab: Tab, cx: &mut Context<Self>) {
+    ///
+    /// A lane's entry goes, with every statement of its queue not yet sent,
+    /// and the tab is let go of once the last lane still out is dropped too.
+    /// Only while the tab is still running the lane's own run (`run`): one
+    /// let go of by an earlier lane may have started another since, whose
+    /// statements can start where this one's did.
+    pub(crate) fn drop_stale_run(
+        &mut self,
+        id: &str,
+        tab: Tab,
+        lane: Option<&Lane>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
+        if let Some(lane) = lane
+            && !matches!(
+                profile.session.slot(tab),
+                Some((QueryState::Running { cancel, .. }, _)) if cancel.is(&lane.run)
+            )
+        {
+            return;
+        }
+        if let Some(&Lane { start, .. }) = lane
+            && let Tab::Query(query) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(query)
+                .and_then(|query| query.queue.as_mut())
+        {
+            queue.done.retain(|finished| {
+                finished.start != start && !matches!(finished.state, QueryState::Idle)
+            });
+            queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
+            cx.notify();
+            if queue
+                .done
+                .iter()
+                .any(|finished| matches!(finished.state, QueryState::Running { .. }))
+            {
+                return;
+            }
+        }
         let Some((state, _)) = profile.session.slot(tab) else {
             return;
         };
         if matches!(state, QueryState::Running { .. }) {
             *state = QueryState::Idle;
             cx.notify();
+        }
+        // A queued statement that will never land holds no chip, as
+        // `release_queue` says; that one reaches only the active profile.
+        if let Tab::Query(query) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab_mut(query)
+                .and_then(|query| query.queue.as_mut())
+            && std::mem::take(&mut queue.awaiting)
+        {
+            queue.remaining.clear();
+            queue.showing = queue.showing.min(queue.done.len().saturating_sub(1));
+        }
+        // Rows of a run nobody will land are not a result, and a grid still
+        // marked as streaming would refuse every copy as if more were coming.
+        if let Some((_, results)) = profile.session.slot(tab) {
+            results.update(cx, |table, cx| {
+                if table.delegate().streamed_set().is_some() {
+                    *table.delegate_mut() = ResultGrid::empty();
+                    table.refresh(cx);
+                }
+            });
         }
     }
 
@@ -1930,6 +2567,85 @@ fn error_span(
         position_at(buffer, start + position),
         start + token.start..start + token.end,
     ))
+}
+
+/// Render a grid's cells that arrived before their types, off the frame
+/// thread, and put them back where they still are.
+fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &mut App) {
+    let cells = db::unrendered(engine, results.read(cx).delegate().result());
+    if cells.is_empty() {
+        return;
+    }
+    let rendering = cx
+        .background_executor()
+        .spawn(async move { db::render(cells) });
+    let results = results.clone();
+    cx.spawn(async move |cx| {
+        let rendered = rendering.await;
+        results.update(cx, |table, cx| {
+            table.delegate_mut().apply_rendered(rendered);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Move what has arrived into the grid. A new result set starts the grid over,
+/// as it would have when the set's statement finished. `true` when anything
+/// on screen changed.
+fn pour(
+    feed: &Feed,
+    results: &Entity<TableState<ResultGrid>>,
+    mode: Mode,
+    engine: Engine,
+    (names, widths): (&[String], &[Pixels]),
+    cx: &mut App,
+) -> bool {
+    let fed = feed.take();
+    // No result set has begun: nothing has a column to go under yet.
+    if fed.set == 0 {
+        return false;
+    }
+    let (typed, changed) = results.update(cx, |table, cx| {
+        let changed = table.delegate().streamed_set() != Some(fed.set)
+            || table.delegate().result().columns != fed.columns
+            || table.delegate().filled() != fed.filled
+            || !fed.rows.is_empty();
+        let mut typed = false;
+        if table.delegate().streamed_set() != Some(fed.set) {
+            typed = fed.columns.iter().any(|column| column.data_type.is_some());
+            let columns = QueryResult {
+                columns: fed.columns,
+                ..QueryResult::default()
+            };
+            *table.delegate_mut() = ResultGrid::new(columns, mode)
+                .with_engine(engine)
+                .with_layout(names, widths)
+                .streaming(fed.set);
+            table.refresh(cx);
+        } else if table.delegate().result().columns != fed.columns {
+            table.delegate_mut().set_column_types(fed.columns);
+            typed = true;
+            cx.notify();
+        }
+        table.delegate_mut().fill(fed.filled);
+        if !fed.rows.is_empty() {
+            let digits = |rows: usize| rows.max(1).ilog10();
+            let before = table.delegate().result().rows.len();
+            table.delegate_mut().append_rows(fed.rows);
+            // The row-number gutter is sized to the last row's number, and
+            // only a refresh lays its width out again.
+            if digits(table.delegate().result().rows.len()) != digits(before) {
+                table.refresh(cx);
+            }
+            cx.notify();
+        }
+        (typed, changed)
+    });
+    if typed {
+        render_aside(results, engine, cx);
+    }
+    changed
 }
 
 #[cfg(test)]

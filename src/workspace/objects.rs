@@ -64,7 +64,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
-        let preview_rows = self.settings.preview_rows;
+        let row_limit = self.settings.row_limit;
         let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
         let profile = self.profile_mut()?;
@@ -104,7 +104,7 @@ impl Workspace {
                     filter,
                     filters,
                     next_join: Conjunction::default(),
-                    limit: preview_rows,
+                    limit: row_limit,
                     offset: 0,
                     stale: false,
                     hydrated: false,
@@ -167,7 +167,7 @@ impl Workspace {
     pub(crate) fn requery_relation(
         &mut self,
         id: u64,
-        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut usize, &mut usize) -> bool,
+        change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut Option<usize>, &mut usize) -> bool,
         cx: &mut Context<Self>,
     ) {
         let engine = self.engine();
@@ -306,7 +306,7 @@ impl Workspace {
 
         let task = cx
             .background_executor()
-            .spawn(async move { connection.generated(&sql, &cancel) });
+            .spawn(async move { connection.generated(&sql, &cancel, None) });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             _ = workspace.update(cx, |workspace, cx| {
@@ -769,7 +769,7 @@ impl Workspace {
                     .map(|(index, label, sql)| {
                         let answer = match sql {
                             Some(sql) => connection
-                                .generated(&sql, &CancelToken::default())
+                                .generated(&sql, &CancelToken::default(), None)
                                 .map(|result| !result.rows.is_empty())
                                 .map_err(|error| error.message),
                             None => Err(
@@ -969,7 +969,7 @@ impl Workspace {
                 cx.notify();
             });
         }
-        let preview_rows = self.settings.preview_rows;
+        let row_limit = self.settings.row_limit;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -1011,7 +1011,11 @@ impl Workspace {
                     // is where they are stored: the snapshot is keyed by this
                     // expression, so the two cannot disagree.
                     *filter = snapshot.filter.clone();
-                    *limit = snapshot.limit.unwrap_or(preview_rows);
+                    *limit = match snapshot.limit {
+                        Some(0) => None,
+                        Some(rows) => Some(rows),
+                        None => row_limit,
+                    };
                     *stale = true;
                 }
             }

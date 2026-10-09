@@ -77,12 +77,44 @@ pub(crate) struct OpenReference {
     pub(crate) index: usize,
 }
 
-/// How many rows a relation's preview asks for. dbdelve's own statement carries
-/// the limit, so the only thing to say is the number.
+/// How many rows a relation's preview asks for, `None` for all of them.
+/// dbdelve's own statement carries the limit, so the only thing to say is the
+/// number.
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = dbdelve, no_json)]
 pub(crate) struct SetRowLimit {
-    pub(crate) rows: usize,
+    pub(crate) rows: Option<usize>,
+}
+
+/// Whose row limit a control sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) enum LimitTarget {
+    Query(u64),
+    Relation(u64),
+    /// The Settings row limit every new tab starts from.
+    Default,
+}
+
+/// The Settings row limit, `None` for no limit.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetDefaultRowLimit {
+    pub(crate) rows: Option<usize>,
+}
+
+/// Swap a row-limit menu for a field to type a number of one's own into.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct CustomRowLimit {
+    pub(crate) target: LimitTarget,
+}
+
+/// How many rows a query tab keeps of what its statements return, `None` for
+/// all of them. The statement is never changed: see AGENTS.md, hard rule 1.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetQueryLimit {
+    pub(crate) rows: Option<usize>,
 }
 
 /// Ask the server how it would run the statement under the cursor. The mode

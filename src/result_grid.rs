@@ -78,6 +78,13 @@ type ReferenceMenu = Rc<Vec<(usize, SharedString)>>;
 /// one-row `DELETE` needs and nothing else.
 pub type RowKey = (String, String, Vec<(String, String)>);
 
+/// A grid's selection, apart from the grid it was made in.
+pub struct GridSelection {
+    active: Option<(usize, usize)>,
+    rows: std::collections::BTreeSet<usize>,
+    anchor: Option<usize>,
+}
+
 pub struct ResultGrid {
     columns: Vec<Column>,
     result: QueryResult,
@@ -123,10 +130,13 @@ pub struct ResultGrid {
     /// whole delegate: there is no field anyone has to remember to clear, and
     /// so no way for a live result to keep claiming it is a snapshot.
     captured: Option<u64>,
-    /// How many rows the result had, for a snapshot that was capped before it
-    /// was written. Held beside `captured` and for the same reason: a run
-    /// replaces the whole delegate, so a live result cannot keep a stale count.
-    restored_total: Option<usize>,
+    /// Which of a run's result sets these rows are, while the run is still
+    /// appending them (`db::Fed::set`). Dropped with the delegate, like
+    /// `captured`, when the finished result replaces it.
+    streamed: Option<usize>,
+    /// When a streamed run's kept rows reached the limit, for its clock to
+    /// stop at.
+    filled: Option<std::time::Instant>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -300,7 +310,8 @@ impl ResultGrid {
             pending: Vec::new(),
             editing: None,
             captured: None,
-            restored_total: None,
+            streamed: None,
+            filled: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -368,6 +379,8 @@ impl ResultGrid {
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                capped_from: (stored.total_rows > stored.rows.len()).then_some(stored.total_rows),
+                stopped: stored.stopped,
                 // All or none: a snapshot naming a type this build does not
                 // know is read as having none, never as rows out of step.
                 cell_types: stored
@@ -396,7 +409,6 @@ impl ResultGrid {
             .active
             .filter(|(row, col)| *row < rows && *col < columns);
         grid.captured = Some(stored.captured);
-        grid.restored_total = Some(stored.total_rows);
         grid.unconfirmed = stored.edit.is_some();
         grid
     }
@@ -405,6 +417,63 @@ impl ResultGrid {
     /// put here.
     pub fn captured(&self) -> Option<u64> {
         self.captured
+    }
+
+    /// A grid for result set `set` of a run's rows to arrive in.
+    pub fn streaming(mut self, set: usize) -> Self {
+        self.streamed = Some(set);
+        self
+    }
+
+    pub fn streamed_set(&self) -> Option<usize> {
+        self.streamed
+    }
+
+    /// The columns' types, learned while their rows are still arriving. The
+    /// rows are kept; what is worked out from the types is worked out again.
+    /// Their values are rendered apart, off the frame thread
+    /// ([`db::unrendered`]).
+    pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
+        self.numeric = columns
+            .iter()
+            .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
+            .collect();
+        self.result.columns = columns;
+    }
+
+    /// Put values rendered off the frame thread in place, each only where the
+    /// cell still holds what was rendered: a sort or a new run in between has
+    /// moved or replaced it, and a value written there would be another
+    /// row's.
+    pub fn apply_rendered(&mut self, rendered: Vec<(usize, usize, String, String)>) {
+        for (row, column, was, now) in rendered {
+            if let Some(Some(cell)) = self
+                .result
+                .rows
+                .get_mut(row)
+                .and_then(|cells| cells.get_mut(column))
+                && *cell == was
+            {
+                *cell = now;
+            }
+        }
+    }
+
+    pub fn fill(&mut self, at: Option<std::time::Instant>) {
+        self.filled = at;
+    }
+
+    pub fn filled(&self) -> Option<std::time::Instant> {
+        self.filled
+    }
+
+    pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
+        self.result.rows.extend(rows);
+    }
+
+    /// The rows streamed in, for the finished result to be built around.
+    pub fn take_rows(&mut self) -> Vec<Vec<db::Cell>> {
+        std::mem::take(&mut self.result.rows)
     }
 
     /// Whether an edit here has to be confirmed against stale rows first.
@@ -417,10 +486,9 @@ impl ResultGrid {
     }
 
     /// How many rows the result behind this grid had. More than the grid holds
-    /// only for a restored snapshot the cap trimmed -- which is the one case
-    /// where the rows on screen are not the whole result set.
+    /// when the row limit or a snapshot's cap trimmed it.
     pub fn total_rows(&self) -> usize {
-        self.restored_total.unwrap_or(self.result.rows.len())
+        self.result.total_rows()
     }
 
     /// What a snapshot of this grid keeps. The tab's own fields -- the
@@ -450,6 +518,7 @@ impl ResultGrid {
             // hold: recomputing it from the capped rows is what collapsed a
             // 20,000-row snapshot to 5,000 on the next save.
             total_rows: self.total_rows(),
+            stopped: self.result.stopped,
             sort: self.sort.clone(),
             order_by: Vec::new(),
             client_sort: None,
@@ -610,6 +679,34 @@ impl ResultGrid {
         if !self.selected_rows.contains(&row) {
             self.click_row(row, false, false);
         }
+    }
+
+    /// What the user has picked out, to be carried onto the finished result
+    /// of the rows it was picked from.
+    pub fn selection(&self) -> GridSelection {
+        GridSelection {
+            active: self.active,
+            rows: self.selected_rows.clone(),
+            anchor: self.row_selection_anchor,
+        }
+    }
+
+    /// Take `selection` back if every row and cell it names is still here:
+    /// `false`, with nothing taken, otherwise or when it picks nothing.
+    pub fn select(&mut self, selection: GridSelection) -> bool {
+        let (rows, columns) = (self.result.rows.len(), self.columns.len());
+        let fits = selection
+            .active
+            .is_none_or(|(row, col)| row < rows && col < columns)
+            && selection.rows.iter().all(|row| *row < rows)
+            && selection.anchor.is_none_or(|row| row < rows);
+        if !fits || (selection.active.is_none() && selection.rows.is_empty()) {
+            return false;
+        }
+        self.active = selection.active;
+        self.selected_rows = selection.rows;
+        self.row_selection_anchor = selection.anchor;
+        true
     }
 
     pub fn clear_row_selection(&mut self) {
@@ -2375,6 +2472,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rows_held_for_their_types_stream_in_as_the_finished_result_shows_them() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n"), column("p")]);
+        feed.push(vec![Some("1234567".into()), Some(point.into())]);
+        assert_eq!(feed.take().set, 0, "held until the describe answers");
+
+        feed.describe(vec!["int4".into(), "geometry".into()]);
+        let fed = feed.take();
+        let mut streamed = ResultGrid::new(
+            QueryResult {
+                columns: fed.columns,
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .streaming(fed.set);
+        streamed.append_rows(fed.rows);
+
+        let mut finished = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "int4"), typed("p", "geometry")],
+                rows: vec![vec![Some("1234567".into()), Some(point.into())]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        finished.apply_rendered(db::render(db::unrendered(
+            db::Engine::Postgres,
+            finished.result(),
+        )));
+
+        for col in 0..2 {
+            assert_eq!(streamed.shown(0, col), finished.shown(0, col));
+        }
+        assert!(streamed.is_numeric_column(0));
+        assert!(db::unrendered(db::Engine::Postgres, streamed.result()).is_empty());
+    }
+
+    #[test]
+    fn rows_held_for_a_describe_go_once_the_statement_is_over() {
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n")]);
+        feed.push(vec![Some("1".into())]);
+        assert!(feed.take().rows.is_empty());
+
+        feed.release();
+        assert_eq!(feed.take().rows, vec![vec![Some("1".to_string())]]);
+    }
+
+    #[test]
+    fn rows_streamed_in_before_their_types_are_rendered_once_the_types_arrive() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("n"), column("p")],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres)
+        .streaming(1);
+        grid.append_rows(vec![vec![Some("1".into()), Some(point.into())]]);
+
+        grid.set_column_types(vec![typed("n", "int4"), typed("p", "geometry")]);
+        let rendered = db::render(db::unrendered(db::Engine::Postgres, grid.result()));
+        grid.apply_rendered(rendered);
+
+        assert!(grid.is_numeric_column(0));
+        let shown = grid.result().rows[0][1].as_deref().unwrap_or_default();
+        assert!(shown.starts_with("POINT"), "{shown}");
+        // Rendered already, so a second pass finds nothing left to do.
+        assert!(db::unrendered(db::Engine::Postgres, grid.result()).is_empty());
+    }
+
+    #[test]
+    fn a_rendered_value_lands_only_where_the_cell_still_holds_what_was_rendered() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("p")],
+                rows: vec![vec![Some("moved".into())], vec![Some("0101".into())]],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        grid.apply_rendered(vec![
+            (0, 0, "0101".into(), "POINT(1 1)".into()),
+            (1, 0, "0101".into(), "POINT(2 2)".into()),
+        ]);
+        assert_eq!(grid.result().rows[0][0].as_deref(), Some("moved"));
+        assert_eq!(grid.result().rows[1][0].as_deref(), Some("POINT(2 2)"));
+    }
+
     fn value(text: &str) -> NewValue {
         NewValue::Value(text.into())
     }
@@ -2840,6 +3033,59 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_carries_onto_rows_that_are_still_there_and_no_further() {
+        let grid = |rows: usize| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: (0..rows).map(|row| vec![Some(row.to_string())]).collect(),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+        };
+        let mut streaming = grid(3);
+        streaming.click_row(1, false, false);
+        streaming.click_row(2, true, false);
+        streaming.set_active(2, 0);
+
+        let mut landed = grid(5);
+        assert!(landed.select(streaming.selection()));
+        assert_eq!(landed.active(), Some((2, 0)));
+        assert_eq!(landed.selected_rows, [1, 2].into());
+        assert_eq!(landed.row_selection_anchor, Some(1));
+
+        let mut shorter = grid(2);
+        assert!(!shorter.select(streaming.selection()));
+        assert_eq!(shorter.active(), None);
+        assert!(shorter.selected_rows.is_empty());
+        assert!(!grid(5).select(grid(3).selection()), "nothing was picked");
+    }
+
+    #[test]
+    fn a_stopped_result_is_still_stopped_once_restored() {
+        for stopped in [db::Stopped::AtLimit, db::Stopped::Cancelled] {
+            let grid = ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: vec![vec![Some("1".into())], vec![Some("2".into())]],
+                    stopped: Some(stopped),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            );
+            let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+            assert_eq!(restored.result().stopped, Some(stopped));
+        }
+    }
+
+    #[test]
     fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
         let grid = ResultGrid::new(
             QueryResult {
@@ -2952,6 +3198,7 @@ mod tests {
                     .map(|n| vec![Some(n.to_string())])
                     .collect(),
                 total_rows: 20_000,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,

@@ -165,7 +165,7 @@ impl Workspace {
     /// Written through to disk, so the palette a person picked is the one the
     /// next launch paints.
     pub(crate) fn set_theme(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
-        // `set_font_size` and `set_preview_rows` both skip the write-through
+        // `set_font_size` and `set_default_row_limit` both skip the write-through
         // when nothing changed; picking the theme already installed should not
         // rewrite `profiles.toml` or re-post the notice either.
         if theme.name == theme::theme(cx).name {
@@ -469,10 +469,30 @@ impl Workspace {
         let Some((QueryState::Running { cancel, .. }, _)) = profile.session.slot(tab) else {
             return;
         };
-        let cancel = cancel.clone();
-        let cancel_task = cx
-            .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+        let mut cancels = vec![cancel.clone()];
+        // A queue's statements running at once are each stopped by their own.
+        if let Tab::Query(id) = tab
+            && let Some(queue) = profile
+                .session
+                .query_tab(id)
+                .and_then(|query| query.queue.as_ref())
+        {
+            cancels.extend(
+                queue
+                    .done
+                    .iter()
+                    .filter_map(|finished| match &finished.state {
+                        QueryState::Running { cancel, .. } => Some(cancel.clone()),
+                        _ => None,
+                    }),
+            );
+        }
+        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+            cancels
+                .iter()
+                .map(|cancel| connection.cancel(cancel))
+                .fold(Ok(()), Result::and)
+        }));
         // Said as `cancel_query` says it: the tab has gone, so a statement
         // still running behind it is all the more worth knowing about.
         cx.spawn(async move |workspace, cx| {

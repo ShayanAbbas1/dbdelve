@@ -202,6 +202,7 @@ impl Workspace {
             resume.refresh,
             resume.keep_rows,
             resume.explain,
+            None,
             cx,
         );
     }

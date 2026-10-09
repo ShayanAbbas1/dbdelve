@@ -44,7 +44,7 @@ impl Workspace {
             chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
             grid_font_size: Some(self.settings.grid_font_size),
-            preview_rows: Some(self.settings.preview_rows),
+            preview_rows: Some(self.settings.row_limit.unwrap_or(0)),
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
@@ -169,6 +169,7 @@ impl Workspace {
             stored.open_objects,
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -211,6 +212,8 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -243,6 +246,7 @@ impl Workspace {
             Vec::new(),
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -257,6 +261,8 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
             session,
@@ -1237,6 +1243,8 @@ impl Workspace {
         };
         profile.generation = generation;
         profile.state = ProfileState::Connecting;
+        profile.in_transaction = false;
+        profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
 
         let id = profile.id.clone();

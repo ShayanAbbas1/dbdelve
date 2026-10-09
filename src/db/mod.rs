@@ -47,6 +47,43 @@ pub struct CancelToken(Arc<Mutex<Cancelling>>);
 struct Cancelling {
     asked: bool,
     handles: Vec<String>,
+    /// `Some` for a run made by [`CancelToken::alongside`]: the connections
+    /// its statements are running on, each emptied once its statement ends.
+    alongside: Option<Vec<Option<Connection>>>,
+}
+
+impl CancelToken {
+    /// For a run whose statements each go out on a connection of their own
+    /// ([`Connection::query_alongside`]). A cancel under it stops those, and
+    /// never what the connection it is asked on is running, which is some
+    /// other tab's statement or nothing, unless one of its statements fell
+    /// back to that connection and is running there.
+    pub fn alongside() -> Self {
+        Self(Arc::new(Mutex::new(Cancelling {
+            alongside: Some(Vec::new()),
+            ..Cancelling::default()
+        })))
+    }
+
+    /// Whether the two are one run's.
+    pub fn is(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Mark the run cancelled and hand back the connections it is running on,
+    /// or `None` for a run on the profile's own.
+    fn stop_alongside(&self) -> Option<Vec<Connection>> {
+        let mut running = self.0.lock().ok()?;
+        let connections = running
+            .alongside
+            .as_ref()?
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        running.asked = true;
+        Some(connections)
+    }
 }
 
 /// Which engine a profile talks to.
@@ -1055,32 +1092,143 @@ impl Connection {
 
     /// Run one statement verbatim.
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    /// The SQL is never rewritten — no limit injected, no reformatting. A
+    /// limit bounds the rows kept, not the statement: past it they are read
+    /// and dropped, and [`QueryResult::capped_from`] says how many there were,
+    /// unless the statement could be stopped there instead
+    /// ([`QueryResult::stopped`]). A feed takes the rows as they arrive
+    /// instead of the result, which then holds none of them, and values
+    /// still waiting on their types are the caller's to [`render`]. Postgres,
+    /// MySQL, SQL Server, SQLite, Snowflake and MongoDB honour [`Fetch`]: SQL
+    /// Server by `SET ROWCOUNT` around a lone read, which the server stops
+    /// itself, and by draining anything else, Snowflake by not downloading the partitions
+    /// past the limit, whose rows the server has already counted, and MongoDB
+    /// without a feed.
+    pub fn query(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         match self {
-            Self::Postgres(connection) => connection.query(sql),
-            Self::MySql(connection) => connection.query(sql),
-            Self::SqlServer(connection) => connection.query(sql),
-            Self::Sqlite(connection) => connection.query(sql),
-            Self::Snowflake(connection) => connection.query_with(sql, cancel),
-            Self::MongoDb(connection) => connection.query(sql, cancel),
+            Self::Postgres(connection) => connection.query(sql, fetch),
+            Self::MySql(connection) => connection.query(sql, fetch),
+            Self::SqlServer(connection) => connection.query(sql, fetch),
+            Self::Sqlite(connection) => connection.query(sql, fetch),
+            Self::Snowflake(connection) => connection.query_with(sql, cancel, fetch),
+            Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
         }
+    }
+
+    /// [`Connection::query`] on a connection of its own, opened the way this
+    /// one was (its tunnel and side session shared), so the statement runs
+    /// beside whatever this one is running rather than queued behind it, and
+    /// closed once it ends. Snowflake and MongoDB need no second one: they
+    /// already run statements side by side, and stop them by `cancel`.
+    ///
+    /// `cancel` is made by [`CancelToken::alongside`]. `read_only` puts the
+    /// profile's Read-only hold on the new session as well.
+    pub fn query_alongside(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+        read_only: bool,
+    ) -> Result<QueryResult, DbError> {
+        let opened = match self {
+            Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
+            Self::MySql(connection) => connection.alongside().map(Self::MySql),
+            Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
+        };
+        // A server out of connections still has this one, which the statement
+        // waits its turn on rather than failing. SQL Server logs in on the
+        // first run, so its refusal surfaces as the statement's error instead.
+        let (connection, shared) = match opened {
+            Ok(connection) => {
+                if read_only {
+                    connection.set_read_only(true)?;
+                }
+                (connection, false)
+            }
+            Err(_) => (self.clone(), true),
+        };
+        let slot = std::cell::Cell::new(None);
+        // A shared connection becomes the run's to stop only once this
+        // statement holds it; until then a Cancel just marks the run, and
+        // the statement is dropped unsent when its turn comes.
+        // ponytail: it is let go of just after the connection is, so a Cancel
+        // in between reaches whatever took the connection next. Closing that
+        // gap needs the engine to clear it under its own lock.
+        let hold = || {
+            let mut running = cancel
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if running.asked {
+                return false;
+            }
+            let alongside = running.alongside.get_or_insert_default();
+            alongside.push(Some(connection.clone()));
+            slot.set(Some(alongside.len() - 1));
+            true
+        };
+        let result = match shared {
+            true => connection.query(
+                sql,
+                cancel,
+                Fetch {
+                    held: Some(&hold),
+                    ..fetch
+                },
+            ),
+            false if hold() => connection.query(sql, cancel, fetch),
+            false => Err(plain_error("Cancelled before it was sent.".into())),
+        };
+        if let Some(slot) = slot.get()
+            && let Ok(mut running) = cancel.0.lock()
+            && let Some(alongside) = &mut running.alongside
+        {
+            alongside[slot] = None;
+        }
+        result
     }
 
     /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
     /// Server alone runs it differently: its session options are the user's to
     /// `SET`, and dbdelve's SQL is written for particular ones.
-    pub fn generated(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+    ///
+    /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
+    /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
+    /// applies.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        feed: Option<&Feed>,
+    ) -> Result<QueryResult, DbError> {
         match self {
-            Self::SqlServer(connection) => connection.generated(sql),
+            Self::SqlServer(connection) => connection.generated(
+                sql,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_) => self.query(sql, cancel),
+            | Self::MongoDb(_) => self.query(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    ..Fetch::default()
+                },
+            ),
         }
     }
 
@@ -1208,6 +1356,14 @@ impl Connection {
     /// a query already returning gigabytes is past the point where stopping the
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
+        if let Some(alongside) = cancel.stop_alongside()
+            && !matches!(self, Self::Snowflake(_) | Self::MongoDb(_))
+        {
+            return alongside
+                .iter()
+                .map(|connection| connection.cancel(&CancelToken::default()))
+                .fold(Ok(()), Result::and);
+        }
         match self {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
@@ -1252,7 +1408,8 @@ impl Connection {
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement, &CancelToken::default()).map(|_| ())
+        self.query(statement, &CancelToken::default(), Fetch::default())
+            .map(|_| ())
     }
 }
 
@@ -1586,6 +1743,16 @@ pub struct QueryResult {
     /// zero both for commands that affected no rows and commands without a row
     /// count, so callers must not infer the command kind from this value.
     pub rows_affected: Option<u64>,
+    /// How many rows the statement returned, when the row limit kept fewer of
+    /// them than that. `None` when `rows` is the whole result.
+    pub capped_from: Option<usize>,
+    /// Set when the statement was stopped before it finished, so `rows` are
+    /// what had arrived by then and how many more there were is unknown.
+    pub stopped: Option<Stopped>,
+    /// What running the statement cost beyond its result, for the user to be
+    /// told beside it: SQL Server's session, reset by a Cancel that landed
+    /// after the statement had finished.
+    pub notice: Option<String>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a
@@ -1608,6 +1775,264 @@ pub struct QueryResult {
     /// is split on the `GO`-separated batch instead, because a batch is a
     /// scope boundary, and one batch readily returns several.
     pub rest: Vec<QueryResult>,
+}
+
+/// Why a statement's rows end before the statement did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stopped {
+    /// It reached the row limit and was safe to stop there.
+    AtLimit,
+    /// The user cancelled it part way.
+    Cancelled,
+}
+
+/// Whether `error` is the user's Cancel landing, in the words each engine's
+/// stop comes back in, rather than anything else that ended the statement while
+/// the cancel was on its way. A server answering in another language reads as
+/// not a cancel, which drops the rows instead of keeping them as a result.
+pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
+    let message = error.message.as_str();
+    match engine {
+        Engine::Postgres => message == "canceling statement due to user request",
+        Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
+        Engine::Sqlite => message == "interrupted",
+        // The second is dbdelve's own, a cancel between partitions.
+        Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
+        Engine::SqlServer => message.starts_with(mssql::CANCELLED),
+        Engine::MongoDb => message == "Cancelled.",
+    }
+}
+
+/// What a Cancel took beyond the statement it stopped, which the user has to
+/// be told even where the rows it had are kept: on SQL Server the error
+/// itself, which says the session was reset. Postgres cannot say whether a
+/// transaction was open, and a cancel aborts the one it lands in; SQLite rolls
+/// back the transaction an interrupted write was in. MySQL's `KILL QUERY` and
+/// SQLite's interrupt of a read undo only the statement, and Snowflake has no
+/// session to lose.
+pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<String> {
+    match engine {
+        Engine::SqlServer => Some(error.message.clone()),
+        Engine::Postgres => Some(
+            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
+             statement until a ROLLBACK."
+                .into(),
+        ),
+        Engine::Sqlite if !reads => Some(
+            "If the statement was inside a transaction, SQLite rolled the whole transaction \
+             back."
+                .into(),
+        ),
+        Engine::Sqlite | Engine::MySql | Engine::MariaDb | Engine::Snowflake | Engine::MongoDb => {
+            None
+        }
+    }
+}
+
+/// How a user statement's rows are taken: how many are kept, where they go as
+/// they arrive, and whether the statement may be stopped once there are
+/// enough of them.
+#[derive(Clone, Copy, Default)]
+pub struct Fetch<'a> {
+    pub limit: Option<usize>,
+    pub feed: Option<&'a Feed>,
+    /// The submission is one statement that only reads, as `sql::stoppable`
+    /// judges it, so stopping it at the limit loses nothing it was going to
+    /// do.
+    pub reads_only: bool,
+    /// Asked once the statement holds its connection, before anything is
+    /// sent: `false` drops it unsent. For a statement queued behind another
+    /// on a connection it shares ([`Connection::query_alongside`]'s fallback),
+    /// so a Cancel before then drops it rather than stopping the other.
+    pub held: Option<&'a dyn Fn() -> bool>,
+}
+
+impl Fetch<'_> {
+    /// [`Fetch::held`], as the error an engine returns before sending.
+    fn hold(&self) -> Result<(), DbError> {
+        match self.held.is_none_or(|held| held()) {
+            true => Ok(()),
+            false => Err(plain_error("Cancelled before it was sent.".into())),
+        }
+    }
+}
+
+/// Rows handed over while a statement is still running, so the first of a
+/// large result is on screen long before the last arrives. The driver pushes
+/// and the grid takes; a row sits here only between the two.
+#[derive(Clone, Default)]
+pub struct Feed(Arc<Mutex<Fed>>);
+
+/// What a [`Feed`] holds since it was last taken from.
+#[derive(Default)]
+pub struct Fed {
+    /// Counts result sets. A taker whose rows came from an earlier set than
+    /// this one has rows of a statement the submission has moved past.
+    pub set: usize,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Vec<Cell>>,
+    /// The first set's column types, once a describe on another connection
+    /// has said, so rows can be shown by type before the statement is done.
+    /// Empty until then.
+    types: Vec<String>,
+    /// Until when the first set's rows are held back for that describe, so
+    /// they are first shown by type rather than restyled under the user's
+    /// eye. Cleared once it has answered, or the statement is over.
+    awaiting: Option<std::time::Instant>,
+    /// When the current set's kept rows reached the limit. Whatever the run
+    /// does after that is not fetching rows anyone will see.
+    pub filled: Option<std::time::Instant>,
+}
+
+impl Feed {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Fed> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn begin(&self, columns: Vec<Column>) {
+        let mut fed = self.lock();
+        fed.set += 1;
+        fed.columns = columns;
+        fed.rows.clear();
+        fed.filled = None;
+    }
+
+    pub(crate) fn push(&self, row: Vec<Cell>) {
+        self.lock().rows.push(row);
+    }
+
+    /// The rows since the last take, under the set's columns, typed once the
+    /// types are known. Positional, and only where the counts agree: the
+    /// describe ran apart from the statement, and a type against the wrong
+    /// column is worse than none.
+    pub fn take(&self) -> Fed {
+        let mut fed = self.lock();
+        if fed.set == 1
+            && fed
+                .awaiting
+                .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return Fed::default();
+        }
+        let mut columns = fed.columns.clone();
+        if fed.set == 1 && fed.types.len() == columns.len() {
+            for (column, data_type) in columns.iter_mut().zip(&fed.types) {
+                column.data_type = Some(data_type.clone());
+            }
+        }
+        Fed {
+            set: fed.set,
+            columns,
+            rows: std::mem::take(&mut fed.rows),
+            types: Vec::new(),
+            awaiting: None,
+            filled: fed.filled,
+        }
+    }
+
+    /// Types learned from a row rather than the description before it.
+    pub(crate) fn retype(&self, columns: Vec<Column>) {
+        self.lock().columns = columns;
+    }
+
+    pub(crate) fn fill(&self) {
+        self.lock().filled = Some(std::time::Instant::now());
+    }
+
+    /// Hold the first set's rows until [`Feed::describe`] or `until`.
+    pub(crate) fn await_types(&self, until: std::time::Instant) {
+        self.lock().awaiting = Some(until);
+    }
+
+    /// The describe's answer, empty when it learned nothing. Rows held for it
+    /// have their geometry rendered here, off the frame thread, as the
+    /// driver renders every row after them.
+    pub(crate) fn describe(&self, types: Vec<String>) {
+        let mut fed = self.lock();
+        fed.awaiting = None;
+        if fed.set == 1 && types.len() == fed.columns.len() {
+            let spatial: Vec<bool> = types
+                .iter()
+                .map(|name| postgres::is_spatial(name))
+                .collect();
+            if spatial.contains(&true) {
+                for row in &mut fed.rows {
+                    postgres::format_spatial_row(row, &spatial);
+                }
+            }
+        }
+        fed.types = types;
+    }
+
+    /// Let held rows go: the statement is over, and the rows are its result.
+    pub(crate) fn release(&self) {
+        self.lock().awaiting = None;
+    }
+
+    /// `None` until [`Feed::describe`] has been told.
+    pub(crate) fn types(&self) -> Option<Vec<String>> {
+        let fed = self.lock();
+        (!fed.types.is_empty()).then(|| fed.types.clone())
+    }
+}
+
+/// The cells of `result` still waiting to be rendered by their column's type,
+/// as `(row, column, value)`: a fed result's rows can arrive before the types
+/// they are rendered by. Copied out so [`render`] can work on them off the
+/// frame thread.
+pub fn unrendered(engine: Engine, result: &QueryResult) -> Vec<(usize, usize, String)> {
+    if engine != Engine::Postgres {
+        return Vec::new();
+    }
+    let spatial: Vec<usize> = result
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            column
+                .data_type
+                .as_deref()
+                .is_some_and(postgres::is_spatial)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if spatial.is_empty() {
+        return Vec::new();
+    }
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            spatial.iter().filter_map(move |&column| {
+                let value = cells.get(column)?.as_deref()?;
+                // EWKB opens with its byte-order flag, `00` or `01`, which no
+                // WKT keyword does: a cheap test before a copy of the value.
+                (value.starts_with("00") || value.starts_with("01"))
+                    .then(|| (row, column, value.to_string()))
+            })
+        })
+        .collect()
+}
+
+/// What [`unrendered`] found, rendered: the value it was, and what it reads as.
+pub fn render(cells: Vec<(usize, usize, String)>) -> Vec<(usize, usize, String, String)> {
+    cells
+        .into_iter()
+        .filter_map(|(row, column, value)| {
+            let rendered = postgres::render_spatial(&value)?;
+            Some((row, column, value, rendered))
+        })
+        .collect()
+}
+
+impl QueryResult {
+    /// The rows the statement returned, held or not.
+    pub fn total_rows(&self) -> usize {
+        self.capped_from.unwrap_or(self.rows.len())
+    }
 }
 
 /// The table a result set's rows can be written back to, already resolved to
@@ -2009,9 +2434,187 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
     }
 }
 
+/// The live checks every engine's `live_` tests make of a queue run at once,
+/// shared because they are one claim about [`Connection::query_alongside`]:
+/// the `Workspace` around it needs a window, and these need a server.
+#[cfg(test)]
+pub(super) mod at_once {
+    use std::time::{Duration, Instant};
+
+    use super::{CancelToken, Connection, DbError, Engine, Fetch, QueryResult, is_cancel};
+    use crate::{session::runs_at_once, sql::Mode};
+
+    /// Each statement on a connection of its own, all at once, as
+    /// `Workspace::run_at_once` sends a queue: how long the lot took, and each
+    /// one's outcome in order.
+    pub(in crate::db) fn run(
+        connection: &Connection,
+        statements: &[&str],
+        cancel: &CancelToken,
+    ) -> (Duration, Vec<Result<QueryResult, DbError>>) {
+        let started = Instant::now();
+        let outcomes = std::thread::scope(|scope| {
+            let running: Vec<_> = statements
+                .iter()
+                .map(|sql| {
+                    scope.spawn(|| connection.query_alongside(sql, cancel, Fetch::default(), false))
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|thread| {
+                    thread
+                        .join()
+                        .expect("the statement's thread should not panic")
+                })
+                .collect()
+        });
+        (started.elapsed(), outcomes)
+    }
+
+    /// Two slow reads run at once take about the time of one: well under what
+    /// they take one after the other on the profile's connection. A queue
+    /// with a write in it is not run at once at all.
+    pub(in crate::db) fn reads_overlap(
+        connection: &Connection,
+        engine: Engine,
+        slow: &str,
+        write: &str,
+    ) {
+        let pair = [slow, slow];
+        assert!(runs_at_once(engine, Mode::ReadWrite, &pair));
+        assert!(!runs_at_once(engine, Mode::Full, &[slow, write]));
+
+        let started = Instant::now();
+        for sql in pair {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .expect("the read should run");
+        }
+        let in_turn = started.elapsed();
+        let (at_once, outcomes) = run(connection, &pair, &CancelToken::alongside());
+        for outcome in outcomes {
+            outcome.expect("the read should run at once with the other");
+        }
+        eprintln!("{engine:?}: two reads in turn {in_turn:?}, at once {at_once:?}");
+        assert!(
+            at_once.as_secs_f64() < in_turn.as_secs_f64() * 0.8,
+            "at once {at_once:?} against {in_turn:?} in turn"
+        );
+    }
+
+    /// Wait for `count` statements under `cancel` to hold a connection of
+    /// their own, and a moment more for them to reach the server. A fixed
+    /// wait loses to a slow connect, and the cancel then lands before
+    /// anything was sent.
+    fn connected(cancel: &CancelToken, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline
+            && cancel.0.lock().map_or(0, |running| {
+                running
+                    .alongside
+                    .as_ref()
+                    .map_or(0, |alongside| alongside.iter().flatten().count())
+            }) < count
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    /// A cancel under the run's token stops every statement running at once,
+    /// each on its own connection, and leaves the profile's connection be.
+    pub(in crate::db) fn a_cancel_stops_them_all(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+    ) {
+        let cancel = CancelToken::alongside();
+        let (elapsed, outcomes) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                connected(&cancel, 2);
+                connection
+                    .cancel(&cancel)
+                    .expect("the cancel should reach each connection");
+            });
+            run(connection, &[runaway, runaway], &cancel)
+        });
+        eprintln!("{engine:?}: two runaways cancelled after {elapsed:?}");
+        for outcome in outcomes {
+            let error = outcome.expect_err("the statement should have been stopped");
+            assert!(is_cancel(engine, &error), "{}", error.message);
+        }
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        connection
+            .query("SELECT 1", &CancelToken::default(), Fetch::default())
+            .expect("the profile's own connection should be untouched");
+    }
+
+    /// A cancel under one statement's own token stops that statement alone:
+    /// the one beside it, under a token of its own, runs to its end, as a
+    /// Cancel on one chip of a queue run at once leaves the others.
+    pub(in crate::db) fn a_cancel_stops_only_its_own(
+        connection: &Connection,
+        engine: Engine,
+        runaway: &str,
+        slow: &str,
+    ) {
+        let (theirs, mine) = (CancelToken::alongside(), CancelToken::alongside());
+        let (stopped, finished) = std::thread::scope(|scope| {
+            let stopped = scope
+                .spawn(|| connection.query_alongside(runaway, &theirs, Fetch::default(), false));
+            let finished =
+                scope.spawn(|| connection.query_alongside(slow, &mine, Fetch::default(), false));
+            connected(&theirs, 1);
+            connected(&mine, 1);
+            connection
+                .cancel(&theirs)
+                .expect("the cancel should reach its connection");
+            let join = |thread: std::thread::ScopedJoinHandle<'_, _>| {
+                thread
+                    .join()
+                    .expect("the statement's thread should not panic")
+            };
+            (join(stopped), join(finished))
+        });
+        let error = stopped.expect_err("the statement cancelled should have been stopped");
+        assert!(is_cancel(engine, &error), "{}", error.message);
+        finished.expect("the statement beside it should run to its end");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_cancel_itself_reads_as_a_cancel() {
+        let error = |message: &str| DbError {
+            message: message.into(),
+            position: None,
+        };
+        let reset = format!("{} The connection was reset.", mssql::CANCELLED);
+        for (engine, words) in [
+            (Engine::Postgres, "canceling statement due to user request"),
+            (Engine::MySql, "Query execution was interrupted"),
+            (Engine::MariaDb, "Query execution was interrupted"),
+            (Engine::Sqlite, "interrupted"),
+            (Engine::Snowflake, "SQL execution canceled"),
+            (Engine::SqlServer, reset.as_str()),
+        ] {
+            assert!(is_cancel(engine, &error(words)), "{engine:?}");
+            assert!(!is_cancel(engine, &error("division by zero")), "{engine:?}");
+        }
+        // The statement had finished: a whole result, not a cancelled one.
+        assert!(!is_cancel(
+            Engine::SqlServer,
+            &error("The statement finished, but Cancel arrived after that.")
+        ));
+        assert!(!is_cancel(
+            Engine::MariaDb,
+            &error("Query execution was interrupted (max_statement_time exceeded)")
+        ));
+    }
 
     #[test]
     fn every_buffer_is_highlighted_by_a_grammar_the_editor_was_built_with() {

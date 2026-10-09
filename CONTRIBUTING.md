@@ -114,6 +114,26 @@ cargo test -- --include-ignored
 -F`) instead of your real `~/.ssh/config`; without it, `live_ssh_*` tests
 panic asking for it rather than silently skipping.
 
+## Load testing
+
+The seed keeps `events` narrow. To see how far DBDelve gets with a wide one,
+`dev/load.sh` rebuilds `events` in the running Postgres: the same rows, key and
+indexes, plus about a hundred columns of every type Postgres has, several JSON
+columns (up to a couple of KB a row) and geometry.
+
+```sh
+dev/load.sh                  # a million rows
+ROWS=100000 dev/load.sh      # fewer rows
+```
+
+Keep the default million if you'll run the live tests afterwards; they count
+on it. Expect a few minutes and about 3 GB. `COMPOSE_PROJECT_NAME` points it at
+another stack. CI never runs it. To get the default seed back:
+
+```sh
+docker compose down -v && docker compose up -d --wait
+```
+
 ## Before opening a PR
 
 CI runs these; run them locally first:

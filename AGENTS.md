@@ -20,8 +20,24 @@ require it, stop and raise it instead.
    column projection, no reformatting on execute, and nothing at all on a
    statement the user did not ask DBDelve to change. A client that silently
    alters statements cannot be trusted with the statements that matter, which
-   is why "silently" is the word that carries the rule. Row limits apply to
-   DBDelve-generated preview queries only, and they are visible in the UI.
+   is why "silently" is the word that carries the rule. A `LIMIT` is written
+   only into DBDelve-generated preview queries. A user's own statement runs
+   as typed; the row limit bounds it by keeping only that many rows and
+   dropping the rest as they arrive, never by changing the statement. A
+   read is stopped once it passes the limit instead of being drained only when
+   it is the submission's one statement (`sql::stoppable`: rerunnable, both
+   parsers count exactly one statement, and no `set_config`, advisory or named
+   lock or `@x :=` the session keeps) and stopping it undoes nothing. Postgres
+   cancels it only outside any transaction the user opened, since a cancel
+   aborts it, and only if `pg_stat_activity` shows the session's process running
+   this statement's exact text, never waiting on the side session to find
+   out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
+   rolled back alone; SQLite interrupts it; MongoDB drops the cursor; SQL Server
+   sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
+   `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
+   `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
+   Anything else is drained. Either way the limit is visible in the UI, and a capped
+   result says how many rows the statement returned, or that it was stopped.
 
    DBDelve _does_ write SQL when the user asks it to, and only then, always
    where the user can read it:
@@ -84,7 +100,8 @@ require it, stop and raise it instead.
    exactly `{_id: <literal>}` and whose update is exactly a `$set` of literals,
    one `insertOne` of a literal document, and one `deleteOne` by `_id`; and
    `mql::browse::is_generated_read` admits only the preview's own
-   `find(filter).sort().skip().limit()` and the status bar's `countDocuments`,
+   `find(filter).sort().skip().limit()` (no `limit()` under no row limit) and the
+   status bar's `countDocuments`,
    each written again from its parts and compared with the text,
    with a filter that is one document running no server-side JavaScript
    (`$where`, `$function`, `$accumulator`). Both read the tree-sitter parse, not
@@ -316,13 +333,15 @@ timer. Database work uses blocking drivers, which own their runtimes
 internally, spawned onto the background executor. `rusqlite` is blocking by
 construction and has no runtime at all.
 
-`tokio` is a direct dependency for one reason, and the same rule is why it is
-safe: tiberius is async with no runtime of its own, so `mssql::Connection`
-owns a tokio current-thread runtime per connection and every call into the
-driver is a `runtime.block_on(...)` on the background thread the query was
-already spawned onto. That is what the `postgres` crate does privately around
-tokio-postgres, written out. The runtime lives behind the connection mutex and
-nothing that leaves `src/db/mssql.rs` is a future.
+`tokio` is a direct dependency for two drivers, and the same rule is why it
+is safe. tiberius is async with no runtime of its own, and tokio-postgres is
+used directly rather than through the blocking `postgres` crate, whose
+`simple_query` collects every row before returning one and so cannot stop
+keeping rows at the row limit. Each `mssql::Connection` and
+`postgres::Connection` owns a tokio current-thread runtime and every call into
+the driver is a `runtime.block_on(...)` on the background thread the query was
+already spawned onto. The runtime lives behind the connection mutex and nothing
+that leaves `src/db/mssql.rs` or `src/db/postgres.rs` is a future.
 
 `tokio-rustls` in the tree is not a breach of that rule, and the rule is why:
 the TLS handshake is a future belonging to the connection, so it runs inside the
@@ -382,6 +401,9 @@ sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
 ```
 
 The seed uses `unhex()`, so it needs sqlite3 3.41 or later.
+
+`dev/load.sh` rebuilds Postgres `events` about a hundred columns wide for load testing;
+it is opt-in and CI never runs it (see `CONTRIBUTING.md`).
 
 **The MySQL container reports itself healthy when its init script failed.**
 `mysqladmin ping` does not care whether the seed applied, so a half-seeded
@@ -672,7 +694,10 @@ Decided, and not to be re-litigated:
   trip a run needs and not just the statement: the preflight ahead of it
   (`@@TRANCOUNT` and the result-set describe) and the follow-ups behind it
   (`@@ROWCOUNT`, the edit-target describe) run inside the same window and are
-  stopped the same way.
+  stopped the same way. The timer stops applying once a result set's kept rows
+  reach the limit: what follows is rows read only to be counted, and closing the
+  connection for them would take the user's transaction with it. Cancel still
+  reaches it.
 - **Cancel reaches the running statement and nothing queued behind it.** The
   handle it needs (Postgres's `CancelToken`, MySQL's connection id, SQLite's
   `InterruptHandle`, a second handle on SQL Server's socket) is captured in
@@ -688,8 +713,23 @@ Decided, and not to be re-litigated:
   before it is ever sent (`InFlight::cancel_queued`, checked in
   `Connection::run` once the mutex is taken and the session reconnected), and a Cancel that lands after the statement already finished is
   answered "Cancel arrived after that." rather than left to look like it did
-  nothing.
-- **SQL Server's Cancel closes the connection.** tiberius cannot send TDS's
+  nothing. On SQL Server that Cancel still closes the connection, so the
+  complete result lands with a notice about the reset instead of an error.
+  Rows that streamed in are kept as a cancelled result only for a stoppable
+  read where `db::is_cancel` matched the error; otherwise the error is shown.
+  Either way `db::cancel_cost` says what the cancel cost: SQL Server's session
+  reset, Postgres's aborted transaction, a SQLite write's rolled-back
+  transaction.
+- **Postgres's side session** (describe, and the check before a stop at the
+  limit) opens with a 2-second `statement_timeout`, and neither ever blocks
+  the run on it: a describe waits its turn there on a thread of its own, and a
+  stop that cannot get it quickly drains instead. A describe waits on the same
+  locks as the user's statement, which their own open transaction can hold for
+  good. The run's first rows are held for the describe for up to a second
+  (`Feed::await_types`), so they are first shown by type rather than restyled
+  once it answers.
+- **SQL Server's Cancel closes the connection** (a read stopped at the row
+  limit does not: that is `SET ROWCOUNT`). tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary
   login lacks, so Cancel shuts the socket down and the server abandons the
   batch, rolling back what it had open (`live_a_cancel_stops_the_statement_on_the_server_and_reconnects`
@@ -731,7 +771,10 @@ Decided, and not to be re-litigated:
   registered under that token. A cancel that lands before the submit has
   returned a handle is kept on the token and carried out when the handle
   arrives. The other engines take the token and ignore it:
-  they stop whatever their one connection is running.
+  they stop whatever their one connection is running, except under a
+  token made by `CancelToken::alongside`, which stops the connections a queue
+  run at once opened instead (see "Session and tabs"). Between partitions the
+  fetch checks whether Cancel was asked and stops fetching the rest.
   Statements are always submitted `async=true`, because a synchronous submit
   withholds its handle for up to 45 seconds and the handle is what Cancel needs.
 - **Snowflake signs in with a key pair and nothing else.** An RS256 token per
@@ -825,7 +868,11 @@ Decided, and not to be re-litigated:
   selection covering one batch is sent as that batch; one covering several runs
   them in turn, a submission apiece (`sql::queued_batches`), because the batch
   is the scope boundary a `DECLARE` or a temp table ends with, and splitting
-  below it would send a declaration and its reader as two batches. `GO n` is
+  below it would send a declaration and its reader as two batches. The
+  exception is a selection whose batches are nothing but plain reads naming no
+  `@variable` or `#temp` table (`sql::split_reads`): when it would run at once,
+  `run_query` cuts it into its statements and each goes out on a lane of its
+  own, every chip up front, as on the other engines. `GO n` is
   still refused (`sql::batch_counts`): the count repeats its batch, and running
   it once is not what the buffer says.
   Format Query reflows each batch alone with sqlformat's SQL Server dialect,
@@ -941,6 +988,14 @@ Decided, and not to be re-litigated:
   shared type when the present, non-null cells agree and `mixed` otherwise. An
   edit is coerced back to its cell's tag; text that does not coerce is an error
   before the review, never a quiet string.
+- **The row limit caps a `find` or `aggregate` cursor, and a read is stopped
+  there by dropping it**, which the driver kills on the server and which
+  undoes nothing; an aggregate with `$out` or `$merge` runs to its end. The
+  first batch is sized to limit+1 (capped at 10,000) unless the statement set
+  its own `batchSize`. A
+  command's reply is one document of at most 16MB and is not capped. Rows
+  are not streamed into the grid: a later document can bring a field no
+  earlier one had, so the columns are not known until the last one is in.
 - **Cancel goes by session, not by comment.** Every run is sent in a driver
   session of its own with the statement untouched (a user's `comment` is theirs
   and is never rewritten to carry a tag). `cancel` takes `&self`, finds the run's
@@ -1109,13 +1164,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`open_query`) and `last_query`.** Do not reintroduce a single shared editor
   for anything.
 - **A selection holding more than one statement runs each of them in turn, one
-  chip per result set.** `sql::queued_statements` splits it and `Queue` on
+  chip per result set, unless every one is a plain read, when they run at
+  once.** `sql::queued_statements` splits it and `Queue` on
   the tab is the queue: `remaining` is what has not gone out, `done` holds a
   `Finished` per result kept, and `showing` says which of them the tab's one
   `query`/`results` pair is displaying. That is one per statement on four
   engines, where a submission holds one statement; on SQL Server the unit is
   the batch, so one submission can land several (see the SQL Server entry under
-  "Engine divergences"). Each statement goes out through
+  "Engine divergences"). Every statement has a chip from the moment Run is
+  pressed: those not yet sent read "queued" and cannot be selected. Each
+  statement goes out through
   `execute_sql` separately, so `sql::classify` and `sql::gate` answer for each
   one on its own and a statement the gate stops parks a `PendingRun` the rest
   wait behind. Nothing else changes: one statement -- selected, or the one
@@ -1129,6 +1187,52 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   fails raises a Stop/Continue decision (`Session::queue_failure`) rather
   than deciding for the user, while a Cancel ends the queue without asking,
   because a cancel was already the decision.
+- **A queue of plain reads runs at once, each on a connection of its own**
+  (`session::runs_at_once`, `Workspace::run_at_once`). Plain is
+  `sql::plain_read`: every statement a query `classify` reads as a read, so no
+  `SET`, `USE`, transaction control, declaration or `SELECT … INTO`, no call
+  whose answer is the session's (`nextval`, advisory and named locks,
+  `LAST_INSERT_ID`, `SCOPE_IDENTITY`, `@x := …`), and on MongoDB a read with
+  no `$out` or `$merge`. And only while `Profile::in_turn` is `None`: what the
+  user's statements left on the session (`sql::leaves`) -- a transaction
+  still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
+  `ROLLBACK`, read off what was sent rather than asked of the server), or a
+  `SET`, `USE`, temporary table or one of those session calls
+  (`session_changed`, until the next connect)
+  -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,
+  a statement nothing can parse and an autocommitted write or DDL leave
+  nothing. A queue of reads held in turn this way says why in the notice.
+  Every entry is in `done` from the start, in `Idle`, and runs through
+  `execute_unchecked` with its `session::Lane`: the profile (by id and
+  generation) and run (its shared token) it was issued for, and where it
+  starts in `Queue::sql`. It lands in its own entry, found by that key and
+  never by position, because a SQL Server batch landing several sets puts
+  results ahead of those still running, and only while the tab still runs
+  that same run; a switch to another profile meanwhile changes nothing about
+  where it lands. Each statement's blocking call runs on a thread of its own
+  (`on_own_thread`), as a Cancel does, not on GPUI's background executor,
+  which on Linux has a thread per core and would be filled by them.
+  `Connection::query_alongside` opens the connection the way the
+  profile's was (its tunnel, password and timeout; Postgres and MySQL share
+  its side session; the Read-only hold is put on it too) and drops it when the
+  statement ends; Snowflake and MongoDB run it on the profile's own, which
+  already runs statements side by side, and so does any engine whose server
+  refuses another connection, behind the profile's other statements. There
+  Cancel stops it only once it holds that connection (`Fetch::held`); while
+  it still waits its turn, Cancel drops it unsent and leaves the statement
+  ahead of it alone. At most `STATEMENTS_AT_ONCE` (8) are
+  out together; the rest start as those land. Each is the lone statement on
+  its connection, so it streams and stops at the row limit as a single run
+  does. A failure stays on its own chip and the rest carry on, with no
+  Stop/Continue to raise. The tab's own slot is `Running` under a
+  `CancelToken::alongside` that only names the run; each statement runs under
+  one of its own. So Cancel stops the statement on screen and the rest carry
+  on, while with a finished result on screen it stops every one still out, as
+  closing the tab does, and drops those not yet sent. Nothing else runs on or
+  is written over the tab (a refusal goes to the notice) until the last has
+  landed and `land_lane` gives the slot the last statement's result, as a
+  queue run in turn leaves it. The slot streams nothing meanwhile, so the
+  status bar reads the statement on screen instead (`Queue::at_once`).
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
   reaches `advance_queue`. Without the flag an ordinary Run, a header sort or

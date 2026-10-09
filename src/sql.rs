@@ -185,6 +185,38 @@ fn queued_batches(sql: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// A SQL Server selection's batches cut into their statements, so a run of
+/// reads can send each at once on a connection of its own as every other
+/// engine does. Only when every batch is plain reads (`plain_read`) naming no
+/// `@variable` and no `#temp` table, which is what a batch scopes: nothing in
+/// one needs another statement beside it. Like `queued_statements`, only the
+/// statements `selection` touches. Empty for anything else, and on every other
+/// engine, whose units are statements already.
+pub(crate) fn split_reads(
+    engine: Engine,
+    sql: &str,
+    batches: &[Range<usize>],
+    selection: Range<usize>,
+) -> Vec<Range<usize>> {
+    let reads_alone = |batch: &str| {
+        plain_read(engine, batch)
+            && !tsql_scan(batch).0.iter().any(|word| {
+                let word = &batch[word.clone()];
+                word.starts_with('#') || word.starts_with('@') && !word.starts_with("@@")
+            })
+    };
+    if engine != Engine::SqlServer || !batches.iter().all(|batch| reads_alone(&sql[batch.clone()]))
+    {
+        return Vec::new();
+    }
+    batches
+        .iter()
+        .flat_map(|batch| tsql_statements(sql, batch.clone()))
+        .filter_map(|statement| trim_range(sql, statement))
+        .filter(|range| range.start < selection.end && selection.start < range.end)
+        .collect()
+}
+
 /// One key of an `ORDER BY`, as dbdelve reads and writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SortKey {
@@ -320,16 +352,19 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
 /// columns that tell its rows apart: without a total order the server may hand
 /// the same row to two pages and none to another. The key follows a
 /// `(SELECT NULL)` that orders nothing, which is how [`unpaged`] tells it from
-/// a sort the user asked for, and is all there is when no key is known.
+/// a sort the user asked for, and is all there is when no key is known. A
+/// preview with no limit is one page already, and comes back as it is.
 ///
-/// `None` for a statement with no limit this can read, which is not a preview.
+/// `None` for a statement this cannot read, or whose limit it cannot.
 pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
     if engine != Engine::SqlServer {
         return Some(statement.to_string());
     }
     let tree = parse(statement)?;
     let anchor = clause_anchor(&tree, statement)?;
-    let limit = child_of_kind(&anchor, "limit")?;
+    let Some(limit) = child_of_kind(&anchor, "limit") else {
+        return Some(statement.to_string());
+    };
     let number = |node: tree_sitter::Node| -> Option<usize> {
         statement
             .get(child_of_kind(&node, "literal")?.byte_range())?
@@ -1685,13 +1720,8 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
 /// finds statement boundaries in a buffer someone is still typing into;
 /// this needs a typed statement, and would rather refuse than guess.
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
-    let dialect: Box<dyn Dialect> = match engine {
-        Engine::Postgres => Box::new(PostgreSqlDialect {}),
-        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
-        Engine::Sqlite => Box::new(SQLiteDialect {}),
-        Engine::Snowflake => Box::new(SnowflakeDialect {}),
-        Engine::SqlServer => Box::new(MsSqlDialect {}),
-        Engine::MongoDb => return crate::mql::classify(sql),
+    let Some(dialect) = dialect(engine) else {
+        return crate::mql::classify(sql);
     };
 
     if engine == Engine::MariaDb
@@ -1722,6 +1752,19 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .iter()
         .map(statement_verdict)
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB,
+/// which is not SQL.
+fn dialect(engine: Engine) -> Option<Box<dyn Dialect>> {
+    Some(match engine {
+        Engine::Postgres => Box::new(PostgreSqlDialect {}),
+        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
+        Engine::Sqlite => Box::new(SQLiteDialect {}),
+        Engine::Snowflake => Box::new(SnowflakeDialect {}),
+        Engine::SqlServer => Box::new(MsSqlDialect {}),
+        Engine::MongoDb => return None,
+    })
 }
 
 /// MariaDB's `ANALYZE <statement>` respelled as the `EXPLAIN ANALYZE` sqlparser
@@ -1772,6 +1815,189 @@ fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String
 pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
     let verdict = classify(engine, sql);
     verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
+}
+
+/// Whether a submission may be stopped part way once its rows pass the limit:
+/// a read, and the only statement in it. Stopping one statement of several
+/// ends the rest with it -- a `COMMIT` behind a `SELECT` never runs, a `SET`
+/// before it is rolled back with the implicit transaction -- and the rows on
+/// screen are not the last statement's. A SQL Server batch is several
+/// statements in one submission wherever the user did not separate them.
+///
+/// Both parsers have to count one: the grammar reads `BEGIN; …; COMMIT` as a
+/// single transaction block. And it must leave the session alone: a Postgres
+/// cancel aborts the implicit transaction a `set_config` or advisory lock
+/// lives in, so such a read is drained rather than stopped.
+pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
+    let parsed_alone = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql)
+            .is_ok_and(|statements| statements.len() == 1),
+        None => true,
+    };
+    rerunnable(engine, sql)
+        && parsed_alone
+        && Buffer::for_engine(engine, sql).statements().len() == 1
+        && !touches_session(engine, sql)
+}
+
+/// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,
+/// transaction control, declaration or `SELECT … INTO`, no call that reads or
+/// changes what only its session holds, and nothing `classify` cannot read.
+/// Such a submission leaves its session as it found it, and reads the same on
+/// another session to the same server as on this one, bar what this one
+/// already holds that a fresh one would not.
+pub(crate) fn plain_read(engine: Engine, sql: &str) -> bool {
+    let queries_only = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+            statements
+                .iter()
+                .all(|statement| matches!(statement, Statement::Query(_)))
+        }),
+        None => true,
+    };
+    queries_only && rerunnable(engine, sql) && !touches_session(engine, sql)
+}
+
+/// Calls whose answer or effect belongs to the session they run on: a
+/// sequence's value, a session variable, an advisory or named lock, the last
+/// identity inserted.
+const SESSION_FUNCTIONS: &[&str] = &[
+    "nextval",
+    "currval",
+    "setval",
+    "lastval",
+    "set_config",
+    "last_insert_id",
+    "get_lock",
+    "release_lock",
+    "release_all_locks",
+    "scope_identity",
+    "sp_getapplock",
+    "sp_releaseapplock",
+];
+
+/// Whether a query calls one of [`SESSION_FUNCTIONS`], an advisory lock, reads
+/// `@@IDENTITY` or assigns a variable with `:=`. Read off the tokens whatever
+/// the engine, so a call anywhere in the statement counts, and a column that
+/// merely shares a name keeps its statement in turn, the conservative side.
+fn touches_session(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    let Ok(tokens) = Tokenizer::new(dialect.as_ref(), sql).tokenize() else {
+        return true;
+    };
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Assignment => return true,
+            Token::Word(word) => {
+                let name = word.value.to_lowercase();
+                let called = tokens.peek() == Some(&&Token::LParen);
+                if name == "@@identity"
+                    || called
+                        && (SESSION_FUNCTIONS.contains(&name.as_str())
+                            || name.starts_with("pg_advisory")
+                            || name.starts_with("pg_try_advisory"))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What running `sql` leaves on its session that a fresh connection to the
+/// same profile would not have, which is what keeps a queue of reads from
+/// running at once on fresh ones.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Leaves {
+    /// `Some(true)` when it leaves a transaction open, `Some(false)` when it
+    /// ends one, `None` when it does neither.
+    pub(crate) transaction: Option<bool>,
+    /// A `SET` (MySQL's `autocommit` among them), `USE`, `PRAGMA … =`, table
+    /// lock, temporary table or variable `SELECT … INTO`, which lasts until
+    /// the session does, or a call [`touches_session`] finds: `set_config`, a
+    /// lock, an `@x :=`. One that only reads what the session holds counts
+    /// too, the conservative side.
+    pub(crate) settings: bool,
+}
+
+/// [`Leaves`] for one submission of the user's. A read, a `SHOW`, an `EXPLAIN`
+/// or an autocommitted write leaves nothing a fresh connection would not see,
+/// and neither does a statement nothing can read -- bar a `SET` or `USE` the
+/// grammar does not know, which still changed the session if it ran.
+/// Snowflake and MongoDB keep nothing from one run to the next.
+pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
+    let mut leaves = Leaves::default();
+    let Some(dialect) = dialect(engine).filter(|_| engine != Engine::Snowflake) else {
+        return leaves;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), sql) {
+        Ok(statements) => statements
+            .iter()
+            .for_each(|statement| leaves.add(statement)),
+        Err(_) => {
+            let tokens = Tokenizer::new(dialect.as_ref(), sql)
+                .tokenize()
+                .unwrap_or_default();
+            let first = tokens.iter().find_map(|token| match token {
+                Token::Word(word) => Some(word.keyword),
+                _ => None,
+            });
+            leaves.settings = match first {
+                Some(Keyword::SET | Keyword::USE) => true,
+                Some(Keyword::PRAGMA) => tokens.contains(&Token::Eq),
+                _ => false,
+            };
+        }
+    }
+    leaves.settings |= touches_session(engine, sql);
+    leaves
+}
+
+impl Leaves {
+    fn add(&mut self, statement: &Statement) {
+        match statement {
+            // A T-SQL `BEGIN … END` block, which opens no transaction itself.
+            Statement::StartTransaction {
+                has_end_keyword: true,
+                statements,
+                ..
+            } => statements.iter().for_each(|statement| self.add(statement)),
+            Statement::StartTransaction { .. } => self.transaction = Some(true),
+            // `AND CHAIN` opens the next one as it ends this one.
+            Statement::Commit { chain, .. }
+            | Statement::Rollback {
+                chain,
+                savepoint: None,
+            } => self.transaction = Some(*chain),
+            Statement::Set(_)
+            | Statement::Use(_)
+            | Statement::LockTables { .. }
+            | Statement::Pragma { is_eq: true, .. } => self.settings = true,
+            Statement::CreateTable(table) => {
+                self.settings |= table.temporary || table.name.to_string().starts_with('#');
+            }
+            Statement::Query(query) => {
+                if let SetExpr::Select(select) = query.body.as_ref()
+                    && let Some(into) = &select.into
+                {
+                    self.settings |= into.temporary
+                        || into
+                            .targets
+                            .iter()
+                            .any(|target| target.to_string().starts_with(['#', '@']));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The lowest mode that may run one statement: what its variant earns, raised
@@ -2590,6 +2816,53 @@ mod tests {
         // The same text is two statements on an engine whose session carries
         // the declaration across submissions.
         assert_eq!(queued_statements(Engine::Postgres, sql, None).len(), 2);
+    }
+
+    fn split_texts(engine: Engine, sql: &str) -> Vec<&str> {
+        let batches = queued_statements(engine, sql, Some(0..sql.len()));
+        queued_texts(sql, &split_reads(engine, sql, &batches, 0..sql.len()))
+    }
+
+    #[test]
+    fn a_sql_server_batch_of_plain_reads_splits_into_its_statements() {
+        let sql = "SELECT 1 AS a;\nSELECT [b] FROM t WHERE n = '@x #y';";
+        assert_eq!(
+            split_texts(Engine::SqlServer, sql),
+            vec!["SELECT 1 AS a", "SELECT [b] FROM t WHERE n = '@x #y'"]
+        );
+        assert_eq!(
+            split_texts(
+                Engine::SqlServer,
+                "SELECT 1;\nGO\nSELECT 2; SELECT @@VERSION;"
+            ),
+            vec!["SELECT 1", "SELECT 2", "SELECT @@VERSION"]
+        );
+
+        // Only the statements the selection touches.
+        let batches = queued_statements(Engine::SqlServer, sql, Some(0..3));
+        assert_eq!(split_reads(Engine::SqlServer, sql, &batches, 0..3).len(), 1);
+
+        assert!(split_texts(Engine::Postgres, "SELECT 1; SELECT 2;").is_empty());
+    }
+
+    /// Each of these needs the rest of its batch beside it, or is no plain
+    /// read, so the batch is sent whole as it always was.
+    #[test]
+    fn a_sql_server_batch_with_anything_but_plain_reads_stays_whole() {
+        for sql in [
+            "DECLARE @x int = 1; SELECT @x;",
+            "SELECT 1; SELECT @x;",
+            "SELECT 1; SELECT * FROM #t;",
+            "SELECT 1; SELECT * FROM ##t;",
+            "SELECT 1; EXEC sp_who;",
+            "SET NOCOUNT ON; SELECT 1;",
+            "SELECT 1; IF 1 = 1 BEGIN SELECT 2; END",
+            "BEGIN SELECT 1; SELECT 2; END",
+            "SELECT 1;\nGO\nSELECT 2; SELECT @x;",
+            "SELECT 1; UPDATE t SET a = 1;",
+        ] {
+            assert!(split_texts(Engine::SqlServer, sql).is_empty(), "{sql}");
+        }
     }
 
     /// A batch is what SQL Server is sent, so a grid is reserved per statement
@@ -3808,8 +4081,11 @@ mod tests {
                 "{engine:?}"
             );
         }
-        // Not a preview: nothing to re-spell, so nothing to run.
-        assert_eq!(paged(Engine::SqlServer, &statement(""), &[]), None);
+        // No limit is one page, which needs no `OFFSET` and so no order.
+        assert_eq!(
+            paged(Engine::SqlServer, &statement(""), &[]).as_deref(),
+            Some(statement("").as_str())
+        );
         assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1", &[]), None);
     }
 
@@ -4144,6 +4420,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_lone_read_is_stopped_at_the_limit() {
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Snowflake,
+            Engine::SqlServer,
+        ] {
+            assert!(stoppable(engine, "SELECT * FROM t"), "{engine:?}");
+            assert!(stoppable(engine, "SELECT * FROM t;"), "{engine:?}");
+            assert!(
+                stoppable(engine, "-- the big one\nSELECT * FROM t"),
+                "{engine:?}"
+            );
+            for sql in [
+                "SELECT * FROM t; COMMIT",
+                "SET x = 1; SELECT * FROM t",
+                "BEGIN; SELECT * FROM t; COMMIT",
+                "SELECT 1; SELECT * FROM t",
+                "UPDATE t SET v = 1",
+            ] {
+                assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        assert!(!stoppable(
+            Engine::SqlServer,
+            "SELECT * FROM t\nSELECT * FROM u"
+        ));
+        // SQL Server caps a stoppable read with `SET ROWCOUNT`, which caps a
+        // write just the same, so nothing that writes may get through.
+        for sql in [
+            "SELECT * INTO #copy FROM t",
+            "SELECT * INTO copy FROM t",
+            "EXEC dbo.report",
+            "EXECUTE dbo.report 1",
+            "dbo.report",
+            "INSERT INTO t SELECT * FROM u",
+            "SELECT * FROM t; DELETE FROM t",
+            "IF 1 = 1 DELETE FROM t",
+            "BEGIN SELECT * FROM t; DELETE FROM t END",
+            "WITH c AS (SELECT 1 AS a) DELETE FROM t",
+            "MERGE t USING u ON t.id = u.id WHEN MATCHED THEN DELETE;",
+        ] {
+            assert!(!stoppable(Engine::SqlServer, sql), "{sql}");
+        }
+        assert!(stoppable(
+            Engine::SqlServer,
+            "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
+        ));
+        for (engine, sql) in [
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false), * FROM t",
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1), * FROM t"),
+            (Engine::MySql, "SELECT GET_LOCK('held', 0), t.* FROM t"),
+            (Engine::MySql, "SELECT @n := @n + 1, t.* FROM t"),
+        ] {
+            assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+        }
+        assert!(stoppable(Engine::MongoDb, "db.accounts.find({})"));
+        assert!(stoppable(
+            Engine::MongoDb,
+            "db.accounts\n  .find({})\n  .sort({a: 1})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.find({})\ndb.other.find({})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.aggregate([{$out: 'copy'}])"
+        ));
+    }
+
     /// Every MongoDB write returns a reply grid, so a restored one is offered
     /// Refresh only when this holds.
     #[test]
@@ -4160,6 +4513,7 @@ mod tests {
             "db.accounts.deleteOne({_id: 1})",
             "db.accounts.findOneAndUpdate({_id: 1}, {$set: {a: 2}})",
             "db.accounts.aggregate([{$out: 'copy'}])",
+            "db.accounts.aggregate([{$merge: 'copy'}])",
             "db.accounts.find({}",
         ] {
             assert!(!rerunnable(Engine::MongoDb, sql), "{sql}");
@@ -4677,5 +5031,106 @@ mod tests {
 
         assert!(formatted.lines().count() > 1, "{formatted}");
         assert!(formatted.contains("  "), "{formatted}");
+    }
+
+    #[test]
+    fn a_query_calling_on_its_session_is_no_plain_read() {
+        for (engine, statement) in [
+            (Engine::Postgres, "SELECT nextval('s')"),
+            (
+                Engine::Postgres,
+                "SELECT pg_catalog.currval('s'), lastval()",
+            ),
+            (Engine::Postgres, "SELECT setval('s', 5)"),
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'x', false)",
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1)"),
+            (Engine::Postgres, "SELECT pg_try_advisory_xact_lock(1)"),
+            (Engine::MySql, "SELECT @x := 1"),
+            (Engine::MariaDb, "SELECT @n := @n + 1 FROM t"),
+            (Engine::MySql, "SELECT LAST_INSERT_ID()"),
+            (Engine::MySql, "SELECT GET_LOCK('a', 10)"),
+            (Engine::MySql, "SELECT RELEASE_LOCK('a')"),
+            (Engine::SqlServer, "SELECT SCOPE_IDENTITY()"),
+            (Engine::SqlServer, "SELECT @@IDENTITY"),
+        ] {
+            assert!(!plain_read(engine, statement), "{statement}");
+        }
+        assert!(plain_read(Engine::Postgres, "SELECT nextval FROM t"));
+        assert!(plain_read(Engine::MySql, "SELECT @x, 1"));
+        assert!(plain_read(Engine::SqlServer, "SELECT @@VERSION"));
+    }
+
+    #[test]
+    fn only_an_open_transaction_or_a_changed_session_is_left_behind() {
+        let open = Leaves {
+            transaction: Some(true),
+            settings: false,
+        };
+        let closed = Leaves {
+            transaction: Some(false),
+            settings: false,
+        };
+        let settings = Leaves {
+            transaction: None,
+            settings: true,
+        };
+        for (engine, statement, left) in [
+            (Engine::Postgres, "BEGIN", &open),
+            (Engine::Postgres, "START TRANSACTION", &open),
+            (Engine::MySql, "START TRANSACTION", &open),
+            (Engine::SqlServer, "BEGIN TRANSACTION", &open),
+            (Engine::Postgres, "COMMIT", &closed),
+            (Engine::Postgres, "END", &closed),
+            (Engine::MySql, "ROLLBACK", &closed),
+            (Engine::Postgres, "COMMIT AND CHAIN", &open),
+            (
+                Engine::Postgres,
+                "BEGIN; UPDATE t SET a = 1; COMMIT",
+                &closed,
+            ),
+            (Engine::Postgres, "SET search_path TO other", &settings),
+            (Engine::MySql, "SET autocommit = 0", &settings),
+            (Engine::MySql, "SET @x = 1", &settings),
+            (Engine::MySql, "USE other", &settings),
+            (Engine::SqlServer, "SET NOCOUNT ON", &settings),
+            (
+                Engine::Postgres,
+                "CREATE TEMPORARY TABLE t (a int)",
+                &settings,
+            ),
+            (Engine::SqlServer, "CREATE TABLE #t (a int)", &settings),
+            (Engine::SqlServer, "SELECT * INTO #t FROM s", &settings),
+            (Engine::MySql, "SELECT 1 INTO @x", &settings),
+            (Engine::Sqlite, "PRAGMA foreign_keys = OFF", &settings),
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false)",
+                &settings,
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1)", &settings),
+            (Engine::MySql, "SELECT GET_LOCK('a', 10)", &settings),
+            (Engine::MySql, "SELECT @x := 1", &settings),
+        ] {
+            assert_eq!(&leaves(engine, statement), left, "{statement}");
+        }
+        for (engine, statement) in [
+            (Engine::Postgres, "SELECT 1"),
+            (Engine::Postgres, "SHOW search_path"),
+            (Engine::MySql, "DESCRIBE t"),
+            (Engine::Postgres, "EXPLAIN SELECT 1"),
+            (Engine::Postgres, "SELEC 1"),
+            (Engine::Postgres, "INSERT INTO t VALUES (1)"),
+            (Engine::MySql, "CREATE TABLE t (a int)"),
+            (Engine::Postgres, "SELECT * INTO t2 FROM t"),
+            (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
+            (Engine::Sqlite, "PRAGMA table_info(t)"),
+            (Engine::Snowflake, "BEGIN"),
+            (Engine::MongoDb, "db.a.insertOne({ x: 1 })"),
+        ] {
+            assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
+        }
     }
 }

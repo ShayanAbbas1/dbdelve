@@ -28,10 +28,10 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, ServerConfig,
-    Sizes, SslMode, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
-    assemble_references, assemble_sizes, assemble_structure, non_utf8_error, plain_error,
-    required_cell,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
+    assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, non_utf8_error,
+    plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -359,6 +359,10 @@ pub struct Connection {
     /// What the cancel socket dials too, and held so ssh runs as long as any
     /// clone does.
     tunnel: Option<Arc<Tunnel>>,
+    /// A second session, for stopping a statement at the row limit while
+    /// this one is busy reading its rows. Opened the first time it is needed
+    /// and kept, so a run does not pay for a connect.
+    side: Arc<Mutex<Option<Conn>>>,
 }
 
 impl Connection {
@@ -376,12 +380,24 @@ impl Connection {
                 engine,
                 connection: Arc::new(Mutex::new(connection)),
                 tunnel,
+                side: Arc::default(),
             })
         })
     }
 
     pub fn engine(&self) -> Engine {
         self.engine
+    }
+
+    /// A second session, for a statement to run on beside this one's; see
+    /// [`super::Connection::query_alongside`]. It shares the side session.
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        let connection = connect(&self.server, self.engine, self.dial()?)?;
+        Ok(Self {
+            connection_id: connection.connection_id(),
+            connection: Arc::new(Mutex::new(connection)),
+            ..self.clone()
+        })
     }
 
     /// A round trip, unlike Postgres's check: the driver keeps no closed flag.
@@ -419,29 +435,76 @@ impl Connection {
             })
     }
 
-    /// Run one statement verbatim.
+    /// Run one statement verbatim, keeping what `fetch` asks for of its rows;
+    /// see [`super::Connection::query`].
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, true)
+    /// The SQL is never rewritten — no limit injected, no reformatting. The
+    /// rows are read off the socket as they come, so one past the limit is
+    /// dropped as soon as it is counted.
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(sql, true, fetch)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false)
+        self.run(sql, false, Fetch::default())
     }
 
-    fn run(&self, sql: &str, editable: bool) -> Result<QueryResult, DbError> {
+    /// `ask` on the side session, opened if there is none. A failure is taken
+    /// for a session that has gone stale while it sat idle, and asked once
+    /// more on a fresh one.
+    fn aside<T>(&self, mut ask: impl FnMut(&mut Conn) -> Result<T, ::mysql::Error>) -> Option<T> {
+        let mut side = self.side.lock().ok()?;
+        for _ in 0..2 {
+            if side.is_none() {
+                let dial = self.dial().ok()?;
+                *side = open(&self.server, || cancel_options(&self.server, dial)).ok();
+            }
+            match ask(side.as_mut()?) {
+                Ok(answer) => return Some(answer),
+                Err(_) => *side = None,
+            }
+        }
+        None
+    }
+
+    /// Stop the statement in flight now that it has passed the row limit:
+    /// `true` when a `KILL QUERY` went out.
+    ///
+    /// Safe wherever the statement only reads, unlike on Postgres: a killed
+    /// statement is rolled back alone and the transaction around it stays
+    /// open, so a `SELECT` inside the user's own `BEGIN` can be stopped too.
+    /// Only while the session is still executing it: one that has already
+    /// finished, its rows waiting in the socket, has nothing to stop, and a
+    /// kill sent to an idle session is one this check exists not to send.
+    fn stop_at_limit(&self) -> bool {
+        let id = self.connection_id;
+        self.aside(|side| {
+            let running: Option<u32> = side.query_first(format!(
+                "SELECT ID FROM information_schema.PROCESSLIST
+                 WHERE ID = {id} AND COMMAND = 'Query'"
+            ))?;
+            if running.is_none() {
+                return Ok(false);
+            }
+            side.query_drop(format!("KILL QUERY {id}"))?;
+            Ok(true)
+        }) == Some(true)
+    }
+
+    fn run(&self, sql: &str, editable: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
         let mut connection = self.connection.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
+        fetch.hold()?;
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
+        // How long the kept rows took, once there were as many as the limit.
+        let mut filled = None;
+        let mut past_limit = false;
 
         let mut submit = || -> Result<(), DbError> {
             // Timed from here, not from the call: one connection serialises a
@@ -481,11 +544,41 @@ impl Connection {
 
                 // One selection can carry several statements, and the grid shows
                 // one result set, so each new description starts the kept set
-                // over and the last statement wins.
+                // over and the last statement wins. The types came with the
+                // description, so the rows are shown by type from the first.
+                if let Some(feed) = fetch.feed {
+                    feed.begin(columns.clone());
+                }
                 let mut rows = Vec::new();
                 let mut bytes = 0;
+                // This set's rows, kept or not, and kept: a fed row is not in
+                // `rows` to be counted.
+                let (mut returned, mut kept) = (0, 0);
+                let mut stopping = false;
+                filled = None;
                 for row in &mut set {
-                    let row = row.map_err(|error| query_error(&error))?;
+                    let row = match row {
+                        Ok(row) => row,
+                        Err(error) if stopping && interrupted(&error) => {
+                            result.stopped = Some(Stopped::AtLimit);
+                            break;
+                        }
+                        Err(error) => return Err(query_error(&error)),
+                    };
+                    returned += 1;
+                    if fetch.limit.is_some_and(|limit| kept >= limit) {
+                        if fetch.reads_only && !stopping && returned == kept + 1 {
+                            stopping = self.stop_at_limit();
+                        }
+                        continue;
+                    }
+                    kept += 1;
+                    if fetch.limit == Some(kept) {
+                        filled = Some(started.elapsed());
+                        if let Some(feed) = fetch.feed {
+                            feed.fill();
+                        }
+                    }
                     let cells: Vec<Cell> = (0..columns.len())
                         .map(|index| {
                             let value = row.as_ref(index).unwrap_or(&Value::NULL);
@@ -497,19 +590,34 @@ impl Connection {
                         .iter()
                         .filter_map(|cell| cell.as_ref().map(String::len))
                         .sum::<usize>();
-                    rows.push(cells);
+                    match fetch.feed {
+                        Some(feed) => feed.push(cells),
+                        None => rows.push(cells),
+                    }
                 }
 
                 // A query's count is the rows it returned, which is what
                 // Postgres reports for a select too. `affected_rows` is zero for
                 // one, and zero would read as a result set that came back empty.
-                result.rows_affected = Some(rows.len() as u64);
+                result.rows_affected = Some(returned as u64);
+                // A stopped statement's count is only what had arrived.
+                result.capped_from =
+                    (result.stopped.is_none() && returned > kept).then_some(returned);
+                past_limit = returned > kept || result.stopped.is_some();
                 result.columns = columns;
                 result.rows = rows;
                 result.bytes = bytes;
                 probed = described;
+                if result.stopped.is_some() {
+                    break;
+                }
             }
-            result.elapsed = started.elapsed();
+            // Timed to the last kept row when rows past the limit came after
+            // it: stopping or draining the statement is not the wait for these.
+            result.elapsed = match filled {
+                Some(filled) if past_limit => filled,
+                _ => started.elapsed(),
+            };
             Ok(())
         };
 
@@ -571,6 +679,7 @@ impl Connection {
             engine: self.engine,
             connection: Arc::new(Mutex::new(connection)),
             tunnel: self.tunnel.clone(),
+            side: Arc::default(),
         };
         assemble_sizes(side.internal_query(&SIZES_SQL.replace("{system}", SYSTEM_SCHEMAS))?)
     }
@@ -888,6 +997,11 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     }
 
     plain_error(describe(error))
+}
+
+/// `KILL QUERY`'s doing: "Query execution was interrupted", on both servers.
+fn interrupted(error: &::mysql::Error) -> bool {
+    matches!(error, ::mysql::Error::MySqlError(error) if error.code == 1317)
 }
 
 fn query_error(error: &::mysql::Error) -> DbError {
@@ -1287,7 +1401,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled(), Engine::MySql).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one")
+            .query("SELECT 1 AS one", Fetch::default())
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
 
@@ -1304,16 +1418,41 @@ mod tests {
             canceller.cancel().expect("the KILL QUERY should send");
         });
         let started = Instant::now();
-        let _ = connection.query("SELECT SLEEP(30)");
+        let _ = connection.query("SELECT SLEEP(30)", Fetch::default());
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    fn live_profile(engine: Engine) -> super::super::Connection {
+        super::super::Connection::MySql(live(engine))
+    }
+
+    fn live_reads_run_at_once_take_the_time_of_one(engine: Engine) {
+        super::super::at_once::reads_overlap(
+            &live_profile(engine),
+            engine,
+            "SELECT SLEEP(1), 1",
+            "INSERT INTO accounts () VALUES ()",
+        );
+    }
+
+    fn live_a_cancel_stops_every_read_run_at_once(engine: Engine) {
+        super::super::at_once::a_cancel_stops_them_all(
+            &live_profile(engine),
+            engine,
+            LIVE_SLOW_SELECT,
+        );
     }
 
     fn live_a_killed_session_is_lost_and_a_failed_statement_is_not(engine: Engine) {
         let connection = live(engine);
-        assert!(connection.query("SELECT broken").is_err());
+        assert!(connection.query("SELECT broken", Fetch::default()).is_err());
         assert!(!connection.is_lost());
 
-        assert!(connection.query("KILL CONNECTION_ID()").is_err());
+        assert!(
+            connection
+                .query("KILL CONNECTION_ID()", Fetch::default())
+                .is_err()
+        );
         assert!(connection.is_lost());
     }
 
@@ -1329,7 +1468,7 @@ mod tests {
         });
 
         let error = connection
-            .query(LIVE_SLOW_SELECT)
+            .query(LIVE_SLOW_SELECT, Fetch::default())
             .expect_err("the statement should be cancelled");
         assert!(
             error.message.contains("interrupt"),
@@ -1337,7 +1476,7 @@ mod tests {
             error.message
         );
         // `KILL QUERY` ends the statement, not the session.
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
     fn live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb(engine: Engine) {
@@ -1353,7 +1492,7 @@ mod tests {
         .expect("connection should open");
 
         let error = connection
-            .query(LIVE_SLOW_SELECT)
+            .query(LIVE_SLOW_SELECT, Fetch::default())
             .expect_err("a read-only SELECT should time out");
         assert!(error.message.contains("exceeded"), "{}", error.message);
 
@@ -1363,13 +1502,16 @@ mod tests {
         if engine == Engine::MariaDb {
             // Not `DO`, which MariaDB lets off with a warning when interrupted.
             let error = connection
-                .query(&format!("SET @bounded = ({LIVE_SLOW_SELECT})"))
+                .query(
+                    &format!("SET @bounded = ({LIVE_SLOW_SELECT})"),
+                    Fetch::default(),
+                )
                 .expect_err("MariaDB bounds every statement");
             assert!(error.message.contains("exceeded"), "{}", error.message);
         } else {
             assert!(
                 connection
-                    .query("DO SLEEP(2)")
+                    .query("DO SLEEP(2)", Fetch::default())
                     .expect("a non-SELECT is not bounded")
                     .rows
                     .is_empty()
@@ -1420,7 +1562,10 @@ mod tests {
         // container reports itself healthy either way. So the volume table is
         // checked by count rather than assumed.
         let result = live(engine)
-            .query("SELECT count(*) AS rows_seeded FROM measurements")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM measurements",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(result.rows[0][0].as_deref(), Some("5000"));
@@ -1453,7 +1598,10 @@ mod tests {
 
     fn live_query_round_trip(engine: Engine) {
         let result = live(engine)
-            .query("SELECT 1 AS id, 'alpha' AS label UNION ALL SELECT 2, NULL")
+            .query(
+                "SELECT 1 AS id, 'alpha' AS label UNION ALL SELECT 2, NULL",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["id", "label"]);
@@ -1472,7 +1620,7 @@ mod tests {
         let connection = live(engine);
 
         let result = connection
-            .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d")
+            .query("SELECT 1 AS a, 2 AS b; SELECT 4 AS d", Fetch::default())
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["d"]);
@@ -1487,7 +1635,10 @@ mod tests {
 
         // A valid empty result still has to carry its headers.
         let empty = connection
-            .query("SELECT 1 AS id, 'x' AS label FROM DUAL WHERE false")
+            .query(
+                "SELECT 1 AS id, 'x' AS label FROM DUAL WHERE false",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         assert_eq!(names(&empty), vec!["id", "label"]);
         assert!(empty.rows.is_empty());
@@ -1495,7 +1646,7 @@ mod tests {
 
     fn live_a_column_is_tagged_with_the_type_the_server_would_name(engine: Engine) {
         let result = live(engine)
-            .query("SELECT id, name, email FROM accounts")
+            .query("SELECT id, name, email FROM accounts", Fetch::default())
             .expect("query should succeed");
 
         // `bigint` and not `int`: the wire protocol carries a type code rather
@@ -1600,7 +1751,7 @@ mod tests {
 
     fn live_a_single_table_select_is_editable_by_its_primary_key(engine: Engine) {
         let edit = live(engine)
-            .query("SELECT name, id FROM accounts")
+            .query("SELECT name, id FROM accounts", Fetch::default())
             .expect("query should succeed")
             .edit
             .expect("accounts has a primary key");
@@ -1616,7 +1767,10 @@ mod tests {
 
     fn live_an_aliased_or_computed_column_reports_what_the_table_calls_it(engine: Engine) {
         let edit = live(engine)
-            .query("SELECT id AS ident, upper(name) AS shouted, name FROM accounts")
+            .query(
+                "SELECT id AS ident, upper(name) AS shouted, name FROM accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed")
             .edit
             .expect("accounts has a primary key");
@@ -1641,7 +1795,7 @@ mod tests {
         ] {
             assert!(
                 connection
-                    .query(sql)
+                    .query(sql, Fetch::default())
                     .expect("query should succeed")
                     .edit
                     .is_none(),
@@ -1657,12 +1811,18 @@ mod tests {
         let connection = live(engine);
 
         let items = connection
-            .query("SELECT count(*) AS rows_seeded FROM order_items")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM order_items",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         assert_eq!(items.rows[0][0].as_deref(), Some("3"));
 
         let closed = connection
-            .query("SELECT count(*) AS rows_seeded FROM dbdelve_archive.closed_accounts")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM dbdelve_archive.closed_accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
     }
@@ -1731,6 +1891,99 @@ mod tests {
         );
     }
 
+    /// Every row of the seed's `measurements` against every other: far more
+    /// rows than a drain could get through quickly, sent as they are made.
+    const LIVE_ENDLESS_SELECT: &str = "SELECT a.id FROM measurements a JOIN measurements b";
+
+    fn live_a_row_limit_keeps_the_first_rows_and_counts_the_rest(engine: Engine) {
+        let connection = live(engine);
+        let capped = connection
+            .query(
+                "SELECT id FROM measurements ORDER BY id LIMIT 10",
+                Fetch {
+                    limit: Some(3),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        assert_eq!(capped.rows.len(), 3);
+        assert_eq!(capped.capped_from, Some(10));
+        assert_eq!(capped.total_rows(), 10);
+    }
+
+    fn live_a_fed_query_hands_its_typed_rows_to_the_feed(engine: Engine) {
+        let connection = live(engine);
+        let feed = crate::db::Feed::default();
+        let result = connection
+            .query(
+                "SELECT id FROM measurements ORDER BY id LIMIT 10",
+                Fetch {
+                    limit: Some(3),
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(fed.rows.len(), 3);
+        // Typed from the description, before any row arrived.
+        assert!(fed.columns[0].data_type.is_some());
+    }
+
+    fn live_a_read_past_the_limit_is_stopped_rather_than_drained(engine: Engine) {
+        let connection = live(engine);
+        let started = Instant::now();
+        let result = connection
+            .query(
+                LIVE_ENDLESS_SELECT,
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .expect("a stopped read is not an error");
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.rows.len(), 3);
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    fn live_a_read_inside_the_users_transaction_is_stopped_and_the_transaction_kept(
+        engine: Engine,
+    ) {
+        let connection = live(engine);
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query("CREATE TEMPORARY TABLE kept (n INT)", Fetch::default())
+            .unwrap();
+        connection
+            .query("INSERT INTO kept VALUES (1)", Fetch::default())
+            .unwrap();
+        let result = connection
+            .query(
+                LIVE_ENDLESS_SELECT,
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        // A killed statement is rolled back alone: the insert before it is
+        // still there to read inside the same transaction.
+        let kept = connection
+            .query("SELECT n FROM kept", Fetch::default())
+            .unwrap();
+        assert_eq!(kept.rows, vec![vec![Some("1".to_string())]]);
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -1777,6 +2030,12 @@ mod tests {
     }
 
     on_both_servers!(
+        live_reads_run_at_once_take_the_time_of_one,
+        live_a_cancel_stops_every_read_run_at_once,
+        live_a_row_limit_keeps_the_first_rows_and_counts_the_rest,
+        live_a_fed_query_hands_its_typed_rows_to_the_feed,
+        live_a_read_past_the_limit_is_stopped_rather_than_drained,
+        live_a_read_inside_the_users_transaction_is_stopped_and_the_transaction_kept,
         live_a_killed_session_is_lost_and_a_failed_statement_is_not,
         live_a_cancel_stops_a_running_statement_without_closing_the_session,
         live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb,

@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::{
     Disableable, ElementExt, IconName, Sizable,
     button::Button,
-    input::{self, Editor, EditorState, Input},
+    input::{self, Editor, EditorState, Input, InputState},
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
@@ -25,9 +25,10 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AddFilter, CancelQuery, ExplainQuery, FormatQuery, NewQuery, NewRow, NextPage,
-        PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetFilterColumn, SetFilterOperator,
-        SetFilterRaw, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        AddFilter, CancelQuery, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget, NewQuery,
+        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
+        SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
+        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -68,6 +69,7 @@ pub struct RowPanel {
     pub copied: Option<(usize, usize)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_main_content(
     profile: &Profile,
     editor_font_size: f32,
@@ -75,6 +77,7 @@ pub fn render_main_content(
     row_panel: &RowPanel,
     plan_copied: bool,
     strip: &TabStrip,
+    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let body = match profile.session.active_object() {
@@ -100,7 +103,7 @@ pub fn render_main_content(
         .flex_col()
         // Chrome, so the strip reads as the frame the surfaces sit in --
         // and chrome is the frost, which is already painted beneath it.
-        .child(render_tab_strip(profile, zoom, strip, cx))
+        .child(render_tab_strip(profile, zoom, strip, custom_limit, cx))
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
@@ -1081,8 +1084,8 @@ fn render_results(
     // A refresh keeps the rows it is replacing (`execute_and_then`'s
     // `keep_rows`), and a centred spinner over rows the user is still reading
     // hides the data this pane is for. So every state that has rows behind it
-    // falls through to the grid, and the run says so in a strip above it
-    // instead of in place of it.
+    // falls through to the grid, and the status bar says the run is going.
+    // The spinner is only for the wait before the first row.
     let has_rows = results.read(cx).delegate().rows_count(cx) > 0;
 
     // The two loading states, overlaid on the grid rather than replacing it
@@ -1195,25 +1198,6 @@ fn render_results(
         .flex_col()
         .min_h_0()
         .min_w_0()
-        // The loading overlay below covers this same strip's spinner while
-        // there are no rows yet; past that, a refresh says so up here and
-        // keeps the rows it is replacing on screen underneath.
-        .children(
-            (matches!(query, QueryState::Running { .. }) && has_rows).then(|| {
-                div()
-                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
-                    .flex_shrink_0()
-                    .px(px(layout::SPACE_SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(layout::SPACE_SM))
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(spinner())
-                    .child(quiet_line("Refreshing…".into()))
-                    .child(div().ml_auto().child(cancel(cx)))
-            }),
-        )
         .child({
             let rows_scroll = smooth_for(
                 "results",
@@ -1222,9 +1206,6 @@ fn render_results(
                 results.read(cx).horizontal_scroll_handle.clone(),
                 cx,
             );
-            // `flex_1` rather than full height: under the "Refreshing…" strip a
-            // full-height grid overruns the pane by the strip's height and
-            // takes its last row and scrollbar with it.
             div()
                 .id("results")
                 .smooth_scroll(&rows_scroll)
@@ -1349,15 +1330,16 @@ fn render_results(
     .into_any_element()
 }
 
-/// One chip per statement a queue has run, and one for the statement still
-/// running, above the result the selected chip is showing.
+/// One chip per statement of a queue, from the moment it starts: those that
+/// have run, the one running, and those still to go, above the result the
+/// selected chip is showing.
 ///
-/// Only from the second result: one chip is nothing to switch between, and an
+/// Only from the second chip: one is nothing to switch between, and an
 /// ordinary run has no queue at all.
 fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let t = *theme(cx);
     let queue = tab.queue.as_ref()?;
-    if queue.done.len() < 2 {
+    if queue.done.len() + usize::from(queue.awaiting) + queue.remaining.len() < 2 {
         return None;
     }
     // The statement in flight is the tab's own slot, not one of `done`, so it
@@ -1379,7 +1361,7 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
             cx,
         )
     });
-    let chips: Vec<AnyElement> = queue
+    let mut chips: Vec<AnyElement> = queue
         .done
         .iter()
         .enumerate()
@@ -1395,6 +1377,18 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
         })
         .chain(running)
         .collect();
+    for (offset, range) in queue.remaining.iter().enumerate() {
+        let index = queue.done.len() + usize::from(queue.awaiting) + offset;
+        let label = queue.sql.get(range.clone()).map(query_label);
+        chips.push(result_chip(
+            tab.id,
+            index,
+            &label.unwrap_or_default(),
+            &QueryState::Idle,
+            false,
+            cx,
+        ));
+    }
 
     Some(
         div()
@@ -1426,7 +1420,9 @@ fn result_chip(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
+    let queued = matches!(state, QueryState::Idle);
     let (readout, tint) = match state {
+        QueryState::Idle => (Some("queued".to_string()), t.text_faint),
         QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
         QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
         QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
@@ -1446,6 +1442,9 @@ fn result_chip(
         .map(|chip| {
             if selected {
                 chip.bg(t.element_active).text_color(t.text)
+            } else if queued {
+                // Nothing to show yet, so nothing to offer on hover.
+                chip.text_color(t.text_faint)
             } else {
                 chip.text_color(t.text_muted)
                     .hover(|style| style.bg(t.element_hover))
@@ -1729,30 +1728,78 @@ fn preview_tab(
         }))
 }
 
-/// One row-limit choice. A chip rather than a menu: four numbers fit, and a
-/// number behind a popover is a number nobody checks.
-fn row_limit_chip(rows: usize, selected: bool, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
-    div()
-        .id(("row-limit", rows))
-        .flex()
-        .items_center()
-        .h(px(layout::chrome(24.)))
-        .px(px(layout::SPACE_SM))
-        .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::chrome(layout::TEXT_SM)))
-        .map(|chip| {
-            if selected {
-                chip.bg(t.element_active).text_color(t.text)
-            } else {
-                chip.text_color(t.text_muted)
-                    .hover(|style| style.bg(t.element_hover))
-            }
+/// A row limit, and the menu that changes it: none at all, the sizes on offer,
+/// and a number of one's own. While `editing` is the field Custom… opened, it
+/// stands where the button was.
+fn row_limit_menu(
+    target: LimitTarget,
+    limit: Option<usize>,
+    editing: Option<&Entity<InputState>>,
+    t: Theme,
+) -> AnyElement {
+    if let Some(input) = editing {
+        // Dressed as the pager's page field, for the reason given there.
+        return div()
+            .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
+            .w(px(layout::chrome(88.)))
+            .px(px(layout::SPACE_SM))
+            .flex()
+            .items_center()
+            .rounded(px(layout::RADIUS_CONTROL))
+            .bg(t.element_active)
+            .border_1()
+            .border_color(t.border_strong)
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+            .text_color(t.text)
+            .child(
+                Input::new(input)
+                    .appearance(false)
+                    .px_0()
+                    .h_full()
+                    .text_size(px(layout::chrome(layout::TEXT_SM))),
+            )
+            .into_any_element();
+    }
+    let rows_label = |rows: usize| format!("{} rows", group_thousands(rows as u64));
+    let label = limit.map_or_else(|| "No limit".to_string(), rows_label);
+    let pick = move |rows: Option<usize>| -> Box<dyn gpui::Action> {
+        match target {
+            LimitTarget::Query(_) => Box::new(SetQueryLimit { rows }),
+            LimitTarget::Relation(_) => Box::new(SetRowLimit { rows }),
+            LimitTarget::Default => Box::new(SetDefaultRowLimit { rows }),
+        }
+    };
+    let id = match target {
+        LimitTarget::Query(id) => gpui::ElementId::from(("query-limit", id)),
+        LimitTarget::Relation(id) => ("relation-limit", id).into(),
+        LimitTarget::Default => "default-limit".into(),
+    };
+    button(id, label, Tone::Quiet, Control::Compact, t)
+        .child(
+            icon(icon::CHEVRON_DOWN)
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.text_faint),
+        )
+        .dropdown_menu(move |menu, _, _| {
+            let menu = menu
+                .menu_with_check("No limit", limit.is_none(), pick(None))
+                .separator();
+            let custom = limit.filter(|rows| !ROW_LIMITS.contains(rows));
+            ROW_LIMITS
+                .into_iter()
+                .fold(menu, |menu, rows| {
+                    menu.menu_with_check(rows_label(rows), limit == Some(rows), pick(Some(rows)))
+                })
+                .separator()
+                .menu_with_check(
+                    match custom {
+                        Some(rows) => format!("Custom ({})…", group_thousands(rows as u64)),
+                        None => "Custom…".to_string(),
+                    },
+                    custom.is_some(),
+                    Box::new(CustomRowLimit { target }),
+                )
         })
-        .child(compact_count(rows))
-        .on_click(cx.listener(move |_, _, window, cx| {
-            window.dispatch_action(Box::new(SetRowLimit { rows }), cx);
-        }))
         .into_any_element()
 }
 
@@ -1879,7 +1926,7 @@ fn render_structure(
 /// What the preview in front asked the server for: its limit, its offset, and
 /// whether a page may follow. Only while its rows are shown: it is a property
 /// of these rows, not of the window.
-fn relation_preview(session: &Session) -> Option<(usize, usize, bool)> {
+fn relation_preview(session: &Session) -> Option<(Option<usize>, usize, bool)> {
     session.active_object().and_then(|tab| match &tab.body {
         ObjectBody::Relation {
             limit,
@@ -1893,36 +1940,108 @@ fn relation_preview(session: &Session) -> Option<(usize, usize, bool)> {
             // A full page may have another behind it; a short one is the
             // relation's end. The same gate `turn_page` holds, read here only
             // to decide whether the button is worth drawing.
-            matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
+            matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ),
         )),
         _ => None,
     })
 }
 
-/// The preview's row limit and pager, centred in the status bar: what the
-/// relation's rows were asked for, and the way to the ones after them. `None`
-/// where there are no rows to page.
-pub(crate) fn render_paging(profile: &Profile, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+/// A run in flight, centred in the status bar in place of the pager: how long
+/// it has taken, the rows that have streamed in so far, and the way to stop it.
+pub(crate) fn render_running(
+    query: &QueryState,
+    results: Option<&Entity<TableState<ResultGrid>>>,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let QueryState::Running {
+        started,
+        cancelling,
+        ..
+    } = query
+    else {
+        return None;
+    };
     let t = *theme(cx);
-    let session = &profile.session;
-    let preview = relation_preview(session);
-    let row_limit = preview.map(|(limit, _, _)| {
-        let chips: Vec<_> = ROW_LIMITS
-            .into_iter()
-            .map(|rows| row_limit_chip(rows, rows == limit, cx))
-            .collect();
+    let (rows, streaming, filled) = results.map_or((0, false, None), |results| {
+        let grid = results.read(cx).delegate();
+        (
+            grid.rows_count(cx),
+            grid.streamed_set().is_some(),
+            grid.filled(),
+        )
+    });
+    // Stopped where the limit filled: the rows on screen are all the run will
+    // keep, and the time spent stopping or draining the statement after them
+    // is not time spent fetching them.
+    let elapsed = filled.map_or_else(|| started.elapsed(), |at| at.duration_since(*started));
+    let what = match (streaming, rows) {
+        // The rows are all in, and the statement is being stopped or drained
+        // behind them: still running, but no longer fetching anything shown.
+        (true, rows) if filled.is_some() => format!(
+            "{} \u{b7} {} \u{b7} finishing\u{2026}",
+            crate::ui::row_readout(rows, rows),
+            clock(elapsed)
+        ),
+        (true, rows) => format!("{} fetched", crate::ui::row_readout(rows, rows)),
+        // A refresh keeps the rows it is replacing on screen until it lands.
+        (false, 1..) => "Refreshing".to_string(),
+        (false, 0) => "Running".to_string(),
+    };
+    // A word rather than an icon: a square or a cross beside a status line
+    // reads as "close this". Once the request is out the label is the only
+    // acknowledgement the click gets, and the statement is still running, so
+    // the button goes inert rather than away.
+    let label = match cancelling {
+        Some(sent) if sent.elapsed() >= CANCEL_PATIENCE => "Still waiting on server…",
+        Some(_) => "Cancelling…",
+        None => "Cancel",
+    };
+    Some(
         div()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(layout::SPACE_XS))
+            .gap(px(layout::SPACE_SM))
             .child(
                 div()
-                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                    .text_color(t.text_faint)
-                    .child("Rows"),
+                    .whitespace_nowrap()
+                    .text_color(t.text_muted)
+                    .child(match filled {
+                        Some(_) => what,
+                        None => format!("{what} \u{b7} {}", clock(elapsed)),
+                    }),
             )
-            .children(chips)
+            .child(
+                button("cancel-query", label, Tone::Quiet, Control::Compact, t)
+                    .disabled(cancelling.is_some())
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.cancel_query(&CancelQuery, window, cx);
+                    })),
+            )
+            .into_any_element(),
+    )
+}
+
+/// The preview's row limit and pager, centred in the status bar: what the
+/// relation's rows were asked for, and the way to the ones after them. `None`
+/// where there are no rows to page.
+pub(crate) fn render_paging(
+    profile: &Profile,
+    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let session = &profile.session;
+    let preview = relation_preview(session);
+    let row_limit = preview.map(|(limit, _, _)| {
+        let target = LimitTarget::Relation(session.active_object().map_or(0, |tab| tab.id));
+        let editing = custom_limit
+            .filter(|(editing, _)| *editing == target)
+            .map(|(_, input)| input);
+        row_limit_menu(target, limit, editing, t)
     });
     // The pager appears only once there is somewhere to go: a first page
     // shorter than its limit is the whole relation, and arrows over it are
@@ -2054,6 +2173,7 @@ fn render_tab_strip(
     profile: &Profile,
     (chrome_zoom, editor_zoom, grid_zoom): (u32, u32, u32),
     strip: &TabStrip,
+    custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
@@ -2605,6 +2725,18 @@ fn render_tab_strip(
                     });
                 })
         }))
+        .children(
+            session
+                .active_query_tab()
+                .filter(|_| runnable && !session.naming)
+                .map(|tab| {
+                    let target = LimitTarget::Query(tab.id);
+                    let editing = custom_limit
+                        .filter(|(editing, _)| *editing == target)
+                        .map(|(_, input)| input);
+                    row_limit_menu(target, tab.row_limit, editing, t)
+                }),
+        )
         // Beside Run, because it asks about the same statement Run would run.
         // A menu rather than a button: the two modes differ by whether the
         // statement is executed, and a single button would have to pick one of
@@ -2724,7 +2856,7 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
 fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let t = *theme(cx);
     let families = fonts(cx).clone();
-    let preview_rows = workspace.settings.preview_rows;
+    let row_limit = workspace.settings.row_limit;
     let check_for_updates = workspace.settings.check_for_updates;
     let color_titlebar = workspace.settings.color_titlebar;
     let client_sort = workspace.settings.client_sort;
@@ -2875,18 +3007,16 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
     })
     .collect();
 
-    let limits: Vec<AnyElement> = ROW_LIMITS
-        .into_iter()
-        .map(|rows| {
-            settings_chip(
-                ("preview-rows", rows),
-                compact_count(rows),
-                rows == preview_rows,
-                cx,
-                move |workspace, _, cx| workspace.set_preview_rows(rows, cx),
-            )
-        })
-        .collect();
+    let limits = row_limit_menu(
+        LimitTarget::Default,
+        row_limit,
+        workspace
+            .custom_limit
+            .as_ref()
+            .filter(|(target, _)| *target == LimitTarget::Default)
+            .map(|(_, input)| input),
+        t,
+    );
 
     div()
         .flex()
@@ -2926,11 +3056,7 @@ fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -
                 .gap(px(layout::SPACE_XS))
                 .children(font_rows),
         ))
-        .child(settings_section(
-            t,
-            "Default limit",
-            div().flex().gap(px(layout::SPACE_XS)).children(limits),
-        ))
+        .child(settings_section(t, "Row limit", div().flex().child(limits)))
         .child(settings_section(
             t,
             "Check for updates",

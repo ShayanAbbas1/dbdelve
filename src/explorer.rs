@@ -5,11 +5,14 @@ use gpui_component::tree::TreeItem;
 use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
 use crate::mql;
 
-/// The row counts a preview can be asked for, and the one it opens with. Every
-/// result set is capped (spec §4.3); this is the part of the cap the user gets
-/// to move, and the grid shows which one is in effect.
+/// The row counts a preview can be asked for besides none at all, and the one
+/// it opens with. The grid shows which one is in effect.
 pub const ROW_LIMITS: [usize; 4] = [100, 1_000, 10_000, 100_000];
 pub const PREVIEW_ROW_LIMIT: usize = ROW_LIMITS[1];
+
+/// The most rows a limit may ask for: a relation's preview writes it into its
+/// `LIMIT`, and Postgres reads that as a `bigint`.
+pub const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
 const RELATION_CATEGORIES: [(RelationKind, &str); 5] = [
     (RelationKind::Table, "Tables"),
@@ -251,7 +254,7 @@ pub fn preview_sql(
     schema: &str,
     relation: &str,
     filter: &str,
-    limit: usize,
+    limit: Option<usize>,
     offset: usize,
 ) -> String {
     match engine {
@@ -264,6 +267,9 @@ pub fn preview_sql(
         | Engine::SqlServer => {}
     }
     let mut sql = format!("SELECT *{}", from_where(engine, schema, relation, filter));
+    let Some(limit) = limit else {
+        return sql;
+    };
     sql.push_str(&format!(" LIMIT {limit}"));
     // `OFFSET` after `LIMIT`: the one order all three engines accept, and the
     // one the statement grammar reads -- it nests `offset` inside the `limit`
@@ -282,9 +288,9 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
             "SELECT TOP 100 * FROM {}",
             engine.qualified(schema, relation)
         ),
-        Engine::MongoDb => mql::browse::find_preview(relation, "", 100, 0),
+        Engine::MongoDb => mql::browse::find_preview(relation, "", Some(100), 0),
         Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
-            preview_sql(engine, schema, relation, "", 100, 0)
+            preview_sql(engine, schema, relation, "", Some(100), 0)
         }
     }
 }
@@ -726,7 +732,7 @@ mod tests {
                 r#"odd"schema"#,
                 r#"table"name"#,
                 "",
-                PREVIEW_ROW_LIMIT,
+                Some(PREVIEW_ROW_LIMIT),
                 0
             ),
             r#"SELECT * FROM "odd""schema"."table""name" LIMIT 1000"#
@@ -734,9 +740,30 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_with_no_limit_asks_for_every_row() {
+        for engine in Engine::ALL {
+            let sql = preview_sql(engine, "public", "accounts", "", None, 0);
+            assert!(!sql.contains("LIMIT") && !sql.contains("limit("), "{sql}");
+            assert!(crate::sql::is_generated_select(engine, &sql), "{sql}");
+            assert_eq!(
+                crate::sql::paged(engine, &sql, &["id".into()]).as_deref(),
+                Some(sql.as_str()),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_paged_preview_carries_its_offset_after_the_limit() {
         assert_eq!(
-            preview_sql(Engine::Postgres, "public", "accounts", "", 1_000, 2_000),
+            preview_sql(
+                Engine::Postgres,
+                "public",
+                "accounts",
+                "",
+                Some(1_000),
+                2_000
+            ),
             r#"SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 2000"#
         );
     }
@@ -752,7 +779,7 @@ mod tests {
                 "public",
                 "accounts",
                 r#""state" = 'ok'"#,
-                100,
+                Some(100),
                 0
             ),
             r#"SELECT * FROM "public"."accounts" WHERE "state" = 'ok' LIMIT 100"#
@@ -763,7 +790,7 @@ mod tests {
                 "dbdelve_dev",
                 "accounts",
                 "`state` = 'ok'",
-                100,
+                Some(100),
                 200
             ),
             "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100 OFFSET 200"
@@ -774,7 +801,7 @@ mod tests {
                 "main",
                 "accounts",
                 r#""state" = 'ok'"#,
-                1_000,
+                Some(1_000),
                 0
             ),
             r#"SELECT * FROM "main"."accounts" WHERE "state" = 'ok' LIMIT 1000"#
@@ -789,17 +816,17 @@ mod tests {
         for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
             let qualified = engine.qualified("public", "accounts");
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "", 1_000, 0),
+                preview_sql(engine, "public", "accounts", "", Some(1_000), 0),
                 format!("SELECT * FROM {qualified} LIMIT 1000")
             );
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "", 1_000, 2_000),
+                preview_sql(engine, "public", "accounts", "", Some(1_000), 2_000),
                 format!("SELECT * FROM {qualified} LIMIT 1000 OFFSET 2000")
             );
             // Whitespace is not a filter: an input the user emptied by hand
             // must not write `WHERE   ` into the statement.
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "   ", 1_000, 0),
+                preview_sql(engine, "public", "accounts", "   ", Some(1_000), 0),
                 format!("SELECT * FROM {qualified} LIMIT 1000")
             );
         }

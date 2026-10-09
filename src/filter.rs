@@ -735,7 +735,7 @@ pub(crate) fn relation_sql(
     relation: &str,
     filter: &str,
     sort: &[SortKey],
-    limit: usize,
+    limit: Option<usize>,
     offset: usize,
 ) -> String {
     let preview = preview_sql(engine, schema, relation, filter, limit, offset);
@@ -1139,7 +1139,7 @@ mod tests {
             "t",
             &sql("hash", Operator::Equals, "0x00FF"),
             &[],
-            10,
+            Some(10),
             0,
         );
         assert!(
@@ -1222,7 +1222,8 @@ mod tests {
             r#""state" IS NOT NULL"#,
             r#""state" <> ''"#,
         ] {
-            let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, 100, 0);
+            let sql =
+                explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, Some(100), 0);
             println!(
                 "{} {filter}",
                 sql::is_generated_select(Engine::Postgres, &sql)
@@ -1243,7 +1244,8 @@ mod tests {
                     _ => "ok",
                 };
                 let filter = predicate(engine, operator, value).expect("applied");
-                let sql = explorer::preview_sql(engine, "public", "accounts", &filter, 100, 0);
+                let sql =
+                    explorer::preview_sql(engine, "public", "accounts", &filter, Some(100), 0);
                 assert!(
                     sql::is_generated_select(engine, &sql),
                     "{} was refused: {sql}",
@@ -1347,7 +1349,7 @@ mod tests {
                 &key.referenced_schema,
                 &key.referenced_table,
                 &filter,
-                100,
+                Some(100),
                 0,
             );
             assert!(sql::is_generated_select(engine, &sql), "{sql} was refused");
@@ -1363,7 +1365,14 @@ mod tests {
             followed(Engine::Postgres, &key, Some("1'; DROP TABLE accounts --")).expect("a value");
         assert_eq!(filter, r#""id" = '1''; DROP TABLE accounts --'"#);
 
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1499,7 +1508,14 @@ mod tests {
             ],
         );
         assert_eq!(filter, r#"(("a" = '1') OR (id > 5)) AND ("c" = '3')"#);
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1518,7 +1534,14 @@ mod tests {
                 ..FilterBar::default()
             }],
         );
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             !sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was admitted"
@@ -1835,7 +1858,15 @@ mod tests {
     #[test]
     fn a_preview_asks_for_the_rows_its_tab_was_set_to() {
         assert_eq!(
-            relation_sql(Engine::Postgres, "public", "accounts", "", &[], 100, 0),
+            relation_sql(
+                Engine::Postgres,
+                "public",
+                "accounts",
+                "",
+                &[],
+                Some(100),
+                0
+            ),
             r#"SELECT * FROM "public"."accounts" LIMIT 100"#
         );
         // A raised limit still keeps the sort ahead of it, or the rows would be
@@ -1847,7 +1878,7 @@ mod tests {
                 "accounts",
                 "",
                 &[SortKey::new(r#""id""#, true)],
-                100_000,
+                Some(100_000),
                 0
             ),
             r#"SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 100000"#
@@ -1866,7 +1897,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1890,7 +1921,7 @@ mod tests {
             "accounts",
             r#""state" = 'ok'"#,
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1914,7 +1945,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, false)],
-            PREVIEW_ROW_LIMIT,
+            Some(PREVIEW_ROW_LIMIT),
             0,
         );
 
@@ -1950,7 +1981,7 @@ mod tests {
                 "accounts",
                 &predicate,
                 &[SortKey::new(engine.quote_identifier("id"), true)],
-                100,
+                Some(100),
                 200,
             );
             assert!(
