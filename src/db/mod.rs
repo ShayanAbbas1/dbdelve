@@ -1492,6 +1492,150 @@ pub fn cell_type(name: &str) -> Option<&'static str> {
 /// distinct from an empty string and must stay distinguishable in the grid.
 pub type Cell = Option<String>;
 
+/// A row's cells, packed: every value's text in one buffer, and where each
+/// ends. A `Vec<Cell>` spends a 24-byte header and a heap block of its own on
+/// every cell, which on a wide table of small values outweighs the values --
+/// a million rows of 106 columns held 7.6 GB for 3.6 GB of text.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Row {
+    text: Box<str>,
+    /// Each cell's end in `text`, with [`NULL`] set for a NULL, whose end is
+    /// the one before it. One spelling per row, so derived equality is the
+    /// cells' equality.
+    ends: Box<[u32]>,
+}
+
+const NULL: u32 = 1 << 31;
+
+impl Row {
+    /// Fails past 2 GB of text in the row, which `ends` cannot address.
+    pub fn new<S: AsRef<str>>(cells: impl IntoIterator<Item = Option<S>>) -> Result<Self, DbError> {
+        let mut builder = RowBuilder::default();
+        for cell in cells {
+            builder.push(cell.as_ref().map(AsRef::as_ref));
+        }
+        builder.finish()
+    }
+
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// `None` for a NULL and for a column past the row's end alike.
+    pub fn get(&self, col: usize) -> Option<&str> {
+        let end = *self.ends.get(col)?;
+        if end & NULL != 0 {
+            return None;
+        }
+        let start = col.checked_sub(1).map_or(0, |before| self.ends[before] & !NULL);
+        Some(&self.text[start as usize..end as usize])
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Option<&str>> + '_ {
+        (0..self.len()).map(|col| self.get(col))
+    }
+
+    /// Bytes of cell text, a NULL counting none.
+    pub fn text_len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Put each `(column, value)` in place, the row rebuilt once however many
+    /// there are. A column past the row's end is skipped, and a row the edits
+    /// would take past 2 GB is left as it was.
+    pub fn replace(&mut self, edits: &[(usize, Option<&str>)]) {
+        let mut builder = RowBuilder::default();
+        for col in 0..self.len() {
+            let edit = edits.iter().rev().find(|(at, _)| *at == col);
+            builder.push(edit.map_or_else(|| self.get(col), |(_, value)| *value));
+        }
+        if let Ok(row) = builder.finish() {
+            *self = row;
+        }
+    }
+}
+
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq<Vec<Cell>> for Row {
+    fn eq(&self, other: &Vec<Cell>) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == b.as_deref())
+    }
+}
+
+impl TryFrom<Vec<Cell>> for Row {
+    type Error = DbError;
+
+    fn try_from(cells: Vec<Cell>) -> Result<Self, DbError> {
+        Self::new(cells)
+    }
+}
+
+/// Written as the list of cells it holds, so a snapshot reads the same as it
+/// did when rows were `Vec<Cell>`, to this build and to older ones.
+impl Serialize for Row {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for Row {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<Cell>::deserialize(deserializer)?)
+            .map_err(|error| serde::de::Error::custom(error.message))
+    }
+}
+
+/// Packs rows from cells a driver already holds as text, one push at a time.
+/// Kept across rows: its buffers are reused, and each row is copied out at
+/// its exact size.
+#[derive(Default)]
+pub struct RowBuilder {
+    text: String,
+    ends: Vec<u32>,
+    overflowed: bool,
+}
+
+impl RowBuilder {
+    pub fn push(&mut self, cell: Option<&str>) {
+        let null = match cell {
+            Some(value) => {
+                self.text.push_str(value);
+                0
+            }
+            None => NULL,
+        };
+        match u32::try_from(self.text.len()) {
+            Ok(end) if end & NULL == 0 => self.ends.push(end | null),
+            _ => self.overflowed = true,
+        }
+    }
+
+    /// The row pushed since the last finish, and a fresh start either way.
+    pub fn finish(&mut self) -> Result<Row, DbError> {
+        let row = match std::mem::take(&mut self.overflowed) {
+            false => Ok(Row {
+                text: self.text.as_str().into(),
+                ends: self.ends.as_slice().into(),
+            }),
+            true => Err(plain_error(
+                "A row holds more than 2 GB of text, more than DBDelve can show.".into(),
+            )),
+        };
+        self.text.clear();
+        self.ends.clear();
+        row
+    }
+}
+
 /// Serialized because a restored tab has to know which kind it is before the
 /// catalog that would say so has loaded -- and a table is what a profile
 /// written before the kind was stored gets read back as.
@@ -2586,6 +2730,29 @@ pub(super) mod at_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_packed_row_holds_what_its_cells_did() {
+        let cells: Vec<Cell> = vec![Some("1".into()), None, Some(String::new()), Some("ü".into())];
+        let mut row = Row::try_from(cells.clone()).unwrap();
+        assert_eq!(row, cells);
+        assert_eq!(row.get(1), None, "NULL");
+        assert_eq!(row.get(2), Some(""), "an empty string, not NULL");
+        assert_eq!(row.get(4), None, "past the end");
+        assert_eq!(row.text_len(), 3);
+
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            serde_json::to_string(&cells).unwrap(),
+            "a snapshot reads as it did",
+        );
+        assert_eq!(serde_json::from_str::<Row>(r#"["1",null,"","ü"]"#).unwrap(), row);
+
+        row.replace(&[(0, None), (1, Some("two")), (9, Some("x"))]);
+        let edited = vec![None, Some("two".into()), Some(String::new()), Some("ü".into())];
+        assert_eq!(row, edited);
+        assert_eq!(row, Row::try_from(edited).unwrap(), "one spelling per row");
+    }
 
     #[test]
     fn only_the_cancel_itself_reads_as_a_cancel() {
