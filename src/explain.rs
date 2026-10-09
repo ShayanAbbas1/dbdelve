@@ -13,6 +13,8 @@
 //! no sense becomes a node carrying its own raw text, and a metric that does
 //! not parse stays in the label where the user can still read it.
 
+use crate::db::Row;
+
 /// A parsed EXPLAIN, ready to render.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Plan {
@@ -75,16 +77,15 @@ impl Actual {
 }
 
 /// Parse the rows an EXPLAIN returned into a plan.
-pub fn parse(columns: &[String], rows: &[Vec<Option<String>>]) -> Plan {
+pub fn parse(columns: &[String], rows: &[Row]) -> Plan {
     if let Some(plan) = parse_linked(columns, rows).or_else(|| parse_document(columns, rows)) {
         return plan;
     }
 
     let text = rows
         .iter()
+        .flat_map(Row::iter)
         .flatten()
-        .flatten()
-        .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
     parse_indented(text)
@@ -92,7 +93,7 @@ pub fn parse(columns: &[String], rows: &[Vec<Option<String>>]) -> Plan {
 
 /// SQLite's `EXPLAIN QUERY PLAN`, which is a table and not a drawing: the tree
 /// is in the `id`/`parent` linkage, and indentation would be a guess.
-fn parse_linked(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan> {
+fn parse_linked(columns: &[String], rows: &[Row]) -> Option<Plan> {
     if columns.len() != 4 {
         return None;
     }
@@ -103,12 +104,7 @@ fn parse_linked(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan
     let mut depths: Vec<(i64, usize)> = Vec::new();
     let mut nodes = Vec::new();
     for row in rows {
-        let cell = |index: usize| {
-            row.get(index)
-                .and_then(Option::as_deref)
-                .unwrap_or_default()
-                .trim()
-        };
+        let cell = |index: usize| row.get(index).unwrap_or_default().trim();
         // A parent of 0 is a root, and so is a parent we have not seen — a
         // forward reference would otherwise have no depth to hang from.
         let depth = cell(parent)
@@ -141,7 +137,7 @@ fn parse_linked(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan
 /// MongoDB's `explain`, which is one document: each column of the one row is a
 /// top-level field, rendered as Relaxed Extended JSON. The tree is in
 /// `inputStage`/`inputStages` nesting, and an aggregate's pipeline in `stages`.
-fn parse_document(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Plan> {
+fn parse_document(columns: &[String], rows: &[Row]) -> Option<Plan> {
     use mongodb::bson::{Bson, Document};
 
     let [row] = rows else {
@@ -149,9 +145,9 @@ fn parse_document(columns: &[String], rows: &[Vec<Option<String>>]) -> Option<Pl
     };
     let reply: Document = columns
         .iter()
-        .zip(row)
+        .zip(row.iter())
         .filter_map(|(name, cell)| {
-            let cell = cell.as_deref()?;
+            let cell = cell?;
             // Only a document or an array is JSON; a scalar's cell is bare text.
             let value = match cell.starts_with(['{', '[']) {
                 true => serde_json::from_str(cell).ok(),
@@ -505,9 +501,13 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::rows;
 
     fn one_column(text: &str) -> Plan {
-        parse(&["QUERY PLAN".to_string()], &[vec![Some(text.to_string())]])
+        parse(
+            &["QUERY PLAN".to_string()],
+            &rows(vec![vec![Some(text.to_string())]]),
+        )
     }
 
     /// Timings never subtract cleanly in binary, so assert to a tolerance far
@@ -528,13 +528,11 @@ mod tests {
     fn explain_reply(json: &str) -> Plan {
         let reply: mongodb::bson::Document = serde_json::from_str(json).unwrap();
         let columns: Vec<String> = reply.keys().cloned().collect();
-        let row = reply
-            .values()
-            .map(|value| match value {
-                mongodb::bson::Bson::String(text) => Some(text.clone()),
-                other => serde_json::to_string(other).ok(),
-            })
-            .collect();
+        let row = Row::new(reply.values().map(|value| match value {
+            mongodb::bson::Bson::String(text) => Some(text.clone()),
+            other => serde_json::to_string(other).ok(),
+        }))
+        .unwrap();
         parse(&columns, &[row])
     }
 
@@ -647,7 +645,7 @@ mod tests {
     #[test]
     fn a_reply_with_no_plan_in_it_is_not_taken_for_one() {
         let columns = ["ok".to_string()];
-        let plan = parse(&columns, &[vec![Some("1".into())]]);
+        let plan = parse(&columns, &rows(vec![vec![Some("1".into())]]));
         assert!(plan.nodes.len() <= 1);
         assert_eq!(plan.text, "1");
     }
@@ -757,10 +755,10 @@ Execution Time: 0.041 ms"#,
     fn mysql_arrives_as_one_cell_of_newlines_and_a_single_cost() {
         let plan = parse(
             &["EXPLAIN".to_string()],
-            &[vec![Some(
+            &rows(vec![vec![Some(
                 "-> Limit: 10 row(s)  (cost=1.25 rows=10) (actual time=0.021..0.030 rows=10 loops=1)\n    -> Table scan on accounts  (cost=2.50 rows=12) (actual time=0.019..0.025 rows=12 loops=1)\n"
                     .to_string(),
-            )]],
+            )]]),
         );
 
         assert_eq!(plan.nodes.len(), 2);
@@ -796,11 +794,11 @@ Execution Time: 0.041 ms"#,
         };
         let plan = parse(
             &columns,
-            &[
+            &rows(vec![
                 row("2", "0", "SCAN accounts"),
                 row("6", "2", "SEARCH orders USING INDEX orders_account"),
                 row("4", "0", "USE TEMP B-TREE FOR ORDER BY"),
-            ],
+            ]),
         );
 
         let shape: Vec<(usize, &str)> = plan

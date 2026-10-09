@@ -445,16 +445,19 @@ impl ResultGrid {
     /// cell still holds what was rendered: a sort or a new run in between has
     /// moved or replaced it, and a value written there would be another
     /// row's.
-    pub fn apply_rendered(&mut self, rendered: Vec<(usize, usize, String, String)>) {
-        for (row, column, was, now) in rendered {
-            if let Some(Some(cell)) = self
-                .result
-                .rows
-                .get_mut(row)
-                .and_then(|cells| cells.get_mut(column))
-                && *cell == was
-            {
-                *cell = now;
+    pub fn apply_rendered(&mut self, mut rendered: Vec<(usize, usize, String, String)>) {
+        rendered.sort_by_key(|(row, ..)| *row);
+        for cells in rendered.chunk_by(|a, b| a.0 == b.0) {
+            let Some(row) = self.result.rows.get_mut(cells[0].0) else {
+                continue;
+            };
+            let edits: Vec<_> = cells
+                .iter()
+                .filter(|(_, column, was, _)| row.get(*column) == Some(was.as_str()))
+                .map(|(_, column, _, now)| (*column, Some(now.as_str())))
+                .collect();
+            if !edits.is_empty() {
+                row.replace(&edits);
             }
         }
     }
@@ -467,12 +470,12 @@ impl ResultGrid {
         self.filled
     }
 
-    pub fn append_rows(&mut self, rows: Vec<Vec<db::Cell>>) {
+    pub fn append_rows(&mut self, rows: Vec<db::Row>) {
         self.result.rows.extend(rows);
     }
 
     /// The rows streamed in, for the finished result to be built around.
-    pub fn take_rows(&mut self) -> Vec<Vec<db::Cell>> {
+    pub fn take_rows(&mut self) -> Vec<db::Row> {
         std::mem::take(&mut self.result.rows)
     }
 
@@ -789,7 +792,7 @@ impl ResultGrid {
     /// and copying what happens to fit would be the same bug as reading a value
     /// through the column.
     pub(crate) fn cell(&self, row_ix: usize, col_ix: usize) -> Option<&str> {
-        self.result.rows.get(row_ix)?.get(col_ix)?.as_deref()
+        self.result.rows.get(row_ix)?.get(col_ix)
     }
 
     /// What a fetched cell paints, worked out as it is drawn rather than kept:
@@ -2457,6 +2460,7 @@ pub(crate) fn new_grid(
 mod tests {
     use super::*;
     use crate::db::Column as DbColumn;
+    use crate::db::rows;
 
     fn column(name: &str) -> DbColumn {
         DbColumn {
@@ -2478,7 +2482,7 @@ mod tests {
         let feed = db::Feed::default();
         feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
         feed.begin(vec![column("n"), column("p")]);
-        feed.push(vec![Some("1234567".into()), Some(point.into())]);
+        feed.push(db::Row::new([Some("1234567"), Some(point)]).unwrap());
         assert_eq!(feed.take().set, 0, "held until the describe answers");
 
         feed.describe(vec!["int4".into(), "geometry".into()]);
@@ -2496,7 +2500,7 @@ mod tests {
         let mut finished = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "int4"), typed("p", "geometry")],
-                rows: vec![vec![Some("1234567".into()), Some(point.into())]],
+                rows: rows(vec![vec![Some("1234567".into()), Some(point.into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2518,7 +2522,7 @@ mod tests {
         let feed = db::Feed::default();
         feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
         feed.begin(vec![column("n")]);
-        feed.push(vec![Some("1".into())]);
+        feed.push(db::Row::new([Some("1")]).unwrap());
         assert!(feed.take().rows.is_empty());
 
         feed.release();
@@ -2537,14 +2541,14 @@ mod tests {
         )
         .with_engine(db::Engine::Postgres)
         .streaming(1);
-        grid.append_rows(vec![vec![Some("1".into()), Some(point.into())]]);
+        grid.append_rows(rows(vec![vec![Some("1".into()), Some(point.into())]]));
 
         grid.set_column_types(vec![typed("n", "int4"), typed("p", "geometry")]);
         let rendered = db::render(db::unrendered(db::Engine::Postgres, grid.result()));
         grid.apply_rendered(rendered);
 
         assert!(grid.is_numeric_column(0));
-        let shown = grid.result().rows[0][1].as_deref().unwrap_or_default();
+        let shown = grid.result().rows[0].get(1).unwrap_or_default();
         assert!(shown.starts_with("POINT"), "{shown}");
         // Rendered already, so a second pass finds nothing left to do.
         assert!(db::unrendered(db::Engine::Postgres, grid.result()).is_empty());
@@ -2555,7 +2559,7 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("p")],
-                rows: vec![vec![Some("moved".into())], vec![Some("0101".into())]],
+                rows: rows(vec![vec![Some("moved".into())], vec![Some("0101".into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2564,8 +2568,8 @@ mod tests {
             (0, 0, "0101".into(), "POINT(1 1)".into()),
             (1, 0, "0101".into(), "POINT(2 2)".into()),
         ]);
-        assert_eq!(grid.result().rows[0][0].as_deref(), Some("moved"));
-        assert_eq!(grid.result().rows[1][0].as_deref(), Some("POINT(2 2)"));
+        assert_eq!(grid.result().rows[0].get(0), Some("moved"));
+        assert_eq!(grid.result().rows[1].get(0), Some("POINT(2 2)"));
     }
 
     fn value(text: &str) -> NewValue {
@@ -2580,10 +2584,10 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("b", "int4"), typed("a", "int4")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("1".into()), Some("9".into())],
                     vec![Some("2".into()), Some("8".into())],
-                ],
+                ]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2612,10 +2616,12 @@ mod tests {
                     name: "a".into(),
                     data_type: data_type.map(str::to_string),
                 }],
-                rows: values
-                    .iter()
-                    .map(|value| vec![value.map(str::to_string)])
-                    .collect(),
+                rows: rows(
+                    values
+                        .iter()
+                        .map(|value| vec![value.map(str::to_string)])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2704,13 +2710,13 @@ mod tests {
                     name: "v".into(),
                     data_type: Some("mixed".into()),
                 }],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("b".into())],
                     vec![Some("10".into())],
                     vec![None],
                     vec![Some("9".into())],
                     vec![Some("10".into())],
-                ],
+                ]),
                 cell_types: vec![
                     vec!["string"],
                     vec!["int"],
@@ -2730,10 +2736,12 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("team", "text"), typed("score", "int4")],
-                rows: [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
-                    .iter()
-                    .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
-                    .collect(),
+                rows: rows(
+                    [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
+                        .iter()
+                        .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2750,10 +2758,10 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note"), column("total")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("7".into()), Some("first".into()), Some("1".into())],
                     vec![Some("8".into()), Some("second".into()), Some("2".into())],
-                ],
+                ]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -2772,11 +2780,11 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note"), typed("depth", "int4")],
-                rows: vec![vec![
+                rows: rows(vec![vec![
                     Some("7".into()),
                     Some("first".into()),
                     Some("1".into()),
-                ]],
+                ]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -2797,7 +2805,7 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![Some("7".into()), None]],
+                rows: rows(vec![vec![Some("7".into()), None]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -2816,7 +2824,7 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![None, Some("first".into())]],
+                rows: rows(vec![vec![None, Some("first".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -2863,10 +2871,10 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "int8"), column("ddl")],
-                rows: vec![vec![
+                rows: rows(vec![vec![
                     Some("1234567".into()),
                     Some("CREATE\n  VIEW v".into()),
-                ]],
+                ]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2890,7 +2898,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "numeric")],
-                rows: vec![vec![Some(digits.clone())]],
+                rows: rows(vec![vec![Some(digits.clone())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2958,7 +2966,7 @@ mod tests {
         let mut grid = editable_grid();
         assert!(grid.set_pending(0, 1, value("changed")));
 
-        assert_eq!(grid.result.rows[0][1].as_deref(), Some("first"));
+        assert_eq!(grid.result.rows[0].get(1), Some("first"));
         assert_eq!(grid.shown(0, 1).as_deref(), Some("first"));
         assert_eq!(grid.cell(0, 1), Some("first"));
         assert!(grid.has_pending());
@@ -3041,7 +3049,9 @@ mod tests {
                         name: "id".into(),
                         data_type: None,
                     }],
-                    rows: (0..rows).map(|row| vec![Some(row.to_string())]).collect(),
+                    rows: crate::db::rows(
+                        (0..rows).map(|row| vec![Some(row.to_string())]).collect(),
+                    ),
                     ..QueryResult::default()
                 },
                 Mode::ReadWrite,
@@ -3074,7 +3084,7 @@ mod tests {
                         name: "id".into(),
                         data_type: None,
                     }],
-                    rows: vec![vec![Some("1".into())], vec![Some("2".into())]],
+                    rows: rows(vec![vec![Some("1".into())], vec![Some("2".into())]]),
                     stopped: Some(stopped),
                     ..QueryResult::default()
                 },
@@ -3096,7 +3106,7 @@ mod tests {
                     },
                     column("phone"),
                 ],
-                rows: vec![vec![None, None]],
+                rows: rows(vec![vec![None, None]]),
                 cell_types: vec![vec![db::MISSING, "null"]],
                 ..QueryResult::default()
             },
@@ -3113,7 +3123,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("email"), column("phone")],
-                rows: vec![vec![None, None]],
+                rows: rows(vec![vec![None, None]]),
                 cell_types: vec![vec![db::MISSING, "null"]],
                 ..QueryResult::default()
             },
@@ -3141,11 +3151,11 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("_id", "mixed"), typed("value", "mixed")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("ObjectId('65a4f1c0ffffffffffffffff')".into()), None],
                     vec![Some("2".into()), Some("BinData(0, 'AP8=')".into())],
                     vec![Some("3".into()), Some("42".into())],
-                ],
+                ]),
                 cell_types: vec![
                     vec!["objectId", db::MISSING],
                     vec!["int", "binData"],
@@ -3194,9 +3204,11 @@ mod tests {
         let restored = ResultGrid::restored(
             &StoredGrid {
                 columns: vec!["n".into()],
-                rows: (0..GRID_ROW_CAP)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 total_rows: 20_000,
                 stopped: None,
                 sort: Vec::new(),
@@ -3236,9 +3248,11 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("n")],
-                rows: (0..GRID_ROW_CAP + 10)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP + 10)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3291,7 +3305,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), typed("payload", "bytea")],
-                rows: vec![vec![Some("7".into()), Some("\\xab".into())]],
+                rows: rows(vec![vec![Some("7".into()), Some("\\xab".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -3346,7 +3360,7 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![None, Some("orphan".into())]],
+                rows: rows(vec![vec![None, Some("orphan".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
@@ -3433,7 +3447,7 @@ mod tests {
                             data_type: Some(data_type.into()),
                         },
                     ],
-                    rows: vec![vec![Some("7".into()), Some("x'AB'".into())]],
+                    rows: rows(vec![vec![Some("7".into()), Some("x'AB'".into())]]),
                     edit: Some(EditTarget {
                         schema: "public".into(),
                         table: "measurements".into(),
@@ -3466,7 +3480,7 @@ mod tests {
                             data_type: Some("image".into()),
                         },
                     ],
-                    rows: vec![vec![Some("7".into()), Some("cat.png".into())]],
+                    rows: rows(vec![vec![Some("7".into()), Some("cat.png".into())]]),
                     edit: Some(EditTarget {
                         schema: "main".into(),
                         table: "pets".into(),
@@ -3867,7 +3881,7 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a"), column("b")],
-                rows: vec![vec![Some(value.clone()), None]],
+                rows: rows(vec![vec![Some(value.clone()), None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3926,7 +3940,7 @@ mod tests {
         let replaced = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a")],
-                rows: vec![vec![Some("only".into())]],
+                rows: rows(vec![vec![Some("only".into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3943,7 +3957,11 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("account_id"), column("sku")],
-                rows: vec![vec![Some("7".into()), Some("42".into()), Some("x".into())]],
+                rows: rows(vec![vec![
+                    Some("7".into()),
+                    Some("42".into()),
+                    Some("x".into()),
+                ]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4044,7 +4062,7 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id")],
-                rows: (0..4).map(|row| vec![Some(row.to_string())]).collect(),
+                rows: rows((0..4).map(|row| vec![Some(row.to_string())]).collect()),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4197,7 +4215,7 @@ mod tests {
                     },
                     column("note"),
                 ],
-                rows: vec![vec![Some("7".into()), None]],
+                rows: rows(vec![vec![Some("7".into()), None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4268,12 +4286,12 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![Default::default()],
-                rows: vec![vec![Some("a\nb".to_string())]],
+                rows: rows(vec![vec![Some("a\nb".to_string())]]),
                 ..Default::default()
             },
             Mode::ReadWrite,
         );
-        assert_eq!(grid.result.rows[0][0].as_deref(), Some("a\nb"));
+        assert_eq!(grid.result.rows[0].get(0), Some("a\nb"));
     }
 
     #[test]
@@ -4327,7 +4345,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a")],
-                rows: vec![vec![Some(value.clone())], vec![None]],
+                rows: rows(vec![vec![Some(value.clone())], vec![None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4346,7 +4364,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a"), column("b")],
-                rows: vec![vec![Some("only one cell".into())]],
+                rows: rows(vec![vec![Some("only one cell".into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4385,10 +4403,12 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "int4"), typed("tag", "text")],
-                rows: [("2", "x"), ("3", "y"), ("1", "x")]
-                    .iter()
-                    .map(|(n, tag)| vec![Some(n.to_string()), Some(tag.to_string())])
-                    .collect(),
+                rows: rows(
+                    [("2", "x"), ("3", "y"), ("1", "x")]
+                        .iter()
+                        .map(|(n, tag)| vec![Some(n.to_string()), Some(tag.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4417,7 +4437,7 @@ mod tests {
                     name: "v".into(),
                     data_type: Some("mixed".into()),
                 }],
-                rows: vec![vec![None], vec![Some("1".into())]],
+                rows: rows(vec![vec![None], vec![Some("1".into())]]),
                 cell_types: vec![vec![db::MISSING], vec!["int"]],
                 ..QueryResult::default()
             },

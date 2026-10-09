@@ -17,10 +17,11 @@ use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
-    RelationKind, ServerConfig, Sizes, Stopped, Structure, assemble_catalog, assemble_databases,
-    assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, create_table,
-    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
+    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
+    RelationKind, Row, RowBuilder, ServerConfig, Sizes, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
+    assemble_structure, create_table, non_utf8_error, optional_cell, plain_error, required_cell,
+    terminated,
 };
 
 /// The port the server listens on when the profile does not say.
@@ -941,7 +942,7 @@ impl Connection {
                        AND xact_start = query_start AND backend_xid IS NULL"
                 ))
                 .ok()?;
-            Some(result.rows.first()?.first()? == &Some("t".to_string()))
+            Some(result.rows.first()?.get(0) == Some("t"))
         });
         signalled == Some(true)
     }
@@ -1013,9 +1014,9 @@ impl Connection {
                  WHERE class.oid = {}::regclass",
                 Engine::Postgres.quote_literal(&name)
             ))?;
-            let row = result.rows.first().map(Vec::as_slice).unwrap_or_default();
-            let definition = required_cell(&result, row, "definition")?;
-            let options = match optional_cell(&result, row, "options") {
+            let row = result.rows.first().cloned().unwrap_or_default();
+            let definition = required_cell(&result, &row, "definition")?;
+            let options = match optional_cell(&result, &row, "options") {
                 Some(options) if !options.is_empty() => format!(" WITH ({options})"),
                 _ => String::new(),
             };
@@ -1037,7 +1038,7 @@ impl Connection {
         if storage.rows.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        let first = storage.rows.first().map(Vec::as_slice).unwrap_or_default();
+        let first = &storage.rows.first().cloned().unwrap_or_default();
         let (head, tail) = match (
             optional_cell(&storage, first, "partition_key"),
             optional_cell(&storage, first, "foreign_server"),
@@ -1260,6 +1261,7 @@ struct Assembly<'a> {
     sets: usize,
     /// Which of the first set's columns are spatial, once the feed knows.
     spatial: Option<Vec<bool>>,
+    row: RowBuilder,
     started: Instant,
     /// How long the kept rows took, once there were as many as the limit.
     filled: Option<Duration>,
@@ -1277,6 +1279,7 @@ impl<'a> Assembly<'a> {
             stopping: false,
             sets: 0,
             spatial: None,
+            row: RowBuilder::default(),
             started,
             filled: None,
         }
@@ -1364,33 +1367,32 @@ impl<'a> Assembly<'a> {
                     // — poisoning it and taking the process down with it. A
                     // database whose encoding is SQL_ASCII can return such
                     // bytes for ordinary text.
-                    let cells: Vec<Cell> = (0..row.len())
-                        .map(|index| {
-                            row.try_get(index)
-                                .map(|cell| cell.map(str::to_string))
-                                .map_err(|_| non_utf8_error(&self.result.columns, index))
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    self.result.bytes += cells
-                        .iter()
-                        .filter_map(|cell| cell.as_ref().map(String::len))
-                        .sum::<usize>();
-                    match self.fetch.feed {
-                        Some(feed) => {
-                            let mut cells = cells;
-                            if self.sets == 1 {
-                                if self.spatial.is_none() {
-                                    self.spatial = feed.types().map(|types| {
-                                        types.iter().map(|name| is_spatial(name)).collect()
-                                    });
-                                }
-                                if let Some(spatial) = &self.spatial {
-                                    format_spatial_row(&mut cells, spatial);
-                                }
+                    let spatial = match self.fetch.feed {
+                        Some(feed) if self.sets == 1 => {
+                            if self.spatial.is_none() {
+                                self.spatial = feed.types().map(|types| {
+                                    types.iter().map(|name| is_spatial(name)).collect()
+                                });
                             }
-                            feed.push(cells);
+                            self.spatial.as_deref()
                         }
+                        _ => None,
+                    };
+                    for index in 0..row.len() {
+                        let cell = row
+                            .try_get(index)
+                            .map_err(|_| non_utf8_error(&self.result.columns, index))?;
+                        self.result.bytes += cell.map_or(0, str::len);
+                        let wkt = cell
+                            .filter(|_| {
+                                spatial.is_some_and(|spatial| spatial.get(index) == Some(&true))
+                            })
+                            .and_then(render_spatial);
+                        self.row.push(wkt.as_deref().or(cell));
+                    }
+                    let cells = self.row.finish()?;
+                    match self.fetch.feed {
+                        Some(feed) => feed.push(cells),
                         None => self.result.rows.push(cells),
                     }
                 }
@@ -1455,13 +1457,17 @@ pub(super) fn is_spatial(type_name: &str) -> bool {
 
 /// A value that is not hex EWKB is left alone, which is what lets rows already
 /// rendered as they streamed in go through this a second time.
-pub(super) fn format_spatial_row(row: &mut [Cell], spatial: &[bool]) {
-    for (cell, spatial) in row.iter_mut().zip(spatial) {
-        if let (true, Some(value)) = (spatial, cell)
-            && let Some(wkt) = render_spatial(value)
-        {
-            *value = wkt;
-        }
+pub(super) fn format_spatial_row(row: &mut Row, spatial: &[bool]) {
+    let wkt: Vec<(usize, String)> = (0..row.len())
+        .filter(|&col| spatial.get(col) == Some(&true))
+        .filter_map(|col| Some((col, render_spatial(row.get(col)?)?)))
+        .collect();
+    if !wkt.is_empty() {
+        let edits: Vec<_> = wkt
+            .iter()
+            .map(|(col, wkt)| (*col, Some(wkt.as_str())))
+            .collect();
+        row.replace(&edits);
     }
 }
 
@@ -1589,7 +1595,7 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKey, RelationKind, RoutineKind, SslMode, result};
+    use crate::db::{ForeignKey, RelationKind, RoutineKind, SslMode, result, rows};
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -1941,19 +1947,19 @@ mod tests {
                     data_type: Some("text".into()),
                 },
             ],
-            rows: vec![vec![Some(ewkb.into()), Some(ewkb.into())]],
+            rows: rows(vec![vec![Some(ewkb.into()), Some(ewkb.into())]]),
             ..Default::default()
         };
 
         format_spatial_cells(&mut result);
 
         assert_eq!(
-            result.rows[0][0].as_deref(),
+            result.rows[0].get(0),
             Some(
                 "POLYGON ((-98.533429 29.51536, -98.522614 29.509683, -98.533086 29.508787, -98.533429 29.51536))"
             )
         );
-        assert_eq!(result.rows[0][1].as_deref(), Some(ewkb));
+        assert_eq!(result.rows[0].get(1), Some(ewkb));
     }
 
     #[test]
@@ -1963,13 +1969,13 @@ mod tests {
                 name: "shape".into(),
                 data_type: Some("geometry".into()),
             }],
-            rows: vec![vec![Some("not ewkb".into())]],
+            rows: rows(vec![vec![Some("not ewkb".into())]]),
             ..Default::default()
         };
 
         format_spatial_cells(&mut result);
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("not ewkb"));
+        assert_eq!(result.rows[0].get(0), Some("not ewkb"));
     }
 
     #[test]
@@ -2232,9 +2238,10 @@ mod tests {
         let pid = connection
             .query("SELECT pg_backend_pid()", Fetch::default())
             .unwrap()
-            .rows[0][0]
-            .clone()
-            .unwrap();
+            .rows[0]
+            .get(0)
+            .unwrap()
+            .to_string();
         Connection::open(&live_config())
             .expect("a second connection should open")
             .query(
@@ -2621,11 +2628,11 @@ mod tests {
         let types: Vec<_> = fed.columns.iter().map(|c| c.data_type.as_deref()).collect();
         assert_eq!(types, vec![Some("int4"), Some("geometry")]);
         assert!(
-            fed.rows[0][1]
-                .as_deref()
+            fed.rows[0]
+                .get(1)
                 .is_some_and(|cell| cell.starts_with("POINT")),
             "{:?}",
-            fed.rows[0][1]
+            fed.rows[0].get(1)
         );
     }
 
@@ -3285,7 +3292,7 @@ mod tests {
                 Fetch::default(),
             )
             .expect("query should succeed");
-        assert_eq!(items.rows[0][0].as_deref(), Some("3"));
+        assert_eq!(items.rows[0].get(0), Some("3"));
 
         let closed = connection
             .query(
@@ -3293,7 +3300,7 @@ mod tests {
                 Fetch::default(),
             )
             .expect("query should succeed");
-        assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
+        assert_eq!(closed.rows[0].get(0), Some("2"));
     }
 
     #[test]

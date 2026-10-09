@@ -9,7 +9,7 @@ use std::{collections::HashSet, path::Path};
 
 use serde::Deserialize;
 
-use crate::db::{Cell, Column, EditTarget, Engine, MISSING, QueryResult, Syntax};
+use crate::db::{Column, EditTarget, Engine, MISSING, QueryResult, Row, Syntax};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -94,7 +94,7 @@ pub fn render_rows_as(
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|cell| cell.as_deref().unwrap_or("NULL"))
+                    .map(|cell| cell.unwrap_or("NULL"))
                     .collect::<Vec<_>>()
                     .join("\t")
             })
@@ -162,7 +162,7 @@ pub fn render_rows_as(
 /// `insert_literal`'s value, by contrast, is never anything but what dbdelve
 /// itself rendered (`mssql::render`, `mysql::render`, `sqlite::render`), so a
 /// shape check alone is enough.
-fn insert_literal(engine: Engine, cell: &Cell, column: &Column) -> String {
+fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String {
     let data_type = column.data_type.as_deref();
     match cell {
         None => "NULL".to_string(),
@@ -170,13 +170,13 @@ fn insert_literal(engine: Engine, cell: &Cell, column: &Column) -> String {
             if data_type.is_some_and(crate::db::is_numeric_type)
                 && value.parse::<f64>().is_ok_and(f64::is_finite) =>
         {
-            value.clone()
+            value.to_string()
         }
         Some(value)
             if data_type.is_some_and(|data_type| engine.is_binary_type(data_type))
                 && is_bare_binary_literal(value) =>
         {
-            value.clone()
+            value.to_string()
         }
         Some(value) => engine.quote_value(value, data_type),
     }
@@ -207,7 +207,7 @@ pub fn render(format: Format, result: &QueryResult) -> String {
 pub fn render_rows(
     format: Format,
     columns: &[Column],
-    rows: &[Vec<Cell>],
+    rows: &[Row],
     cell_types: &[Vec<&str>],
 ) -> String {
     match format {
@@ -217,7 +217,7 @@ pub fn render_rows(
     }
 }
 
-fn render_delimited(delimiter: char, columns: &[Column], rows: &[Vec<Cell>]) -> String {
+fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String {
     let mut out = String::new();
     let separator = delimiter.to_string();
 
@@ -239,7 +239,7 @@ fn render_delimited(delimiter: char, columns: &[Column], rows: &[Vec<Cell>]) -> 
                 // empty string is forced into quotes even though the general
                 // quoting rule below would otherwise leave it bare.
                 None => String::new(),
-                Some(value) if value.is_empty() => "\"\"".to_string(),
+                Some("") => "\"\"".to_string(),
                 Some(value) => csv_field(delimiter, value),
             })
             .collect::<Vec<_>>()
@@ -266,7 +266,7 @@ fn csv_field(delimiter: char, value: &str) -> String {
 ///
 /// A document's missing field is left out of its object rather than written as
 /// the `null` it does not hold.
-fn render_json(columns: &[Column], rows: &[Vec<Cell>], cell_types: &[Vec<&str>]) -> String {
+fn render_json(columns: &[Column], rows: &[Row], cell_types: &[Vec<&str>]) -> String {
     let keys = json_keys(columns);
 
     let rows = rows
@@ -275,11 +275,11 @@ fn render_json(columns: &[Column], rows: &[Vec<Cell>], cell_types: &[Vec<&str>])
         .map(|(row_ix, row)| {
             let types = cell_types.get(row_ix);
             let mut object = serde_json::Map::new();
-            for (col_ix, (key, cell)) in keys.iter().zip(row).enumerate() {
+            for (col_ix, (key, cell)) in keys.iter().zip(row.iter()).enumerate() {
                 if types.and_then(|types| types.get(col_ix)) == Some(&MISSING) {
                     continue;
                 }
-                object.insert(key.clone(), serde_json::Value::from(cell.clone()));
+                object.insert(key.clone(), serde_json::Value::from(cell));
             }
             serde_json::Value::Object(object)
         })
@@ -323,6 +323,7 @@ fn json_keys(columns: &[Column]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::rows;
 
     fn column(name: &str) -> Column {
         Column {
@@ -353,10 +354,10 @@ mod tests {
                     data_type: Some("text".into()),
                 },
             ],
-            rows: vec![
+            rows: rows(vec![
                 vec![Some("7".into()), Some("it's".into())],
                 vec![Some("8".into()), None],
-            ],
+            ]),
             ..QueryResult::default()
         };
         let edit = edit_target(&["id", "note"]);
@@ -390,7 +391,7 @@ mod tests {
                 },
                 column("t"),
             ],
-            rows: vec![vec![Some("7".into()), Some("2024-01-01".into())]],
+            rows: rows(vec![vec![Some("7".into()), Some("2024-01-01".into())]]),
             ..QueryResult::default()
         };
         let edit = EditTarget {
@@ -417,7 +418,7 @@ mod tests {
                 name: "data".into(),
                 data_type: Some("blob".into()),
             }],
-            rows: vec![vec![Some("0xABCD".into())]],
+            rows: rows(vec![vec![Some("0xABCD".into())]]),
             ..QueryResult::default()
         };
         let edit = edit_target(&["data"]);
@@ -432,7 +433,7 @@ mod tests {
                 name: "data".into(),
                 data_type: Some("blob".into()),
             }],
-            rows: vec![vec![Some("x'ABCD'".into())]],
+            rows: rows(vec![vec![Some("x'ABCD'".into())]]),
             ..QueryResult::default()
         };
         assert_eq!(
@@ -445,11 +446,11 @@ mod tests {
     fn a_comma_a_quote_and_a_newline_each_get_escaped() {
         let result = QueryResult {
             columns: vec![column("a")],
-            rows: vec![
+            rows: rows(vec![
                 vec![Some("has,comma".into())],
                 vec![Some("has\"quote".into())],
                 vec![Some("has\nnewline".into())],
-            ],
+            ]),
             ..QueryResult::default()
         };
 
@@ -465,7 +466,7 @@ mod tests {
     fn null_is_an_empty_field_but_an_empty_string_is_quoted() {
         let result = QueryResult {
             columns: vec![column("a")],
-            rows: vec![vec![None], vec![Some(String::new())]],
+            rows: rows(vec![vec![None], vec![Some(String::new())]]),
             ..QueryResult::default()
         };
 
@@ -504,7 +505,7 @@ mod tests {
     fn json_renders_null_as_null_never_as_the_string_null() {
         let result = QueryResult {
             columns: vec![column("a")],
-            rows: vec![vec![None]],
+            rows: rows(vec![vec![None]]),
             ..QueryResult::default()
         };
 
@@ -518,7 +519,7 @@ mod tests {
     fn a_missing_field_is_left_out_of_the_json_and_a_null_is_kept() {
         let result = QueryResult {
             columns: vec![column("email"), column("phone")],
-            rows: vec![vec![None, None]],
+            rows: rows(vec![vec![None, None]]),
             cell_types: vec![vec![MISSING, "null"]],
             ..QueryResult::default()
         };
@@ -543,7 +544,7 @@ mod tests {
     fn duplicate_column_names_both_survive_the_json_round_trip() {
         let result = QueryResult {
             columns: vec![column("id"), column("id")],
-            rows: vec![vec![Some("7".into()), Some("8".into())]],
+            rows: rows(vec![vec![Some("7".into()), Some("8".into())]]),
             ..QueryResult::default()
         };
 
@@ -557,7 +558,11 @@ mod tests {
     fn a_duplicate_key_skips_over_a_suffix_that_is_already_a_real_column() {
         let result = QueryResult {
             columns: vec![column("id"), column("id_2"), column("id")],
-            rows: vec![vec![Some("1".into()), Some("2".into()), Some("3".into())]],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("2".into()),
+                Some("3".into()),
+            ]]),
             ..QueryResult::default()
         };
 
@@ -575,7 +580,11 @@ mod tests {
     fn a_real_column_keeps_its_name_from_a_duplicate_that_comes_before_it() {
         let result = QueryResult {
             columns: vec![column("id"), column("id"), column("id_2")],
-            rows: vec![vec![Some("1".into()), Some("2".into()), Some("3".into())]],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("2".into()),
+                Some("3".into()),
+            ]]),
             ..QueryResult::default()
         };
 
@@ -590,7 +599,11 @@ mod tests {
     fn json_key_order_matches_column_order() {
         let result = QueryResult {
             columns: vec![column("z"), column("a"), column("m")],
-            rows: vec![vec![Some("1".into()), Some("2".into()), Some("3".into())]],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("2".into()),
+                Some("3".into()),
+            ]]),
             ..QueryResult::default()
         };
 
@@ -610,7 +623,10 @@ mod tests {
     fn tsv_quotes_a_tab_but_leaves_a_comma_bare() {
         let result = QueryResult {
             columns: vec![column("a"), column("b")],
-            rows: vec![vec![Some("has\ttab".into()), Some("has,comma".into())]],
+            rows: rows(vec![vec![
+                Some("has\ttab".into()),
+                Some("has,comma".into()),
+            ]]),
             ..QueryResult::default()
         };
 

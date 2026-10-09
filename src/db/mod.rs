@@ -1521,17 +1521,15 @@ impl Row {
         self.ends.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
-    }
-
     /// `None` for a NULL and for a column past the row's end alike.
     pub fn get(&self, col: usize) -> Option<&str> {
         let end = *self.ends.get(col)?;
         if end & NULL != 0 {
             return None;
         }
-        let start = col.checked_sub(1).map_or(0, |before| self.ends[before] & !NULL);
+        let start = col
+            .checked_sub(1)
+            .map_or(0, |before| self.ends[before] & !NULL);
         Some(&self.text[start as usize..end as usize])
     }
 
@@ -1592,6 +1590,14 @@ impl<'de> Deserialize<'de> for Row {
         Self::new(Vec::<Cell>::deserialize(deserializer)?)
             .map_err(|error| serde::de::Error::custom(error.message))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn rows(cells: Vec<Vec<Cell>>) -> Vec<Row> {
+    cells
+        .into_iter()
+        .map(|row| Row::try_from(row).unwrap())
+        .collect()
 }
 
 /// Packs rows from cells a driver already holds as text, one push at a time.
@@ -1878,7 +1884,7 @@ pub struct Reference {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryResult {
     pub columns: Vec<Column>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// Total bytes of returned cell text. Shown in the status bar so the cost
     /// of a wide or geometry-heavy result is visible rather than mysterious.
     pub bytes: usize,
@@ -2014,7 +2020,7 @@ pub struct Fed {
     /// this one has rows of a statement the submission has moved past.
     pub set: usize,
     pub columns: Vec<Column>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// The first set's column types, once a describe on another connection
     /// has said, so rows can be shown by type before the statement is done.
     /// Empty until then.
@@ -2043,7 +2049,7 @@ impl Feed {
         fed.filled = None;
     }
 
-    pub(crate) fn push(&self, row: Vec<Cell>) {
+    pub(crate) fn push(&self, row: Row) {
         self.lock().rows.push(row);
     }
 
@@ -2151,7 +2157,7 @@ pub fn unrendered(engine: Engine, result: &QueryResult) -> Vec<(usize, usize, St
         .enumerate()
         .flat_map(|(row, cells)| {
             spatial.iter().filter_map(move |&column| {
-                let value = cells.get(column)?.as_deref()?;
+                let value = cells.get(column)?;
                 // EWKB opens with its byte-order flag, `00` or `01`, which no
                 // WKT keyword does: a cheap test before a copy of the value.
                 (value.starts_with("00") || value.starts_with("01"))
@@ -2475,7 +2481,7 @@ pub(super) fn assemble_databases(result: &QueryResult) -> Result<Databases, DbEr
 
 pub(super) fn required_cell<'a>(
     result: &'a QueryResult,
-    row: &'a [Cell],
+    row: &'a Row,
     column_name: &str,
 ) -> Result<&'a str, DbError> {
     let index = result
@@ -2485,24 +2491,19 @@ pub(super) fn required_cell<'a>(
         .ok_or_else(|| plain_error(format!("Catalog query omitted column {column_name}.")))?;
 
     row.get(index)
-        .and_then(Option::as_deref)
         .ok_or_else(|| plain_error(format!("Catalog query returned no {column_name}.")))
 }
 
 /// A catalog column an engine may have nothing to say about. A missing column
 /// and a null read the same, so an engine without the concept says so by not
 /// selecting it rather than by coalescing a placeholder.
-fn optional_cell<'a>(
-    result: &'a QueryResult,
-    row: &'a [Cell],
-    column_name: &str,
-) -> Option<&'a str> {
+fn optional_cell<'a>(result: &'a QueryResult, row: &'a Row, column_name: &str) -> Option<&'a str> {
     let index = result
         .columns
         .iter()
         .position(|column| column.name == column_name)?;
 
-    row.get(index)?.as_deref().filter(|value| !value.is_empty())
+    row.get(index).filter(|value| !value.is_empty())
 }
 
 pub(super) fn unexpected_catalog_value(label: &str, value: &str) -> DbError {
@@ -2572,7 +2573,7 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
             .collect(),
         rows: rows
             .iter()
-            .map(|row| row.iter().map(|cell| cell.map(str::to_string)).collect())
+            .map(|row| Row::new(row.iter().copied()).unwrap())
             .collect(),
         ..Default::default()
     }
@@ -2733,7 +2734,12 @@ mod tests {
 
     #[test]
     fn a_packed_row_holds_what_its_cells_did() {
-        let cells: Vec<Cell> = vec![Some("1".into()), None, Some(String::new()), Some("ü".into())];
+        let cells: Vec<Cell> = vec![
+            Some("1".into()),
+            None,
+            Some(String::new()),
+            Some("ü".into()),
+        ];
         let mut row = Row::try_from(cells.clone()).unwrap();
         assert_eq!(row, cells);
         assert_eq!(row.get(1), None, "NULL");
@@ -2746,10 +2752,18 @@ mod tests {
             serde_json::to_string(&cells).unwrap(),
             "a snapshot reads as it did",
         );
-        assert_eq!(serde_json::from_str::<Row>(r#"["1",null,"","ü"]"#).unwrap(), row);
+        assert_eq!(
+            serde_json::from_str::<Row>(r#"["1",null,"","ü"]"#).unwrap(),
+            row
+        );
 
         row.replace(&[(0, None), (1, Some("two")), (9, Some("x"))]);
-        let edited = vec![None, Some("two".into()), Some(String::new()), Some("ü".into())];
+        let edited = vec![
+            None,
+            Some("two".into()),
+            Some(String::new()),
+            Some("ü".into()),
+        ];
         assert_eq!(row, edited);
         assert_eq!(row, Row::try_from(edited).unwrap(), "one spelling per row");
     }
