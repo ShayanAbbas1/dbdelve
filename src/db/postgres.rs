@@ -622,6 +622,13 @@ impl Connection {
         tunnelled(server, DEFAULT_PORT, |tunnel| Self::connect(server, tunnel))
     }
 
+    /// Open the side session now, so the first run's types and stop do not
+    /// wait out its connect.
+    pub fn warm(&self) {
+        let this = self.clone();
+        std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
+    }
+
     fn connect(server: &ServerConfig, tunnel: Option<Arc<Tunnel>>) -> Result<Self, DbError> {
         // Two branches rather than a boxed connector: `Client::connect` is
         // generic over it, and `NoTls` is a distinct type whose entire purpose
