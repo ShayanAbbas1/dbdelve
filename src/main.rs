@@ -52,15 +52,15 @@ use gpui_component::{
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
     CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, DeleteRow, DiscardEdits, EditCell,
-    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, ImportConnections,
-    LimitTarget, NewConnection, NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile,
-    NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious, PreviousEdit, PreviousPage,
-    PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, RemoveFilter,
-    RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase,
-    SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator,
-    SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowEditor, ShowReferences,
-    SortColumn, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel, ToggleSidebar,
-    ZoomEditorIn, ZoomEditorOut,
+    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
+    ImportConnections, LimitTarget, NewConnection, NewProject, NewQuery, NewRow, NextEdit,
+    NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
+    PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection,
+    RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery,
+    SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
+    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
+    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin,
+    ToggleNextJoin, TogglePinColumn, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

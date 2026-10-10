@@ -9,6 +9,7 @@ use gpui::Pixels;
 use gpui_component::table::TableState;
 
 use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
+use crate::result_grid::ColumnView;
 
 use super::*;
 use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
@@ -1695,6 +1696,7 @@ impl Workspace {
                 widths,
                 vertical,
                 table.horizontal_scroll_handle.offset(),
+                table.delegate().column_view(),
             )
         };
         if !keep_rows && explain.is_none() {
@@ -1795,7 +1797,7 @@ impl Workspace {
         let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
             let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
-            let (names, widths) = (shown.0.clone(), shown.1.clone());
+            let (names, widths, column_view) = (shown.0.clone(), shown.1.clone(), shown.4.clone());
             cx.spawn(async move |workspace, cx| {
                 loop {
                     cx.background_executor()
@@ -1813,7 +1815,7 @@ impl Workspace {
                         // draw, not the grid's. Only when something arrived:
                         // the clock has a tick of its own.
                         let began = results.read(cx).delegate().streamed_set();
-                        if running && pour(&feed, &results, mode, engine, (&names, &widths), cx) {
+                        if running && pour(&feed, &results, mode, engine, (&names, &widths, &column_view), cx) {
                             cx.notify();
                         }
                         // A grid started for the rows lacks what the structure
@@ -1969,8 +1971,16 @@ impl Workspace {
                                 // took it rather than where the last run left it.
                                 let streamed = results.read(cx).delegate().streamed_set().is_some();
                                 if let Some(feed) = &feed {
-                                    let (names, widths) = (&shown.0, &shown.1);
-                                    pour(feed, &results, mode, engine, (names, widths), cx);
+                                    let (names, widths, column_view) =
+                                        (&shown.0, &shown.1, &shown.4);
+                                    pour(
+                                        feed,
+                                        &results,
+                                        mode,
+                                        engine,
+                                        (names, widths, column_view),
+                                        cx,
+                                    );
                                     let (mut rows, streamed_columns) =
                                         results.update(cx, |table, _| {
                                             let grid = table.delegate_mut();
@@ -2025,12 +2035,14 @@ impl Workspace {
                                 results.update(cx, |table, cx| {
                                     let selection = table.delegate().selection();
                                     let sort = sort_columns(engine, &keys, &result.columns);
-                                    let (names, widths, vertical, horizontal) = &shown;
+                                    let (names, widths, vertical, horizontal, column_view) = &shown;
+                                    let column_view = carried_view(table.delegate(), column_view);
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
                                         .with_engine(engine)
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
-                                        .with_layout(names, widths);
+                                        .with_layout(names, widths)
+                                        .with_column_view(&column_view);
                                     // Streamed rows are the finished result's
                                     // first rows, in order, so what was picked
                                     // out of them as they came still names
@@ -2584,6 +2596,16 @@ fn render_aside(results: &Entity<TableState<ResultGrid>>, engine: Engine, cx: &m
     .detach();
 }
 
+/// What the next grid keeps of the hidden and pinned columns: the grid's
+/// own, which a column hidden while rows were still arriving has changed
+/// since the run began, unless the run already cleared it to nothing.
+fn carried_view(grid: &ResultGrid, at_start: &ColumnView) -> ColumnView {
+    match grid.columns().is_empty() {
+        true => at_start.clone(),
+        false => grid.column_view(),
+    }
+}
+
 /// Move what has arrived into the grid. A new result set starts the grid over,
 /// as it would have when the set's statement finished. `true` when anything
 /// on screen changed.
@@ -2592,7 +2614,7 @@ fn pour(
     results: &Entity<TableState<ResultGrid>>,
     mode: Mode,
     engine: Engine,
-    (names, widths): (&[String], &[Pixels]),
+    (names, widths, column_view): (&[String], &[Pixels], &ColumnView),
     cx: &mut App,
 ) -> bool {
     let fed = feed.take();
@@ -2612,9 +2634,11 @@ fn pour(
                 columns: fed.columns,
                 ..QueryResult::default()
             };
+            let column_view = carried_view(table.delegate(), column_view);
             *table.delegate_mut() = ResultGrid::new(columns, mode)
                 .with_engine(engine)
                 .with_layout(names, widths)
+                .with_column_view(&column_view)
                 .streaming(fed.set);
             table.refresh(cx);
         } else if table.delegate().result().columns != fed.columns {

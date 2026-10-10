@@ -46,6 +46,59 @@ impl Workspace {
         });
     }
 
+    /// Change how the grid in front lays out its columns, then have the table
+    /// rebuild its own copy of them.
+    fn relay_columns(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut crate::result_grid::ResultGrid),
+    ) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results().cloned())
+        else {
+            return;
+        };
+        results.update(cx, |table, cx| {
+            change(table.delegate_mut());
+            table.refresh(cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// The column under the ring, which the cell menu acts on.
+    fn active_column(&self, cx: &App) -> Option<usize> {
+        let results = self.profile()?.session.active_results()?;
+        results.read(cx).delegate().active().map(|(_, col)| col)
+    }
+
+    pub(crate) fn hide_column(&mut self, _: &HideColumn, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(col) = self.active_column(cx) {
+            self.relay_columns(cx, |grid| grid.hide_column(col));
+        }
+    }
+
+    pub(crate) fn toggle_pin_column(
+        &mut self,
+        _: &TogglePinColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(col) = self.active_column(cx) {
+            self.relay_columns(cx, |grid| grid.toggle_pinned(col));
+        }
+    }
+
+    pub(crate) fn show_all_columns(
+        &mut self,
+        _: &ShowAllColumns,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.relay_columns(cx, |grid| grid.show_all_columns());
+    }
+
     /// From a column listed in Structure: back to the rows, at that column.
     pub(crate) fn reveal_column_named(
         &mut self,
