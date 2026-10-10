@@ -286,6 +286,11 @@ windows-sys = { version = "=0.61.2", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
 
+# The headless test platform, simulated input and the `#[gpui::test]` harness
+# the end-to-end tests in `src/workspace/e2e.rs` drive the app through.
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.5", features = ["test-support"] }
+
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]

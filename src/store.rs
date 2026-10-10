@@ -927,7 +927,7 @@ fn variant_name() -> Result<String, String> {
 /// macOS keeps Application Support, where every install before this already
 /// has its data. Linux follows the XDG base directory spec. Windows uses the
 /// roaming profile, which follows the user the way Application Support does.
-fn dbdelve_directory() -> Result<PathBuf, String> {
+pub(crate) fn dbdelve_directory() -> Result<PathBuf, String> {
     Ok(data_root()?.join(variant_name()?))
 }
 
@@ -1114,7 +1114,7 @@ fn secure(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::db::rows;
     use crate::theme::ConnectionColor;
@@ -1147,7 +1147,7 @@ mod tests {
     /// touch the disk take turns and each gets its own directory to be the
     /// whole of dbdelve's storage for the length of the test. Windows reads
     /// `APPDATA` instead, so that is pointed at the same temporary root.
-    fn with_home<T>(body: impl FnOnce() -> T) -> T {
+    pub(crate) fn with_home<T>(body: impl FnOnce() -> T) -> T {
         static LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
 
         let mut counter = LOCK.lock().unwrap_or_else(|error| error.into_inner());
