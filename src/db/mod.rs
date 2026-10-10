@@ -1195,6 +1195,13 @@ impl Connection {
         result
     }
 
+    /// Open now what the first run would otherwise wait on opening.
+    pub fn warm(&self) {
+        if let Self::Postgres(connection) = self {
+            connection.warm();
+        }
+    }
+
     /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
     /// Server alone runs it differently: its session options are the user's to

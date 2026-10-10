@@ -1281,6 +1281,7 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| error.message)?;
                 }
+                connection.warm();
                 Ok(connection)
             }
         });
