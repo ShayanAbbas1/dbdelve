@@ -209,6 +209,10 @@ nucleo-matcher = "=0.3.1"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# VS Code theme files are JSONC: comments and trailing commas, which serde_json
+# refuses. dprint's parser, straight into a serde_json `Value`; its `serde`
+# feature adds only serde, already in the graph.
+jsonc-parser = { version = "=0.34.0", features = ["serde"] }
 toml = "0.9"
 url = "2"
 

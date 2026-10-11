@@ -198,16 +198,20 @@ GitHub at startup to check for updates, which you can turn off in Settings.
 ## Themes
 
 To use a theme from another editor, open the theme picker and choose
-**Import from Zed…** at the end of the list. It lists every Zed theme on this
-machine: Zed's own defaults, the ones in Zed's themes folder
-(`~/.config/zed/themes`, under `$XDG_CONFIG_HOME` on Linux if set, or
-`%APPDATA%\Zed\themes` on Windows) and those of every installed Zed extension.
+**Import from Zed…** or **Import from VS Code…** at the end of the list.
+
+- Zed: its own defaults, the ones in Zed's themes folder
+  (`~/.config/zed/themes`, under `$XDG_CONFIG_HOME` on Linux if set, or
+  `%APPDATA%\Zed\themes` on Windows) and those of every installed Zed
+  extension. Themes with a blurred or transparent background come out as glass.
+- VS Code: the themes VS Code ships with, read from its install, and those of
+  every extension in `~/.vscode/extensions`.
+
 Each is previewed as you move through the list, and Enter imports it: DBDelve
 converts it into a theme file of its own and switches to it. A theme already
 imported is marked so; importing it again replaces the file. One named like a
 theme DBDelve ships is imported with the app's name after it, as in
-"One Dark (Zed)". Zed themes with a blurred or transparent background come out
-as glass.
+"One Dark (Zed)" or "Monokai (VS Code)".
 
 Imported themes, and any you write yourself, live in a `themes` folder next
 to DBDelve's other data:

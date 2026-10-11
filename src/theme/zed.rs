@@ -317,7 +317,7 @@ fn convert(entry: Entry) -> Theme {
 /// in GitHub Dark High Contrast, where they are one colour. Then it is moved
 /// a step off the editor in lightness, keeping the side of it the theme put it
 /// on, or the side with room on a near-black or near-white editor.
-fn apart_from(chrome: Srgb, editor: Srgb) -> Srgb {
+pub(super) fn apart_from(chrome: Srgb, editor: Srgb) -> Srgb {
     const MIN_RATIO: f32 = 1.05;
     if contrast_ratio(chrome, editor) >= MIN_RATIO {
         return chrome;
@@ -336,15 +336,16 @@ fn apart_from(chrome: Srgb, editor: Srgb) -> Srgb {
         .unwrap_or(chrome)
 }
 
-/// `#RGB`, `#RRGGBB` or `#RRGGBBAA` at `pointer`; anything else is absent.
 fn color(style: &Value, pointer: &str) -> Option<Rgba> {
-    let hex = style.pointer(pointer)?.as_str()?.strip_prefix('#')?;
+    hex(style.pointer(pointer)?.as_str()?)
+}
+
+/// `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`; anything else is absent.
+pub(super) fn hex(text: &str) -> Option<Rgba> {
+    let hex = text.strip_prefix('#')?;
     let hex = match hex.len() {
-        3 => hex
-            .chars()
-            .flat_map(|c| [c, c])
-            .chain("ff".chars())
-            .collect(),
+        3 => hex.chars().chain(['f']).flat_map(|c| [c, c]).collect(),
+        4 => hex.chars().flat_map(|c| [c, c]).collect(),
         6 => format!("{hex}ff"),
         8 => hex.to_string(),
         _ => return None,

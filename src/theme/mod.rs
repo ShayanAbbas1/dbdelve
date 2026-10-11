@@ -21,6 +21,7 @@
 
 pub mod color;
 pub mod user;
+mod vscode;
 mod zed;
 
 use gpui::{App, Window};

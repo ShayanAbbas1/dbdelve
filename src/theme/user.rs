@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::{PoisonError, RwLock};
 
-use super::{Theme, zed};
+use super::{Theme, vscode, zed};
 use crate::store;
 
 static USER_THEMES: RwLock<Vec<Theme>> = RwLock::new(Vec::new());
@@ -14,14 +14,16 @@ static USER_THEMES: RwLock<Vec<Theme>> = RwLock::new(Vec::new());
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Zed,
+    VsCode,
 }
 
 impl Source {
-    pub const ALL: [Self; 1] = [Self::Zed];
+    pub const ALL: [Self; 2] = [Self::Zed, Self::VsCode];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Zed => "Zed",
+            Self::VsCode => "VS Code",
         }
     }
 
@@ -30,6 +32,7 @@ impl Source {
     fn found(self) -> &'static [Theme] {
         match self {
             Self::Zed => zed::discover(),
+            Self::VsCode => vscode::discover(),
         }
     }
 
