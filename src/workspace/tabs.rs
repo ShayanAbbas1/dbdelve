@@ -215,6 +215,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match theme::user::import(source, index) {
+            // `set_theme` skips a theme already in force by name, and a
+            // re-import may have brought it new colours.
+            Ok(theme) if theme.name == theme::theme(cx).name => {
+                install_theme(
+                    theme.with_opacity(self.settings.opacity_for(&theme)),
+                    window,
+                    cx,
+                );
+                cx.refresh_windows();
+            }
             Ok(theme) => self.set_theme(theme, window, cx),
             Err(message) => self.note(message, cx),
         }
