@@ -1,14 +1,15 @@
 //! VS Code's colour themes, its own and its installed extensions', converted
 //! onto dbdelve's [`Theme`].
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 
 use super::color::{Rgba, contrast_ratio};
-use super::zed::{apart_from, hex, on_accent, see_through};
+use super::zed::{
+    apart_from, hex, keep_untaken, on_accent, read_text, see_through, sorted_entries,
+};
 use super::{PALETTE_EDITED_ALPHA, Theme};
 use crate::store;
 
@@ -30,16 +31,15 @@ pub(crate) fn discover() -> &'static [Theme] {
         for roots in [built_in_directories(), extension_directories()] {
             let mut group: Vec<Theme> = roots
                 .iter()
-                .flat_map(|root| std::fs::read_dir(root).into_iter().flatten().flatten())
-                .flat_map(|extension| extension_themes(&extension.path()))
+                .flat_map(|root| sorted_entries(root))
+                .flat_map(|extension| extension_themes(&extension))
                 .collect();
             group.sort_by_key(|theme| theme.name.to_lowercase());
             themes.extend(group);
         }
         // ponytail: an extension VS Code has updated but not yet deleted (its
         // `.obsolete` list) is read twice, and either copy may win the name.
-        let mut taken = HashSet::new();
-        themes.retain(|theme| taken.insert(theme.name.to_lowercase()));
+        keep_untaken(&mut themes, &mut Vec::new());
         themes
     })
 }
@@ -88,10 +88,11 @@ fn extension_directories() -> Vec<PathBuf> {
 
 /// The colour themes an extension's `package.json` contributes.
 fn extension_themes(extension: &Path) -> Vec<Theme> {
-    let Ok(manifest) = read(&extension.join("package.json")).and_then(|text| parse(&text)) else {
+    let Ok(manifest) = read_text(&extension.join("package.json")).and_then(|text| parse(&text))
+    else {
         return Vec::new();
     };
-    let strings = read(&extension.join("package.nls.json"))
+    let strings = read_text(&extension.join("package.nls.json"))
         .and_then(|text| parse(&text))
         .unwrap_or_default();
     let contributions = manifest
@@ -112,7 +113,7 @@ fn extension_themes(extension: &Path) -> Vec<Theme> {
                 Some("vs" | "hc-light")
             );
             let path = extension.join(file);
-            match load(&path, &read, 0) {
+            match load(&path, &read_text, 0) {
                 Ok(source) => Some(convert(
                     localized(label.as_str()?, &strings),
                     light,
@@ -139,10 +140,6 @@ fn localized(label: &str, strings: &Value) -> String {
         })
         .unwrap_or(label)
         .to_string()
-}
-
-fn read(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|error| error.to_string())
 }
 
 fn parse(text: &str) -> Result<Value, String> {

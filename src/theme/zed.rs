@@ -93,15 +93,16 @@ pub(super) fn read(
 ) -> Vec<Theme> {
     let mut themes = Vec::new();
     for path in files {
-        match std::fs::read_to_string(&path)
-            .map_err(|error| error.to_string())
-            .and_then(|text| parse(&text))
-        {
+        match read_text(&path).and_then(|text| parse(&text)) {
             Ok(parsed) => themes.extend(parsed),
             Err(error) => eprintln!("skipping theme file {}: {error}", path.display()),
         }
     }
     themes
+}
+
+pub(super) fn read_text(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| error.to_string())
 }
 
 /// Drop every theme whose name is taken, case-blind as `restored_theme` is,
