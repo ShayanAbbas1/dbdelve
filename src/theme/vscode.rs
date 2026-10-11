@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value};
 
 use super::color::{Rgba, contrast_ratio};
-use super::zed::{apart_from, hex};
-use super::{PALETTE_EDITED_ALPHA, PALETTE_SELECTION_ALPHA, Theme};
+use super::zed::{apart_from, hex, on_accent, see_through};
+use super::{PALETTE_EDITED_ALPHA, Theme};
 use crate::store;
 
 static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
@@ -285,20 +285,9 @@ fn convert(name: String, light: bool, source: &Source) -> Theme {
         text_muted: solid(&["descriptionForeground"]).unwrap_or(base.text_muted),
         text_faint: solid(&["editorLineNumber.foreground"]).unwrap_or(base.text_faint),
         accent,
-        // On the accent, whichever of the theme's two ends reads better.
-        on_accent: if contrast_ratio(text, accent) >= contrast_ratio(surface, accent) {
-            text
-        } else {
-            surface
-        },
-        // An opaque selection would hide the text it selects.
-        selection: first(&["editor.selectionBackground"]).map_or(base.selection, |c| {
-            if c.a < 1.0 {
-                c
-            } else {
-                c.flatten(surface).alpha(PALETTE_SELECTION_ALPHA)
-            }
-        }),
+        on_accent: on_accent(text, surface, accent),
+        selection: first(&["editor.selectionBackground"])
+            .map_or(base.selection, |c| see_through(c, surface)),
         cursor: solid(&["editorCursor.foreground"]).unwrap_or(text),
         edited: solid(&["editorWarning.foreground"])
             .map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA)),

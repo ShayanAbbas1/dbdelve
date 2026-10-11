@@ -280,21 +280,8 @@ fn convert(entry: Entry) -> Theme {
         text_muted: solid("/text.muted").unwrap_or(base.text_muted),
         text_faint: solid("/text.placeholder").unwrap_or(base.text_faint),
         accent,
-        // Zed has no on-accent colour; take whichever of its two ends reads
-        // better on the accent.
-        on_accent: if contrast_ratio(text, accent) >= contrast_ratio(surface, accent) {
-            text
-        } else {
-            surface
-        },
-        // An opaque selection would hide the text it selects.
-        selection: rgba("/players/0/selection").map_or(base.selection, |c| {
-            if c.a < 1.0 {
-                c
-            } else {
-                c.flatten(surface).alpha(PALETTE_SELECTION_ALPHA)
-            }
-        }),
+        on_accent: on_accent(text, surface, accent),
+        selection: rgba("/players/0/selection").map_or(base.selection, |c| see_through(c, surface)),
         cursor: cursor.unwrap_or(base.cursor),
         edited: solid("/warning").map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA)),
         danger: solid("/error").unwrap_or(base.danger),
@@ -334,6 +321,26 @@ pub(super) fn apart_from(chrome: Srgb, editor: Srgb) -> Srgb {
         .map(|n| Oklch::new(edge.l + step * n as f32, own.c, own.h).to_srgb())
         .find(|candidate| contrast_ratio(*candidate, editor) >= MIN_RATIO)
         .unwrap_or(chrome)
+}
+
+/// Neither Zed nor VS Code names a colour to write on the accent; take
+/// whichever of the theme's two ends reads better on it.
+pub(super) fn on_accent(text: Srgb, surface: Srgb, accent: Srgb) -> Srgb {
+    if contrast_ratio(text, accent) >= contrast_ratio(surface, accent) {
+        text
+    } else {
+        surface
+    }
+}
+
+/// `selection`, made translucent if it is not: an opaque selection would hide
+/// the text it selects.
+pub(super) fn see_through(selection: Rgba, surface: Srgb) -> Rgba {
+    if selection.a < 1.0 {
+        selection
+    } else {
+        selection.flatten(surface).alpha(PALETTE_SELECTION_ALPHA)
+    }
 }
 
 fn color(style: &Value, pointer: &str) -> Option<Rgba> {
