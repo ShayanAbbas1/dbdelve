@@ -2011,7 +2011,9 @@ mod tests {
 
     #[test]
     fn opacity_is_stored_per_theme() {
-        let [first, second, ..] = Theme::all();
+        let [first, second, ..] = Theme::all()[..] else {
+            unreachable!()
+        };
         let mut settings = Settings::default();
         settings.set_opacity_for(&first, 0.9);
         assert_eq!(settings.opacity_for(&first), 0.9);

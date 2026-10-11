@@ -20,6 +20,7 @@
 //! The window is vibrant, so every plane is also a glass: see [`Theme::frost`].
 
 pub mod color;
+pub mod zed;
 
 use gpui::{App, Window};
 
@@ -573,9 +574,17 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Every theme dbdelve ships, in the order the theme picker lists them:
-    /// every dark theme, then every light one. The first is the default.
-    pub fn all() -> [Self; 29] {
+    /// Every theme in the order the theme picker lists them: the built-in
+    /// ones, then any [`zed::load_user_themes`] read.
+    pub fn all() -> Vec<Self> {
+        let mut all = Self::built_in().to_vec();
+        all.extend_from_slice(zed::user_themes());
+        all
+    }
+
+    /// Every theme dbdelve ships: every dark theme, then every light one. The
+    /// first is the default.
+    fn built_in() -> [Self; 29] {
         [
             Self::glass(),
             Self::black(),
@@ -1841,7 +1850,10 @@ mod tests {
     fn themes_are_comparable_not_mirrored() {
         // Every theme should land in the same contrast neighbourhood, so
         // switching does not make one of them feel washed out next to another.
-        let ratios = Theme::all().map(|theme| contrast_ratio(theme.text, theme.bg));
+        let ratios: Vec<_> = Theme::all()
+            .iter()
+            .map(|theme| contrast_ratio(theme.text, theme.bg))
+            .collect();
         let spread = ratios.iter().cloned().fold(f32::MIN, f32::max)
             - ratios.iter().cloned().fold(f32::MAX, f32::min);
         assert!(spread < 6.0, "themes drifted apart: {ratios:?}");
@@ -1981,9 +1993,9 @@ mod tests {
     fn glass_is_toned_onto_the_glass_planes() {
         let planes = |t: Theme| [t.bg, t.panel, t.surface, t.overlay, t.control];
         let all = Theme::all();
-        for glass in all.into_iter().filter(|t| t.is_glass) {
-            let base = all
-                .into_iter()
+        for &glass in all.iter().filter(|t| t.is_glass) {
+            let base = *all
+                .iter()
                 .find(|t| Some(t.name) == glass.name.strip_suffix(" Glass"))
                 .unwrap_or_else(|| panic!("{}: no base theme", glass.name));
             let tones = match glass.appearance {

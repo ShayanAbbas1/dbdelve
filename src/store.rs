@@ -1049,6 +1049,11 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     written
 }
 
+/// Where the Zed theme files a user drops in are read from at startup.
+pub(crate) fn theme_directory() -> Result<PathBuf, String> {
+    Ok(dbdelve_directory()?.join("themes"))
+}
+
 /// Where a private key another client kept in its own store is written, since
 /// ssh reads a key only from a file.
 pub(crate) fn ssh_key_directory() -> Result<PathBuf, String> {
