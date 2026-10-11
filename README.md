@@ -195,6 +195,38 @@ status bar links to [the latest release][releases] once there is a newer one.
 There is no telemetry. The only request DBDelve makes on its own is one to
 GitHub at startup to check for updates, which you can turn off in Settings.
 
+## Themes
+
+Besides its own, DBDelve lists the themes you have in [Zed](https://zed.dev),
+read at startup from Zed's themes folder (`~/.config/zed/themes`, under
+`$XDG_CONFIG_HOME` on Linux if set, or `%APPDATA%\Zed\themes` on Windows) and
+from every installed Zed extension. Zed
+themes with a blurred or transparent background come out as glass.
+
+Your own go in a `themes` folder next to DBDelve's other data:
+
+- macOS: `~/Library/Application Support/dbdelve/themes`
+- Linux: `$XDG_DATA_HOME/dbdelve/themes`, or `~/.local/share/dbdelve/themes`
+- Windows: `%APPDATA%\dbdelve\themes`
+
+A file there is either a Zed theme file or one DBDelve theme, whose colours are
+named after DBDelve's own tokens (`bg`, `panel`, `surface`, `overlay`,
+`control`, `text`, `text_muted`, `accent`, `selection`, `syntax_keyword` and
+the rest in [`src/theme/mod.rs`](src/theme/mod.rs)). Any left out come from
+DBDelve Dark or Light:
+
+```json
+{
+  "name": "Harbor",
+  "appearance": "dark",
+  "glass": false,
+  "colors": { "bg": "#1b2430", "text": "#d8dee9", "accent": "#88c0d0" }
+}
+```
+
+A theme named like one already listed is skipped: DBDelve's own come first,
+then this folder, then Zed's. Restart DBDelve to pick up a change.
+
 
 ## License
 

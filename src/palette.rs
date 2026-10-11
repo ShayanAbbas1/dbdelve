@@ -29,7 +29,7 @@ use crate::{
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
-    theme::{FontSlot, Theme, fonts, install_theme, layout, theme},
+    theme::{FontSlot, Theme, fonts, install_theme, layout, theme, zed},
     ui::{chord_hint, object_icon, one_line, row_icon},
     workspace::opacity_for,
 };
@@ -471,6 +471,8 @@ fn theme_items(cx: &App) -> Vec<Item> {
             label: candidate.name.to_string(),
             hint: if candidate.name == current {
                 "current"
+            } else if zed::is_from_zed(candidate.name) {
+                "Zed"
             } else {
                 ""
             }

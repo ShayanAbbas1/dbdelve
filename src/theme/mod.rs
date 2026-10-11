@@ -575,10 +575,10 @@ pub struct Theme {
 
 impl Theme {
     /// Every theme in the order the theme picker lists them: the built-in
-    /// ones, then any [`zed::load_user_themes`] read.
+    /// ones, then the user's own, then Zed's.
     pub fn all() -> Vec<Self> {
         let mut all = Self::built_in().to_vec();
-        all.extend_from_slice(zed::user_themes());
+        all.extend(zed::user_themes());
         all
     }
 
