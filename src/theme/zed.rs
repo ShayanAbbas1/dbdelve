@@ -343,6 +343,10 @@ fn color(style: &Value, pointer: &str) -> Option<Rgba> {
 /// `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`; anything else is absent.
 pub(super) fn hex(text: &str) -> Option<Rgba> {
     let hex = text.strip_prefix('#')?;
+    // `from_str_radix` would take a leading `+` as a sign.
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let hex = match hex.len() {
         3 => hex.chars().chain(['f']).flat_map(|c| [c, c]).collect(),
         4 => hex.chars().flat_map(|c| [c, c]).collect(),
@@ -404,6 +408,7 @@ mod tests {
         assert_eq!(theme.syntax_keyword, Srgb::from_hex(0xaa0055));
         assert_eq!(theme.syntax_string, light.syntax_string);
         assert_eq!(theme.danger, light.danger);
+        assert!(hex("#+abcde").is_none());
     }
 
     #[test]
