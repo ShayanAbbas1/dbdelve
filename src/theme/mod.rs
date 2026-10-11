@@ -20,7 +20,8 @@
 //! The window is vibrant, so every plane is also a glass: see [`Theme::frost`].
 
 pub mod color;
-pub mod zed;
+pub mod user;
+mod zed;
 
 use gpui::{App, Window};
 
@@ -575,10 +576,10 @@ pub struct Theme {
 
 impl Theme {
     /// Every theme in the order the theme picker lists them: the built-in
-    /// ones, then the user's own, then Zed's.
+    /// ones, then the user's own and the imported.
     pub fn all() -> Vec<Self> {
         let mut all = Self::built_in().to_vec();
-        all.extend(zed::user_themes());
+        all.extend(user::themes());
         all
     }
 

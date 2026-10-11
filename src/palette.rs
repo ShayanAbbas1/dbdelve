@@ -29,7 +29,7 @@ use crate::{
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
-    theme::{FontSlot, Theme, fonts, install_theme, layout, theme, zed},
+    theme::{FontSlot, Theme, fonts, install_theme, layout, theme, user},
     ui::{chord_hint, object_icon, one_line, row_icon},
     workspace::opacity_for,
 };
@@ -46,9 +46,12 @@ pub enum Mode {
     /// with the slot in it rather than three: the list is the same list, and
     /// only the row's destination differs.
     Font(FontSlot),
-    /// Every shipped theme. The highlighted row is installed as it moves, and
-    /// only a confirmed one is kept.
+    /// Every theme, then a row per app to import one from. The highlighted
+    /// theme is installed as it moves, and only a confirmed one is kept.
     Theme,
+    /// Every theme one app has on this machine, previewed as the theme list
+    /// previews, and imported when confirmed.
+    ImportTheme(user::Source),
     /// The databases on the active profile's server, as last fetched.
     Database,
     /// The columns of the grid in front, to jump to one of them.
@@ -126,6 +129,10 @@ pub enum Command {
     /// Put the palette back up over the theme list.
     SelectTheme,
     SetTheme(Box<Theme>),
+    /// Put the palette back up over the themes an app has, to import one.
+    BrowseThemes(user::Source),
+    /// By index into [`user::Source::themes`], which stands for the process.
+    ImportTheme(user::Source, usize),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
     SetDatabase(String),
@@ -177,8 +184,8 @@ pub struct Palette {
     /// order on screen is the matcher's order.
     matched: Vec<usize>,
     matcher: Matcher,
-    /// The theme in force when the theme list opened, for a filter that
-    /// matches nothing to fall back to.
+    /// The theme in force when a theme list opened, for a filter that
+    /// matches nothing, or a row that is not a theme, to fall back to.
     unpreviewed: Option<Theme>,
     /// Opacity per theme as of opening, so a previewed theme paints at its own.
     theme_opacity: HashMap<String, f32>,
@@ -189,6 +196,7 @@ impl Palette {
     pub fn new(mode: Mode, workspace: &Workspace, cx: &App) -> Self {
         let items = match (mode, workspace.profile()) {
             (Mode::Theme, _) => theme_items(cx),
+            (Mode::ImportTheme(source), _) => import_items(source),
             (Mode::Jump, Some(profile)) => jump_items(profile),
             (Mode::Commands, Some(profile)) => command_items(workspace, profile, cx),
             (Mode::History, Some(profile)) => history_items(profile),
@@ -202,7 +210,7 @@ impl Palette {
             matched: (0..items.len()).collect(),
             items,
             matcher: Matcher::new(Config::DEFAULT),
-            unpreviewed: (mode == Mode::Theme).then(|| *theme(cx)),
+            unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
             theme_opacity: workspace.settings.theme_opacity.clone(),
             fallback_opacity: workspace.settings.opacity,
         }
@@ -228,6 +236,7 @@ impl Palette {
             Mode::History => "Recall a statement you have run…",
             Mode::Font(_) => "Pick a font…",
             Mode::Theme => "Pick a theme…",
+            Mode::ImportTheme(_) => "Import a theme…",
             Mode::Database => "Switch database…",
             Mode::Columns => "Go to a column…",
         }
@@ -299,10 +308,16 @@ impl ListDelegate for Palette {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
+        let message = match self.mode {
+            Mode::ImportTheme(source) if self.items.is_empty() => {
+                format!("No {} themes found on this machine.", source.name())
+            }
+            _ => "No matches.".to_string(),
+        };
         div()
             .p(px(layout::SPACE_MD))
             .text_color(theme(cx).text_muted)
-            .child("No matches.")
+            .child(message)
     }
 
     /// The live preview. Nothing here is saved, and nothing here undoes it:
@@ -315,6 +330,7 @@ impl ListDelegate for Palette {
     ) {
         let previewed = match ix.and_then(|ix| self.command(ix.row)) {
             Some(Command::SetTheme(candidate)) => Some(**candidate),
+            Some(Command::ImportTheme(source, index)) => source.themes().nth(*index),
             _ => self.unpreviewed,
         };
         if let Some(previewed) = previewed {
@@ -461,24 +477,50 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
         .collect()
 }
 
-/// Every theme dbdelve ships, in [`Theme::all`] order, the one in force marked
-/// the way the font list marks its family.
+/// Every theme, in [`Theme::all`] order, the one in force marked the way the
+/// font list marks its family. The ways to import one follow, after the
+/// themes, so the list opens on a theme and reads as themes first, as the
+/// command palette lists its import rows after the work.
 fn theme_items(cx: &App) -> Vec<Item> {
     let current = theme(cx).name;
-    Theme::all()
-        .into_iter()
-        .map(|candidate| Item {
+    let themes = Theme::all().into_iter().map(|candidate| Item {
+        label: candidate.name.to_string(),
+        hint: if candidate.name == current {
+            "current"
+        } else {
+            ""
+        }
+        .into(),
+        icon: icon::THEME,
+        command: Command::SetTheme(Box::new(candidate)),
+    });
+    let imports = user::Source::ALL.into_iter().map(|source| {
+        Item::command(
+            &format!("Import from {}…", source.name()),
+            "",
+            icon::PLUS,
+            Command::BrowseThemes(source),
+        )
+    });
+    themes.chain(imports).collect()
+}
+
+/// Every theme one app has, marked once it has been imported, since
+/// importing it again only writes the same file over itself.
+fn import_items(source: user::Source) -> Vec<Item> {
+    source
+        .themes()
+        .enumerate()
+        .map(|(index, candidate)| Item {
             label: candidate.name.to_string(),
-            hint: if candidate.name == current {
-                "current"
-            } else if zed::is_from_zed(candidate.name) {
-                "Zed"
+            hint: if user::is_imported(&source.imported_name(candidate.name)) {
+                "imported"
             } else {
                 ""
             }
             .into(),
             icon: icon::THEME,
-            command: Command::SetTheme(Box::new(candidate)),
+            command: Command::ImportTheme(source, index),
         })
         .collect()
 }

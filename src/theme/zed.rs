@@ -1,22 +1,25 @@
-//! User themes, read once at startup: dbdelve's own [`store::theme_directory`],
-//! then Zed's themes directory and its installed extensions.
+//! Zed's theme format, and the themes Zed has on this machine for
+//! [`super::user::Source::Zed`] to import: its own defaults, which are compiled
+//! into Zed rather than installed, its themes directory and its extensions.
+//! dbdelve's native format is read and written here too, since a file in
+//! dbdelve's own directory may be either.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::color::{Oklch, Rgba, Srgb, contrast_ratio};
-use super::{PALETTE_EDITED_ALPHA, PALETTE_SELECTION_ALPHA, Theme};
+use super::{Appearance, PALETTE_EDITED_ALPHA, PALETTE_SELECTION_ALPHA, Theme};
 use crate::store;
 
-struct Loaded {
-    own: Vec<Theme>,
-    zed: Vec<Theme>,
-}
-
-static USER_THEMES: OnceLock<Loaded> = OnceLock::new();
+/// Zed's defaults, from `assets/themes` in its repository.
+const BUNDLED: [&str; 3] = [
+    include_str!("../../assets/themes/zed/ayu.json"),
+    include_str!("../../assets/themes/zed/gruvbox.json"),
+    include_str!("../../assets/themes/zed/one.json"),
+];
 
 #[derive(Deserialize)]
 struct Family {
@@ -35,47 +38,36 @@ struct Entry {
     style: Value,
 }
 
-/// The themes [`load_user_themes`] read, dbdelve's own before Zed's, or none
-/// if it has not run.
-pub(super) fn user_themes() -> impl Iterator<Item = Theme> {
-    USER_THEMES
-        .get()
-        .into_iter()
-        .flat_map(|loaded| loaded.own.iter().chain(&loaded.zed))
-        .copied()
-}
-
-pub(crate) fn is_from_zed(name: &str) -> bool {
-    USER_THEMES
-        .get()
-        .is_some_and(|loaded| loaded.zed.iter().any(|theme| theme.name == name))
-}
-
-/// Read every theme file once. A file that does not read or parse is
-/// skipped, never fatal, and a name already taken goes to whichever came
-/// first: built-in, then dbdelve's directory, then Zed's, then its extensions.
-pub(crate) fn load_user_themes() {
-    let mut own = read(
-        store::theme_directory()
+/// Every Zed theme on this machine, unglassed, scanned once per process so
+/// the names leaked for them stay bounded. A name goes to whichever has it
+/// first: Zed's themes directory, its extensions, then its defaults, so a
+/// user's own copy of a default wins.
+///
+/// ponytail: scanned on the UI thread when the import list first opens. Move
+/// it to a background task if a large extensions folder makes that stutter.
+pub(super) fn discover() -> &'static [Theme] {
+    static FOUND: OnceLock<Vec<Theme>> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        let user = store::zed_theme_directory()
             .into_iter()
-            .flat_map(|directory| json_files(&directory)),
-        parse_own,
-    );
-    let zed_themes = store::zed_theme_directory()
-        .into_iter()
-        .flat_map(|directory| json_files(&directory));
-    let zed_extensions = store::zed_extension_directory()
-        .into_iter()
-        .flat_map(|root| sorted_entries(&root))
-        .flat_map(|extension| json_files(&extension.join("themes")));
-    let mut zed = read(zed_themes.chain(zed_extensions), parse_zed);
-    let mut taken = Theme::built_in().map(|theme| theme.name).to_vec();
-    keep_untaken(&mut own, &mut taken);
-    keep_untaken(&mut zed, &mut taken);
-    let _ = USER_THEMES.set(Loaded { own, zed });
+            .flat_map(|directory| json_files(&directory));
+        let extensions = store::zed_extension_directory()
+            .into_iter()
+            .flat_map(|root| sorted_entries(&root))
+            .flat_map(|extension| json_files(&extension.join("themes")));
+        let mut themes = read(user.chain(extensions), parse_zed);
+        themes.extend(
+            BUNDLED
+                .iter()
+                .flat_map(|text| parse_zed(text).unwrap_or_default()),
+        );
+        keep_untaken(&mut themes, &mut Vec::new());
+        themes.sort_by_key(|theme| theme.name.to_lowercase());
+        themes
+    })
 }
 
-fn sorted_entries(directory: &Path) -> Vec<PathBuf> {
+pub(super) fn sorted_entries(directory: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<_> = std::fs::read_dir(directory)
         .into_iter()
         .flatten()
@@ -86,7 +78,7 @@ fn sorted_entries(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn json_files(directory: &Path) -> Vec<PathBuf> {
+pub(super) fn json_files(directory: &Path) -> Vec<PathBuf> {
     let mut paths = sorted_entries(directory);
     paths.retain(|path| {
         path.extension()
@@ -95,7 +87,7 @@ fn json_files(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn read(
+pub(super) fn read(
     files: impl Iterator<Item = PathBuf>,
     parse: fn(&str) -> Result<Vec<Theme>, String>,
 ) -> Vec<Theme> {
@@ -114,7 +106,7 @@ fn read(
 
 /// Drop every theme whose name is taken, case-blind as `restored_theme` is,
 /// and take the names of the ones kept.
-fn keep_untaken(themes: &mut Vec<Theme>, taken: &mut Vec<&'static str>) {
+pub(super) fn keep_untaken(themes: &mut Vec<Theme>, taken: &mut Vec<&'static str>) {
     themes.retain(|theme| {
         let fresh = !taken
             .iter()
@@ -126,15 +118,27 @@ fn keep_untaken(themes: &mut Vec<Theme>, taken: &mut Vec<&'static str>) {
     });
 }
 
-/// A file in dbdelve's own directory: a Zed family, or one native theme.
-fn parse_own(text: &str) -> Result<Vec<Theme>, String> {
+/// A file in dbdelve's own directory: a Zed family, or one native theme. A
+/// glass theme comes out glassed.
+pub(super) fn parse_own(text: &str) -> Result<Vec<Theme>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    if value.get("themes").is_some() {
-        return zed_family(value);
+    let flat = if value.get("themes").is_some() {
+        zed_family(value)?
+    } else {
+        vec![native(&value).ok_or("neither a Zed theme family nor a theme with a name")?]
+    };
+    Ok(flat.into_iter().map(finished).collect())
+}
+
+/// A theme as it is painted. An unglassed theme carries `is_glass` as the
+/// intent only: its planes are the ones glassing tones, which is also what a
+/// native file holds, so loading one glasses it exactly once.
+pub(super) fn finished(theme: Theme) -> Theme {
+    if theme.is_glass {
+        theme.glassed(theme.name)
+    } else {
+        theme
     }
-    native(&value)
-        .map(|theme| vec![theme])
-        .ok_or_else(|| "neither a Zed theme family nor a theme with a name".to_string())
 }
 
 fn parse_zed(text: &str) -> Result<Vec<Theme>, String> {
@@ -154,13 +158,29 @@ fn base(appearance: &str) -> Theme {
     }
 }
 
-/// `{ "name", "appearance", "glass", "colors": { <Theme field>: hex } }`.
+/// Every colour a native file names, solid planes and inks before the
+/// translucent washes, for `$then` to fill or write.
+macro_rules! native_colors {
+    ($then:ident) => {
+        // `surface` first: it is what a translucent solid is flattened over.
+        $then!(
+            surface, bg, panel, overlay, control, text, text_muted, text_faint, accent, on_accent,
+            cursor, danger, success, syntax_comment, syntax_keyword, syntax_string, syntax_number,
+            syntax_function, syntax_type, syntax_variable, syntax_operator;
+            element_hover, element_active, border, border_strong, selection, edited
+        )
+    };
+}
+
+/// `{ "name", "appearance", "glass", "colors": { <Theme field>: hex } }`,
+/// unglassed.
 fn native(value: &Value) -> Option<Theme> {
-    // ponytail: leaked, but themes load once per process so it is bounded.
+    // ponytail: leaked, bounded by the files read at startup plus imports.
     let name: &'static str = Box::leak(value.get("name")?.as_str()?.into());
     let appearance = value.get("appearance").and_then(Value::as_str);
     let mut theme = Theme {
         name,
+        is_glass: value.get("glass") == Some(&Value::Bool(true)),
         ..base(appearance.unwrap_or_default())
     };
     let pick = |field: &str| color(value, &format!("/colors/{field}"));
@@ -174,20 +194,39 @@ fn native(value: &Value) -> Option<Theme> {
             })*
         };
     }
-    // `surface` first: it is what a translucent solid is flattened over.
-    fill!(
-        surface, bg, panel, overlay, control, text, text_muted, text_faint, accent, on_accent,
-        cursor, danger, success, syntax_comment, syntax_keyword, syntax_string, syntax_number,
-        syntax_function, syntax_type, syntax_variable, syntax_operator;
-        element_hover, element_active, border, border_strong, selection, edited
-    );
-    Some(if value.get("glass") == Some(&Value::Bool(true)) {
-        theme.glassed(name)
-    } else {
-        theme
-    })
+    native_colors!(fill);
+    Some(theme)
 }
 
+/// The inverse of [`native`]: every colour, so the file does not lean on
+/// whichever base a later dbdelve falls back to.
+pub(super) fn native_text(theme: &Theme) -> String {
+    let mut colors = serde_json::Map::new();
+    macro_rules! put {
+        ($($solid:ident),*; $($wash:ident),*) => {
+            $(colors.insert(stringify!($solid).into(), theme.$solid.hex().into());)*
+            $(colors.insert(stringify!($wash).into(), rgba_hex(theme.$wash).into());)*
+        };
+    }
+    native_colors!(put);
+    let file = json!({
+        "name": theme.name,
+        "appearance": match theme.appearance {
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        },
+        "glass": theme.is_glass,
+        "colors": colors,
+    });
+    serde_json::to_string_pretty(&file).unwrap_or_default()
+}
+
+fn rgba_hex(c: Rgba) -> String {
+    let alpha = (c.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("{}{alpha:02x}", Srgb::new(c.r, c.g, c.b).hex())
+}
+
+/// Unglassed, as [`finished`] takes it.
 fn convert(entry: Entry) -> Theme {
     let base = base(&entry.appearance);
     let style = &entry.style;
@@ -225,9 +264,9 @@ fn convert(entry: Entry) -> Theme {
     let cursor = solid("/players/0/cursor");
     let accent = solid("/text.accent").or(cursor).unwrap_or(base.accent);
     let syntax = |name: &str| solid(&format!("/syntax/{name}/color"));
-    let name: &'static str = Box::leak(entry.name.into_boxed_str());
-    let theme = Theme {
-        name,
+    Theme {
+        name: Box::leak(entry.name.into_boxed_str()),
+        is_glass: glass,
         bg: editor.unwrap_or(base.bg),
         panel: editor.unwrap_or(base.panel),
         surface,
@@ -271,8 +310,7 @@ fn convert(entry: Entry) -> Theme {
         syntax_variable: syntax("variable").unwrap_or(base.syntax_variable),
         syntax_operator: syntax("operator").unwrap_or(base.syntax_operator),
         ..base
-    };
-    if glass { theme.glassed(name) } else { theme }
+    }
 }
 
 /// `chrome`, unless it sits too close to `editor` to tell the two apart, as
@@ -397,6 +435,44 @@ mod tests {
         .unwrap();
         assert_eq!(themes[0].surface, Srgb::from_hex(0x010409));
         assert_ne!(themes[1].surface, themes[1].panel);
+    }
+
+    #[test]
+    fn a_native_file_round_trips_and_glasses_once() {
+        let themes = parse_zed(
+            r##"{ "themes": [
+                { "name": "Trip Glass", "appearance": "light", "style": {
+                    "background.appearance": "blurred", "background": "#d0e0f0cc",
+                    "editor.background": "#fafafa", "border": "#00000033", "text": "#123456"
+                } },
+                { "name": "Trip", "style": {
+                    "background": "#1e1e2e", "players": [{ "selection": "#0055aa40" }]
+                } }
+            ] }"##,
+        )
+        .unwrap();
+        for flat in themes {
+            let text = native_text(&flat);
+            let read = native(&serde_json::from_str(&text).unwrap()).unwrap();
+            assert_eq!(native_text(&read), text, "{}", flat.name);
+            let [loaded] = parse_own(&text).unwrap()[..] else {
+                panic!("one theme per native file");
+            };
+            assert_eq!(native_text(&loaded), native_text(&finished(read)));
+            assert_eq!(loaded.bg != read.bg, flat.is_glass, "{}", flat.name);
+        }
+    }
+
+    #[test]
+    fn zeds_defaults_are_bundled() {
+        let names: Vec<_> = BUNDLED
+            .iter()
+            .flat_map(|text| parse_zed(text).unwrap())
+            .map(|theme| theme.name)
+            .collect();
+        assert_eq!(names.len(), 11);
+        assert!(names.contains(&"Gruvbox Light Soft"));
+        assert!(names.contains(&"One Dark"));
     }
 
     #[test]

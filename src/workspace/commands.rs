@@ -89,23 +89,28 @@ impl Workspace {
         // Swapping straight to another list skips `close_palette`, and a
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
-        // The theme picker is the one list reachable before any connection
+        // The theme lists are the only ones reachable before any connection
         // exists, from the welcome surface or the connection form.
-        if showing == Some(mode) || (self.profile().is_none() && mode != PaletteMode::Theme) {
+        let picks_theme = matches!(mode, PaletteMode::Theme | PaletteMode::ImportTheme(_));
+        if showing == Some(mode) || (self.profile().is_none() && !picks_theme) {
             self.close_palette(window, cx);
             return;
         }
 
-        // The theme list opens on the theme in force, so the preview it starts
-        // with is no change at all.
+        // A theme list opens on the theme in force where it lists it, so the
+        // preview it starts with is no change at all.
+        if picks_theme {
+            self.theme_before_preview = Some(*theme(cx));
+        }
         let first = match mode {
-            PaletteMode::Theme => {
-                self.theme_before_preview = Some(*theme(cx));
-                Theme::all()
-                    .iter()
-                    .position(|candidate| candidate.name == theme(cx).name)
-                    .unwrap_or_default()
-            }
+            PaletteMode::Theme => Theme::all()
+                .iter()
+                .position(|candidate| candidate.name == theme(cx).name)
+                .unwrap_or_default(),
+            PaletteMode::ImportTheme(source) => source
+                .themes()
+                .position(|candidate| source.imported_name(candidate.name) == theme(cx).name)
+                .unwrap_or_default(),
             PaletteMode::Database => self
                 .profile()
                 .and_then(|profile| {
@@ -324,6 +329,10 @@ impl Workspace {
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),
             Command::SetTheme(theme) => self.set_theme(*theme, window, cx),
+            Command::BrowseThemes(source) => {
+                self.open_palette(PaletteMode::ImportTheme(source), window, cx)
+            }
+            Command::ImportTheme(source, index) => self.import_theme(source, index, window, cx),
             Command::PickFont(slot) => self.open_palette(PaletteMode::Font(slot), window, cx),
             Command::SetFont(slot, family) => self.set_font(slot, family, cx),
             Command::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),

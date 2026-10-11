@@ -197,13 +197,20 @@ GitHub at startup to check for updates, which you can turn off in Settings.
 
 ## Themes
 
-Besides its own, DBDelve lists the themes you have in [Zed](https://zed.dev),
-read at startup from Zed's themes folder (`~/.config/zed/themes`, under
-`$XDG_CONFIG_HOME` on Linux if set, or `%APPDATA%\Zed\themes` on Windows) and
-from every installed Zed extension. Zed
-themes with a blurred or transparent background come out as glass.
+To use a theme from another editor, open the theme picker and choose
+**Import from Zed…** at the end of the list. It lists every Zed theme on this
+machine: Zed's own defaults, the ones in Zed's themes folder
+(`~/.config/zed/themes`, under `$XDG_CONFIG_HOME` on Linux if set, or
+`%APPDATA%\Zed\themes` on Windows) and those of every installed Zed extension.
+Each is previewed as you move through the list, and Enter imports it: DBDelve
+converts it into a theme file of its own and switches to it. A theme already
+imported is marked so; importing it again replaces the file. One named like a
+theme DBDelve ships is imported with the app's name after it, as in
+"One Dark (Zed)". Zed themes with a blurred or transparent background come out
+as glass.
 
-Your own go in a `themes` folder next to DBDelve's other data:
+Imported themes, and any you write yourself, live in a `themes` folder next
+to DBDelve's other data:
 
 - macOS: `~/Library/Application Support/dbdelve/themes`
 - Linux: `$XDG_DATA_HOME/dbdelve/themes`, or `~/.local/share/dbdelve/themes`
@@ -224,10 +231,10 @@ DBDelve Dark or Light:
 }
 ```
 
-A theme named like one already listed is skipped: DBDelve's own come first,
-then this folder, then Zed's. Restart DBDelve to pick up a change.
+A theme named like one DBDelve ships is skipped. Restart DBDelve to pick up a
+file you changed by hand.
 
 
 ## License
 
-MIT. See [NOTICES.md](NOTICES.md) for third-party font licenses.
+MIT. See [NOTICES.md](NOTICES.md) for third-party font and theme licenses.

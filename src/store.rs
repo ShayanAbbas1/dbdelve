@@ -1026,7 +1026,7 @@ fn read_file(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
@@ -1049,7 +1049,8 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
     written
 }
 
-/// Where the theme files a user drops in are read from at startup.
+/// Where the theme files a user drops in, and the themes imported from other
+/// apps, are read from at startup.
 pub(crate) fn theme_directory() -> Result<PathBuf, String> {
     Ok(dbdelve_directory()?.join("themes"))
 }

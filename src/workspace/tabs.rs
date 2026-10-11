@@ -205,6 +205,21 @@ impl Workspace {
         cx.refresh_windows();
     }
 
+    /// The theme is written into dbdelve's own directory first, so picking it
+    /// is the same pick a theme already listed would be.
+    pub(crate) fn import_theme(
+        &mut self,
+        source: theme::user::Source,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match theme::user::import(source, index) {
+            Ok(theme) => self.set_theme(theme, window, cx),
+            Err(message) => self.note(message, cx),
+        }
+    }
+
     /// Written through to disk like the zoom, and reinstalled rather than
     /// merely notified: `install_theme` snapshots the derived colours into
     /// gpui-component's globals, so a repaint alone would leave the library's
