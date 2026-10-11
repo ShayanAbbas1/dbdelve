@@ -1,7 +1,7 @@
 //! The themes in dbdelve's own [`store::theme_directory`]: read at startup,
 //! and added to at runtime by importing one from another app.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock, PoisonError, RwLock};
 
 use super::{Theme, vscode, zed};
@@ -106,22 +106,43 @@ pub(crate) fn import(source: Source, index: usize) -> Result<Theme, String> {
         .found()
         .get(index)
         .ok_or("That theme is no longer listed.")?;
-    import_into(&store::theme_directory()?, flat)
-}
-
-fn import_into(directory: &Path, flat: Theme) -> Result<Theme, String> {
-    let mut themes = USER_THEMES.write().unwrap_or_else(PoisonError::into_inner);
-    let existing = themes
-        .iter()
-        .position(|theme| theme.name.eq_ignore_ascii_case(flat.name));
-    let path = directory.join(format!("{}.json", slug(flat.name)));
-    store::write_file(&path, &zed::native_text(&flat))?;
+    write_native(&store::theme_directory()?, flat)?;
     let theme = zed::finished(flat);
-    match existing {
+    let mut themes = USER_THEMES.write().unwrap_or_else(PoisonError::into_inner);
+    match themes
+        .iter()
+        .position(|listed| listed.name.eq_ignore_ascii_case(theme.name))
+    {
         Some(index) => themes[index] = theme,
         None => themes.push(theme),
     }
     Ok(theme)
+}
+
+/// Into the file that already holds a theme of its name, the one [`load`]
+/// takes it from, else the first of `<slug>.json`, `<slug>-2.json`… that is
+/// free. Never over a file holding another theme, nor one that does not parse,
+/// which may be a theme someone is part way through writing.
+fn write_native(directory: &Path, theme: Theme) -> Result<PathBuf, String> {
+    let slug = slug(theme.name);
+    let path = zed::json_files(directory)
+        .into_iter()
+        .find(|path| {
+            zed::read(std::iter::once(path.clone()), zed::parse_own)
+                .iter()
+                .any(|held| held.name.eq_ignore_ascii_case(theme.name))
+        })
+        .or_else(|| {
+            (1..)
+                .map(|n| match n {
+                    1 => directory.join(format!("{slug}.json")),
+                    n => directory.join(format!("{slug}-{n}.json")),
+                })
+                .find(|path| !path.exists())
+        })
+        .ok_or("No free file name for the theme.")?;
+    store::write_file(&path, &zed::native_text(&theme))?;
+    Ok(path)
 }
 
 fn slug(name: &str) -> String {
@@ -142,28 +163,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_import_is_written_natively_and_listed_under_a_free_name() {
+    fn an_import_overwrites_only_the_file_holding_its_own_name() {
+        let found = Source::Zed.found();
+        assert!(found.iter().any(|theme| theme.name == "Zed: One Dark"));
+
         let directory =
             std::env::temp_dir().join(format!("dbdelve-theme-import-{}", std::process::id()));
-        // Light, so it lands after every light theme as the listing tests
-        // expect of whatever `Theme::all` holds while they run.
-        let flat = Theme {
-            name: "Zed: One Light",
-            ..Theme::light()
+        let named = |name| Theme {
+            name,
+            ..Theme::dark()
         };
-        let imported = import_into(&directory, flat);
-        let again = import_into(&directory, flat);
-        let written = std::fs::read_to_string(directory.join("zed-one-light.json"));
+        let seed = |file: &str, name| {
+            store::write_file(&directory.join(file), &zed::native_text(&named(name)))
+        };
+        let import = |name| {
+            write_native(&directory, named(name))
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        };
+        let held = |file: &str| {
+            zed::read(std::iter::once(directory.join(file)), zed::parse_own)
+                .first()
+                .map(|theme| theme.name)
+        };
+        seed("zed-ayu-dark.json", "Mine").unwrap();
+        seed("custom.json", "zed: gruvbox dark").unwrap();
+        let first = import("Zed: One Dark");
+        let again = import("Zed: One Dark");
+        let beside = import("Zed: Ayu Dark");
+        let over = import("Zed: Gruvbox Dark");
+        let held = ["zed-ayu-dark.json", "zed-ayu-dark-2.json", "custom.json"].map(held);
+        let files = zed::json_files(&directory).len();
         let _ = std::fs::remove_dir_all(&directory);
 
-        assert_eq!(imported.map(|theme| theme.name), Ok("Zed: One Light"));
-        assert_eq!(again.map(|theme| theme.name), Ok("Zed: One Light"));
-        let parsed = zed::parse_own(&written.unwrap()).unwrap();
-        assert_eq!(parsed[0].name, "Zed: One Light");
-        let listed = Theme::all();
-        let named = |name| listed.iter().filter(|theme| theme.name == name).count();
-        assert_eq!(named("Zed: One Light"), 1);
-        assert_eq!(named("One Light"), 1);
-        assert!(is_imported("Zed: One Light"));
+        assert_eq!(first.as_deref(), Ok("zed-one-dark.json"));
+        assert_eq!(again, first);
+        assert_eq!(beside.as_deref(), Ok("zed-ayu-dark-2.json"));
+        assert_eq!(over.as_deref(), Ok("custom.json"));
+        assert_eq!(
+            held,
+            [
+                Some("Mine"),
+                Some("Zed: Ayu Dark"),
+                Some("Zed: Gruvbox Dark")
+            ]
+        );
+        assert_eq!(files, 4);
     }
 }
