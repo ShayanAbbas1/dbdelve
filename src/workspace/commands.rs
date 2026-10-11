@@ -96,6 +96,13 @@ impl Workspace {
             self.close_palette(window, cx);
             return;
         }
+        if let PaletteMode::ImportTheme(source) = mode
+            && !source.is_ready()
+        {
+            self.close_palette(window, cx);
+            self.open_import_list_once_found(source, window, cx);
+            return;
+        }
 
         // A theme list opens on the theme in force where it lists it, so the
         // preview it starts with is no change at all.
@@ -141,6 +148,42 @@ impl Workspace {
             .detach();
         self.palette = Some(list);
         cx.notify();
+    }
+
+    /// Waiting for a source's scan off the UI thread, with no list up meanwhile
+    /// and so no preview left on screen. The note saying so comes down from
+    /// wherever `note` put it, if nothing has said anything since.
+    fn open_import_list_once_found(
+        &mut self,
+        source: theme::user::Source,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let finding = format!("Finding {} themes…", source.name());
+        self.note(finding.clone(), cx);
+        let found = cx
+            .background_executor()
+            .spawn(on_own_thread(move || source.found()));
+        cx.spawn_in(window, async move |workspace, cx| {
+            found.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                let notice = match workspace.profile_mut() {
+                    Some(profile) => &mut profile.session.notice,
+                    None => match &mut workspace.form {
+                        Some(form) => &mut form.error,
+                        None => &mut workspace.welcome_notice,
+                    },
+                };
+                if notice.as_deref() == Some(finding.as_str()) {
+                    *notice = None;
+                }
+                // Something else opened while the scan ran is left alone.
+                if workspace.palette.is_none() {
+                    workspace.open_palette(PaletteMode::ImportTheme(source), window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The palette is dismissed before its command runs, always. A command can

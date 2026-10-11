@@ -8,6 +8,7 @@ use super::{Theme, vscode, zed};
 use crate::store;
 
 static USER_THEMES: RwLock<Vec<Theme>> = RwLock::new(Vec::new());
+static FOUND: [OnceLock<Vec<Theme>>; 2] = [const { OnceLock::new() }; 2];
 
 /// An app whose themes can be imported: a variant, its name, and the call
 /// that finds its themes.
@@ -33,7 +34,6 @@ impl Source {
     /// nor another source's. Scanned once per process, which bounds the names
     /// leaked for them.
     pub(crate) fn found(self) -> &'static [Theme] {
-        static FOUND: [OnceLock<Vec<Theme>>; 2] = [const { OnceLock::new() }; 2];
         FOUND[self as usize].get_or_init(|| {
             let themes = match self {
                 Self::Zed => zed::discover(),
@@ -49,6 +49,11 @@ impl Source {
         })
     }
 
+    /// Whether [`Self::found`] would answer without waiting on a scan.
+    pub(crate) fn is_ready(self) -> bool {
+        FOUND[self as usize].get().is_some()
+    }
+
     /// One of [`Self::found`] as it would paint, for the import list to
     /// preview.
     pub fn theme(self, index: usize) -> Option<Theme> {
@@ -56,12 +61,14 @@ impl Source {
     }
 }
 
-/// Scan every source on a thread of its own, once, so a list opened on one has
+/// Scan each source on a thread of its own, once, so a list opened on one has
 /// it ready rather than reading a large extensions folder on the UI thread.
 pub(crate) fn prewarm() {
     static STARTED: Once = Once::new();
     STARTED.call_once(|| {
-        std::thread::spawn(|| Source::ALL.map(Source::found));
+        for source in Source::ALL {
+            std::thread::spawn(move || source.found());
+        }
     });
 }
 
