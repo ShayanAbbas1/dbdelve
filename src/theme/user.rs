@@ -125,22 +125,31 @@ pub(crate) fn import(source: Source, index: usize) -> Result<Theme, String> {
 /// which may be a theme someone is part way through writing.
 fn write_native(directory: &Path, theme: Theme) -> Result<PathBuf, String> {
     let slug = slug(theme.name);
-    let path = zed::json_files(directory)
-        .into_iter()
-        .find(|path| {
-            zed::read(std::iter::once(path.clone()), zed::parse_own)
-                .iter()
-                .any(|held| held.name.eq_ignore_ascii_case(theme.name))
-        })
-        .or_else(|| {
-            (1..)
-                .map(|n| match n {
-                    1 => directory.join(format!("{slug}.json")),
-                    n => directory.join(format!("{slug}-{n}.json")),
-                })
-                .find(|path| !path.exists())
-        })
-        .ok_or("No free file name for the theme.")?;
+    let holder = zed::json_files(directory).into_iter().find_map(|path| {
+        let held = zed::read(std::iter::once(path.clone()), zed::parse_own);
+        held.iter()
+            .any(|held| held.name.eq_ignore_ascii_case(theme.name))
+            .then_some((path, held.len()))
+    });
+    let path = match holder {
+        // Overwriting a family would drop its other themes, and a file beside
+        // it would hold a name that only one of the two loads under.
+        Some((path, held)) if held > 1 => {
+            return Err(format!(
+                "{} already has a theme named \"{}\"; rename it there to import this one.",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                theme.name
+            ));
+        }
+        Some((path, _)) => path,
+        None => (1..)
+            .map(|n| match n {
+                1 => directory.join(format!("{slug}.json")),
+                n => directory.join(format!("{slug}-{n}.json")),
+            })
+            .find(|path| !path.exists())
+            .ok_or("No free file name for the theme.")?,
+    };
     store::write_file(&path, &zed::native_text(&theme))?;
     Ok(path)
 }
@@ -187,10 +196,24 @@ mod tests {
         };
         seed("zed-ayu-dark.json", "Mine").unwrap();
         seed("custom.json", "zed: gruvbox dark").unwrap();
+        store::write_file(
+            &directory.join("family.json"),
+            r#"{ "name": "Family", "themes": [
+                { "name": "Zed: Rosé Pine", "style": {} },
+                { "name": "Rosé Pine Moon", "style": {} }
+            ] }"#,
+        )
+        .unwrap();
         let first = import("Zed: One Dark");
         let again = import("Zed: One Dark");
         let beside = import("Zed: Ayu Dark");
         let over = import("Zed: Gruvbox Dark");
+        let refused = import("Zed: Rosé Pine");
+        let family = zed::read(
+            std::iter::once(directory.join("family.json")),
+            zed::parse_own,
+        )
+        .len();
         let held = ["zed-ayu-dark.json", "zed-ayu-dark-2.json", "custom.json"].map(held);
         let files = zed::json_files(&directory).len();
         let _ = std::fs::remove_dir_all(&directory);
@@ -200,6 +223,14 @@ mod tests {
         assert_eq!(beside.as_deref(), Ok("zed-ayu-dark-2.json"));
         assert_eq!(over.as_deref(), Ok("custom.json"));
         assert_eq!(
+            refused,
+            Err(
+                "family.json already has a theme named \"Zed: Rosé Pine\"; rename it there to import this one."
+                    .into()
+            )
+        );
+        assert_eq!(family, 2);
+        assert_eq!(
             held,
             [
                 Some("Mine"),
@@ -207,6 +238,6 @@ mod tests {
                 Some("Zed: Gruvbox Dark")
             ]
         );
-        assert_eq!(files, 4);
+        assert_eq!(files, 5);
     }
 }
