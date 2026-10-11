@@ -2,7 +2,7 @@
 //! and added to at runtime by importing one from another app.
 
 use std::path::Path;
-use std::sync::{PoisonError, RwLock};
+use std::sync::{OnceLock, PoisonError, RwLock};
 
 use super::{Theme, vscode, zed};
 use crate::store;
@@ -28,30 +28,30 @@ impl Source {
     }
 
     /// Every theme this source has on this machine, unglassed, one per name,
-    /// in the order the import list shows them. Scanned once per process.
-    fn found(self) -> &'static [Theme] {
-        match self {
-            Self::Zed => zed::discover(),
-            Self::VsCode => vscode::discover(),
-        }
+    /// in the order the import list shows them. Each is named `<source>:
+    /// <theme>`, as it is once imported, so it clashes with neither a built-in
+    /// nor another source's. Scanned once per process, which bounds the names
+    /// leaked for them.
+    pub(crate) fn found(self) -> &'static [Theme] {
+        static FOUND: [OnceLock<Vec<Theme>>; 2] = [const { OnceLock::new() }; 2];
+        FOUND[self as usize].get_or_init(|| {
+            let themes = match self {
+                Self::Zed => zed::discover(),
+                Self::VsCode => vscode::discover(),
+            };
+            themes
+                .into_iter()
+                .map(|theme| Theme {
+                    name: Box::leak(format!("{}: {}", self.name(), theme.name).into()),
+                    ..theme
+                })
+                .collect()
+        })
     }
 
     /// The themes as they would paint, for the import list to preview.
     pub fn themes(self) -> impl Iterator<Item = Theme> {
         self.found().iter().copied().map(zed::finished)
-    }
-
-    /// What a theme is called once imported: its own name, unless one of
-    /// dbdelve's own already has it, as dbdelve's One Dark has Zed's.
-    pub fn imported_name(self, name: &str) -> String {
-        let taken = Theme::built_in()
-            .iter()
-            .any(|theme| theme.name.eq_ignore_ascii_case(name));
-        if taken {
-            format!("{name} ({})", self.name())
-        } else {
-            name.to_string()
-        }
     }
 }
 
@@ -96,25 +96,17 @@ pub(crate) fn import(source: Source, index: usize) -> Result<Theme, String> {
         .found()
         .get(index)
         .ok_or("That theme is no longer listed.")?;
-    import_into(&store::theme_directory()?, source, flat)
+    import_into(&store::theme_directory()?, flat)
 }
 
-fn import_into(directory: &Path, source: Source, flat: Theme) -> Result<Theme, String> {
+fn import_into(directory: &Path, flat: Theme) -> Result<Theme, String> {
     let mut themes = USER_THEMES.write().unwrap_or_else(PoisonError::into_inner);
-    let name = source.imported_name(flat.name);
     let existing = themes
         .iter()
-        .position(|theme| theme.name.eq_ignore_ascii_case(&name));
-    let name: &'static str = match existing {
-        Some(index) if themes[index].name == name => themes[index].name,
-        _ if name == flat.name => flat.name,
-        // ponytail: leaked, bounded by the imports made in one run.
-        _ => Box::leak(name.into_boxed_str()),
-    };
-    let named = Theme { name, ..flat };
-    let path = directory.join(format!("{}.json", slug(name)));
-    store::write_file(&path, &zed::native_text(&named))?;
-    let theme = zed::finished(named);
+        .position(|theme| theme.name.eq_ignore_ascii_case(flat.name));
+    let path = directory.join(format!("{}.json", slug(flat.name)));
+    store::write_file(&path, &zed::native_text(&flat))?;
+    let theme = zed::finished(flat);
     match existing {
         Some(index) => themes[index] = theme,
         None => themes.push(theme),
@@ -141,28 +133,27 @@ mod tests {
 
     #[test]
     fn an_import_is_written_natively_and_listed_under_a_free_name() {
-        assert_eq!(Source::Zed.imported_name("Ayu Dark"), "Ayu Dark");
         let directory =
             std::env::temp_dir().join(format!("dbdelve-theme-import-{}", std::process::id()));
         // Light, so it lands after every light theme as the listing tests
         // expect of whatever `Theme::all` holds while they run.
         let flat = Theme {
-            name: "One Light",
+            name: "Zed: One Light",
             ..Theme::light()
         };
-        let imported = import_into(&directory, Source::Zed, flat);
-        let again = import_into(&directory, Source::Zed, flat);
-        let written = std::fs::read_to_string(directory.join("one-light-zed.json"));
+        let imported = import_into(&directory, flat);
+        let again = import_into(&directory, flat);
+        let written = std::fs::read_to_string(directory.join("zed-one-light.json"));
         let _ = std::fs::remove_dir_all(&directory);
 
-        assert_eq!(imported.map(|theme| theme.name), Ok("One Light (Zed)"));
-        assert_eq!(again.map(|theme| theme.name), Ok("One Light (Zed)"));
+        assert_eq!(imported.map(|theme| theme.name), Ok("Zed: One Light"));
+        assert_eq!(again.map(|theme| theme.name), Ok("Zed: One Light"));
         let parsed = zed::parse_own(&written.unwrap()).unwrap();
-        assert_eq!(parsed[0].name, "One Light (Zed)");
+        assert_eq!(parsed[0].name, "Zed: One Light");
         let listed = Theme::all();
         let named = |name| listed.iter().filter(|theme| theme.name == name).count();
-        assert_eq!(named("One Light (Zed)"), 1);
+        assert_eq!(named("Zed: One Light"), 1);
         assert_eq!(named("One Light"), 1);
-        assert!(is_imported("One Light (Zed)"));
+        assert!(is_imported("Zed: One Light"));
     }
 }

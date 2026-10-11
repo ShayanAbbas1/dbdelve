@@ -505,15 +505,20 @@ fn theme_items(cx: &App) -> Vec<Item> {
     themes.chain(imports).collect()
 }
 
-/// Every theme one app has, marked once it has been imported, since
-/// importing it again only writes the same file over itself.
+/// Every theme one app has, without the app's name every one of them is
+/// prefixed with, since the list is that app's alone. One already imported is
+/// marked, since importing it again only writes the same file over itself.
 fn import_items(source: user::Source) -> Vec<Item> {
     source
         .themes()
         .enumerate()
         .map(|(index, candidate)| Item {
-            label: candidate.name.to_string(),
-            hint: if user::is_imported(&source.imported_name(candidate.name)) {
+            label: candidate
+                .name
+                .split_once(": ")
+                .map_or(candidate.name, |(_, name)| name)
+                .to_string(),
+            hint: if user::is_imported(candidate.name) {
                 "imported"
             } else {
                 ""

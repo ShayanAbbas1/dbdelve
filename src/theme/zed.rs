@@ -5,7 +5,6 @@
 //! dbdelve's own directory may be either.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -38,33 +37,29 @@ struct Entry {
     style: Value,
 }
 
-/// Every Zed theme on this machine, unglassed, scanned once per process so
-/// the names leaked for them stay bounded. A name goes to whichever has it
+/// Every Zed theme on this machine, unglassed. A name goes to whichever has it
 /// first: Zed's themes directory, its extensions, then its defaults, so a
 /// user's own copy of a default wins.
 ///
 /// ponytail: scanned on the UI thread when the import list first opens. Move
 /// it to a background task if a large extensions folder makes that stutter.
-pub(super) fn discover() -> &'static [Theme] {
-    static FOUND: OnceLock<Vec<Theme>> = OnceLock::new();
-    FOUND.get_or_init(|| {
-        let user = store::zed_theme_directory()
-            .into_iter()
-            .flat_map(|directory| json_files(&directory));
-        let extensions = store::zed_extension_directory()
-            .into_iter()
-            .flat_map(|root| sorted_entries(&root))
-            .flat_map(|extension| json_files(&extension.join("themes")));
-        let mut themes = read(user.chain(extensions), parse_zed);
-        themes.extend(
-            BUNDLED
-                .iter()
-                .flat_map(|text| parse_zed(text).unwrap_or_default()),
-        );
-        keep_untaken(&mut themes, &mut Vec::new());
-        themes.sort_by_key(|theme| theme.name.to_lowercase());
-        themes
-    })
+pub(super) fn discover() -> Vec<Theme> {
+    let user = store::zed_theme_directory()
+        .into_iter()
+        .flat_map(|directory| json_files(&directory));
+    let extensions = store::zed_extension_directory()
+        .into_iter()
+        .flat_map(|root| sorted_entries(&root))
+        .flat_map(|extension| json_files(&extension.join("themes")));
+    let mut themes = read(user.chain(extensions), parse_zed);
+    themes.extend(
+        BUNDLED
+            .iter()
+            .flat_map(|text| parse_zed(text).unwrap_or_default()),
+    );
+    keep_untaken(&mut themes, &mut Vec::new());
+    themes.sort_by_key(|theme| theme.name.to_lowercase());
+    themes
 }
 
 pub(super) fn sorted_entries(directory: &Path) -> Vec<PathBuf> {

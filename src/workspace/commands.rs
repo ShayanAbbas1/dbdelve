@@ -108,8 +108,9 @@ impl Workspace {
                 .position(|candidate| candidate.name == theme(cx).name)
                 .unwrap_or_default(),
             PaletteMode::ImportTheme(source) => source
-                .themes()
-                .position(|candidate| source.imported_name(candidate.name) == theme(cx).name)
+                .found()
+                .iter()
+                .position(|candidate| candidate.name == theme(cx).name)
                 .unwrap_or_default(),
             PaletteMode::Database => self
                 .profile()

@@ -2,7 +2,6 @@
 //! onto dbdelve's [`Theme`].
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 
@@ -13,8 +12,6 @@ use super::zed::{
 use super::{PALETTE_EDITED_ALPHA, Theme};
 use crate::store;
 
-static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
-
 /// A theme file with its includes folded in.
 #[derive(Default)]
 struct Source {
@@ -22,26 +19,24 @@ struct Source {
     token_colors: Vec<Value>,
 }
 
-/// VS Code's own themes, then its extensions', each by name. Scanned once per
-/// process, so the leaked names stay bounded. A theme that does not read or
-/// parse is skipped, and a name already taken goes to whichever came first.
-pub(crate) fn discover() -> &'static [Theme] {
-    THEMES.get_or_init(|| {
-        let mut themes = Vec::new();
-        for roots in [built_in_directories(), extension_directories()] {
-            let mut group: Vec<Theme> = roots
-                .iter()
-                .flat_map(|root| sorted_entries(root))
-                .flat_map(|extension| extension_themes(&extension))
-                .collect();
-            group.sort_by_key(|theme| theme.name.to_lowercase());
-            themes.extend(group);
-        }
-        // ponytail: an extension VS Code has updated but not yet deleted (its
-        // `.obsolete` list) is read twice, and either copy may win the name.
-        keep_untaken(&mut themes, &mut Vec::new());
-        themes
-    })
+/// VS Code's own themes, then its extensions', each by name. A theme that does
+/// not read or parse is skipped, and a name already taken goes to whichever
+/// came first.
+pub(super) fn discover() -> Vec<Theme> {
+    let mut themes = Vec::new();
+    for roots in [built_in_directories(), extension_directories()] {
+        let mut group: Vec<Theme> = roots
+            .iter()
+            .flat_map(|root| sorted_entries(root))
+            .flat_map(|extension| extension_themes(&extension))
+            .collect();
+        group.sort_by_key(|theme| theme.name.to_lowercase());
+        themes.extend(group);
+    }
+    // ponytail: an extension VS Code has updated but not yet deleted (its
+    // `.obsolete` list) is read twice, and either copy may win the name.
+    keep_untaken(&mut themes, &mut Vec::new());
+    themes
 }
 
 /// Where VS Code keeps the extensions it ships, its own themes among them.
