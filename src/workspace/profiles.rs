@@ -1606,6 +1606,12 @@ impl Workspace {
             profile.session.clear_prompts();
         }
         self.connect_active(cx);
+        // A connect that landed while this profile was behind another one ran
+        // nothing on its tab in front, which may still be a restored snapshot
+        // waiting for its first run.
+        if let Some(Tab::Object(object)) = self.profile().map(|profile| profile.session.active) {
+            self.load_relation(object, cx);
+        }
         cx.notify();
     }
 
