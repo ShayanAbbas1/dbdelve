@@ -131,7 +131,7 @@ pub enum Command {
     SetTheme(Box<Theme>),
     /// Put the palette back up over the themes an app has, to import one.
     BrowseThemes(user::Source),
-    /// By index into [`user::Source::themes`], which stands for the process.
+    /// By index into [`user::Source::found`], which stands for the process.
     ImportTheme(user::Source, usize),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
@@ -330,7 +330,7 @@ impl ListDelegate for Palette {
     ) {
         let previewed = match ix.and_then(|ix| self.command(ix.row)) {
             Some(Command::SetTheme(candidate)) => Some(**candidate),
-            Some(Command::ImportTheme(source, index)) => source.themes().nth(*index),
+            Some(Command::ImportTheme(source, index)) => source.theme(*index),
             _ => self.unpreviewed,
         };
         if let Some(previewed) = previewed {
@@ -510,7 +510,8 @@ fn theme_items(cx: &App) -> Vec<Item> {
 /// marked, since importing it again only writes the same file over itself.
 fn import_items(source: user::Source) -> Vec<Item> {
     source
-        .themes()
+        .found()
+        .iter()
         .enumerate()
         .map(|(index, candidate)| Item {
             label: candidate

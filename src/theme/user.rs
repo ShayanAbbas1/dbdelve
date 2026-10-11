@@ -49,9 +49,10 @@ impl Source {
         })
     }
 
-    /// The themes as they would paint, for the import list to preview.
-    pub fn themes(self) -> impl Iterator<Item = Theme> {
-        self.found().iter().copied().map(zed::finished)
+    /// One of [`Self::found`] as it would paint, for the import list to
+    /// preview.
+    pub fn theme(self, index: usize) -> Option<Theme> {
+        self.found().get(index).copied().map(zed::finished)
     }
 }
 
