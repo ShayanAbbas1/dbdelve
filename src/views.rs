@@ -2251,7 +2251,10 @@ pub(crate) fn render_hidden_columns(
         let t = *theme(cx);
         button(
             "show-hidden-columns",
-            format!("{hidden} hidden columns · Show"),
+            format!(
+                "{hidden} hidden {} · Show",
+                if hidden == 1 { "column" } else { "columns" }
+            ),
             Tone::Quiet,
             Control::Compact,
             t,
