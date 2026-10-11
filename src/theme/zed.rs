@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::color::{Rgba, Srgb, contrast_ratio};
+use super::color::{Oklch, Rgba, Srgb, contrast_ratio};
 use super::{PALETTE_EDITED_ALPHA, PALETTE_SELECTION_ALPHA, Theme};
 use crate::store;
 
@@ -200,15 +200,27 @@ fn convert(entry: Entry) -> Theme {
     );
     // A glass theme's background is translucent so the desktop shows through;
     // glassing re-tones its hue, which compositing would have washed out.
-    let surface = rgba("/background").map_or(base.surface, |c| {
+    let background = rgba("/background").map_or(base.surface, |c| {
         if glass {
             Srgb::new(c.r, c.g, c.b)
         } else {
             c.flatten(base.surface)
         }
     });
+    let editor = rgba("/editor.background").map(|c| c.flatten(background));
+    // Zed's `background` is what sits behind its panes, and many themes set it
+    // to the editor's own colour; its chrome is the panel and the title bar.
+    // Chrome matching the editor would make the active tab, which is painted
+    // in the editor's tone, invisible.
+    let surface = if glass {
+        background
+    } else {
+        let chrome = rgba("/panel.background")
+            .or(rgba("/title_bar.background"))
+            .map_or(background, |c| c.flatten(background));
+        apart_from(chrome, editor.unwrap_or(base.panel))
+    };
     let solid = |pointer: &str| rgba(pointer).map(|c| c.flatten(surface));
-    let editor = solid("/editor.background");
     let text = solid("/text").unwrap_or(base.text);
     let cursor = solid("/players/0/cursor");
     let accent = solid("/text.accent").or(cursor).unwrap_or(base.accent);
@@ -261,6 +273,29 @@ fn convert(entry: Entry) -> Theme {
         ..base
     };
     if glass { theme.glassed(name) } else { theme }
+}
+
+/// `chrome`, unless it sits too close to `editor` to tell the two apart, as
+/// in GitHub Dark High Contrast, where they are one colour. Then it is moved
+/// a step off the editor in lightness, keeping the side of it the theme put it
+/// on, or the side with room on a near-black or near-white editor.
+fn apart_from(chrome: Srgb, editor: Srgb) -> Srgb {
+    const MIN_RATIO: f32 = 1.05;
+    if contrast_ratio(chrome, editor) >= MIN_RATIO {
+        return chrome;
+    }
+    let (own, edge) = (Oklch::from_srgb(chrome), Oklch::from_srgb(editor));
+    let lighter = match own.l.partial_cmp(&edge.l) {
+        _ if edge.l > 0.9 => false,
+        _ if edge.l < 0.1 => true,
+        Some(std::cmp::Ordering::Equal) | None => edge.l < 0.5,
+        Some(order) => order.is_gt(),
+    };
+    let step = if lighter { 0.01 } else { -0.01 };
+    (1..=20)
+        .map(|n| Oklch::new(edge.l + step * n as f32, own.c, own.h).to_srgb())
+        .find(|candidate| contrast_ratio(*candidate, editor) >= MIN_RATIO)
+        .unwrap_or(chrome)
 }
 
 /// `#RGB`, `#RRGGBB` or `#RRGGBBAA` at `pointer`; anything else is absent.
@@ -343,6 +378,25 @@ mod tests {
         .unwrap();
         assert!(themes[0].is_glass);
         assert_eq!(themes[0].name, "Blur");
+    }
+
+    #[test]
+    fn chrome_stays_apart_from_the_editor_so_the_active_tab_shows() {
+        let themes = parse_zed(
+            r##"{ "themes": [
+                { "name": "Panel", "style": {
+                    "background": "#0d1117", "editor.background": "#0d1117",
+                    "panel.background": "#010409"
+                } },
+                { "name": "Flat", "style": {
+                    "background": "#010409", "editor.background": "#010409",
+                    "panel.background": "#010409"
+                } }
+            ] }"##,
+        )
+        .unwrap();
+        assert_eq!(themes[0].surface, Srgb::from_hex(0x010409));
+        assert_ne!(themes[1].surface, themes[1].panel);
     }
 
     #[test]
