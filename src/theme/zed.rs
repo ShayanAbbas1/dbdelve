@@ -40,9 +40,6 @@ struct Entry {
 /// Every Zed theme on this machine, unglassed. A name goes to whichever has it
 /// first: Zed's themes directory, its extensions, then its defaults, so a
 /// user's own copy of a default wins.
-///
-/// ponytail: scanned on the UI thread when the import list first opens. Move
-/// it to a background task if a large extensions folder makes that stutter.
 pub(super) fn discover() -> Vec<Theme> {
     let user = store::zed_theme_directory()
         .into_iter()

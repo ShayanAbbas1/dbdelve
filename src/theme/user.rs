@@ -2,7 +2,7 @@
 //! and added to at runtime by importing one from another app.
 
 use std::path::Path;
-use std::sync::{OnceLock, PoisonError, RwLock};
+use std::sync::{Once, OnceLock, PoisonError, RwLock};
 
 use super::{Theme, vscode, zed};
 use crate::store;
@@ -54,6 +54,15 @@ impl Source {
     pub fn theme(self, index: usize) -> Option<Theme> {
         self.found().get(index).copied().map(zed::finished)
     }
+}
+
+/// Scan every source on a thread of its own, once, so a list opened on one has
+/// it ready rather than reading a large extensions folder on the UI thread.
+pub(crate) fn prewarm() {
+    static STARTED: Once = Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| Source::ALL.map(Source::found));
+    });
 }
 
 /// Every theme in dbdelve's directory, as of startup plus anything imported.

@@ -102,6 +102,11 @@ impl Workspace {
         if picks_theme {
             self.theme_before_preview = Some(*theme(cx));
         }
+        // On the picker rather than at startup, which most launches never
+        // need, and ahead of the import rows it lists.
+        if mode == PaletteMode::Theme {
+            theme::user::prewarm();
+        }
         let first = match mode {
             PaletteMode::Theme => Theme::all()
                 .iter()
