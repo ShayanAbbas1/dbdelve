@@ -5,6 +5,8 @@
 //! inherent impl rather than types of their own.
 
 mod commands;
+#[cfg(test)]
+mod e2e;
 mod editing;
 mod filters;
 mod forms;
