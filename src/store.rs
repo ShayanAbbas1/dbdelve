@@ -260,6 +260,12 @@ pub struct StoredGrid {
     pub client_sort: Option<Vec<(String, bool)>>,
     #[serde(default)]
     pub widths: Vec<f32>,
+    /// Hidden columns, as name and which of the same-named columns it is.
+    #[serde(default)]
+    pub hidden: Vec<(String, usize)>,
+    /// Pinned columns in pinned order, keyed like [`Self::hidden`].
+    #[serde(default)]
+    pub pinned: Vec<(String, usize)>,
     #[serde(default)]
     pub active: Option<(usize, usize)>,
     #[serde(default)]
@@ -768,6 +774,8 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             order_by: grid.order_by.clone(),
             client_sort: grid.client_sort.clone(),
             widths: grid.widths.clone(),
+            hidden: grid.hidden.clone(),
+            pinned: grid.pinned.clone(),
             active: grid.active,
             last_query: grid.last_query.clone(),
             limit: grid.limit,
@@ -2413,6 +2421,8 @@ open_objects = []
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -2462,6 +2472,8 @@ open_objects = []
                 order_by: vec![("created_at".into(), false)],
                 client_sort: Some(vec![("\"name\"".into(), false)]),
                 widths: vec![80.0, 160.0],
+                hidden: vec![("name".into(), 1)],
+                pinned: vec![("id".into(), 0)],
                 active: Some((0, 1)),
                 last_query: Some("select * from accounts".into()),
                 limit: Some(1_000),
@@ -2500,6 +2512,8 @@ open_objects = []
                 order_by: Vec::new(),
                 client_sort: Some(Vec::new()),
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -2550,6 +2564,8 @@ open_objects = []
                 order_by: vec![("\"id\"".into(), true)],
                 client_sort: None,
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: Some(1_000),

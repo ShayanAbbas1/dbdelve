@@ -430,6 +430,10 @@ impl ResultGrid {
             column.width = px(width.max(MIN_COLUMN_WIDTH));
         }
         grid.sort = stored.sort.clone();
+        grid = grid.with_column_view(&ColumnView {
+            hidden: stored.hidden.clone(),
+            pinned: stored.pinned.clone(),
+        });
         let (rows, columns) = (grid.result.rows.len(), grid.columns.len());
         // A snapshot is capped, so the cell that was active may be past the
         // rows that came back with it -- and that is not a cell.
@@ -529,6 +533,7 @@ impl ResultGrid {
     /// `pending` and `editing` are deliberately absent. An unapplied edit is
     /// against rows this session fetched, and a restored grid is not those rows.
     pub fn stored(&self) -> StoredGrid {
+        let view = self.column_view();
         StoredGrid {
             columns: self
                 .result
@@ -558,6 +563,8 @@ impl ResultGrid {
                 .iter()
                 .map(|column| f32::from(column.width))
                 .collect(),
+            hidden: view.hidden,
+            pinned: view.pinned,
             active: self.active,
             last_query: None,
             limit: None,
@@ -3637,6 +3644,8 @@ mod tests {
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -4278,6 +4287,23 @@ mod tests {
         assert_eq!(
             (grown.view.as_slice(), grown.pinned),
             ([2, 0, 3].as_slice(), 1)
+        );
+    }
+
+    #[test]
+    fn hidden_and_pinned_columns_survive_a_snapshot() {
+        let mut grid = abcd();
+        grid.hide_column(1);
+        grid.toggle_pinned(3);
+        let mut stored = grid.stored();
+        // A column the result no longer has is ignored, not an error.
+        stored.hidden.push(("gone".into(), 0));
+        stored.pinned.push(("gone".into(), 0));
+
+        let restored = ResultGrid::restored(&stored, Mode::default());
+        assert_eq!(
+            (restored.view.as_slice(), restored.pinned),
+            ([3, 0, 2].as_slice(), 1)
         );
     }
 
