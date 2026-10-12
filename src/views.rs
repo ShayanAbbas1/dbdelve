@@ -12,6 +12,7 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
+use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
     Disableable, ElementExt, IconName, Sizable,
     button::Button,
@@ -1272,6 +1273,20 @@ fn render_results(
                 // caught here on its way out of the Table context.
                 .on_action(cx.listener(Workspace::edit_cell))
                 .on_action(cx.listener(Workspace::copy_cell))
+                // Captured, so the ring steps before the library's own
+                // handler steps from its stale column.
+                .capture_action({
+                    let results = results.clone();
+                    move |_: &SelectNextColumn, _, cx| {
+                        results.update(cx, |table, cx| result_grid::step_col(table, 1, cx))
+                    }
+                })
+                .capture_action({
+                    let results = results.clone();
+                    move |_: &SelectPrevColumn, _, cx| {
+                        results.update(cx, |table, cx| result_grid::step_col(table, -1, cx))
+                    }
+                })
                 .on_action(cx.listener(Workspace::hide_column))
                 .on_action(cx.listener(Workspace::toggle_pin_column))
                 .on_action(cx.listener(Workspace::show_all_columns))

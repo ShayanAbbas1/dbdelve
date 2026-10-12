@@ -45,6 +45,12 @@ tree-sitter-javascript = "=0.23.1"
 # implement and the types we hand it are the same crate rather than two copies.
 lsp-types = "=0.97.0"
 
+# The table's arrow-key actions, which gpui-component binds but keeps in a
+# private module, so the grid can step them from its own active cell. A crate
+# already in the graph, pinned to the version gpui-component resolves so the
+# actions caught are the ones its keymap dispatches.
+gpui-base = "=0.6.4"
+
 # Async, driven the way SQL Server's tiberius is below: each connection owns a
 # tokio current-thread runtime and blocks on it from the background executor,
 # so no tokio future reaches GPUI's. Directly rather than through the blocking

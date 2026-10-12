@@ -616,6 +616,15 @@ impl ResultGrid {
         self.position_of(col).map(|position| position + GUTTER)
     }
 
+    /// The cell a step lands on from the ring, across the columns as drawn so a
+    /// column step goes to the one on screen beside it, not the next fetched.
+    fn step_from_active(&self, step: &Step, rows: usize) -> Option<(usize, usize)> {
+        self.active
+            .and_then(|(row, col)| Some((row, self.position_of(col)?)))
+            .and_then(|from| step_target(from, step, rows, self.view.len()))
+            .and_then(|(row, position)| Some((row, self.column_at(position)?)))
+    }
+
     /// Take a column out of the drawn ones. The last one stays: a grid with
     /// rows and no columns reads as a broken grid, not a choice.
     pub fn hide_column(&mut self, col: usize) {
@@ -1779,14 +1788,7 @@ fn commit_and_step(
 ) {
     cx.stop_propagation();
     let grid = table.delegate();
-    // Stepped across the columns as drawn, so `tab` goes to the column on
-    // screen to the right and not to the next one fetched.
-    let Some(to) = grid
-        .active()
-        .and_then(|(row, col)| Some((row, grid.position_of(col)?)))
-        .and_then(|from| step_target(from, &step, grid.rows_count(cx), grid.view.len()))
-        .and_then(|(row, position)| Some((row, grid.column_at(position)?)))
-    else {
+    let Some(to) = grid.step_from_active(&step, grid.rows_count(cx)) else {
         return;
     };
     if !commit_from_input(table, window, cx) {
@@ -1801,6 +1803,28 @@ fn commit_and_step(
                 table.set_selected_col(col, cx);
             }
         }
+    }
+}
+
+/// `left`, `right` and `tab` on the grid, stepped from the ring. The library
+/// steps from its own selected column instead, which a cell click never moves
+/// and hiding or pinning a column renumbers, so its first step would land one
+/// past whatever column it last selected.
+pub(crate) fn step_col(
+    table: &mut TableState<ResultGrid>,
+    by: isize,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    let grid = table.delegate();
+    if grid.active().is_none() {
+        return;
+    }
+    cx.stop_propagation();
+    let to = grid
+        .step_from_active(&Step::Cols(by), grid.rows_count(cx))
+        .and_then(|(_, col)| grid.table_col(col));
+    if let Some(col) = to {
+        table.set_selected_col(col, cx);
     }
 }
 
@@ -4212,6 +4236,19 @@ mod tests {
             (grid.view.as_slice(), grid.pinned),
             ([3, 0, 1, 2].as_slice(), 1)
         );
+    }
+
+    #[test]
+    fn a_column_step_from_a_pinned_column_goes_to_the_one_drawn_beside_it() {
+        let mut grid = abcd();
+        grid.toggle_pinned(1);
+        grid.toggle_pinned(3);
+        assert_eq!(grid.view, [1, 3, 0, 2]);
+        grid.set_active(0, 3);
+        assert_eq!(grid.step_from_active(&Step::Cols(1), 1), Some((0, 0)));
+        assert_eq!(grid.step_from_active(&Step::Cols(-1), 1), Some((0, 1)));
+        grid.set_active(0, 2);
+        assert_eq!(grid.step_from_active(&Step::Cols(1), 1), None);
     }
 
     #[test]

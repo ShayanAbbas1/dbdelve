@@ -1595,6 +1595,7 @@ dependencies = [
  "cbc 0.1.2",
  "futures-util",
  "geozero",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
