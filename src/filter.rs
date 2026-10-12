@@ -184,7 +184,7 @@ impl Operator {
     /// a syntax error until an application registers the function (spec §7).
     /// SQL Server has none before 2025. MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
+        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::Turso | Engine::SqlServer)
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -376,6 +376,7 @@ pub(crate) fn derived_filter(
                 | Engine::MySql
                 | Engine::MariaDb
                 | Engine::Sqlite
+                | Engine::Turso
                 | Engine::Snowflake
                 | Engine::SqlServer => {
                     format!("({left}) {} ({predicate})", bar.conjunction.as_str())
@@ -405,6 +406,7 @@ pub(crate) fn bar_predicate(
             | Engine::MySql
             | Engine::MariaDb
             | Engine::Sqlite
+            | Engine::Turso
             | Engine::Snowflake
             | Engine::SqlServer => value.to_string(),
         });
@@ -458,6 +460,7 @@ pub(crate) fn filter_predicate(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -524,7 +527,7 @@ pub(crate) fn filter_predicate(
             // anywhere in the value.
             Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
             // SQL Server has no regex before 2025's `REGEXP_LIKE`.
-            Engine::Sqlite | Engine::SqlServer => None,
+            Engine::Sqlite | Engine::Turso | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
@@ -560,7 +563,7 @@ pub(crate) fn substring(
     value: &str,
 ) -> String {
     let literal = engine.quote_literal(value);
-    if engine == Engine::Sqlite {
+    if matches!(engine, Engine::Sqlite | Engine::Turso) {
         return match operator {
             Operator::NotContains => format!("instr({name}, {literal}) = 0"),
             Operator::StartsWith => format!("instr({name}, {literal}) = 1"),
@@ -760,6 +763,7 @@ pub(crate) fn sort_expression(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }

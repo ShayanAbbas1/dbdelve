@@ -144,7 +144,9 @@ impl Profile {
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
             engine: Some(self.config.engine().as_str().to_string()),
             path: match &self.config {
-                ConnectionConfig::Sqlite { path, .. } => Some(path.clone()),
+                ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::Turso { path, .. } => {
+                    Some(path.clone())
+                }
                 _ => None,
             },
             account: snowflake.map(|account| account.account.clone()),

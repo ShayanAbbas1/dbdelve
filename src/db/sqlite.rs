@@ -341,8 +341,53 @@ impl Connection {
         // ponytail: one pragma per result set, no cache. A map from table to key
         // held on the connection is the upgrade path if the trip shows up in
         // query timings.
-        let key = self.primary_key(&schema, &table).ok()?;
+        let key = self.schema().primary_key(&schema, &table).ok()?;
         resolve_edit_target(probed, &schema, &table, &key)
+    }
+
+    fn schema(&self) -> Schema<'static, impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
+        Schema {
+            run: |sql: &str| self.internal_query(sql),
+            engine: Engine::Sqlite,
+            schema_argument: true,
+            hidden: &[],
+        }
+    }
+
+    pub fn catalog(&self) -> Result<Catalog, DbError> {
+        self.schema().catalog()
+    }
+
+    pub fn routines(&self) -> Result<Catalog, DbError> {
+        self.schema().routines()
+    }
+
+    pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
+        self.schema().references(schema, relation)
+    }
+
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        self.schema().structure(schema, relation)
+    }
+
+    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        self.schema().ddl(schema, relation)
+    }
+}
+
+pub(super) struct Schema<'a, F> {
+    pub(super) run: F,
+    pub(super) engine: Engine,
+    pub(super) schema_argument: bool,
+    pub(super) hidden: &'a [&'a str],
+}
+
+impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<'_, F> {
+    fn argument(&self, schema: &str) -> String {
+        match self.schema_argument {
+            true => format!(", {}", self.engine.quote_literal(schema)),
+            false => String::new(),
+        }
     }
 
     /// The table's primary key columns, in key order.
@@ -352,40 +397,40 @@ impl Connection {
     /// the user selected it, and a predicate dbdelve cannot read off the grid is
     /// a predicate it must not write.
     fn primary_key(&self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
-        let result = self.internal_query(&format!(
+        let result = (self.run)(&format!(
             "SELECT name AS column_name
-             FROM pragma_table_info({table}, {schema})
+             FROM pragma_table_info({table}{schema})
              WHERE pk > 0
              ORDER BY pk",
-            table = Engine::Sqlite.quote_literal(table),
-            schema = Engine::Sqlite.quote_literal(schema),
+            table = self.engine.quote_literal(table),
+            schema = self.argument(schema),
         ))?;
 
         column_of(&result, "column_name")
     }
 
-    pub fn catalog(&self) -> Result<Catalog, DbError> {
+    pub(super) fn catalog(&self) -> Result<Catalog, DbError> {
         let schemas = self.schemas()?;
         if schemas.is_empty() {
             return Ok(Catalog::default());
         }
 
-        let relations = self.internal_query(&relations_sql(&schemas))?;
+        let relations = (self.run)(&relations_sql(self.engine, &schemas, self.hidden))?;
         assemble_catalog(relations, QueryResult::default())
     }
 
     /// SQLite has no stored functions or procedures at all, so an empty list is
     /// the true answer rather than a gap in what dbdelve can see -- and there is
     /// nothing to ask the file for.
-    pub fn routines(&self) -> Result<Catalog, DbError> {
+    pub(super) fn routines(&self) -> Result<Catalog, DbError> {
         Ok(Catalog::default())
     }
 
     /// `main`, `temp`, and anything `ATTACH`ed — under SQLite's own names for
     /// them, which is what the user typed if they attached it.
     fn schemas(&self) -> Result<Vec<String>, DbError> {
-        let result = self
-            .internal_query("SELECT name AS schema_name FROM pragma_database_list ORDER BY seq")?;
+        let result =
+            (self.run)("SELECT name AS schema_name FROM pragma_database_list ORDER BY seq")?;
 
         column_of(&result, "schema_name")
     }
@@ -394,21 +439,26 @@ impl Connection {
     /// referenced side, so every table of the schema is asked what it
     /// references. A key that names no column of the parent references the
     /// parent's primary key, filled in the way [`Connection::foreign_keys`] does.
-    pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
-        let mut result = self.internal_query(&format!(
+    pub(super) fn references(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<Reference>, DbError> {
+        let mut result = (self.run)(&format!(
             "SELECT {schema_literal} AS source_schema,
                     tables.name AS source_table,
                     keys.\"from\" AS column_name,
                     COALESCE(keys.\"to\", '') AS referenced_column,
                     keys.id AS constraint_name
              FROM {schema_name}.sqlite_master AS tables,
-                  pragma_foreign_key_list(tables.name, {schema_literal}) AS keys
+                  pragma_foreign_key_list(tables.name{schema_argument}) AS keys
              WHERE tables.type = 'table'
                AND keys.\"table\" = {relation} COLLATE NOCASE
              ORDER BY tables.name, keys.id, keys.seq",
-            schema_literal = Engine::Sqlite.quote_literal(schema),
-            schema_name = Engine::Sqlite.quote_identifier(schema),
-            relation = Engine::Sqlite.quote_literal(relation),
+            schema_literal = self.engine.quote_literal(schema),
+            schema_argument = self.argument(schema),
+            schema_name = self.engine.quote_identifier(schema),
+            relation = self.engine.quote_literal(relation),
         ))?;
         if result.rows.iter().any(|row| row.get(3) == Some("")) {
             let key = self.primary_key(schema, relation)?;
@@ -426,8 +476,8 @@ impl Connection {
         assemble_references(&result)
     }
 
-    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
-        let columns = self.internal_query(&format!(
+    pub(super) fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        let columns = (self.run)(&format!(
             "SELECT name AS column_name,
                     type AS data_type,
                     CASE
@@ -441,17 +491,17 @@ impl Connection {
                              AND upper(type) = 'INTEGER'
                              AND (
                                  SELECT count(*)
-                                 FROM pragma_table_info({relation}, {schema})
+                                 FROM pragma_table_info({relation}{schema})
                                  WHERE pk > 0
                              ) = 1
                             THEN 'no'
                         ELSE 'yes'
                     END AS nullable,
                     COALESCE(dflt_value, '') AS column_default
-             FROM pragma_table_info({relation}, {schema})
+             FROM pragma_table_info({relation}{schema})
              ORDER BY cid",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         // The shared assembler reads the columns; SQLite has no catalog of
@@ -468,13 +518,13 @@ impl Connection {
     /// The relation's own `CREATE` first, then its indexes and triggers in
     /// the order they were made. An index SQLite made for a constraint has no
     /// text, and is declared by the table's.
-    pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
-        let listed = self.internal_query(&format!(
+    pub(super) fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        let listed = (self.run)(&format!(
             "SELECT sql FROM {}.sqlite_master
              WHERE tbl_name = {} COLLATE NOCASE AND sql IS NOT NULL
              ORDER BY type NOT IN ('table', 'view'), rowid",
-            Engine::Sqlite.quote_identifier(schema),
-            Engine::Sqlite.quote_literal(relation),
+            self.engine.quote_identifier(schema),
+            self.engine.quote_literal(relation),
         ))?;
         let statements = column_of(&listed, "sql")?;
         if statements.is_empty() {
@@ -487,18 +537,18 @@ impl Connection {
     /// SQLite created to enforce a `UNIQUE` or `PRIMARY KEY` has no row there at
     /// all, so its definition is reconstructed from the columns it covers.
     fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<NamedDefinition>, DbError> {
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT index_list.name AS object_name,
                     index_list.\"unique\" AS is_unique,
                     COALESCE(sqlite_master.sql, '') AS definition
-             FROM pragma_index_list({relation}, {schema}) AS index_list
+             FROM pragma_index_list({relation}{schema}) AS index_list
              LEFT JOIN {schema_identifier}.sqlite_master
                     ON sqlite_master.type = 'index'
                    AND sqlite_master.name = index_list.name
              ORDER BY index_list.name",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
-            schema_identifier = Engine::Sqlite.quote_identifier(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
+            schema_identifier = self.engine.quote_identifier(schema),
         ))?;
 
         let mut indexes = Vec::new();
@@ -526,12 +576,12 @@ impl Connection {
     }
 
     fn index_columns(&self, schema: &str, index: &str) -> Result<Vec<String>, DbError> {
-        let result = self.internal_query(&format!(
+        let result = (self.run)(&format!(
             "SELECT name AS column_name
-             FROM pragma_index_info({index}, {schema})
+             FROM pragma_index_info({index}{schema})
              ORDER BY seqno",
-            index = Engine::Sqlite.quote_literal(index),
-            schema = Engine::Sqlite.quote_literal(schema),
+            index = self.engine.quote_literal(index),
+            schema = self.argument(schema),
         ))?;
 
         column_of(&result, "column_name")
@@ -553,15 +603,15 @@ impl Connection {
             });
         }
 
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT id AS constraint_id,
                     \"table\" AS target_relation,
                     \"from\" AS source_column,
                     COALESCE(\"to\", '') AS target_column
-             FROM pragma_foreign_key_list({relation}, {schema})
+             FROM pragma_foreign_key_list({relation}{schema})
              ORDER BY id, seq",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         // One constraint spans one row per column, so the rows are grouped here
@@ -608,15 +658,15 @@ impl Connection {
     /// The same pragma as [`Connection::constraints`], kept as fields: one
     /// entry per column of every foreign key, in key order.
     fn foreign_keys(&self, schema: &str, relation: &str) -> Result<Vec<ForeignKey>, DbError> {
-        let listed = self.internal_query(&format!(
+        let listed = (self.run)(&format!(
             "SELECT id AS constraint_id,
                     \"table\" AS target_relation,
                     \"from\" AS source_column,
                     COALESCE(\"to\", '') AS target_column
-             FROM pragma_foreign_key_list({relation}, {schema})
+             FROM pragma_foreign_key_list({relation}{schema})
              ORDER BY id, seq",
-            relation = Engine::Sqlite.quote_literal(relation),
-            schema = Engine::Sqlite.quote_literal(schema),
+            relation = self.engine.quote_literal(relation),
+            schema = self.argument(schema),
         ))?;
 
         let mut listed_keys = Vec::with_capacity(listed.rows.len());
@@ -785,7 +835,16 @@ fn resolve_edit_target(
 
 /// One `sqlite_master` scan per schema, aliased to the column names
 /// [`assemble_catalog`] reads rather than to SQLite's own.
-fn relations_sql(schemas: &[String]) -> String {
+fn relations_sql(engine: Engine, schemas: &[String], hidden: &[&str]) -> String {
+    let hidden: String = hidden
+        .iter()
+        .map(|prefix| {
+            format!(
+                "\n                   AND name NOT LIKE '{}%' ESCAPE '\\'",
+                prefix.replace('_', "\\_")
+            )
+        })
+        .collect();
     let scans: Vec<String> = schemas
         .iter()
         .map(|schema| {
@@ -798,9 +857,9 @@ fn relations_sql(schemas: &[String]) -> String {
                         END AS relation_kind
                  FROM {schema_identifier}.sqlite_master
                  WHERE type IN ('table', 'view')
-                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
-                schema_literal = Engine::Sqlite.quote_literal(schema),
-                schema_identifier = Engine::Sqlite.quote_identifier(schema),
+                   AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'{hidden}",
+                schema_literal = engine.quote_literal(schema),
+                schema_identifier = engine.quote_identifier(schema),
             )
         })
         .collect();
@@ -861,7 +920,7 @@ fn render<'a>(
 /// A real keeps its point even when it is whole. Rust renders `1.0` as `1`,
 /// which in a SQLite grid is the rendering of an integer, and the difference
 /// between the two storage classes is one the user is entitled to see.
-fn render_real(real: f64) -> String {
+pub(super) fn render_real(real: f64) -> String {
     let rendered = real.to_string();
     match real.is_finite() && !rendered.contains(['.', 'e', 'E']) {
         true => format!("{rendered}.0"),

@@ -27,6 +27,7 @@ mod postgres;
 mod snowflake;
 mod sqlite;
 mod ssh;
+mod turso;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
@@ -98,6 +99,7 @@ pub enum Engine {
     MySql,
     MariaDb,
     Sqlite,
+    Turso,
     Snowflake,
     SqlServer,
     MongoDb,
@@ -189,11 +191,12 @@ impl ExplainMode {
 
 impl Engine {
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
         Self::Sqlite,
+        Self::Turso,
         Self::Snowflake,
         Self::SqlServer,
         Self::MongoDb,
@@ -205,6 +208,7 @@ impl Engine {
             Self::MySql => "MySQL",
             Self::MariaDb => "MariaDB",
             Self::Sqlite => "SQLite",
+            Self::Turso => "Turso",
             Self::Snowflake => "Snowflake",
             Self::SqlServer => "SQL Server",
             Self::MongoDb => "MongoDB",
@@ -219,6 +223,7 @@ impl Engine {
             Self::MySql => "mysql",
             Self::MariaDb => "mariadb",
             Self::Sqlite => "sqlite",
+            Self::Turso => "turso",
             Self::Snowflake => "snowflake",
             Self::SqlServer => "mssql",
             Self::MongoDb => "mongodb",
@@ -233,6 +238,7 @@ impl Engine {
             "mysql" => Ok(Self::MySql),
             "mariadb" => Ok(Self::MariaDb),
             "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
+            "turso" => Ok(Self::Turso),
             "snowflake" => Ok(Self::Snowflake),
             "mssql" | "sqlserver" => Ok(Self::SqlServer),
             "mongodb" | "mongodb+srv" => Ok(Self::MongoDb),
@@ -247,7 +253,7 @@ impl Engine {
             Self::MySql | Self::MariaDb => Some(mysql::DEFAULT_PORT),
             Self::SqlServer => Some(mssql::DEFAULT_PORT),
             Self::MongoDb => Some(mongo::DEFAULT_PORT),
-            Self::Sqlite | Self::Snowflake => None,
+            Self::Sqlite | Self::Turso | Self::Snowflake => None,
         }
     }
 
@@ -260,7 +266,7 @@ impl Engine {
             Self::Postgres | Self::MySql | Self::MariaDb | Self::SqlServer | Self::MongoDb => {
                 Fields::Server
             }
-            Self::Sqlite => Fields::File,
+            Self::Sqlite | Self::Turso => Fields::File,
             Self::Snowflake => Fields::Account,
         }
     }
@@ -275,6 +281,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => false,
         }
@@ -289,6 +296,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => false,
         }
@@ -315,6 +323,7 @@ impl Engine {
             (Self::MariaDb, ExplainMode::Analyze) => Some("ANALYZE "),
             (Self::Sqlite, ExplainMode::Plan) => Some("EXPLAIN QUERY PLAN "),
             (Self::Sqlite, ExplainMode::Analyze) => None,
+            (Self::Turso, _) => None,
             // Its plan is a fourth shape `explain.rs` does not read yet.
             (Self::Snowflake, _) => None,
             // SQL Server has no prefix form. A plan comes from `SET SHOWPLAN_XML
@@ -340,6 +349,7 @@ impl Engine {
                 | Self::MySql
                 | Self::MariaDb
                 | Self::Sqlite
+                | Self::Turso
                 | Self::Snowflake
                 | Self::SqlServer,
                 ExplainMode::Plan | ExplainMode::Analyze,
@@ -363,7 +373,7 @@ impl Engine {
             // One simple-query submission is already one implicit transaction.
             Self::Postgres => None,
             Self::MySql | Self::MariaDb => Some("BEGIN"),
-            Self::Sqlite => Some("BEGIN"),
+            Self::Sqlite | Self::Turso => Some("BEGIN"),
             // Every statement autocommits unless the submission brackets it.
             Self::Snowflake => Some("BEGIN"),
             // A bare `BEGIN` opens a statement block in T-SQL, not a
@@ -388,7 +398,7 @@ impl Engine {
                 true
             }
             // A document has no column defaults to fall back to.
-            Self::Sqlite | Self::MongoDb => false,
+            Self::Sqlite | Self::Turso | Self::MongoDb => false,
         }
     }
 
@@ -401,6 +411,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => true,
             Self::MongoDb => kind != RelationKind::View,
@@ -419,6 +430,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::MongoDb => false,
         }
@@ -435,6 +447,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::SqlServer
             | Self::MongoDb => false,
         }
@@ -452,6 +465,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::MongoDb => "COUNT(*)",
         }
@@ -495,6 +509,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => Syntax::Sql,
             Self::MongoDb => Syntax::Mongo,
@@ -522,7 +537,7 @@ impl Engine {
             // Snowflake folds an unquoted name to upper case and reads a quoted
             // one exactly, and the catalog reports names as stored -- so quoting
             // what the catalog said is always the name it meant.
-            Self::Postgres | Self::Sqlite | Self::Snowflake => Some('"'),
+            Self::Postgres | Self::Sqlite | Self::Turso | Self::Snowflake => Some('"'),
             // Not T-SQL's own `[name]`: the grammar every gate in `sql.rs`
             // parses with has no brackets, and the pin does not move. The
             // standard quote names an identifier under `QUOTED_IDENTIFIER`,
@@ -571,7 +586,9 @@ impl Engine {
     /// survive as two.
     pub fn quote_literal(self, value: &str) -> String {
         match self {
-            Self::Postgres | Self::Sqlite => format!("'{}'", value.replace('\'', "''")),
+            Self::Postgres | Self::Sqlite | Self::Turso => {
+                format!("'{}'", value.replace('\'', "''"))
+            }
             // Snowflake reads a backslash as an escape too, and unconditionally.
             Self::MySql | Self::MariaDb | Self::Snowflake => {
                 format!("'{}'", value.replace('\\', r"\\").replace('\'', "''"))
@@ -675,6 +692,7 @@ impl Engine {
             | Self::MySql
             | Self::MariaDb
             | Self::Sqlite
+            | Self::Turso
             | Self::Snowflake
             | Self::SqlServer => "an ORDER BY",
             Self::MongoDb => "a sort",
@@ -912,6 +930,10 @@ pub enum ConnectionConfig {
         path: String,
         statement_timeout: u32,
     },
+    Turso {
+        path: String,
+        statement_timeout: u32,
+    },
     Snowflake(SnowflakeConfig),
     MongoDb(MongoConfig),
 }
@@ -924,6 +946,7 @@ impl ConnectionConfig {
             Self::MariaDb(_) => Engine::MariaDb,
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite { .. } => Engine::Sqlite,
+            Self::Turso { .. } => Engine::Turso,
             Self::Snowflake(_) => Engine::Snowflake,
             Self::MongoDb(_) => Engine::MongoDb,
         }
@@ -938,7 +961,7 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
-            Self::Sqlite { .. } | Self::Snowflake(_) => None,
+            Self::Sqlite { .. } | Self::Turso { .. } | Self::Snowflake(_) => None,
         }
     }
 
@@ -951,7 +974,7 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
-            Self::Sqlite { .. } | Self::Snowflake(_) => None,
+            Self::Sqlite { .. } | Self::Turso { .. } | Self::Snowflake(_) => None,
         }
     }
 
@@ -963,7 +986,7 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.database = name,
             Self::MongoDb(mongo) => mongo.set_database(name),
-            Self::Sqlite { .. } | Self::Snowflake(_) => {}
+            Self::Sqlite { .. } | Self::Turso { .. } | Self::Snowflake(_) => {}
         }
     }
 
@@ -994,6 +1017,10 @@ impl ConnectionConfig {
                 // A URL has nowhere to say it; the form is where it is set.
                 statement_timeout: 0,
             }),
+            Engine::Turso => sqlite::path_from_url(url).map(|path| Self::Turso {
+                path,
+                statement_timeout: 0,
+            }),
             // Nobody pastes a Snowflake URL, because there is no such form.
             Engine::Snowflake => {
                 Err("Snowflake has no connection URL. Fill the fields in instead.".to_string())
@@ -1012,6 +1039,9 @@ impl ConnectionConfig {
             | Self::SqlServer(server) => server.statement_timeout,
             Self::MongoDb(mongo) => mongo.server.statement_timeout,
             Self::Sqlite {
+                statement_timeout, ..
+            }
+            | Self::Turso {
                 statement_timeout, ..
             } => *statement_timeout,
             Self::Snowflake(account) => account.statement_timeout,
@@ -1045,7 +1075,7 @@ impl ConnectionConfig {
             | Self::MariaDb(server)
             | Self::SqlServer(server) => server.endpoint(),
             Self::MongoDb(mongo) => mongo.endpoint(),
-            Self::Sqlite { path, .. } => path.clone(),
+            Self::Sqlite { path, .. } | Self::Turso { path, .. } => path.clone(),
             Self::Snowflake(account) => account.host(),
         }
     }
@@ -1060,6 +1090,7 @@ pub enum Connection {
     MySql(mysql::Connection),
     SqlServer(mssql::Connection),
     Sqlite(sqlite::Connection),
+    Turso(turso::Connection),
     Snowflake(snowflake::Connection),
     MongoDb(mongo::Connection),
 }
@@ -1083,6 +1114,10 @@ impl Connection {
                 path,
                 statement_timeout,
             } => sqlite::Connection::open(&path, statement_timeout).map(Self::Sqlite),
+            ConnectionConfig::Turso {
+                path,
+                statement_timeout,
+            } => turso::Connection::open(&path, statement_timeout).map(Self::Turso),
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
@@ -1115,6 +1150,7 @@ impl Connection {
             Self::MySql(connection) => connection.query(sql, fetch),
             Self::SqlServer(connection) => connection.query(sql, fetch),
             Self::Sqlite(connection) => connection.query(sql, fetch),
+            Self::Turso(connection) => connection.query(sql, fetch),
             Self::Snowflake(connection) => connection.query_with(sql, cancel, fetch),
             Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
         }
@@ -1141,6 +1177,7 @@ impl Connection {
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
             Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
+            Self::Turso(connection) => connection.alongside().map(Self::Turso),
         };
         // A server out of connections still has this one, which the statement
         // waits its turn on rather than failing. SQL Server logs in on the
@@ -1227,6 +1264,7 @@ impl Connection {
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
+            | Self::Turso(_)
             | Self::Snowflake(_)
             | Self::MongoDb(_) => self.query(
                 sql,
@@ -1253,6 +1291,7 @@ impl Connection {
             Self::MySql(connection) => connection.catalog(),
             Self::SqlServer(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
+            Self::Turso(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
             Self::MongoDb(connection) => connection.catalog(),
         }
@@ -1266,6 +1305,7 @@ impl Connection {
             Self::MySql(connection) => connection.routines(),
             Self::SqlServer(connection) => connection.routines(),
             Self::Sqlite(connection) => connection.routines(),
+            Self::Turso(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
             Self::MongoDb(connection) => connection.routines(),
         }
@@ -1285,7 +1325,9 @@ impl Connection {
             Self::Postgres(connection) => connection.sizes(),
             Self::MySql(connection) => connection.sizes(),
             Self::MongoDb(connection) => connection.sizes(),
-            Self::SqlServer(_) | Self::Sqlite(_) | Self::Snowflake(_) => Ok(Sizes::new()),
+            Self::SqlServer(_) | Self::Sqlite(_) | Self::Turso(_) | Self::Snowflake(_) => {
+                Ok(Sizes::new())
+            }
         }
     }
 
@@ -1299,6 +1341,7 @@ impl Connection {
             Self::MySql(connection) => connection.references(schema, relation),
             Self::SqlServer(connection) => connection.references(schema, relation),
             Self::Sqlite(connection) => connection.references(schema, relation),
+            Self::Turso(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
             Self::Snowflake(_) | Self::MongoDb(_) => Ok(Vec::new()),
         }
@@ -1312,7 +1355,7 @@ impl Connection {
             Self::MySql(connection) => connection.databases(),
             Self::SqlServer(connection) => connection.databases(),
             Self::MongoDb(connection) => connection.databases(),
-            Self::Sqlite(_) | Self::Snowflake(_) => Ok(Databases::default()),
+            Self::Sqlite(_) | Self::Turso(_) | Self::Snowflake(_) => Ok(Databases::default()),
         }
     }
 
@@ -1322,6 +1365,7 @@ impl Connection {
             Self::MySql(connection) => connection.structure(schema, relation),
             Self::SqlServer(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
+            Self::Turso(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
             Self::MongoDb(connection) => connection.structure(schema, relation),
         }
@@ -1337,6 +1381,7 @@ impl Connection {
             Self::MySql(connection) => connection.ddl(schema, relation),
             Self::SqlServer(connection) => connection.ddl(schema, relation, kind),
             Self::Sqlite(connection) => connection.ddl(schema, relation),
+            Self::Turso(connection) => connection.ddl(schema, relation),
             Self::Snowflake(connection) => connection.ddl(schema, relation, kind),
             Self::MongoDb(connection) => connection.ddl(schema, relation),
         }
@@ -1376,6 +1421,7 @@ impl Connection {
             Self::MySql(connection) => connection.cancel(),
             Self::SqlServer(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
+            Self::Turso(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
         }
@@ -1391,7 +1437,11 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.is_lost(),
             Self::MySql(connection) => connection.is_lost(),
-            Self::SqlServer(_) | Self::Sqlite(_) | Self::Snowflake(_) | Self::MongoDb(_) => false,
+            Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::Snowflake(_)
+            | Self::MongoDb(_) => false,
         }
     }
 
@@ -1409,6 +1459,7 @@ impl Connection {
             Self::MySql(connection) => connection.engine(),
             Self::SqlServer(_) => Engine::SqlServer,
             Self::Sqlite(_) => Engine::Sqlite,
+            Self::Turso(_) => Engine::Turso,
             Self::Snowflake(_) => Engine::Snowflake,
             Self::MongoDb(_) => Engine::MongoDb,
         };
@@ -1953,6 +2004,7 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::Postgres => message == "canceling statement due to user request",
         Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
         Engine::Sqlite => message == "interrupted",
+        Engine::Turso => message == turso::INTERRUPTED,
         // The second is dbdelve's own, a cancel between partitions.
         Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
@@ -1980,9 +2032,17 @@ pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<Strin
              back."
                 .into(),
         ),
-        Engine::Sqlite | Engine::MySql | Engine::MariaDb | Engine::Snowflake | Engine::MongoDb => {
-            None
-        }
+        Engine::Turso if !reads => Some(
+            "If the statement was inside a transaction, Turso will not commit it: the COMMIT \
+             fails and the transaction is rolled back."
+                .into(),
+        ),
+        Engine::Sqlite
+        | Engine::Turso
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Snowflake
+        | Engine::MongoDb => None,
     }
 }
 
@@ -2555,6 +2615,7 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         (Engine::MySql | Engine::MariaDb, true) => Some("SET SESSION TRANSACTION READ ONLY"),
         (Engine::MySql | Engine::MariaDb, false) => Some("SET SESSION TRANSACTION READ WRITE"),
         (Engine::Sqlite, _) => None,
+        (Engine::Turso, _) => None,
         // There is no session to set anything on.
         (Engine::Snowflake, _) => None,
         // No session-level switch exists. `ApplicationIntent=ReadOnly` routes a

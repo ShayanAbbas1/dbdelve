@@ -80,7 +80,7 @@ jobs:
       # without one; the mock tests cover the same ground offline. The one
       # live test that needs no account stays: it is what proves the TLS
       # provider is linked at run time.
-      - run: cargo test -- --include-ignored --skip snowflake::tests::live_
+      - run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_
       - run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
 
   macos-lint:

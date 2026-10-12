@@ -68,6 +68,9 @@ rusqlite = { version = "0.40", default-features = false, features = [
     "column_decltype",
 ] }
 
+turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }
+turso_core = "=0.8.2"
+
 # MySQL. Blocking, and with no tokio anywhere in its tree -- rust-mysql-simple
 # is the sibling of the blocking `postgres` client, not of `mysql_async`.
 #

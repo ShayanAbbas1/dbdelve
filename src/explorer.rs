@@ -263,6 +263,7 @@ pub fn preview_sql(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -289,9 +290,12 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
             engine.qualified(schema, relation)
         ),
         Engine::MongoDb => mql::browse::find_preview(relation, "", Some(100), 0),
-        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
-            preview_sql(engine, schema, relation, "", Some(100), 0)
-        }
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Turso
+        | Engine::Snowflake => preview_sql(engine, schema, relation, "", Some(100), 0),
     }
 }
 
@@ -312,7 +316,7 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     match engine {
         Engine::MongoDb => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
         // SQLite has no TRUNCATE.
-        Engine::Sqlite => format!("DELETE FROM {qualified};"),
+        Engine::Sqlite | Engine::Turso => format!("DELETE FROM {qualified};"),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -339,6 +343,7 @@ pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
+        | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
