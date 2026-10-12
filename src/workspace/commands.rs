@@ -61,7 +61,7 @@ impl Workspace {
         };
         results.update(cx, |table, cx| {
             change(table.delegate_mut());
-            table.refresh(cx);
+            crate::result_grid::relaid(table, cx);
             cx.notify();
         });
         cx.notify();

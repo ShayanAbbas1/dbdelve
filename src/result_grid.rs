@@ -625,10 +625,26 @@ impl ResultGrid {
         if position < self.pinned {
             self.pinned -= 1;
         }
-        // The ring on a hidden column would act on a cell nobody can see.
+        // The ring on a hidden column would act on a cell nobody can see, and
+        // an input there would keep the keyboard for a cell nobody can see.
         if self.active.is_some_and(|(_, active)| active == col) {
             self.active = None;
         }
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.col == col)
+        {
+            self.editing = None;
+        }
+    }
+
+    /// Where the library's column selection belongs once the columns are laid
+    /// out again: on the ring's column at its new position, or nowhere when
+    /// the ring went with a hidden column. The library keeps that selection as
+    /// a drawn position, so left alone it stays on whatever column moved in.
+    fn ring_table_col(&self) -> Option<usize> {
+        self.table_col(self.active?.1)
     }
 
     /// Put a hidden column back where it sits among the columns as fetched.
@@ -650,6 +666,16 @@ impl ResultGrid {
             .copied()
             .chain((0..self.columns.len()).filter(|col| !pinned.contains(col)))
             .collect();
+    }
+
+    /// How wide a row's cells run: the gutter and the columns drawn.
+    fn content_width(&self) -> f32 {
+        self.gutter_width()
+            + self
+                .view
+                .iter()
+                .map(|&col| f32::from(self.columns[col].width))
+                .sum::<f32>()
     }
 
     pub fn hidden_columns(&self) -> usize {
@@ -1801,7 +1827,7 @@ pub(crate) fn step_pending(
     // An edit in a hidden column is still an edit about to be applied, and
     // stepping to it is the way to see it.
     table.delegate_mut().show_column(col);
-    table.refresh(cx);
+    relaid(table, cx);
     table.delegate_mut().set_active(row, col);
     table.set_selected_row(row, cx);
     scroll_to_drawn_col(table, col, cx);
@@ -1822,7 +1848,7 @@ fn column_menu(
         move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
             table.update(cx, |table, cx| {
                 change(table.delegate_mut(), col);
-                table.refresh(cx);
+                relaid(table, cx);
                 cx.notify();
             });
         }
@@ -1843,6 +1869,25 @@ fn column_menu(
                 .on_click(relay(|grid, _| grid.show_all_columns())),
         )
     })
+}
+
+/// Have the table rebuild its columns after the grid changed which are drawn
+/// or where, and move its column selection with them. Every change to the
+/// drawn columns ends here.
+pub(crate) fn relaid(table: &mut TableState<ResultGrid>, cx: &mut Context<TableState<ResultGrid>>) {
+    table.refresh(cx);
+    if table.selected_col().is_none() {
+        return;
+    }
+    match table.delegate().ring_table_col() {
+        // Reselected where it stands now, without the scroll that comes with it.
+        Some(col) => {
+            let from = table.horizontal_scroll_handle.offset();
+            table.set_selected_col(col, cx);
+            table.horizontal_scroll_handle.set_offset(from);
+        }
+        None => table.clear_selection(cx),
+    }
 }
 
 /// Bring a drawn column into view. A pinned one always is, and the library,
@@ -1875,7 +1920,7 @@ pub(crate) fn reveal_column(
     // Going to a hidden column is asking to see it.
     if table.delegate().position_of(col).is_none() {
         table.delegate_mut().show_column(col);
-        table.refresh(cx);
+        relaid(table, cx);
     }
     table.delegate_mut().select_col(col);
     scroll_to_drawn_col(table, col, cx);
@@ -2096,12 +2141,7 @@ impl TableDelegate for ResultGrid {
         // scroll and the cells stay put while the header moves.
         // Not a mask painted over the margin: on a glass theme a second
         // `data_glass` stacks on the plane's own and the margin turns solid.
-        let content_width = self.gutter_width()
-            + self
-                .columns
-                .iter()
-                .map(|column| f32::from(column.width))
-                .sum::<f32>();
+        let content_width = self.content_width();
         let row = div()
             .id(("row", row_ix))
             .relative()
@@ -4244,6 +4284,56 @@ mod tests {
         grid.select_col(1);
         grid.hide_column(1);
         assert_eq!(grid.active(), None);
+    }
+
+    #[test]
+    fn hiding_the_column_being_edited_closes_its_input() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_active(0, 1);
+        grid.editing = Some(Editing {
+            row: 0,
+            col: 1,
+            input: None,
+        });
+        grid.hide_column(1);
+        assert!(grid.editing.is_none());
+
+        // An input in another column stays open.
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_active(0, 2);
+        grid.editing = Some(Editing {
+            row: 0,
+            col: 2,
+            input: None,
+        });
+        grid.hide_column(1);
+        assert!(grid.editing.is_some());
+    }
+
+    #[test]
+    fn the_column_selection_follows_the_ring_when_the_columns_move() {
+        // `a b c d`, the ring on `c`: pinned, `c` is drawn first.
+        let mut grid = filled(&["a", "b", "c", "d"]);
+        grid.select_col(2);
+        assert_eq!(grid.ring_table_col(), Some(2 + GUTTER));
+        grid.toggle_pinned(2);
+        assert_eq!(grid.ring_table_col(), Some(GUTTER));
+        // `a` hidden: `c` stays first.
+        grid.hide_column(0);
+        assert_eq!(grid.ring_table_col(), Some(GUTTER));
+        // `c` hidden: the selection has nowhere to be.
+        grid.hide_column(2);
+        assert_eq!(grid.ring_table_col(), None);
+    }
+
+    #[test]
+    fn a_row_is_as_wide_as_the_columns_drawn() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_widths(&[px(100.), px(100.), px(100.)]);
+        let full = grid.content_width();
+        grid.hide_column(0);
+        grid.hide_column(2);
+        assert_eq!(grid.content_width(), full - 200.);
     }
 
     #[test]
