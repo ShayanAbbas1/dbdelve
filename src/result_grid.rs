@@ -134,6 +134,9 @@ pub struct ResultGrid {
     /// How wide the scrolling columns were laid out last frame, for
     /// `keep_active_in_view`.
     laid_out_width: Pixels,
+    /// The horizontal offset last frame, for selecting a fixed column to put
+    /// back after the library scrolls it away.
+    painted_x: Pixels,
     /// What the user has changed and not yet applied. No value in
     /// `result.rows` is ever written -- a sort in memory moves whole rows, and
     /// these with them -- so the grid can always show pending against
@@ -331,6 +334,7 @@ impl ResultGrid {
             numeric,
             active: None,
             laid_out_width: Pixels::ZERO,
+            painted_x: Pixels::ZERO,
             pending: Vec::new(),
             editing: None,
             captured: None,
@@ -1794,13 +1798,7 @@ fn commit_and_step(
         Step::Rows(_) => table.set_selected_row(to.0, cx),
         Step::Cols(_) => {
             if let Some(col) = table.delegate().table_col(to.1) {
-                // The library scrolls to the column it selects, and to the
-                // first one that scrolls for any pinned one.
-                let from = table.horizontal_scroll_handle.offset();
                 table.set_selected_col(col, cx);
-                if table.delegate().is_pinned(to.1) {
-                    table.horizontal_scroll_handle.set_offset(from);
-                }
             }
         }
     }
@@ -1935,11 +1933,13 @@ pub(crate) fn reveal_column(
 ///
 /// Run after the table's prepaint, the first point the new width is known.
 /// Answers the horizontal offset to glide to, leaving the offset where it was.
+/// Notes that offset too, as the one a fixed column's selection keeps.
 pub(crate) fn keep_active_in_view(
     table: &mut TableState<ResultGrid>,
     cx: &mut Context<TableState<ResultGrid>>,
 ) -> Option<Pixels> {
     let handle = table.horizontal_scroll_handle.clone();
+    table.delegate_mut().painted_x = handle.offset().x;
     let width = handle.bounds().size.width;
     // At no width `scroll_to_col` defers to the list's next layout, which the
     // jump back below could not undo.
@@ -2824,13 +2824,25 @@ pub(crate) fn new_grid(
             });
         }
         TableEvent::SelectColumn(col) => {
-            let Some(col) = col.checked_sub(GUTTER) else {
-                return;
-            };
-            let Some(col) = table.read(cx).delegate().column_at(col) else {
-                return;
-            };
+            let col = *col;
             table.update(cx, |table, cx| {
+                // Selecting a fixed column (the gutter or a pinned one) makes
+                // the library scroll to the first column that scrolls instead.
+                // A fixed column is always in view, so put the offset back
+                // before the frame that would show the jump. Caught here
+                // because arrows, tab and header clicks all select inside the
+                // library, past any hook of ours.
+                if col < GUTTER + table.delegate().pinned {
+                    let mut offset = table.horizontal_scroll_handle.offset();
+                    offset.x = table.delegate().painted_x;
+                    table.horizontal_scroll_handle.set_offset(offset);
+                }
+                let Some(col) = col
+                    .checked_sub(GUTTER)
+                    .and_then(|position| table.delegate().column_at(position))
+                else {
+                    return;
+                };
                 table.delegate_mut().select_col(col);
                 cx.notify();
             });
