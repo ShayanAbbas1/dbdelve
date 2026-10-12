@@ -971,7 +971,9 @@ Decided, and not to be re-litigated:
   pragmas as SQLite minus the schema argument, which Turso's pragma functions
   refuse; its `__turso_internal_` tables are hidden. `multiprocess_wal` is
   switched on only when a `-tshm` sidecar already exists, since the library
-  refuses a mixed open against a live process. **A Turso result is never
+  refuses a mixed open against a live process. Where the IO backend has no
+  shared WAL (Windows), the open falls back to a plain one, which the library
+  still refuses while another process holds the file. **A Turso result is never
   editable**: the driver names no column's table, and reading it off the
   statement would be a guessed predicate (hard rule 2); inserting from an
   object tab works. No Explain, and no Read-only backstop

@@ -38,11 +38,12 @@ impl Connection {
             .to_str()
             .ok_or_else(|| plain_error(format!("{} is not valid UTF-8.", path.display())))?;
         let shared = std::path::Path::new(&format!("{text}-tshm")).exists();
-        Self::open_at(
-            text,
-            shared.then_some("multiprocess_wal"),
-            statement_timeout,
-        )
+        let plain = || Self::open_at(text, None, statement_timeout);
+        match shared {
+            true => Self::open_at(text, Some("multiprocess_wal"), statement_timeout)
+                .or_else(|_| plain()),
+            false => plain(),
+        }
         .map_err(|error| {
             plain_error(format!(
                 "Cannot open {}: {}",
@@ -641,12 +642,13 @@ mod tests {
     }
 
     #[test]
-    fn a_file_opens_plain_and_opens_again_once_a_shared_wal_sidecar_exists() {
+    fn a_file_opens_plain_and_opens_again_with_a_shared_wal_sidecar_beside_it() {
         let dir = std::env::temp_dir().join(format!("dbdelve-turso-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let plain = dir.join("plain.db");
-        let shared = dir.join("shared.db");
-        for (path, features) in [(&plain, None), (&shared, Some("multiprocess_wal"))] {
+        let beside = dir.join("beside.db");
+        let features = cfg!(not(windows)).then_some("multiprocess_wal");
+        for (path, features) in [(&plain, None), (&beside, features)] {
             let created = Connection::open_at(path.to_str().unwrap(), features, 0).unwrap();
             created
                 .query(
@@ -655,11 +657,12 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(
-            std::path::Path::new(&format!("{}-tshm", shared.display())).exists(),
-            "the shared WAL leaves a sidecar for open to read"
-        );
-        for path in [&plain, &shared] {
+        let sidecar = format!("{}-tshm", beside.display());
+        if features.is_none() {
+            std::fs::write(&sidecar, b"").unwrap();
+        }
+        assert!(std::path::Path::new(&sidecar).exists());
+        for path in [&plain, &beside] {
             let opened = Connection::open(path.to_str().unwrap(), 0).unwrap();
             assert_eq!(count(&opened), "1");
         }
