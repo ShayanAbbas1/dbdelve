@@ -2615,7 +2615,8 @@ impl ResultGrid {
                 .on_click(|_, _, cx| cx.stop_propagation())
                 // The input has focus, so both keystrokes arrive here on their
                 // way out of it. Consumed rather than propagated: `escape`
-                // otherwise reaches the workspace and moves focus to the editor.
+                // otherwise goes on to the table's own binding for it, which
+                // clears the selection the edit was opened from.
                 .on_action(cx.listener(
                     move |table, _: &gpui_component::input::Enter, window, cx| {
                         commit_from_input(table, window, cx);

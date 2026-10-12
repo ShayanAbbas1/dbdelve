@@ -125,7 +125,7 @@ registry! {
     ("previous_tab", "Previous Tab", None, ["ctrl-shift-tab"], PreviousTab),
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),
     ("previous_profile", "Previous Connection", None, ["ctrl-shift-`"], PreviousProfile),
-    ("show_editor", "Back / Dismiss", None, ["escape"], ShowEditor),
+    ("show_editor", "Dismiss", None, ["escape"], ShowEditor),
     // Still keyed by the id of the cycle this replaced, so an override saved
     // against it keeps working.
     ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),

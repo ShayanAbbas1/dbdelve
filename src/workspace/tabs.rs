@@ -282,7 +282,7 @@ impl Workspace {
         self.set_opacity(stepped, window, cx);
     }
 
-    /// Return to the editor, backing out of whatever is in front of it.
+    /// Back out of whatever dbdelve has in front of the tab, one layer at a time.
     pub(crate) fn show_editor(
         &mut self,
         _: &ShowEditor,
@@ -375,21 +375,12 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if matches!(profile.session.active, Tab::Query(_)) {
-            // Nothing of dbdelve's is stacked over the editor, so the keystroke
-            // is not ours. Handing it on is what lets the completion popup --
-            // which is the input's, not dbdelve's -- close on `escape`; this
-            // binding is unscoped and would otherwise win it at every depth.
-            cx.propagate();
-            return;
-        }
-        let Some(&QueryTab { id, .. }) = profile.session.queries.first() else {
-            return;
-        };
-        profile.session.active = Tab::Query(id);
-        profile.session.editor_needs_focus = true;
-        self.remember_profiles(cx);
-        cx.notify();
+        // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
+        // ours. Handing it on is what lets the completion popup close and a
+        // grid cell's input cancel its edit; this binding is unscoped and would
+        // otherwise win it at every depth. Never a tab switch, on any tab: that
+        // is what used to take the `escape` meant for a cell edit.
+        cx.propagate();
     }
 
     /// `tab` takes the highlighted suggestion, and indents when there is none

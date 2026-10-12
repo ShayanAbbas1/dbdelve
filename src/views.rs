@@ -1011,12 +1011,7 @@ fn render_routine(tab: &ObjectTab, scope: &str, cx: &mut Context<Workspace>) -> 
                         .children(
                             (!routine.result_type.is_empty())
                                 .then(|| div().child(format!("Returns: {}", routine.result_type))),
-                        )
-                        .child(div().ml_auto().child(key_hint(
-                            t,
-                            "escape",
-                            "returns to the editor",
-                        ))),
+                        ),
                 ),
         )
         .child(
