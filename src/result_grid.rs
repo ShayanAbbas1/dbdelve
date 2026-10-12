@@ -439,7 +439,7 @@ impl ResultGrid {
         // rows that came back with it -- and that is not a cell.
         grid.active = stored
             .active
-            .filter(|(row, col)| *row < rows && *col < columns);
+            .filter(|(row, col)| *row < rows && *col < columns && grid.position_of(*col).is_some());
         grid.captured = Some(stored.captured);
         grid.unconfirmed = stored.edit.is_some();
         grid
