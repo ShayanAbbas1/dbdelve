@@ -227,6 +227,8 @@ sqlformat = "=0.5.0"            # Format Query only. default-features = false
 postgres = "0.19"          # blocking client, NOT tokio-postgres
 mysql = "28"               # rust-mysql-simple, blocking. default-features = false
 rusqlite = "0.40"          # bundled + column_metadata + column_decltype. dff = false
+turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }  # Turso, blocking rsapi
+turso_core = "=0.8.2"      # its Value
 
 rustls = "0.23"            # TLS; the driver ships none. default-features = false
 rustls-native-certs = "0.8"     # the platform trust store, for Postgres
@@ -426,12 +428,12 @@ locally:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                      # unit tests; no database needed
-cargo test -- --include-ignored --skip snowflake::tests::live_ # plus the live_ tests
+cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ # plus the live_ tests
 ```
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MARIADB_URL`,
-`dbdelve_MSSQL_URL`, `dbdelve_SQLITE_PATH` and `dbdelve_SSH_CONFIG` (the
+`dbdelve_MSSQL_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
 lowercase prefix is what they read; the last points `live_ssh_*` at the
 config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
 string); the `tests` job in `ci.yml` has the values
@@ -958,6 +960,24 @@ Decided, and not to be re-litigated:
   empty or all-`NULL` one still reads `datetime` (known limitation). Driver
   panics (unimplemented tokens, an empty trust store) are caught and reported
   rather than poisoning the mutex.
+- **Turso is a local file only, through `turso_sdk_kit::rsapi`, not the `turso`
+  crate.** `turso` forces async IO and keeps `interrupt` and the statement
+  timeout private, and its default `mimalloc` installs a global allocator.
+  With `async_io: false` the rsapi blocks like rusqlite, so no runtime is
+  involved; Cancel is `interrupt`, the timeout is `set_query_timeout`, both
+  reporting `interrupted`. `fts` is required to open any database holding a
+  `USING fts` index. Turso Cloud and remote libSQL are not supported. The
+  catalog, structure, DDL and references run through `sqlite::Schema`, the same
+  pragmas as SQLite minus the schema argument, which Turso's pragma functions
+  refuse; its `__turso_internal_` tables are hidden. `multiprocess_wal` is
+  switched on only when a `-tshm` sidecar already exists, since the library
+  refuses a mixed open against a live process. **A Turso result is never
+  editable**: the driver names no column's table, and reading it off the
+  statement would be a guessed predicate (hard rule 2); inserting from an
+  object tab works. No Explain, and no Read-only backstop
+  (`Engine::holds_read_only`). `Connection::connect` is a closure because
+  holding `Arc<TursoDatabase>` directly overflows the compiler's `Send`
+  evaluation of `db::Connection`. Its live test reads `dbdelve_TURSO_PATH`.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
 - **MariaDB's `JSON` is a `longtext` with a `json_valid` check**, and is shown
