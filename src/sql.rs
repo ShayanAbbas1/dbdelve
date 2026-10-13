@@ -2466,10 +2466,19 @@ mod tests {
         let delete = sql.find("DELETE").unwrap();
         // The cursor on another statement does not make that one the grid's.
         let grid = buffer.statement_at(select).unwrap();
-        assert_eq!(buffer.find(Engine::Postgres, sql, delete, &sql[grid.clone()]), Some(grid));
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, delete, &sql[grid.clone()]),
+            Some(grid)
+        );
         let first = buffer.statement_at(0).unwrap();
-        assert_eq!(buffer.find(Engine::Postgres, sql, 0, &sql[first.clone()]), Some(first));
-        assert_eq!(buffer.find(Engine::Postgres, sql, delete, "SELECT * FROM u"), None);
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, 0, &sql[first.clone()]),
+            Some(first)
+        );
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, delete, "SELECT * FROM u"),
+            None
+        );
     }
 
     fn texts(sql: &str) -> Vec<&str> {
@@ -3216,7 +3225,10 @@ mod tests {
     fn a_whole_buffer_selection_is_found_without_its_semicolon() {
         let sql = "select * from accounts;\n";
         let found = Buffer::for_engine(Engine::Postgres, sql).find(Engine::Postgres, sql, 0, sql);
-        assert_eq!(found.map(|range| &sql[range]), Some("select * from accounts"));
+        assert_eq!(
+            found.map(|range| &sql[range]),
+            Some("select * from accounts")
+        );
     }
 
     #[test]
