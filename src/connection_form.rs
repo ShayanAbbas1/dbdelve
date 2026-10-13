@@ -333,23 +333,19 @@ impl ConnectionForm {
         }
 
         let statement_timeout = self.statement_timeout(cx)?;
+        let file = || match read(&self.path) {
+            path if path.is_empty() => Err("Database file is required.".to_string()),
+            path => Ok(path),
+        };
         let config = match self.engine {
-            Engine::Sqlite | Engine::Turso => {
-                let path = read(&self.path);
-                if path.is_empty() {
-                    return Err("Database file is required.".into());
-                }
-                match self.engine {
-                    Engine::Turso => ConnectionConfig::Turso {
-                        path,
-                        statement_timeout,
-                    },
-                    _ => ConnectionConfig::Sqlite {
-                        path,
-                        statement_timeout,
-                    },
-                }
-            }
+            Engine::Sqlite => ConnectionConfig::Sqlite {
+                path: file()?,
+                statement_timeout,
+            },
+            Engine::Turso => ConnectionConfig::Turso {
+                path: file()?,
+                statement_timeout,
+            },
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
