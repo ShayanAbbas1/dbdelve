@@ -562,26 +562,27 @@ impl Workspace {
 
     /// Run one of a finished queue's statements again, as `sql`, into its own
     /// result. A lane, because the tab's slot is the last statement's result
-    /// and the others are only ever written through `done`.
+    /// and the others are only ever written through `done`. `false` when
+    /// nothing ran.
     pub(crate) fn rerun_queued(
         &mut self,
         tab: Tab,
         index: usize,
         sql: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Tab::Query(id) = tab else {
-            return;
+            return false;
         };
         let Some(profile) = self.profile_mut() else {
-            return;
+            return false;
         };
         let issued = (profile.id.clone(), profile.generation);
         let Some(query) = profile.session.query_tab_mut(id) else {
-            return;
+            return false;
         };
         if matches!(query.query, QueryState::Running { .. }) {
-            return;
+            return false;
         }
         // The lane lands wherever `start` first leads, so it has to lead here.
         let Some(finished) = query
@@ -595,7 +596,7 @@ impl Workspace {
             })
             .and_then(|queue| queue.done.get_mut(index))
         else {
-            return;
+            return false;
         };
         finished.sql = sql;
         finished.state = QueryState::Idle;
@@ -606,6 +607,7 @@ impl Workspace {
         };
         self.start_lane(tab, &issued.0, issued.1, cx);
         cx.notify();
+        true
     }
 
     /// Send the first of a queue's statements still waiting to run at once

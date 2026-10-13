@@ -563,6 +563,14 @@ impl Workspace {
             .queue
             .as_ref()
             .is_some_and(|queue| !queue.remaining.is_empty() || queue.awaiting || queue.at_once());
+        // A lane finds its result by where its statement starts, which a
+        // batch's further sets share with its first.
+        let unreachable = tab.queue.as_ref().is_some_and(|queue| {
+            queue
+                .done
+                .get(queue.showing)
+                .is_some_and(|finished| queue.lane(finished.start) != Some(queue.showing))
+        });
         let (queued, last_query) = match queued {
             Some((index, sql)) => (Some(index), sql),
             None => match tab.last_query.clone() {
@@ -581,6 +589,15 @@ impl Workspace {
         if queued.is_some() && unfinished {
             self.note(
                 "Sort this result once the rest of the run has finished.".into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unreachable {
+            self.note(
+                "These rows are one of several sets a batch returned, and cannot be sorted on \
+                 their own."
+                    .into(),
                 cx,
             );
             return false;
@@ -657,9 +674,11 @@ impl Workspace {
         editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
         match queued {
             Some(index) => self.rerun_queued(Tab::Query(tab_id), index, sorted, cx),
-            None => self.execute_sql(sorted, Tab::Query(tab_id), cx),
+            None => {
+                self.execute_sql(sorted, Tab::Query(tab_id), cx);
+                true
+            }
         }
-        true
     }
 
     /// `Enter` on the active cell opens an input on it. Everything after this
