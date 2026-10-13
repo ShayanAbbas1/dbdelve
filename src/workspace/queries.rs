@@ -580,9 +580,19 @@ impl Workspace {
         let Some(query) = profile.session.query_tab_mut(id) else {
             return;
         };
+        if matches!(query.query, QueryState::Running { .. }) {
+            return;
+        }
+        // The lane lands wherever `start` first leads, so it has to lead here.
         let Some(finished) = query
             .queue
             .as_mut()
+            .filter(|queue| {
+                queue
+                    .done
+                    .get(index)
+                    .is_some_and(|finished| queue.lane(finished.start) == Some(index))
+            })
             .and_then(|queue| queue.done.get_mut(index))
         else {
             return;

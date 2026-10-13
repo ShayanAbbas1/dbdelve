@@ -547,12 +547,22 @@ impl Workspace {
         let tab_id = tab.id;
         let editor = tab.editor.clone();
         let (in_turn, mode) = (profile.in_turn(), profile.mode);
+        // A header click refuses this itself; the sorting chips come here
+        // without asking.
+        let running = profile.session.running(Tab::Query(tab_id));
         // On a queue, the result the switcher shows. Only the last of them is
         // the tab's slot, which `last_query` describes.
         let queued = tab.queue.as_ref().and_then(|queue| {
             let finished = queue.done.get(queue.showing)?;
             (finished.grid != tab.results).then(|| (queue.showing, finished.sql.clone()))
         });
+        // An earlier result reruns as a lane, which only a queue with nothing
+        // left to send can take: one still out, or parked on a failure,
+        // would land its own results around it.
+        let unfinished = tab
+            .queue
+            .as_ref()
+            .is_some_and(|queue| !queue.remaining.is_empty() || queue.awaiting || queue.at_once());
         let (queued, last_query) = match queued {
             Some((index, sql)) => (Some(index), sql),
             None => match tab.last_query.clone() {
@@ -560,6 +570,21 @@ impl Workspace {
                 None => return false,
             },
         };
+        if running {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unfinished {
+            self.note(
+                "Sort this result once the rest of the run has finished.".into(),
+                cx,
+            );
+            return false;
+        }
         // A sort re-runs the statement behind the grid, and one that writes
         // would write again.
         if !sql::rerunnable(engine, &last_query) {

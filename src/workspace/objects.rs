@@ -1078,8 +1078,10 @@ impl Workspace {
                 // at, and `start` only feeds the line number in the failure
                 // dialog, which a restored result never raises -- it is
                 // `Complete` or nothing. Keep the offset in the snapshot if a
-                // failed one is ever restored too.
-                start: 0,
+                // failed one is ever restored too. Distinct all the same:
+                // a header sort reruns a result as a lane, which finds its
+                // entry by `start`.
+                start: index,
                 sql: snapshot.last_query.clone().unwrap_or_default(),
                 state: restored_state(&snapshot),
                 grid,
