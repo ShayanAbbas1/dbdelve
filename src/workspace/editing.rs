@@ -441,14 +441,9 @@ impl Workspace {
             return;
         };
         let tab = profile.session.active;
-        // On a queue the two differ. Into memory, what gets sorted is the
-        // result in front; into the server, the keys are spliced into the
-        // statement behind the tab's own slot, so they must name its columns.
-        let source = match client {
-            true => profile.session.active_results(),
-            false => profile.session.results(tab),
-        };
-        let Some(results) = source.cloned() else {
+        // Either way the result in front: `reorder_query` splices into the
+        // statement behind it.
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
         let (order, shown) = {
@@ -519,8 +514,8 @@ impl Workspace {
         let engine = self.engine();
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_query_tab())
-            .map(|tab| tab.results.clone())
+            .and_then(|profile| profile.session.active_results())
+            .cloned()
         else {
             return;
         };
@@ -551,8 +546,19 @@ impl Workspace {
         };
         let tab_id = tab.id;
         let editor = tab.editor.clone();
-        let Some(last_query) = tab.last_query.clone() else {
-            return false;
+        let (in_turn, mode) = (profile.in_turn(), profile.mode);
+        // On a queue, the result the switcher shows. Only the last of them is
+        // the tab's slot, which `last_query` describes.
+        let queued = tab.queue.as_ref().and_then(|queue| {
+            let finished = queue.done.get(queue.showing)?;
+            (finished.grid != tab.results).then(|| (queue.showing, finished.sql.clone()))
+        });
+        let (queued, last_query) = match queued {
+            Some((index, sql)) => (Some(index), sql),
+            None => match tab.last_query.clone() {
+                Some(sql) => (None, sql),
+                None => return false,
+            },
         };
         // A sort re-runs the statement behind the grid, and one that writes
         // would write again.
@@ -600,11 +606,34 @@ impl Workspace {
             );
             return false;
         };
+        // An earlier result reruns on a connection of its own, as the queue's
+        // reads did when they ran at once.
+        if queued.is_some() {
+            let refusal = match in_turn {
+                Some(_) => Some(
+                    "Only the last result can be sorted by the server while this connection \
+                     has a transaction open or changed session settings. Use Client sorting \
+                     for this one.",
+                ),
+                None if !session::runs_at_once(engine, mode, &[&sorted]) => Some(
+                    "Only the last result can be sorted by the server unless its statement \
+                     is a plain read. Use Client sorting for this one.",
+                ),
+                None => None,
+            };
+            if let Some(refusal) = refusal {
+                self.note(refusal.into(), cx);
+                return false;
+            }
+        }
 
         let mut replaced = text.clone();
         replaced.replace_range(range, &sorted);
         editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
-        self.execute_sql(sorted, Tab::Query(tab_id), cx);
+        match queued {
+            Some(index) => self.rerun_queued(Tab::Query(tab_id), index, sorted, cx),
+            None => self.execute_sql(sorted, Tab::Query(tab_id), cx),
+        }
         true
     }
 

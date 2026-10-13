@@ -560,6 +560,44 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Run one of a finished queue's statements again, as `sql`, into its own
+    /// result. A lane, because the tab's slot is the last statement's result
+    /// and the others are only ever written through `done`.
+    pub(crate) fn rerun_queued(
+        &mut self,
+        tab: Tab,
+        index: usize,
+        sql: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let issued = (profile.id.clone(), profile.generation);
+        let Some(query) = profile.session.query_tab_mut(id) else {
+            return;
+        };
+        let Some(finished) = query
+            .queue
+            .as_mut()
+            .and_then(|queue| queue.done.get_mut(index))
+        else {
+            return;
+        };
+        finished.sql = sql;
+        finished.state = QueryState::Idle;
+        query.query = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::alongside(),
+        };
+        self.start_lane(tab, &issued.0, issued.1, cx);
+        cx.notify();
+    }
+
     /// Send the first of a queue's statements still waiting to run at once
     /// with the others, on the profile the run was issued to.
     fn start_lane(&mut self, tab: Tab, profile: &str, generation: u64, cx: &mut Context<Self>) {
