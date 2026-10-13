@@ -15,14 +15,13 @@ use super::{
 
 pub const INTERRUPTED: &str = "interrupted";
 
-const HIDDEN: &[&str] = &["__turso_internal_"];
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct Connection {
     connect: Arc<dyn Fn() -> Result<Arc<TursoConnection>, TursoError> + Send + Sync>,
     connection: Arc<TursoConnection>,
     running: Arc<Mutex<()>>,
-    statement_timeout: Duration,
 }
 
 impl Connection {
@@ -38,18 +37,19 @@ impl Connection {
             .to_str()
             .ok_or_else(|| plain_error(format!("{} is not valid UTF-8.", path.display())))?;
         let shared = std::path::Path::new(&format!("{text}-tshm")).exists();
-        let plain = || Self::open_at(text, None, statement_timeout);
-        match shared {
-            true => Self::open_at(text, Some("multiprocess_wal"), statement_timeout)
-                .or_else(|_| plain()),
-            false => plain(),
+        let failed =
+            |reason: String| plain_error(format!("Cannot open {}: {reason}", path.display()));
+        if !shared {
+            return Self::open_at(text, None, statement_timeout)
+                .map_err(|error| failed(error.to_string()));
         }
-        .map_err(|error| {
-            plain_error(format!(
-                "Cannot open {}: {}",
-                path.display(),
-                describe(&error)
-            ))
+        let features = Some("multiprocess_wal");
+        Self::open_at(text, features, statement_timeout).or_else(|first| {
+            Self::open_at(text, None, statement_timeout).map_err(|second| {
+                failed(format!(
+                    "{first}; opening without the shared WAL failed too: {second}"
+                ))
+            })
         })
     }
 
@@ -70,20 +70,23 @@ impl Connection {
             open_flags: Default::default(),
         });
         let _ = database.open()?;
-        let connection = database.connect()?;
         let statement_timeout = Duration::from_secs(u64::from(statement_timeout));
-        connection.set_query_timeout(statement_timeout);
+        let connect: Arc<dyn Fn() -> Result<Arc<TursoConnection>, TursoError> + Send + Sync> =
+            Arc::new(move || {
+                let connection = database.connect()?;
+                connection.set_busy_timeout(BUSY_TIMEOUT);
+                connection.set_query_timeout(statement_timeout);
+                Ok(connection)
+            });
         Ok(Self {
-            connect: Arc::new(move || database.connect()),
-            connection,
+            connection: connect()?,
+            connect,
             running: Arc::new(Mutex::new(())),
-            statement_timeout,
         })
     }
 
     pub fn alongside(&self) -> Result<Self, DbError> {
-        let connection = (self.connect)().map_err(|error| plain_error(describe(&error)))?;
-        connection.set_query_timeout(self.statement_timeout);
+        let connection = (self.connect)().map_err(|error| plain_error(error.to_string()))?;
         Ok(Self {
             connection,
             running: Arc::new(Mutex::new(())),
@@ -154,8 +157,10 @@ impl Connection {
                     match statement.step(None).map_err(query_error)? {
                         TursoStatusCode::Done => break,
                         TursoStatusCode::Io => {
-                            statement.run_io().map_err(query_error)?;
-                            continue;
+                            return Err(plain_error(
+                                "The driver asked for asynchronous IO on a blocking connection."
+                                    .into(),
+                            ));
                         }
                         TursoStatusCode::Row => {}
                     }
@@ -208,7 +213,6 @@ impl Connection {
         if let Err(error) = outcome {
             return Err(self.rolled_back(outside_a_transaction, error));
         }
-        result.edit = None;
         Ok(result)
     }
 
@@ -225,7 +229,7 @@ impl Connection {
                 .to_string(),
             Err(failure) => format!(
                 "The transaction the batch opened is still open: the rollback failed too. {}",
-                describe(&failure)
+                failure
             ),
         };
         DbError {
@@ -234,12 +238,10 @@ impl Connection {
         }
     }
 
-    fn schema(&self) -> Schema<'static, impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
+    fn schema(&self) -> Schema<impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
         Schema {
             run: |sql: &str| self.internal_query(sql),
             engine: Engine::Turso,
-            schema_argument: false,
-            hidden: HIDDEN,
         }
     }
 
@@ -276,13 +278,9 @@ fn render(value: &Value) -> Option<Cow<'_, str>> {
 
 fn query_error(error: TursoError) -> DbError {
     DbError {
-        message: describe(&error),
+        message: error.to_string(),
         position: None,
     }
-}
-
-fn describe(error: &TursoError) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]
@@ -666,6 +664,31 @@ mod tests {
             let opened = Connection::open(path.to_str().unwrap(), 0).unwrap();
             assert_eq!(count(&opened), "1");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_write_waits_for_a_lock_another_connection_releases() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-turso-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("busy.db");
+        let holder = Connection::open_at(path.to_str().unwrap(), None, 0).unwrap();
+        holder
+            .query("CREATE TABLE t (id INTEGER)", Fetch::default())
+            .unwrap();
+        let waiter = holder.alongside().unwrap();
+        holder
+            .query("BEGIN; INSERT INTO t VALUES (1)", Fetch::default())
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            holder.query("COMMIT", Fetch::default()).unwrap();
+        });
+        waiter
+            .query("INSERT INTO t VALUES (2)", Fetch::default())
+            .unwrap();
+        release.join().unwrap();
+        assert_eq!(count(&waiter), "2");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

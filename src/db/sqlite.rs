@@ -345,12 +345,10 @@ impl Connection {
         resolve_edit_target(probed, &schema, &table, &key)
     }
 
-    fn schema(&self) -> Schema<'static, impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
+    fn schema(&self) -> Schema<impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
         Schema {
             run: |sql: &str| self.internal_query(sql),
             engine: Engine::Sqlite,
-            schema_argument: true,
-            hidden: &[],
         }
     }
 
@@ -375,18 +373,35 @@ impl Connection {
     }
 }
 
-pub(super) struct Schema<'a, F> {
+pub(super) struct Schema<F> {
     pub(super) run: F,
     pub(super) engine: Engine,
-    pub(super) schema_argument: bool,
-    pub(super) hidden: &'a [&'a str],
 }
 
-impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<'_, F> {
+impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
     fn argument(&self, schema: &str) -> String {
-        match self.schema_argument {
-            true => format!(", {}", self.engine.quote_literal(schema)),
-            false => String::new(),
+        match self.engine {
+            Engine::Sqlite => format!(", {}", self.engine.quote_literal(schema)),
+            Engine::Turso => String::new(),
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::SqlServer
+            | Engine::Snowflake
+            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
+        }
+    }
+
+    fn hidden(&self) -> &'static [&'static str] {
+        match self.engine {
+            Engine::Sqlite => &[],
+            Engine::Turso => &["__turso_internal_"],
+            Engine::Postgres
+            | Engine::MySql
+            | Engine::MariaDb
+            | Engine::SqlServer
+            | Engine::Snowflake
+            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
         }
     }
 
@@ -415,7 +430,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<'_, F> {
             return Ok(Catalog::default());
         }
 
-        let relations = (self.run)(&relations_sql(self.engine, &schemas, self.hidden))?;
+        let relations = (self.run)(&relations_sql(self.engine, &schemas, self.hidden()))?;
         assemble_catalog(relations, QueryResult::default())
     }
 
