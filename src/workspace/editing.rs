@@ -571,7 +571,9 @@ impl Workspace {
         };
         // The grid's own statement, not whatever the cursor is on: that may be
         // another statement entirely, and one that never ran.
-        let Some(range) = Buffer::for_engine(engine, &text).find(&text, cursor, &last_query) else {
+        let Some(range) =
+            Buffer::for_engine(engine, &text).find(engine, &text, cursor, &last_query)
+        else {
             self.note(
                 "The statement behind these rows is no longer in the editor.".into(),
                 cx,

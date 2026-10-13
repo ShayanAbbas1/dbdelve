@@ -82,7 +82,21 @@ impl Buffer {
     /// Where `statement` stands in `sql`, the buffer this was parsed from: the
     /// statement under `cursor` if it is that one, else the first that is.
     /// `None` once it has been edited away.
-    pub fn find(&self, sql: &str, cursor: usize, statement: &str) -> Option<Range<usize>> {
+    ///
+    /// A selection is sent verbatim, so `statement` can carry what the
+    /// buffer's ranges leave out, like its closing `;`. It is cut the way the
+    /// buffer is before the two are compared.
+    pub fn find(
+        &self,
+        engine: Engine,
+        sql: &str,
+        cursor: usize,
+        statement: &str,
+    ) -> Option<Range<usize>> {
+        let statement = match Buffer::for_engine(engine, statement).statements() {
+            [only] => &statement[only.clone()],
+            _ => statement,
+        };
         let is_it = |range: &Range<usize>| sql[range.clone()].trim() == statement.trim();
         self.statement_at(cursor)
             .filter(is_it)
@@ -2452,10 +2466,10 @@ mod tests {
         let delete = sql.find("DELETE").unwrap();
         // The cursor on another statement does not make that one the grid's.
         let grid = buffer.statement_at(select).unwrap();
-        assert_eq!(buffer.find(sql, delete, &sql[grid.clone()]), Some(grid));
+        assert_eq!(buffer.find(Engine::Postgres, sql, delete, &sql[grid.clone()]), Some(grid));
         let first = buffer.statement_at(0).unwrap();
-        assert_eq!(buffer.find(sql, 0, &sql[first.clone()]), Some(first));
-        assert_eq!(buffer.find(sql, delete, "SELECT * FROM u"), None);
+        assert_eq!(buffer.find(Engine::Postgres, sql, 0, &sql[first.clone()]), Some(first));
+        assert_eq!(buffer.find(Engine::Postgres, sql, delete, "SELECT * FROM u"), None);
     }
 
     fn texts(sql: &str) -> Vec<&str> {
@@ -3196,6 +3210,13 @@ mod tests {
                 "{sql:?} was truncated to {run:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_whole_buffer_selection_is_found_without_its_semicolon() {
+        let sql = "select * from accounts;\n";
+        let found = Buffer::for_engine(Engine::Postgres, sql).find(Engine::Postgres, sql, 0, sql);
+        assert_eq!(found.map(|range| &sql[range]), Some("select * from accounts"));
     }
 
     #[test]
