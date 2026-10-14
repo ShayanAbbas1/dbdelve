@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, IconName, Rope, Sizable,
+    ActiveTheme, Disableable, ElementExt, IconName, Rope, RopeExt, Sizable,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{self, Editor, EditorState, Input, InputState},
@@ -1810,8 +1810,11 @@ fn render_row_inspector(
 }
 
 thread_local! {
-    // Building one compiles the grammar's highlight query, which is far too
-    // slow to pay for every field on every frame the inspector redraws.
+    // ponytail: this saves only the query compile. Every repaint still
+    // reparses every JSON field, and because one highlighter is shared the
+    // same-text skip only hits when a row has a single JSON field. If a
+    // release build ever feels slow, compute highlights once per (row, col)
+    // next to the reformatted value, or keep one highlighter per column.
     static JSON_HIGHLIGHTER: std::cell::RefCell<SyntaxHighlighter> =
         std::cell::RefCell::new(SyntaxHighlighter::new("json"));
 }
@@ -1820,17 +1823,24 @@ fn json_highlights(
     text: &str,
     syntax: &HighlightTheme,
 ) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-    JSON_HIGHLIGHTER
-        .with_borrow_mut(|highlighter| {
-            highlighter.update(None, &Rope::from_str(text), None);
-            highlighter.styles(&(0..text.len()), syntax)
-        })
-        .into_iter()
-        .filter_map(|(range, style)| {
-            let end = range.end.min(text.len());
-            (range.start < end).then_some((range.start..end, style))
-        })
-        .collect()
+    JSON_HIGHLIGHTER.with_borrow_mut(|highlighter| {
+        let new = Rope::from_str(text);
+        let old = highlighter.text();
+        let point = |rope: &Rope| {
+            let end = rope.offset_to_point(rope.len());
+            tree_sitter::Point::new(end.row, end.column)
+        };
+        let edit = tree_sitter::InputEdit {
+            start_byte: 0,
+            old_end_byte: old.len(),
+            new_end_byte: new.len(),
+            start_position: tree_sitter::Point::new(0, 0),
+            old_end_position: point(old),
+            new_end_position: point(&new),
+        };
+        highlighter.update(Some(edit), &new, None);
+        highlighter.styles(&(0..text.len()), syntax)
+    })
 }
 
 /// One segment of the Data | Structure pair. A quiet chip rather than a
