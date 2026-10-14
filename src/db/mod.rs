@@ -402,6 +402,29 @@ impl Engine {
         }
     }
 
+    /// Whether the server fills `column` itself and an insert leaves it out:
+    /// one it refuses a value for, or `AUTO_INCREMENT`, which takes one but is
+    /// practically never given it. Read off the markers the structure queries
+    /// write into `default`, so a plain default -- `now()`, a serial's
+    /// `nextval`, an identity `BY DEFAULT` -- is not one.
+    pub fn generates(self, column: &ColumnDefinition) -> bool {
+        let Some(default) = column.default.as_deref() else {
+            return false;
+        };
+        match self {
+            Self::Postgres => default.starts_with("GENERATED ALWAYS AS "),
+            Self::MySql | Self::MariaDb => {
+                default == "AUTO_INCREMENT" || default.starts_with("GENERATED ALWAYS AS (")
+            }
+            // A default constraint's definition always comes wrapped in
+            // parentheses, so neither prefix can be one.
+            Self::SqlServer => default.starts_with("IDENTITY(") || default.starts_with("AS "),
+            // SQLite's `table_info` leaves generated columns out altogether, and
+            // a Snowflake identity takes a supplied value.
+            Self::Sqlite | Self::Turso | Self::Snowflake | Self::MongoDb => false,
+        }
+    }
+
     /// Whether New row may insert into a relation of `kind`. A SQL view can
     /// take an insert (an updatable view, or a trigger behind it), so the
     /// server is left to say; a MongoDB view never does.

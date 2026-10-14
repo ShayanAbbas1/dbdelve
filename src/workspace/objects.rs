@@ -1073,12 +1073,17 @@ impl Workspace {
         else {
             return;
         };
-        let columns: Vec<&str> = structure
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .collect();
-        let Some(sql) = sql::insert_template(engine, &tab.schema, &tab.name, &columns) else {
+        let Some(sql) = sql::insert_template(engine, &tab.schema, &tab.name, &structure.columns)
+        else {
+            // Nothing left over a column the server generates means it
+            // generates them all.
+            if structure
+                .columns
+                .iter()
+                .any(|column| engine.generates(column))
+            {
+                self.note("The server fills every column here.".into(), cx);
+            }
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(sql));
