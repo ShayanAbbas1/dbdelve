@@ -92,6 +92,7 @@ impl Workspace {
             OpenedObject::Structure { .. } => ObjectBody::Structure {
                 structure: StructureState::Loading,
                 grid: structure_grid::new_grid(window, cx),
+                origin: None,
             },
             OpenedObject::Relation {
                 filter, filters, ..
@@ -575,7 +576,9 @@ impl Workspace {
                             waited = matches!(structure, StructureState::Loading);
                             *structure = loaded(result);
                         }
-                        ObjectBody::Structure { structure, grid } => {
+                        ObjectBody::Structure {
+                            structure, grid, ..
+                        } => {
                             if let Ok(loaded) = &result {
                                 let section = grid.read(cx).delegate().section();
                                 structure_grid::show(grid, loaded, section, cx);
@@ -953,11 +956,46 @@ impl Workspace {
         let ObjectKind::Relation(kind) = tab.kind else {
             return;
         };
-        if matches!(tab.body, ObjectBody::Structure { .. }) == structure {
+        let origin = match &tab.body {
+            ObjectBody::Structure { origin, .. } if !structure => *origin,
+            ObjectBody::Relation { .. } if structure => Some(tab.id),
+            _ => return,
+        };
+        let (schema, name) = (tab.schema.clone(), tab.name.clone());
+        if structure {
+            let id = self.open_relation_view(schema, name, kind, true, window, cx);
+            let tab = id.and_then(|id| {
+                let profile = self.profile_mut()?;
+                profile.session.objects.iter_mut().find(|tab| tab.id == id)
+            });
+            if let Some(ObjectTab {
+                body: ObjectBody::Structure { origin: slot, .. },
+                ..
+            }) = tab
+            {
+                *slot = origin;
+            }
             return;
         }
-        let (schema, name) = (tab.schema.clone(), tab.name.clone());
-        self.open_relation_view(schema, name, kind, structure, window, cx);
+        let data = self.profile().and_then(|profile| {
+            let rows = || {
+                profile.session.objects.iter().filter(|tab| {
+                    matches!(tab.body, ObjectBody::Relation { .. })
+                        && tab.schema == schema
+                        && tab.name == name
+                })
+            };
+            rows()
+                .find(|tab| Some(tab.id) == origin)
+                .or_else(|| rows().next())
+                .map(|tab| tab.id)
+        });
+        match data {
+            Some(id) => self.activate_tab(Tab::Object(id), window, cx),
+            None => {
+                self.open_relation_view(schema, name, kind, false, window, cx);
+            }
+        }
     }
 
     /// From a structure tab's Columns section: the relation's rows, at that
@@ -1061,6 +1099,7 @@ impl Workspace {
         if let ObjectBody::Structure {
             structure: StructureState::Loaded(structure),
             grid,
+            ..
         } = &tab.body
         {
             structure_grid::show(grid, structure, section, cx);

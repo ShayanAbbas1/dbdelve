@@ -576,7 +576,10 @@ fn render_object(
     // Scopes this tab's scroll state to its own id -- see the same line in
     // `render_query_surface`.
     let scope = Tab::Object(tab.id).scroll_scope(profile_id);
-    if let ObjectBody::Structure { structure, grid } = &tab.body {
+    if let ObjectBody::Structure {
+        structure, grid, ..
+    } = &tab.body
+    {
         // No New row here: the form belongs to the rows, in the other tab.
         return div()
             .size_full()

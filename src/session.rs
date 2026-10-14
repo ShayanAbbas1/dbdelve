@@ -1627,6 +1627,10 @@ pub(crate) enum ObjectBody {
         structure: StructureState,
         /// Over whichever section its chips picked.
         grid: Entity<TableState<StructureGrid>>,
+        /// The data tab that last switched here, which going back to Data
+        /// returns to: a relation can have several, filtered ones among them,
+        /// and its unfiltered rows are not the ones the user left.
+        origin: Option<u64>,
     },
     Routine(Routine),
 }
