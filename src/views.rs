@@ -83,9 +83,11 @@ pub struct RowPanel {
     /// is. A field unmounted while focused keeps the window's focus, and with
     /// it every keybinding; render hands focus back when this comes up false.
     pub searched: std::cell::Cell<bool>,
-    /// The grid's active cell the panel last scrolled to, so it scrolls once
-    /// per click or arrow key and then leaves the panel to the wheel.
-    pub revealed: std::cell::Cell<Option<(usize, usize)>>,
+    /// The tab and grid cell the panel last scrolled to, so it scrolls once
+    /// per click or arrow key and then leaves the panel to the wheel. Cleared
+    /// whenever the panel is folded or off screen, so reopening it scrolls
+    /// again.
+    pub revealed: std::cell::RefCell<Option<(String, usize, usize)>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1690,6 +1692,7 @@ fn render_row_inspector(
             }))
     };
     if folded {
+        row_panel.revealed.take();
         return Some(
             div()
                 .h_full()
@@ -1724,10 +1727,12 @@ fn render_row_inspector(
         })
         .collect();
 
-    if row_panel.revealed.replace(active) != active
-        && let Some(ix) = active.and_then(|(_, col)| fields.iter().position(|(c, _)| *c == col))
-    {
-        scroll_to("row-inspector", scope, ix, cx);
+    let reveal = active.map(|(row, col)| (scope.to_owned(), row, col));
+    if *row_panel.revealed.borrow() != reveal {
+        if let Some(ix) = active.and_then(|(_, col)| fields.iter().position(|(c, _)| *c == col)) {
+            scroll_to("row-inspector", scope, ix, cx);
+        }
+        row_panel.revealed.replace(reveal);
     }
 
     row_panel.searched.set(true);

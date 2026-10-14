@@ -900,6 +900,9 @@ impl Render for Workspace {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
+        if !self.row_panel.on_screen.get() {
+            self.row_panel.revealed.take();
+        }
         self.row_panel.on_screen.set(false);
         self.row_panel.searched.set(false);
         // Every way the switcher closes ends here, so this is the one place
