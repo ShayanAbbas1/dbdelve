@@ -143,8 +143,8 @@ fn named(definitions: &[crate::db::NamedDefinition]) -> Vec<Vec<SharedString>> {
 
 /// A read-only grid over one section of a relation's structure.
 pub(crate) struct StructureGrid {
-    /// For the jumps to a column's data and the copy notices, which a
-    /// delegate handed only its table's context has no other way to reach.
+    /// For the jumps to a column's data, which a delegate handed only its
+    /// table's context has no other way to reach.
     workspace: WeakEntity<Workspace>,
     section: Section,
     rows: Vec<Vec<SharedString>>,
@@ -163,21 +163,22 @@ impl StructureGrid {
     /// The selected cell, or the selected row as one line of TSV.
     pub(crate) fn selection_text(&self) -> Option<String> {
         let (row, col) = self.selected?;
-        match col {
-            Some(col) => self.rows.get(row)?.get(col).map(ToString::to_string),
-            None => self.row_text(row),
-        }
+        self.text(row, col)
     }
 
-    fn row_text(&self, row: usize) -> Option<String> {
-        Some(
-            self.rows
-                .get(row)?
-                .iter()
-                .map(|cell| crate::export::csv_field('\t', cell))
-                .collect::<Vec<_>>()
-                .join("\t"),
-        )
+    /// A cell's text, or with no column its row's as one line of TSV.
+    fn text(&self, row: usize, col: Option<usize>) -> Option<String> {
+        let cells = self.rows.get(row)?;
+        match col {
+            Some(col) => cells.get(col).map(ToString::to_string),
+            None => Some(
+                cells
+                    .iter()
+                    .map(|cell| crate::export::csv_field('\t', cell))
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            ),
+        }
     }
 }
 
@@ -324,12 +325,10 @@ impl TableDelegate for StructureGrid {
         };
         let (divider, faint, text) = (t.border, t.text_faint, t.text);
         let value = self.rows[row_ix].get(col_ix).cloned();
-        let row_text = self.row_text(row_ix).unwrap_or_default();
-        let (copied_cell, copied_row) = (self.workspace.clone(), self.workspace.clone());
         let column_name = (self.section == Section::Columns && col_ix == 0)
             .then(|| value.clone())
             .flatten();
-        let reveal = self.workspace.clone();
+        let grid = cx.entity().downgrade();
         div()
             .id((
                 "structure-cell",
@@ -359,11 +358,12 @@ impl TableDelegate for StructureGrid {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(color)
-                    .when_some(value.clone(), |cell, value| cell.child(value)),
+                    .when_some(value, |cell, value| cell.child(value)),
             )
             // A column listed here is a way to its data: back to the rows,
             // scrolled to it. Dressed as `ResultGrid`'s follow-key square.
             .children(column_name.map(|name| {
+                let reveal = self.workspace.clone();
                 div()
                     .id(("reveal-column", row_ix))
                     .flex_shrink_0()
@@ -383,22 +383,22 @@ impl TableDelegate for StructureGrid {
                         });
                     })
             }))
+            // Not the `CopyCell` action the data grid's menu sends: that copies
+            // the selection, and a right click here selects nothing.
             .context_menu(move |menu, _, _| {
-                let value = value.clone().unwrap_or_default().to_string();
-                let (row_text, copied_cell, copied_row) =
-                    (row_text.clone(), copied_cell.clone(), copied_row.clone());
-                menu.item(PopupMenuItem::new("Copy Cell").on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                    _ = copied_cell.update(cx, |workspace, cx| {
-                        workspace.confirm("Copied the cell.".into(), cx);
-                    });
-                }))
-                .item(PopupMenuItem::new("Copy Row").on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(row_text.clone()));
-                    _ = copied_row.update(cx, |workspace, cx| {
-                        workspace.confirm("Copied 1 row as TSV.".into(), cx);
-                    });
-                }))
+                let copy = |label: &'static str, col: Option<usize>| {
+                    let grid = grid.clone();
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let text = grid
+                            .upgrade()
+                            .and_then(|grid| grid.read(cx).delegate().text(row_ix, col));
+                        if let Some(text) = text {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                    })
+                };
+                menu.item(copy("Copy Cell", Some(col_ix)))
+                    .item(copy("Copy Row", None))
             })
     }
 
