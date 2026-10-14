@@ -9,16 +9,16 @@
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FontWeight, HighlightStyle, InteractiveElement, IntoElement, ParentElement,
+    Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, ParentElement,
     SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, div,
     prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, IconName, Rope, RopeExt, Sizable,
+    ActiveTheme, Disableable, ElementExt, IconName, RopeExt, Sizable,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::{self, Editor, EditorState, Input, InputState},
+    input::{self, Editor, EditorState, Input, InputState, Rope},
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
@@ -35,6 +35,7 @@ use crate::{
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
+    explain::{self, LabelPart},
     explorer::ROW_LIMITS,
     filter::{Conjunction, FilterRow, Operator},
     icons::icon,
@@ -304,7 +305,10 @@ fn render_plan(
 ) -> AnyElement {
     let t = *theme(cx);
     let code = fonts(cx).editor.clone();
-    let Explained { plan, mode, sql } = explained;
+    let syntax = cx.theme().highlight_theme.clone();
+    let Explained {
+        plan, mode, sql, ..
+    } = explained;
     // What every bar is a share of. A plan with no timings draws none, and the
     // guard against zero is what keeps a 0ms plan from dividing by it.
     let total = plan.total_ms.filter(|total| *total > 0.0);
@@ -390,13 +394,13 @@ fn render_plan(
                                 true => t.danger,
                                 false => t.text,
                             })
-                            .child(clip_label(&node.label)),
+                            .child(plan_label(&node.label, &t)),
                     )
                     .children(node.detail.iter().map(|line| {
                         div()
                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                             .text_color(t.text_muted)
-                            .child(clip_label(line))
+                            .child(plan_detail(line, node, &t, &syntax))
                     }))
                     .child(
                         div()
@@ -419,6 +423,12 @@ fn render_plan(
                                     ),
                                     t.success.into(),
                                 )
+                            }))
+                            .children(plan.misestimate(index).map(|factor| {
+                                div().text_color(t.danger).child(format!(
+                                    "×{} misestimate",
+                                    group_thousands(factor.round() as u64)
+                                ))
                             }))
                             .children(node.estimated.map(|estimated| {
                                 metric(
@@ -546,6 +556,105 @@ fn clip_label(label: &str) -> String {
         Some((at, _)) => format!("{}…", &label[..at]),
         None => label.to_string(),
     }
+}
+
+fn tint(color: impl Into<Hsla>) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(color.into()),
+        ..HighlightStyle::default()
+    }
+}
+
+/// A node's label with what it reads, and through which index, told apart
+/// from the operator. The operator itself keeps the row's own colour, so the
+/// slowest node's stays red.
+fn plan_label(label: &str, t: &Theme) -> StyledText {
+    let label = clip_label(label);
+    let highlights = explain::label_parts(&label)
+        .into_iter()
+        .filter_map(|(range, part)| {
+            let style = match part {
+                LabelPart::Operator => return None,
+                LabelPart::Relation => tint(t.syntax_type),
+                LabelPart::Index => tint(t.syntax_function),
+                LabelPart::Keyword => tint(t.text_faint),
+                LabelPart::Aside => tint(t.text_muted),
+            };
+            Some((range, style))
+        })
+        .collect::<Vec<_>>();
+    StyledText::new(label).with_highlights(highlights)
+}
+
+/// A qualifier line: its key quiet, a condition highlighted as SQL, numbers
+/// picked out of anything else, and a filter that threw away far more than it
+/// kept in the warning colour.
+fn plan_detail(
+    line: &str,
+    node: &explain::PlanNode,
+    t: &Theme,
+    syntax: &HighlightTheme,
+) -> StyledText {
+    let wasteful = explain::wasteful(line, node.actual);
+    let line = clip_label(line);
+    let (key, value_start) = match line.split_once(": ") {
+        Some((key, _)) => (key, key.len() + 2),
+        None => ("", 0),
+    };
+    let value = &line[value_start..];
+    let shifted =
+        |range: std::ops::Range<usize>| range.start + value_start..range.end + value_start;
+
+    let mut highlights = vec![(0..key.len(), tint(t.text_faint))];
+    if wasteful {
+        highlights.push((value_start..line.len(), tint(t.danger)));
+    } else if explain::is_expression(key) {
+        highlights.extend(
+            sql_highlights(value, syntax)
+                .into_iter()
+                .map(|(range, style)| (shifted(range), style)),
+        );
+    } else {
+        highlights.extend(
+            explain::numbers(value)
+                .into_iter()
+                .map(|range| (shifted(range), tint(t.syntax_number))),
+        );
+    }
+    highlights.retain(|(range, _)| !range.is_empty());
+    StyledText::new(line).with_highlights(highlights)
+}
+
+thread_local! {
+    // Building one compiles the grammar's highlight query, which is far too
+    // slow to pay for every qualifier on every frame the plan redraws.
+    static SQL_HIGHLIGHTER: std::cell::RefCell<SyntaxHighlighter> =
+        std::cell::RefCell::new(SyntaxHighlighter::new("sql"));
+}
+
+/// An expression from a plan, highlighted as the editor would. It is parsed
+/// behind a `SELECT ` so the grammar reads an expression rather than a broken
+/// statement; what it still cannot read is left unstyled, never dropped.
+fn sql_highlights(
+    expression: &str,
+    syntax: &HighlightTheme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    const PREFIX: &str = "SELECT ";
+    let text = format!("{PREFIX}{expression}");
+    SQL_HIGHLIGHTER
+        .with_borrow_mut(|highlighter| {
+            highlighter.update(None, &Rope::from_str(&text), None);
+            highlighter.styles(&(PREFIX.len()..text.len()), syntax)
+        })
+        .into_iter()
+        .map(|(range, style)| {
+            (
+                range.start.saturating_sub(PREFIX.len())..range.end.saturating_sub(PREFIX.len()),
+                style,
+            )
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect()
 }
 
 /// A statement on one line, for the header strip that says what was explained.
@@ -2811,7 +2920,7 @@ fn render_query_toolbar(
     // a control with one working half, which is the same as no control at all.
     let plan_toggle = session
         .active_query_tab()
-        .filter(|tab| tab.plan.is_some())
+        .filter(|tab| tab.flips_to_plan())
         .map(|tab| {
             div()
                 .flex_shrink_0()
@@ -3500,4 +3609,41 @@ fn settings_chip(
             apply(workspace, window, cx);
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plan_expression_is_highlighted_within_itself_whatever_it_holds() {
+        let syntax = HighlightTheme::default_dark();
+        for expression in [
+            "((status)::text = 'paid'::text)",
+            "(o.account_id = a.id)",
+            "a.created_at DESC",
+            "",
+            "é ' ( ;; \u{1F600}",
+        ] {
+            for (range, _) in sql_highlights(expression, &syntax) {
+                assert!(range.end <= expression.len(), "{expression:?} {range:?}");
+                assert!(expression.is_char_boundary(range.start));
+                assert!(expression.is_char_boundary(range.end));
+            }
+        }
+
+        let expression = "(balance > 100) AND (name = 'x')";
+        let keyword = syntax
+            .style
+            .syntax
+            .style("keyword")
+            .and_then(|style| style.color);
+        assert!(keyword.is_some());
+        assert!(
+            sql_highlights(expression, &syntax)
+                .iter()
+                .any(|(range, style)| &expression[range.clone()] == "AND"
+                    && style.color == keyword)
+        );
+    }
 }

@@ -158,7 +158,7 @@ impl Syntax {
 /// `Analyze` *runs the statement* to report what it really cost. Explaining a
 /// `DELETE` under `Analyze` deletes. That is why the two are a choice the user
 /// makes in front of the button rather than a mode dbdelve picks for them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExplainMode {
     /// Plan only. Never executes the statement.
     #[default]

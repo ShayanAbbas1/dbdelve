@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{EditTarget, RelationKind, Row, SshTunnel};
+use crate::db::{EditTarget, ExplainMode, RelationKind, Row, SshTunnel};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -302,6 +302,31 @@ pub struct StoredGrid {
     /// (`QueryResult::cell_types`): what tells a missing field from a null.
     #[serde(default)]
     pub cell_types: Vec<Vec<String>>,
+    /// The plan a query tab had beside these rows. Absent from a snapshot
+    /// written before plans were kept, which restores with none.
+    #[serde(default)]
+    pub plan: Option<StoredPlan>,
+}
+
+/// What rebuilds a query tab's plan: the rows `explain::parse` read it from,
+/// never the parsed tree, so a parser that has learned more since reads them
+/// afresh.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredPlan {
+    pub mode: ExplainMode,
+    pub sql: String,
+    /// A typed `EXPLAIN`'s rows are the snapshot's own, and are not kept twice.
+    #[serde(default)]
+    pub typed: bool,
+    /// Whether the pane was turned to the plan rather than the rows.
+    #[serde(default)]
+    pub showing: bool,
+    /// The Explain command's answer, which never reaches the grid. Empty for a
+    /// typed plan.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub rows: Vec<Row>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -791,6 +816,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
             cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
+            plan: grid.plan.clone(),
         };
         &capped
     } else {
@@ -2449,6 +2475,7 @@ open_objects = []
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -2504,6 +2531,7 @@ open_objects = []
                 }),
                 data_types: vec![Some("int4".into()), None],
                 cell_types: Vec::new(),
+                plan: None,
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -2538,6 +2566,7 @@ open_objects = []
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -2589,6 +2618,7 @@ open_objects = []
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -2626,6 +2656,7 @@ open_objects = []
 
         assert_eq!(grid.edit, None);
         assert!(grid.data_types.is_empty());
+        assert_eq!(grid.plan, None);
         assert_eq!(grid.rows, vec![vec![Some("1".to_string()), None]]);
     }
 

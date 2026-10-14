@@ -1095,7 +1095,7 @@ impl Workspace {
         };
         // Nothing to turn to. The toggle is not drawn in that case, so this is
         // the palette's row and a stale keystroke rather than a button.
-        if showing && tab.plan.is_none() {
+        if !tab.flips_to_plan() {
             return;
         }
         tab.showing_plan = showing;
@@ -1613,8 +1613,10 @@ impl Workspace {
     /// clears them first, because rows from the previous statement sitting
     /// under the one now running cannot be told from fresh ones.
     ///
-    /// `explain` says this submission is an `EXPLAIN`, and diverts its result
-    /// away from the grid and into the tab's plan. It routes through here rather
+    /// `explain` says this submission is the Explain command's, the statement
+    /// under dbdelve's prefix, and diverts its result away from the grid and
+    /// into the tab's plan, as a lone statement the user typed as an `EXPLAIN`
+    /// is diverted without it (`sql::typed_explain`). It routes through here rather
     /// than down a path of its own because everything around the result — the
     /// single-flight guard, the generation check that drops a stale run, the
     /// cancel handle, the connection — is the same for a plan as for rows, and a
@@ -1655,6 +1657,18 @@ impl Workspace {
         let generation = profile.generation;
         let read_only = profile.mode == Mode::ReadOnly;
         let alongside = lane.is_some();
+        // A statement the user typed as an `EXPLAIN` is theirs, run and kept in
+        // the history as typed; only its answer goes where the Explain
+        // command's does. Not in a queue, where every result holds a grid.
+        let typed = match tab {
+            Tab::Query(query) if explain.is_none() && refresh.is_none() && !alongside => profile
+                .session
+                .query_tab(query)
+                .filter(|query| query.queue.is_none())
+                .and_then(|_| sql::typed_explain(engine, &sql)),
+            _ => None,
+        };
+        let explaining = explain.or(typed);
         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
@@ -1730,13 +1744,16 @@ impl Workspace {
             && let Some(tab) = profile.session.query_tab_mut(query)
         {
             tab.showing_plan = false;
+            // A typed `EXPLAIN`'s plan is a view of the rows about to be
+            // replaced, with no Data of its own to flip back to it from.
+            tab.plan.take_if(|plan| plan.typed);
         }
 
         // Rows from the previous statement must not sit under the one now on
-        // screen -- a reader cannot tell stale rows from fresh ones. An
-        // `EXPLAIN` never reaches the grid at all, so the rows already there are
-        // not the previous statement's: they are still this tab's own result,
-        // and are what the user flips back to.
+        // screen -- a reader cannot tell stale rows from fresh ones. The
+        // Explain command's `EXPLAIN` never reaches the grid at all, so the
+        // rows already there are not the previous statement's: they are still
+        // this tab's own result, and are what the user flips back to.
         let shown = {
             let table = results.read(cx);
             let (names, widths) = table.delegate().layout();
@@ -1790,12 +1807,14 @@ impl Workspace {
         let statement = (matches!(tab, Tab::Query(_)) && explain.is_none()).then(|| sql.clone());
         // What the plan pane says it is a plan of: the user's statement, without
         // the prefix dbdelve put in front of it.
-        let explained = explain.map(|mode| {
-            let prefix = engine.explain_prefix(mode).unwrap_or_default();
-            let suffix = engine.explain_suffix(mode);
-            let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
-            bare.strip_suffix(suffix).unwrap_or(bare).to_string()
-        });
+        let explained = explain
+            .map(|mode| {
+                let prefix = engine.explain_prefix(mode).unwrap_or_default();
+                let suffix = engine.explain_suffix(mode);
+                let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
+                bare.strip_suffix(suffix).unwrap_or(bare).to_string()
+            })
+            .or(typed.map(|_| sql.clone()));
         if let Tab::Query(query) = tab
             && lane.is_none()
             && let Some(tab) = self
@@ -1832,7 +1851,7 @@ impl Workspace {
         }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
-            Tab::Query(query) if explain.is_none() => self
+            Tab::Query(query) if explaining.is_none() => self
                 .issued_to(&id, generation)
                 .and_then(|profile| profile.session.query_tab(query))
                 .and_then(|query| query.row_limit),
@@ -1844,7 +1863,7 @@ impl Workspace {
         // preview is dbdelve's statement and streams like the user's; a query
         // tab's generated run is an edit, with no rows to stream.
         let streams = matches!(tab, Tab::Object(_)) || !generated;
-        let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
+        let feed = (!keep_rows && streams && explaining.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
             let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
             let (names, widths, column_view) = (shown.0.clone(), shown.1.clone(), shown.4.clone());
@@ -1930,10 +1949,13 @@ impl Workspace {
                         // Read before `slot` for the same reason. A view sorted
                         // in memory is sorted again as its rows land: a page
                         // turn or a re-run hands them back in the server's order.
+                        // Never a plan's: its lines are in the only order
+                        // that reads as one.
                         let client_keys = profile
                             .session
                             .sorting(tab)
                             .and_then(Sorting::client_keys)
+                            .filter(|_| typed.is_none())
                             .map(<[SortKey]>::to_vec);
                         // Before `slot`: a tab closed mid-run still ran on the
                         // session that died.
@@ -2013,7 +2035,8 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan), Vec::new(), result.notice)
+                                let answer = (plan, columns, result.rows);
+                                (true, false, Some(answer), Vec::new(), result.notice)
                             }
                             Ok(mut result) => {
                                 // Rows that streamed in were scrolled through as
@@ -2065,12 +2088,28 @@ impl Workspace {
                                 // table like any select, but applying an edit
                                 // re-runs the statement behind the grid to
                                 // reload it -- which would repeat the write.
-                                if statement
-                                    .as_deref()
-                                    .is_some_and(|statement| !sql::rerunnable(engine, statement))
+                                if typed.is_some()
+                                    || statement.as_deref().is_some_and(|statement| {
+                                        !sql::rerunnable(engine, statement)
+                                    })
                                 {
                                     result.edit = None;
                                 }
+                                // A typed `EXPLAIN`'s rows land as any result's
+                                // do, for copying and export, and are drawn as
+                                // the plan they spell.
+                                let plan = typed.map(|_| {
+                                    let columns: Vec<String> = result
+                                        .columns
+                                        .iter()
+                                        .map(|column| column.name.clone())
+                                        .collect();
+                                    (
+                                        explain::parse(&columns, &result.rows),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    )
+                                });
                                 *state = QueryState::Complete {
                                     rows: result.total_rows(),
                                     bytes: result.bytes,
@@ -2123,7 +2162,7 @@ impl Workspace {
                                 if feed.is_some() {
                                     render_aside(&results, engine, cx);
                                 }
-                                (true, produced_grid, None, rest, notice)
+                                (true, produced_grid, plan, rest, notice)
                             }
                             Err(mut error) => {
                                 // Rows of a statement that failed part way are
@@ -2179,13 +2218,16 @@ impl Workspace {
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
                         {
-                            tab.last_query = Some(statement);
+                            // Never a typed `EXPLAIN`: a sort or refresh
+                            // re-runs `last_query`, and `ANALYZE` runs the
+                            // statement it explains.
+                            tab.last_query = typed.is_none().then_some(statement);
                         }
                         // Shown as soon as it lands: asking for a plan is asking
                         // to read one, so the pane turns to it rather than
                         // leaving the answer behind a tab the user has to find.
-                        if let Some(plan) = plan
-                            && let Some(mode) = explain
+                        if let Some((plan, columns, rows)) = plan
+                            && let Some(mode) = explaining
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
                         {
@@ -2193,6 +2235,9 @@ impl Workspace {
                                 plan,
                                 mode,
                                 sql: explained.unwrap_or_default(),
+                                typed: typed.is_some(),
+                                columns,
+                                rows,
                             });
                             tab.showing_plan = true;
                         }

@@ -587,6 +587,7 @@ impl ResultGrid {
                 .iter()
                 .map(|column| column.data_type.clone())
                 .collect(),
+            plan: None,
         }
     }
 
@@ -1952,14 +1953,15 @@ fn scroll_to_drawn_col(
 
 /// Put the ring on a column and bring it into view, for "Go to column". The
 /// ring stays on the row it was on, so the eye lands on the same record.
+/// Answers whether the grid took focus for it.
 pub(crate) fn reveal_column(
     table: &mut TableState<ResultGrid>,
     col: usize,
     window: &mut Window,
     cx: &mut Context<TableState<ResultGrid>>,
-) {
+) -> bool {
     if col >= table.delegate().columns().len() {
-        return;
+        return false;
     }
     table.focus_handle(cx).focus(window, cx);
     // Going to a hidden column is asking to see it.
@@ -1970,6 +1972,7 @@ pub(crate) fn reveal_column(
     table.delegate_mut().select_col(col);
     scroll_to_drawn_col(table, col, cx);
     cx.notify();
+    true
 }
 
 /// Scroll the active cell back into view when the grid's width changes under
@@ -3671,6 +3674,7 @@ mod tests {
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
             },
             Mode::ReadWrite,
         );

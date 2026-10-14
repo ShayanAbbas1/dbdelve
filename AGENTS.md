@@ -751,6 +751,13 @@ Decided, and not to be re-litigated:
   runs as MySQL's is. Only when a `SELECT`, `WITH`, `INSERT`, `REPLACE`,
   `UPDATE`, `DELETE` or `(` follows (after an optional `FORMAT=JSON`):
   `ANALYZE TABLE t` would otherwise read as an `EXPLAIN` of the query `TABLE t`.
+  A lone statement the user typed as an explain lands in the plan pane as the
+  command's does, but only where its answer is a shape `explain.rs` reads
+  (`sql::typed_explain`): Postgres text, MySQL's tree, SQLite's `QUERY PLAN`,
+  MongoDB's `.explain()`. Tables, JSON and bytecode stay in the grid. Its
+  rows still land in the grid, for copying and export, with the plan drawn
+  over them and no Data toggle. It never becomes `last_query`, so no sort or
+  refresh runs an `EXPLAIN ANALYZE` again.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
 - **Read-only has no server-side backstop on SQLite, Snowflake or SQL Server.**
@@ -1295,7 +1302,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   the later run overwrites the first two files and leaves the rest. The count
   is also what keeps the startup prune off them. `hydrate_tab` rebuilds the
   strip, which is why it takes a `&mut Window`: a grid per result cannot be
-  built without one.
+  built without one. A query tab's plan rides in its own snapshot
+  (`StoredGrid::plan`) as the rows it was parsed from, never the parsed tree,
+  and is parsed again on restore: a typed `EXPLAIN`'s are the snapshot's own
+  rows, the Explain command's are kept beside the grid's, which still hold the
+  last real run. Whether the pane was showing it comes back too.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

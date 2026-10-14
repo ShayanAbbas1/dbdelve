@@ -498,6 +498,147 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
     }
 }
 
+impl Plan {
+    /// The node's `misestimate`, unless it only ran short because an ancestor
+    /// stopped pulling rows. Estimates are for running to completion, so a
+    /// scan under a `Limit` or a semi/anti join's inner side reads as a
+    /// huge overestimate on a healthy plan.
+    pub fn misestimate(&self, index: usize) -> Option<f64> {
+        let node = &self.nodes[index];
+        let factor = node.misestimate()?;
+        let under = node.actual?.rows < node.estimated?.rows as f64;
+        let mut depth = node.depth;
+        let stopped = self.nodes[..index].iter().rev().any(|ancestor| {
+            let is_ancestor = ancestor.depth < depth;
+            depth = depth.min(ancestor.depth);
+            let label = ancestor.label.to_lowercase();
+            is_ancestor
+                && (label.starts_with("limit")
+                    || label.contains("semi join")
+                    || label.contains("anti join"))
+        });
+        (!(under && stopped)).then_some(factor)
+    }
+}
+
+impl PlanNode {
+    /// How many times over or under the planner's row count was, when it was
+    /// off by ten or more. Postgres reports both per loop, so they compare
+    /// as they stand; zero is read as one so neither side divides by it.
+    pub fn misestimate(&self) -> Option<f64> {
+        let estimated = (self.estimated?.rows as f64).max(1.0);
+        let actual = self.actual?.rows.max(1.0);
+        let factor = (actual / estimated).max(estimated / actual);
+        (factor >= 10.0).then_some(factor)
+    }
+}
+
+/// What a stretch of a node's label names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelPart {
+    Operator,
+    /// The ` on ` and ` using ` that join the operator to its targets.
+    Keyword,
+    Relation,
+    Index,
+    /// A trailing parenthetical, like `(never executed)`.
+    Aside,
+}
+
+/// A label cut into consecutive parts that together are all of it:
+/// `Index Scan` `using` `accounts_pkey` `on` `accounts a`.
+pub fn label_parts(label: &str) -> Vec<(std::ops::Range<usize>, LabelPart)> {
+    let head_end = match label.find(" (") {
+        Some(at) if label.ends_with(')') => at,
+        _ => label.len(),
+    };
+    let head = &label[..head_end];
+    let mut parts = Vec::new();
+    let mut part = LabelPart::Operator;
+    let mut at = 0;
+    while let Some((found, keyword)) = [" on ", " using "]
+        .into_iter()
+        .filter_map(|keyword| Some((at + head[at..].find(keyword)?, keyword)))
+        .min()
+    {
+        parts.push((at..found, part));
+        parts.push((found..found + keyword.len(), LabelPart::Keyword));
+        part = match keyword {
+            " using " => LabelPart::Index,
+            _ if head.starts_with("Bitmap Index Scan") => LabelPart::Index,
+            _ => LabelPart::Relation,
+        };
+        at = found + keyword.len();
+    }
+    parts.push((at..head_end, part));
+    parts.push((head_end..label.len(), LabelPart::Aside));
+    parts.retain(|(range, _)| !range.is_empty());
+    parts
+}
+
+/// Whether a qualifier's value is an SQL expression, worth highlighting as one.
+pub fn is_expression(key: &str) -> bool {
+    matches!(
+        key,
+        "Filter"
+            | "Index Cond"
+            | "Recheck Cond"
+            | "Hash Cond"
+            | "Merge Cond"
+            | "TID Cond"
+            | "Join Filter"
+            | "One-Time Filter"
+            | "Run Condition"
+            | "Sort Key"
+            | "Presorted Key"
+            | "Group Key"
+            | "Hash Key"
+            | "Cache Key"
+            | "Order By"
+            | "Output"
+    )
+}
+
+/// Whether a `Rows Removed by …` qualifier says the node threw away far more
+/// than it kept. Both counts are per loop, as Postgres prints them.
+// ponytail: more removed than kept, and at least a thousand; a per-operator
+// selectivity threshold is the upgrade if this flags healthy plans.
+pub fn wasteful(line: &str, actual: Option<Actual>) -> bool {
+    let Some((key, value)) = line.split_once(": ") else {
+        return false;
+    };
+    let Ok(removed) = value.trim().parse::<f64>() else {
+        return false;
+    };
+    key.starts_with("Rows Removed by ")
+        && removed >= 1000.0
+        && removed > actual.map_or(0.0, |actual| actual.rows)
+}
+
+/// Where the numbers are in a qualifier's value: `hit=12 read=3`, `9kB`. A
+/// digit glued to a name, as in `idx_1`, is part of the name.
+pub fn numbers(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let glued = at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        if !bytes[at].is_ascii_digit() || glued {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len()
+            && (bytes[at].is_ascii_digit()
+                || bytes[at] == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit))
+        {
+            at += 1;
+        }
+        found.push(start..at);
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +1009,178 @@ Planning Time: broken"#,
 
         assert_eq!(parse(&[], &[]), Plan::default());
         assert_eq!(one_column("").nodes, Vec::new());
+    }
+
+    fn parts(label: &str) -> Vec<(&str, LabelPart)> {
+        let parts = label_parts(label);
+        // Whatever the label, the parts are all of it, in order.
+        assert_eq!(
+            parts
+                .iter()
+                .map(|(range, _)| &label[range.clone()])
+                .collect::<String>(),
+            label
+        );
+        parts
+            .into_iter()
+            .map(|(range, part)| (&label[range], part))
+            .collect()
+    }
+
+    #[test]
+    fn a_label_reads_as_operator_then_what_it_reads_and_through_what() {
+        use LabelPart::*;
+        assert_eq!(
+            parts("Index Scan using accounts_pkey on accounts a"),
+            [
+                ("Index Scan", Operator),
+                (" using ", Keyword),
+                ("accounts_pkey", Index),
+                (" on ", Keyword),
+                ("accounts a", Relation),
+            ]
+        );
+        assert_eq!(
+            parts("Seq Scan on orders o (never executed)"),
+            [
+                ("Seq Scan", Operator),
+                (" on ", Keyword),
+                ("orders o", Relation),
+                (" (never executed)", Aside),
+            ]
+        );
+        // A bitmap index scan names the index after `on`, not a table.
+        assert_eq!(
+            parts("Bitmap Index Scan on orders_account_idx"),
+            [
+                ("Bitmap Index Scan", Operator),
+                (" on ", Keyword),
+                ("orders_account_idx", Index),
+            ]
+        );
+        assert_eq!(parts("Hash Join"), [("Hash Join", Operator)]);
+        assert_eq!(parts("Limit: 10 row(s)"), [("Limit: 10 row(s)", Operator)]);
+        assert_eq!(parts(""), []);
+        parts("on using ( ) é on  using");
+    }
+
+    #[test]
+    fn only_conditions_and_keys_are_read_as_sql() {
+        assert!(is_expression("Filter"));
+        assert!(is_expression("Hash Cond"));
+        assert!(is_expression("Sort Key"));
+        assert!(!is_expression("Rows Removed by Filter"));
+        assert!(!is_expression("Buffers"));
+    }
+
+    #[test]
+    fn rows_removed_is_flagged_when_far_more_were_thrown_away_than_kept() {
+        let kept = |rows| {
+            Some(Actual {
+                startup_ms: 0.0,
+                total_ms: 1.0,
+                rows,
+                loops: 1.0,
+            })
+        };
+        assert!(wasteful("Rows Removed by Filter: 98213", kept(10.0)));
+        assert!(wasteful("Rows Removed by Index Recheck: 5000", None));
+        assert!(!wasteful("Rows Removed by Filter: 98213", kept(100_000.0)));
+        assert!(!wasteful("Rows Removed by Filter: 999", kept(0.0)));
+        assert!(!wasteful("Filter: (balance > 100000)", kept(0.0)));
+        assert!(!wasteful("Rows Removed by Filter: lots", kept(0.0)));
+    }
+
+    #[test]
+    fn a_tenfold_miss_either_way_is_a_misestimate() {
+        let node = |estimated: u64, actual: f64| PlanNode {
+            estimated: Some(Estimated {
+                startup_cost: 0.0,
+                total_cost: 1.0,
+                rows: estimated,
+                width: 0,
+            }),
+            actual: Some(Actual {
+                startup_ms: 0.0,
+                total_ms: 1.0,
+                rows: actual,
+                loops: 1.0,
+            }),
+            ..PlanNode::default()
+        };
+        assert_eq!(node(10, 1000.0).misestimate(), Some(100.0));
+        assert_eq!(node(5000, 50.0).misestimate(), Some(100.0));
+        // Zero is read as one, so nothing divides by it.
+        assert_eq!(node(1, 0.0).misestimate(), None);
+        assert_eq!(node(0, 20.0).misestimate(), Some(20.0));
+        assert_eq!(node(10, 99.0).misestimate(), None);
+        assert_eq!(PlanNode::default().misestimate(), None);
+    }
+
+    #[test]
+    fn a_parent_that_stops_early_explains_a_short_scan() {
+        let node = |label: &str, depth: usize, estimated: u64, actual: f64| PlanNode {
+            label: label.into(),
+            depth,
+            estimated: Some(Estimated {
+                startup_cost: 0.0,
+                total_cost: 1.0,
+                rows: estimated,
+                width: 0,
+            }),
+            actual: Some(Actual {
+                startup_ms: 0.0,
+                total_ms: 1.0,
+                rows: actual,
+                loops: 1.0,
+            }),
+            ..PlanNode::default()
+        };
+        let plan = |nodes| Plan {
+            nodes,
+            ..Plan::default()
+        };
+        let limit = plan(vec![
+            node("Limit", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(limit.misestimate(1), None);
+        let mysql = plan(vec![
+            node("Limit: 10 row(s)", 0, 10, 10.0),
+            node("Table scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(mysql.misestimate(1), None);
+        let semi = plan(vec![
+            node("Nested Loop Semi Join", 0, 5, 5.0),
+            node("Seq Scan on a", 1, 5, 5.0),
+            node("Hash Anti Join", 1, 5, 5.0),
+            node("Index Scan on b", 2, 100_000, 1.0),
+        ]);
+        assert_eq!(semi.misestimate(3), None);
+        let overshoot = plan(vec![
+            node("Limit", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 10, 5000.0),
+        ]);
+        assert_eq!(overshoot.misestimate(1), Some(500.0));
+        let sibling = plan(vec![
+            node("Append", 0, 1, 1.0),
+            node("Limit", 1, 10, 10.0),
+            node("Seq Scan on a", 2, 10, 10.0),
+            node("Seq Scan on b", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(sibling.misestimate(3), Some(100_000.0));
+        let plain = plan(vec![
+            node("Sort", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(plain.misestimate(1), Some(100_000.0));
+    }
+
+    #[test]
+    fn numbers_are_found_but_not_inside_names() {
+        let text = "shared hit=12 read=3.5 idx_1 9kB é7";
+        let found: Vec<&str> = numbers(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(found, ["12", "3.5", "9", "7"]);
+        assert!(numbers("").is_empty());
     }
 }

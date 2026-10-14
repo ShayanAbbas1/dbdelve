@@ -23,9 +23,9 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, QueryResult, Relation, RelationKind, Routine, Structure, Syntax,
+        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
     },
-    explain::Plan,
+    explain::{self, Plan},
     explorer::{ExplorerLeaf, ObjectKind},
     filter::{
         Conjunction, FilterBar, FilterRow, applied_filters, filter_bars, restored_filter,
@@ -1056,6 +1056,7 @@ pub(crate) struct QueryTab {
 }
 
 /// A plan, and what it is a plan of.
+#[derive(Debug, PartialEq)]
 pub(crate) struct Explained {
     pub(crate) plan: Plan,
     pub(crate) mode: ExplainMode,
@@ -1064,6 +1065,52 @@ pub(crate) struct Explained {
     /// plan that silently re-labels itself against edited text would be
     /// describing a statement nobody ran.
     pub(crate) sql: String,
+    /// Typed by the user as an `EXPLAIN` rather than asked of the Explain
+    /// command. Its rows are the grid's own, so there is no other Data to
+    /// flip to.
+    pub(crate) typed: bool,
+    /// The Explain command's answer as it arrived, which the grid never holds,
+    /// kept for the snapshot to parse again. Empty for a typed plan, whose
+    /// rows are the grid's.
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<Row>,
+}
+
+impl Explained {
+    pub(crate) fn stored(&self, showing: bool) -> store::StoredPlan {
+        store::StoredPlan {
+            mode: self.mode,
+            sql: self.sql.clone(),
+            typed: self.typed,
+            showing,
+            columns: self.columns.clone(),
+            rows: self
+                .rows
+                .iter()
+                .take(store::GRID_ROW_CAP)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// The plan a snapshot was written beside, parsed again from the rows it
+    /// came from, and whether it was the one on screen.
+    pub(crate) fn restored(grid: &store::StoredGrid) -> Option<(Self, bool)> {
+        let stored = grid.plan.as_ref()?;
+        let (columns, rows) = match stored.typed {
+            true => (&grid.columns, &grid.rows),
+            false => (&stored.columns, &stored.rows),
+        };
+        let explained = Self {
+            plan: explain::parse(columns, rows),
+            mode: stored.mode,
+            sql: stored.sql.clone(),
+            typed: stored.typed,
+            columns: stored.columns.clone(),
+            rows: stored.rows.clone(),
+        };
+        Some((explained, stored.showing))
+    }
 }
 
 /// The statements a selection covers, run one at a time, and what each has
@@ -1262,6 +1309,11 @@ pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> b
 }
 
 impl QueryTab {
+    /// Whether the results pane offers Data and Plan to flip between.
+    pub(crate) fn flips_to_plan(&self) -> bool {
+        self.plan.as_ref().is_some_and(|plan| !plan.typed)
+    }
+
     /// The result on screen: whichever of a queue's finished statements the
     /// switcher has selected, else the tab's own slot, which is what a run
     /// writes into.
@@ -1840,14 +1892,17 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                 },
             );
         }
-        if !matches!(tab.query, QueryState::Complete { .. }) {
+        // An `EXPLAIN` from the command leaves the grid as the last real run
+        // did, and is written for the plan beside it.
+        let explained = matches!(tab.query, QueryState::Explained { .. });
+        if !explained && !matches!(tab.query, QueryState::Complete { .. }) {
             continue;
         }
         let grid = tab.results.read(cx).delegate().stored();
         // A statement that returned no columns produced no grid to keep. A
         // write can still return one (`RETURNING`, or any MongoDB reply), so a
         // restored grid's `last_query` is not safe to re-run as it stands.
-        if grid.columns.is_empty() {
+        if grid.columns.is_empty() && !explained {
             continue;
         }
         let _ = store::write_grid(
@@ -1856,6 +1911,10 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             &store::StoredGrid {
                 last_query: tab.last_query.clone(),
                 client_sort: tab.sorting.stored(),
+                plan: tab
+                    .plan
+                    .as_ref()
+                    .map(|explained| explained.stored(tab.showing_plan)),
                 ..grid
             },
         );
@@ -1925,6 +1984,65 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn a_plan_survives_the_round_trip_through_a_snapshot() {
+        let lines = || {
+            crate::db::rows(vec![
+                vec![Some(
+                    "Seq Scan on t  (cost=0.00..1.01 rows=1 width=4)".into(),
+                )],
+                vec![Some("  Filter: (a = 1)".into())],
+            ])
+        };
+        let plan_columns = || vec!["QUERY PLAN".to_string()];
+        let grid = |columns: Vec<String>, rows: Vec<Row>| {
+            let mut grid: store::StoredGrid =
+                serde_json::from_str(r#"{"columns":[],"rows":[],"total_rows":0}"#).unwrap();
+            grid.total_rows = rows.len();
+            (grid.columns, grid.rows) = (columns, rows);
+            grid
+        };
+        let typed = (
+            grid(plan_columns(), lines()),
+            Explained {
+                plan: explain::parse(&plan_columns(), &lines()),
+                mode: ExplainMode::Analyze,
+                sql: "EXPLAIN ANALYZE SELECT 1".into(),
+                typed: true,
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+            true,
+        );
+        // The command's rows are its own: the grid still holds the last run's.
+        let command = (
+            grid(
+                vec!["id".into()],
+                crate::db::rows(vec![vec![Some("1".into())]]),
+            ),
+            Explained {
+                plan: explain::parse(&plan_columns(), &lines()),
+                mode: ExplainMode::Plan,
+                sql: "SELECT 1".into(),
+                typed: false,
+                columns: plan_columns(),
+                rows: lines(),
+            },
+            false,
+        );
+
+        for (grid, explained, showing) in [typed, command] {
+            let snapshot = store::StoredGrid {
+                plan: Some(explained.stored(showing)),
+                ..grid
+            };
+            let text = serde_json::to_string(&snapshot).unwrap();
+            let read: store::StoredGrid = serde_json::from_str(&text).unwrap();
+            assert!(!explained.plan.nodes.is_empty());
+            assert_eq!(Explained::restored(&read), Some((explained, showing)));
+        }
+    }
 
     #[test]
     fn a_views_sorting_survives_its_snapshot_and_an_unsorted_client_view_stays_client() {
