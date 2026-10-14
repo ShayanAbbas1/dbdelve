@@ -43,7 +43,7 @@ use crate::{
     palette::{Command, Mode as PaletteMode},
     result_grid,
     result_grid::ResultGrid,
-    scroller::{SmoothScrollable, smooth, smooth_for, smooth_scoped},
+    scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
         Session, StructureState, Tab, query_label, result_pane_is_expanded,
@@ -83,6 +83,9 @@ pub struct RowPanel {
     /// is. A field unmounted while focused keeps the window's focus, and with
     /// it every keybinding; render hands focus back when this comes up false.
     pub searched: std::cell::Cell<bool>,
+    /// The grid's active cell the panel last scrolled to, so it scrolls once
+    /// per click or arrow key and then leaves the panel to the wheel.
+    pub revealed: std::cell::Cell<Option<(usize, usize)>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1663,13 +1666,14 @@ fn render_row_inspector(
     let t = *theme(cx);
     let grid = fonts(cx).grid.clone();
 
-    let (row_ix, rows, fields) = {
+    let (row_ix, rows, fields, active) = {
         let table = results.read(cx);
         let row_ix = table.selected_row()?;
         (
             row_ix,
             table.delegate().rows_count(cx),
             table.delegate().fields(row_ix),
+            table.delegate().active(),
         )
     };
     // A selection can outlive the rows it was made against.
@@ -1719,6 +1723,12 @@ fn render_row_inspector(
                     .is_some_and(|value| value.to_lowercase().contains(query.as_str()))
         })
         .collect();
+
+    if row_panel.revealed.replace(active) != active
+        && let Some(ix) = active.and_then(|(_, col)| fields.iter().position(|(c, _)| *c == col))
+    {
+        scroll_to("row-inspector", scope, ix, cx);
+    }
 
     row_panel.searched.set(true);
     let table = results.clone();

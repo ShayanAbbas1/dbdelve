@@ -323,6 +323,7 @@ impl Workspace {
                 copied: None,
                 search: row_panel_search,
                 searched: Default::default(),
+                revealed: Default::default(),
             },
             plan_copied: false,
             pending_removal: None,
@@ -958,7 +959,7 @@ impl Render for Workspace {
                 .iter()
                 .position(|key| profile.session.tab_of(key) == Some(profile.session.active))
             {
-                crate::scroller::scroll_to("tab-strip", index, cx);
+                crate::scroller::scroll_to("tab-strip", "", index, cx);
             }
             // Whatever the surface in front is: a keystroke reaches the
             // workspace along the focused element's dispatch path, so a

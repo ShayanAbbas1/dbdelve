@@ -77,10 +77,10 @@ const OVERLAY_CHILDREN: usize = 1;
 /// prepaint -- the id has to be one `smooth` was already called with once,
 /// which every render of the scrolled element does regardless. `ix` counts
 /// the caller's own children, not `smooth_scroll`'s canvas ahead of them.
-pub fn scroll_to(id: &'static str, ix: usize, cx: &mut App) {
+pub fn scroll_to(id: &'static str, scope: impl Into<String>, ix: usize, cx: &mut App) {
     cx.default_global::<Registry>()
         .handles
-        .entry((id, String::new()))
+        .entry((id, scope.into()))
         .or_default()
         .scroll_to_item(ix + OVERLAY_CHILDREN);
 }
