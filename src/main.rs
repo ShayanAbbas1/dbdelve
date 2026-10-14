@@ -19,6 +19,7 @@ mod scroller;
 mod session;
 mod sql;
 mod store;
+mod structure_grid;
 mod tab_drag;
 mod views;
 mod workspace;

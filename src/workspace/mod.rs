@@ -1340,6 +1340,28 @@ impl Render for Workspace {
         });
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
+        // In place of the rows' copy and export, behind Structure: the
+        // relation's own definition, and a statement to fill it with.
+        let structure_copies = profile.session.active_object().and_then(|tab| {
+            let ObjectBody::Relation {
+                showing_structure: true,
+                structure,
+                ..
+            } = &tab.body
+            else {
+                return None;
+            };
+            let ObjectKind::Relation(kind) = tab.kind else {
+                return None;
+            };
+            let connected = matches!(profile.state, ProfileState::Connected(_));
+            let insert = engine.syntax() == db::Syntax::Sql
+                && matches!(structure, StructureState::Loaded(loaded) if !loaded.columns.is_empty());
+            Some((
+                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind)),
+                insert,
+            ))
+        });
         let apply_workspace = cx.entity().downgrade();
         let discard_workspace = apply_workspace.clone();
         let previous_workspace = apply_workspace.clone();
@@ -1348,6 +1370,8 @@ impl Render for Workspace {
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
         let refresh_workspace = apply_workspace.clone();
+        let ddl_workspace = apply_workspace.clone();
+        let insert_workspace = apply_workspace.clone();
 
         // Chrome for content, not a fixture of the window: with no tab open
         // every field below is empty, and an empty bar is a background and a
@@ -1362,6 +1386,7 @@ impl Render for Workspace {
             || query_status.is_some()
             || refreshable_snapshot
             || has_results
+            || structure_copies.is_some()
             || has_pending;
 
         let results_status = bar_has_content.then(|| {
@@ -1490,6 +1515,46 @@ impl Render for Workspace {
                                     workspace.export_results(Format::Json, cx);
                                 });
                             })
+                        }))
+                        .children(structure_copies.map(|(ddl, insert)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_SM))
+                                .children(ddl.map(|(schema, relation, kind)| {
+                                    button(
+                                        "copy-create",
+                                        "Copy CREATE",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let (schema, relation) =
+                                                (schema.clone(), relation.clone());
+                                            _ = ddl_workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                            });
+                                        },
+                                    )
+                                }))
+                                .children(insert.then(|| {
+                                    button(
+                                        "copy-insert",
+                                        "Copy INSERT",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = insert_workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_insert_template(cx);
+                                            });
+                                        },
+                                    )
+                                }))
                         }))
                         // A tinted cell scrolled out of view is an edit
                         // nobody knows is about to be written.

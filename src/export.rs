@@ -251,7 +251,7 @@ fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String
     out
 }
 
-fn csv_field(delimiter: char, value: &str) -> String {
+pub(crate) fn csv_field(delimiter: char, value: &str) -> String {
     if value.contains(['"', delimiter, '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {

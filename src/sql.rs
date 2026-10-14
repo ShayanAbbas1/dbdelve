@@ -540,6 +540,39 @@ pub fn insert_row(
     ))
 }
 
+/// An `INSERT` naming every column, each value the engine's own parameter
+/// placeholder: a template for the user's code, put on the clipboard and never
+/// run. `None` on MongoDB, which has no placeholders, and with no columns.
+pub fn insert_template(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    columns: &[&str],
+) -> Option<String> {
+    let placeholder: fn(usize) -> String = match engine {
+        Engine::Postgres => |n| format!("${n}"),
+        Engine::SqlServer => |n| format!("@p{n}"),
+        Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Turso | Engine::Snowflake => {
+            |_| "?".into()
+        }
+        Engine::MongoDb => return None,
+    };
+    if columns.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = columns
+        .iter()
+        .map(|column| engine.quote_identifier(column))
+        .collect();
+    let values: Vec<String> = (1..=columns.len()).map(placeholder).collect();
+    Some(format!(
+        "INSERT INTO {} ({}) VALUES ({});",
+        engine.qualified(schema, table),
+        names.join(", "),
+        values.join(", ")
+    ))
+}
+
 /// One row's `DELETE`: every column in `keys` matched, and nothing else.
 ///
 /// One row per statement. Multi-row deletion is cut, and the upgrade path when
@@ -3525,6 +3558,27 @@ mod tests {
         // An empty form is not `INSERT INTO t DEFAULT VALUES`, which is a
         // statement dbdelve has never been asked for.
         assert!(insert_row(Engine::Postgres, "s", "t", &[], &[]).is_err());
+    }
+
+    #[test]
+    fn an_insert_template_numbers_or_marks_its_placeholders_the_engines_way() {
+        let columns = ["id", "email"];
+        assert_eq!(
+            insert_template(Engine::Postgres, "public", "users", &columns).unwrap(),
+            r#"INSERT INTO "public"."users" ("id", "email") VALUES ($1, $2);"#
+        );
+        assert_eq!(
+            insert_template(Engine::MySql, "app", "users", &columns).unwrap(),
+            "INSERT INTO `app`.`users` (`id`, `email`) VALUES (?, ?);"
+        );
+        assert_eq!(
+            insert_template(Engine::SqlServer, "dbo", "users", &columns).unwrap(),
+            r#"INSERT INTO "dbo"."users" ("id", "email") VALUES (@p1, @p2);"#
+        );
+        assert_eq!(
+            insert_template(Engine::MongoDb, "db", "users", &columns),
+            None
+        );
     }
 
     #[test]

@@ -97,6 +97,7 @@ impl Workspace {
                 ObjectBody::Relation {
                     showing_structure: false,
                     structure: StructureState::Loading,
+                    structure_grid: structure_grid::new_grid(window, cx),
                     results: result_grid::new_grid(window, cx),
                     query: QueryState::Idle,
                     sort: Vec::new(),
@@ -476,7 +477,10 @@ impl Workspace {
                         return;
                     }
                     match result {
-                        Ok(ddl) => cx.write_to_clipboard(ClipboardItem::new_string(ddl)),
+                        Ok(ddl) => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(ddl));
+                            workspace.confirm("Copied the CREATE statement.".into(), cx);
+                        }
                         Err(error) => {
                             workspace.note(format!("Could not read the DDL: {error}"), cx)
                         }
@@ -551,10 +555,19 @@ impl Workspace {
                         return;
                     };
                     let mut waited = false;
-                    if let ObjectBody::Relation { structure, .. } = &mut tab.body {
+                    if let ObjectBody::Relation {
+                        structure,
+                        structure_grid,
+                        ..
+                    } = &mut tab.body
+                    {
                         waited = matches!(structure, StructureState::Loading);
                         *structure = match result {
-                            Ok(loaded) => StructureState::Loaded(loaded),
+                            Ok(loaded) => {
+                                let section = structure_grid.read(cx).delegate().section();
+                                structure_grid::show(structure_grid, &loaded, section, cx);
+                                StructureState::Loaded(loaded)
+                            }
                             Err(error) => StructureState::Failed(error.message),
                         };
                         cx.notify();
@@ -898,6 +911,56 @@ impl Workspace {
             } = &mut tab.body
         {
             *showing = showing_structure;
+            cx.notify();
+        }
+    }
+
+    /// The active relation's `INSERT` template on the clipboard. Nothing runs.
+    pub(crate) fn copy_insert_template(&mut self, cx: &mut Context<Self>) {
+        let engine = self.engine();
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+        else {
+            return;
+        };
+        let ObjectBody::Relation {
+            structure: StructureState::Loaded(structure),
+            ..
+        } = &tab.body
+        else {
+            return;
+        };
+        let columns: Vec<&str> = structure
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        let Some(sql) = sql::insert_template(engine, &tab.schema, &tab.name, &columns) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(sql));
+        self.confirm("Copied the INSERT template.".into(), cx);
+    }
+
+    pub(crate) fn show_structure_section(
+        &mut self,
+        section: structure_grid::Section,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+        else {
+            return;
+        };
+        if let ObjectBody::Relation {
+            structure: StructureState::Loaded(structure),
+            structure_grid,
+            ..
+        } = &tab.body
+        {
+            structure_grid::show(structure_grid, structure, section, cx);
             cx.notify();
         }
     }

@@ -8,8 +8,8 @@
 //! surface it assembles, which is why the rest of the module is private.
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, ClickEvent, Context, Div, Entity, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
+    Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
+    Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
@@ -26,10 +26,10 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AddFilter, CancelQuery, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget, NewQuery,
-        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
-        SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
-        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget,
+        NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
+        SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit,
+        SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -45,6 +45,7 @@ use crate::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
         Session, StructureState, Tab, query_label, result_pane_is_expanded,
     },
+    structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
     theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, theme},
     ui::{
@@ -578,6 +579,7 @@ fn render_object(
     let ObjectBody::Relation {
         showing_structure,
         structure,
+        structure_grid,
         results,
         query,
         filters,
@@ -607,8 +609,10 @@ fn render_object(
                 div()
                     .flex_1()
                     .min_h_0()
+                    .flex()
+                    .flex_col()
                     .bg(t.data_glass())
-                    .child(render_structure(structure, &scope, cx)),
+                    .child(render_structure(structure, structure_grid, &scope, cx)),
             )
             .into_any_element();
     }
@@ -1919,12 +1923,11 @@ fn row_limit_menu(
 
 fn render_structure(
     state: &StructureState,
+    grid: &Entity<TableState<StructureGrid>>,
     scope: &str,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
-    let code = fonts(cx).editor.clone();
-
     let structure = match state {
         StructureState::Loading => {
             return div()
@@ -1943,107 +1946,79 @@ fn render_structure(
         StructureState::Loaded(structure) => structure,
     };
 
-    let heading = |label: &'static str| {
-        div()
-            .pt(px(layout::SPACE_MD))
-            .child(section_label(t, label))
-    };
-    let name_column = |name: String| {
-        div()
-            .w(px(220.))
-            .min_w(px(220.))
-            .overflow_hidden()
-            .text_ellipsis()
-            .whitespace_nowrap()
-            .font_weight(FontWeight::MEDIUM)
-            .child(name)
-    };
-    let definitions = |definitions: &[db::NamedDefinition]| {
-        definitions
-            .iter()
-            .map(|definition| {
+    let shown = grid.read(cx).delegate().section();
+    let chips = control_row().border_b_1().border_color(t.border).children(
+        Section::ALL
+            .into_iter()
+            .filter(|section| section.offered(structure))
+            .map(|section| {
+                let selected = section == shown;
                 div()
+                    .id(section.label())
                     .flex()
-                    .gap(px(layout::SPACE_MD))
-                    .child(name_column(definition.name.clone()))
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .h(px(layout::chrome(24.)))
+                    .px(px(layout::SPACE_SM))
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .map(|chip| match selected {
+                        true => chip.bg(t.element_active).text_color(t.text),
+                        false => chip
+                            .text_color(t.text_muted)
+                            .hover(|style| style.bg(t.element_hover)),
+                    })
+                    .child(section.label())
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(t.text_muted)
-                            .child(definition.definition.clone()),
+                            .text_color(t.text_faint)
+                            .child(section.count(structure).to_string()),
                     )
-            })
-            .collect::<Vec<_>>()
-    };
+                    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                        workspace.show_structure_section(section, cx);
+                    }))
+            }),
+    );
 
+    let rows_scroll = smooth_for(
+        "structure",
+        scope,
+        grid.read(cx).vertical_scroll_handle.clone(),
+        grid.read(cx).horizontal_scroll_handle.clone(),
+        cx,
+    );
+    let copy_from = grid.clone();
     div()
-        .id("structure")
         .size_full()
-        .overflow_y_scroll()
-        .smooth_scroll(&smooth_scoped("structure", scope, cx))
-        .p(px(layout::SPACE_LG))
-        .font_family(code)
         .flex()
         .flex_col()
-        .gap(px(layout::SPACE_XS))
-        .child(heading("Columns"))
-        .children(structure.columns.iter().enumerate().map(|(index, column)| {
-            let name = column.name.clone();
+        .child(chips)
+        .child(
             div()
-                .id(("structure-column", index))
-                .flex()
-                .gap(px(layout::SPACE_MD))
-                .rounded(px(layout::RADIUS_CONTROL))
-                .cursor_pointer()
-                .hover(|row| row.bg(t.element_hover))
-                // A column listed here is a way to its data: back to the
-                // rows, scrolled to it.
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                    workspace.reveal_column_named(&name, window, cx);
-                }))
-                .child(name_column(column.name.clone()))
+                .id("structure")
+                .smooth_scroll(&rows_scroll)
+                .flex_1()
+                .w_full()
+                .min_h_0()
+                .min_w_0()
+                .font_family(fonts(cx).grid.clone())
+                .text_size(px(layout::grid(layout::BODY_FONT_SIZE)))
+                // The data grid's Copy Cell keystroke, answered from this grid's
+                // selection rather than the hidden rows'.
+                .on_action(move |_: &CopyCell, _, cx| {
+                    if let Some(text) = copy_from.read(cx).delegate().selection_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                })
                 .child(
-                    div()
-                        .w(px(200.))
-                        .min_w(px(200.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        // The same colour the editor gives a type name, so
-                        // structure and SQL read as one vocabulary.
-                        .text_color(t.syntax_type)
-                        .child(column.data_type.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(80.))
-                        .min_w(px(80.))
-                        .text_color(t.text_muted)
-                        .child(if column.nullable {
-                            "nullable"
-                        } else {
-                            "not null"
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_color(t.text_muted)
-                        .child(column.default.clone().unwrap_or_default()),
-                )
-        }))
-        .children((!structure.indexes.is_empty()).then(|| heading("Indexes")))
-        .children(definitions(&structure.indexes))
-        .children((!structure.constraints.is_empty()).then(|| heading("Constraints")))
-        .children(definitions(&structure.constraints))
+                    DataTable::new(grid)
+                        .bordered(false)
+                        .stripe(false)
+                        .with_size(gpui_component::Size::Size(px(layout::grid(
+                            gpui_component::Size::Medium.table_row_height().into(),
+                        )))),
+                ),
+        )
         .into_any_element()
 }
 

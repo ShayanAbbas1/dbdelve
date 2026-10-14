@@ -68,12 +68,25 @@ impl Workspace {
         })
     }
 
+    /// Whether rows are in front of the user. Not behind Structure: the grid
+    /// is still there, and copying or exporting it from a view of something
+    /// else would act on rows nobody is looking at.
     pub(crate) fn has_results(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile
-                .session
-                .active_results()
-                .is_some_and(|results| !results.read(cx).delegate().result().columns.is_empty())
+            let structure = profile.session.active_object().is_some_and(|tab| {
+                matches!(
+                    tab.body,
+                    ObjectBody::Relation {
+                        showing_structure: true,
+                        ..
+                    }
+                )
+            });
+            !structure
+                && profile
+                    .session
+                    .active_results()
+                    .is_some_and(|results| !results.read(cx).delegate().result().columns.is_empty())
         })
     }
 

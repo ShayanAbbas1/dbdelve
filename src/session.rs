@@ -35,6 +35,7 @@ use crate::{
     result_grid::{NewValue, ResultGrid},
     sql::{self, Destructive, Mode, SortKey, Verdict},
     store,
+    structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
 };
@@ -1551,6 +1552,8 @@ pub(crate) enum ObjectBody {
     Relation {
         showing_structure: bool,
         structure: StructureState,
+        /// The Structure view's grid, over whichever section its chips picked.
+        structure_grid: Entity<TableState<StructureGrid>>,
         results: Entity<TableState<ResultGrid>>,
         query: QueryState,
         /// The `ORDER BY` the header clicks have built up. dbdelve owns this

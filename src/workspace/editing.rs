@@ -1132,7 +1132,7 @@ impl Workspace {
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
     pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped("copying", cx) {
+        if !self.has_results(cx) || self.refuse_capped("copying", cx) {
             return;
         }
         let Some(results) = self
@@ -1150,12 +1150,19 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         // A copy changes nothing on screen, and a whole result set is too much
         // to take on trust. Unlike a refusal, the confirmation goes by itself.
-        let message = format!(
-            "Copied {} {} as {}.",
-            group_thousands(rows as u64),
-            if rows == 1 { "row" } else { "rows" },
-            format.extension().to_uppercase()
+        self.confirm(
+            format!(
+                "Copied {} {} as {}.",
+                group_thousands(rows as u64),
+                if rows == 1 { "row" } else { "rows" },
+                format.extension().to_uppercase()
+            ),
+            cx,
         );
+    }
+
+    /// A notice that goes by itself: see `clear_notice_later`.
+    pub(crate) fn confirm(&mut self, message: String, cx: &mut Context<Self>) {
         self.note(message.clone(), cx);
         if let Some(profile) = self.profile() {
             let (id, generation) = (profile.id.clone(), profile.generation);
@@ -1336,7 +1343,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped("exporting", cx) {
+        if !self.has_results(cx) || self.refuse_capped("exporting", cx) {
             return;
         }
         let Some(profile) = self.profile() else {
