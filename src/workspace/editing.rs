@@ -39,8 +39,13 @@ impl Workspace {
         let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
             return;
         };
-        let ObjectBody::Relation { structure, .. } = &tab.body else {
-            return;
+        let structure = match &tab.body {
+            ObjectBody::Relation { structure, .. } => structure,
+            ObjectBody::Structure { .. } => {
+                self.note("Switch to Data to add a row.".into(), cx);
+                return;
+            }
+            ObjectBody::Routine(_) => return,
         };
         if !tab.takes_inserts(self.engine()) {
             self.note("This view takes no inserts.".into(), cx);
