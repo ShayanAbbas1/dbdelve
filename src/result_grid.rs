@@ -47,7 +47,7 @@ pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
 /// What a staged `DEFAULT` is called in the cell holding it. Its own word
 /// rather than NULL's: the server resolves the two to different values, and a
 /// cell that painted one of them for the other would be lying about the write.
-const DEFAULT_LABEL: SharedString = SharedString::new_static("DEFAULT");
+pub const DEFAULT_LABEL: SharedString = SharedString::new_static("DEFAULT");
 
 /// Where every column starts and the narrowest a drag can leave it.
 const MIN_COLUMN_WIDTH: f32 = 180.0;
@@ -1062,7 +1062,8 @@ impl ResultGrid {
 
     /// Every column of one row, named, typed where the type is known, and
     /// carrying the value itself rather than the string the column had room
-    /// for. This is what the row inspector reads.
+    /// for -- the staged one where the cell has an edit pending, as the grid
+    /// paints it. This is what the row inspector reads.
     pub fn fields(&self, row_ix: usize) -> Vec<Field> {
         if row_ix >= self.result.rows.len() {
             return Vec::new();
@@ -1073,7 +1074,12 @@ impl ResultGrid {
             .iter()
             .enumerate()
             .map(|(col_ix, column)| {
-                let cell = self.cell(row_ix, col_ix);
+                let edit = self.pending_value(row_ix, col_ix).cloned();
+                let cell = match &edit {
+                    Some(NewValue::Value(value)) => Some(value.as_ref()),
+                    Some(NewValue::Null | NewValue::Default) => None,
+                    None => self.cell(row_ix, col_ix),
+                };
                 let json = cell.and_then(indented_json);
                 Field {
                     name: column.name.clone().into(),
@@ -1086,7 +1092,8 @@ impl ResultGrid {
                         .and_then(|types| types.get(col_ix))
                         .map(|alias| SharedString::new_static(alias))
                         .or_else(|| column.data_type.clone().map(SharedString::from)),
-                    missing: self.missing(row_ix, col_ix),
+                    // Staging anything on an absent field writes it.
+                    missing: edit.is_none() && self.missing(row_ix, col_ix),
                     // Reformatted before it is clipped, never after: a document cut
                     // at 4,000 characters does not parse, and the inspector would
                     // fall back to the one long line for exactly the values big
@@ -1106,6 +1113,7 @@ impl ResultGrid {
                         .into()
                     }),
                     json: json.is_some(),
+                    edit,
                 }
             })
             .collect()
@@ -1694,6 +1702,23 @@ impl ResultGrid {
             .find(|edit| edit.row == row && edit.col == col)
     }
 
+    pub fn pending_value(&self, row: usize, col: usize) -> Option<&NewValue> {
+        self.pending_at(row, col).map(|edit| &edit.value)
+    }
+
+    /// What an input opened on the cell starts out holding: the whole value,
+    /// not the clipped one, since this is the value being changed. A NULL
+    /// seeds as the empty string because that is the only thing an input can
+    /// hold; typing one back is the `SetNull` action's job, not the input's
+    /// (spec §3). Either keyword seeds empty for the same reason.
+    pub fn edit_seed(&self, row: usize, col: usize) -> &str {
+        match self.pending_value(row, col) {
+            Some(NewValue::Value(value)) => value,
+            Some(NewValue::Null | NewValue::Default) => "",
+            None => self.cell(row, col).unwrap_or_default(),
+        }
+    }
+
     /// The input for the cell being edited, created on its first render. `None`
     /// for every other cell, which is every cell but one.
     fn editing_input(
@@ -1711,22 +1736,7 @@ impl ResultGrid {
             return Some(input.clone());
         }
 
-        // The whole value, not the clipped one: this is the value being
-        // changed. A NULL seeds as the empty string because that is the only
-        // thing an input can hold; typing one back is the `SetNull` action's
-        // job, not the input's (spec §3).
-        let seed = match self.pending_at(row, col) {
-            // Either keyword seeds empty for the same reason a fetched NULL
-            // does: neither is text an input could hold and commit back.
-            Some(pending) => match &pending.value {
-                NewValue::Value(value) => value.clone(),
-                NewValue::Null | NewValue::Default => SharedString::default(),
-            },
-            None => self
-                .cell(row, col)
-                .map(|value| SharedString::from(value.to_string()))
-                .unwrap_or_default(),
-        };
+        let seed = SharedString::from(self.edit_seed(row, col).to_string());
         let input = cx.new(|cx| InputState::new(window, cx));
         // `set_value` rather than `default_value`: only the former leaves the
         // caret after the text, and an edit starts from the end of the value.
@@ -1769,6 +1779,9 @@ pub struct Field {
     pub json: bool,
     /// The row has no such field at all, which is not a NULL.
     pub missing: bool,
+    /// The edit staged on this cell, which `value` already shows where it is
+    /// a value rather than a keyword.
+    pub edit: Option<NewValue>,
 }
 
 enum Step {
@@ -4939,6 +4952,37 @@ mod tests {
         grid.click_row(2, false, false);
         grid.click_row(0, true, false);
         assert_eq!(grid.rows_as(RowsAs::Text).as_deref(), Some("0\n1\n2"));
+    }
+
+    #[test]
+    fn the_row_panel_stages_into_any_cell_and_reads_back_what_is_staged() {
+        // The panel stages into the field it was typed in, which need not be
+        // the active cell, and shows what the grid paints there.
+        let mut grid = editable_grid();
+        grid.active = Some((0, 0));
+        let edited = NewValue::Value("edited".into());
+        assert!(grid.stage(1, 1, edited.clone()));
+        assert_eq!(grid.pending_value(1, 1), Some(&edited));
+        assert_eq!(grid.pending_value(0, 1), None);
+        assert_eq!(grid.edit_seed(1, 1), "edited");
+        assert_eq!(grid.edit_seed(0, 1), "first");
+        let fields = grid.fields(1);
+        assert_eq!(fields[1].value.as_deref(), Some("edited"));
+        assert_eq!(fields[1].edit, Some(edited));
+        assert!(fields[0].edit.is_none());
+
+        // A keyword is no text: an input on it starts empty, and the field
+        // has no value to show, only the edit saying which keyword it is.
+        assert!(grid.stage(1, 1, NewValue::Default));
+        assert_eq!(grid.edit_seed(1, 1), "");
+        let field = grid.fields(1).remove(1);
+        assert!(field.value.is_none());
+        assert_eq!(field.edit, Some(NewValue::Default));
+
+        // Typing the fetched value back is no edit at all.
+        assert!(grid.stage(1, 1, NewValue::Value("second".into())));
+        assert_eq!(grid.pending_value(1, 1), None);
+        assert!(grid.fields(1)[1].edit.is_none());
     }
 
     #[test]

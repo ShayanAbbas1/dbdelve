@@ -6,6 +6,9 @@
 use super::*;
 use crate::tab_drag::{self, Drag, Slot};
 
+/// How tall an Edit mode input grows before it scrolls instead.
+const ROW_INPUT_MAX_LINES: usize = 8;
+
 impl Workspace {
     pub(crate) fn toggle_sidebar(
         &mut self,
@@ -31,30 +34,188 @@ impl Workspace {
         if !self.row_panel.on_screen.get() {
             return;
         }
-        if let Some((folded, _)) = self.active_row_panel() {
+        if let Some((folded, _, _)) = self.active_row_panel() {
             *folded = !*folded;
         }
         cx.notify();
     }
 
-    /// The tab in front's row-panel state: whether it is folded, and what it
-    /// is filtered by. `None` for a tab with no rows to inspect.
-    pub(crate) fn active_row_panel(&mut self) -> Option<(&mut bool, &mut gpui::SharedString)> {
+    /// Read ↔ Edit. Turning Edit on asks for the mode an edit needs, as a
+    /// grid edit does, rather than showing inputs that would refuse every
+    /// value typed into them. Turning it off takes the inputs away, and
+    /// `sync_row_panel_inputs` stages what the one being typed in holds.
+    pub(crate) fn toggle_row_panel_edit(&mut self, cx: &mut Context<Self>) {
+        let editing = self
+            .active_row_panel()
+            .is_some_and(|(_, editing, _)| *editing);
+        if !editing && !self.require(Mode::ReadWrite, cx) {
+            return;
+        }
+        if let Some((_, editing, _)) = self.active_row_panel() {
+            *editing = !*editing;
+        }
+        cx.notify();
+    }
+
+    /// The tab in front's row-panel state: whether it is folded, whether it
+    /// is editing, and what it is filtered by. `None` for a tab with no rows
+    /// to inspect.
+    pub(crate) fn active_row_panel(
+        &mut self,
+    ) -> Option<(&mut bool, &mut bool, &mut gpui::SharedString)> {
         let session = &mut self.profile_mut()?.session;
         match session.active {
-            Tab::Query(id) => session
-                .query_tab_mut(id)
-                .map(|tab| (&mut tab.row_panel_folded, &mut tab.row_panel_filter)),
+            Tab::Query(id) => session.query_tab_mut(id).map(|tab| {
+                (
+                    &mut tab.row_panel_folded,
+                    &mut tab.row_panel_editing,
+                    &mut tab.row_panel_filter,
+                )
+            }),
             Tab::Object(id) => match &mut session.objects.iter_mut().find(|tab| tab.id == id)?.body
             {
                 ObjectBody::Relation {
                     row_panel_folded,
+                    row_panel_editing,
                     row_panel_filter,
                     ..
-                } => Some((row_panel_folded, row_panel_filter)),
+                } => Some((row_panel_folded, row_panel_editing, row_panel_filter)),
                 _ => None,
             },
         }
+    }
+
+    /// Give Edit mode an input for every editable field of the selected row,
+    /// from render for the window an input needs. Built for the grid and row
+    /// in front, and built again when either changes; an input already there
+    /// is refilled when its cell changed under it -- an edit in the grid, a
+    /// discard, a refresh -- unless it is the one being typed in.
+    pub(crate) fn sync_row_panel_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = self
+            .active_row_panel()
+            .is_some_and(|(folded, editing, _)| *editing && !*folded);
+        let target = editing
+            .then(|| {
+                let results = self.profile()?.session.active_results()?.clone();
+                let row = results.read(cx).selected_row()?;
+                Some((results, row))
+            })
+            .flatten();
+        if self
+            .row_panel
+            .inputs
+            .as_ref()
+            .map(|inputs| (inputs.grid, inputs.row))
+            != target
+                .as_ref()
+                .map(|(results, row)| (results.entity_id(), *row))
+        {
+            self.drop_row_inputs(window, cx);
+        }
+        let Some((results, row)) = target else {
+            return;
+        };
+        let inputs = self
+            .row_panel
+            .inputs
+            .get_or_insert_with(|| views::RowInputs {
+                grid: results.entity_id(),
+                row,
+                fields: Vec::new(),
+            });
+        // Only the cells that need an input made or refilled are copied out,
+        // since this runs every frame and a value can be a whole document.
+        let changed: Vec<(usize, Option<gpui::SharedString>)> = {
+            let grid = results.read(cx).delegate();
+            inputs.fields.resize_with(grid.columns().len(), || None);
+            inputs
+                .fields
+                .iter()
+                .enumerate()
+                .filter_map(|(col, field)| {
+                    if !grid.editable(row, col) {
+                        return field.is_some().then_some((col, None));
+                    }
+                    let seed = grid.edit_seed(row, col);
+                    (field.as_ref().map(|field| field.seed.as_ref()) != Some(seed))
+                        .then(|| (col, Some(gpui::SharedString::from(seed.to_string()))))
+                })
+                .collect()
+        };
+        for (col, seed) in changed {
+            let slot = &mut inputs.fields[col];
+            match (slot.as_mut(), seed) {
+                (_, None) => *slot = None,
+                (Some(field), Some(_)) if field.input.focus_handle(cx).is_focused(window) => {}
+                (Some(field), Some(seed)) => {
+                    field
+                        .input
+                        .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
+                    field.seed = seed;
+                }
+                (None, Some(seed)) => {
+                    let input = cx.new(|cx| {
+                        gpui_component::input::TextareaState::new(window, cx)
+                            .auto_grow(1, ROW_INPUT_MAX_LINES)
+                            .submit_on_enter(true)
+                    });
+                    input.update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
+                    cx.subscribe(&input, |workspace, input, event: &InputEvent, cx| {
+                        // `shift-enter` is a newline in the value, not a commit.
+                        if matches!(
+                            event,
+                            InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
+                        ) {
+                            workspace.commit_row_input(&input, cx);
+                        }
+                    })
+                    .detach();
+                    *slot = Some(views::RowInput { input, seed });
+                }
+            }
+        }
+    }
+
+    /// Put Edit mode's inputs away, staging first whatever any of them holds
+    /// that is not staged yet. No blur is coming to do it: what takes them away
+    /// is a button -- Done, the fold, closing the panel -- which does not take
+    /// focus, or a click on another row, whose blur gpui dispatches only after
+    /// the frame this runs in. Focus goes back to the front for the reason
+    /// `searched` gives.
+    fn drop_row_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inputs) = self.row_panel.inputs.as_ref() else {
+            return;
+        };
+        let inputs: Vec<_> = inputs
+            .fields
+            .iter()
+            .flatten()
+            .map(|field| field.input.clone())
+            .collect();
+        for input in &inputs {
+            self.commit_row_input(input, cx);
+        }
+        if inputs
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            cx.defer_in(window, |workspace, _, cx| {
+                workspace.refocus_front();
+                cx.notify();
+            });
+        }
+        self.row_panel.inputs = None;
+    }
+
+    /// Whether one of Edit mode's inputs has the keyboard.
+    pub(crate) fn row_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            inputs
+                .fields
+                .iter()
+                .flatten()
+                .any(|field| field.input.focus_handle(cx).is_focused(window))
+        })
     }
 
     /// Show the tab in front's filter in the row panel's field, which every
@@ -63,7 +224,7 @@ impl Workspace {
     /// than one.
     pub(crate) fn sync_row_panel_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.row_panel.search.clone();
-        let Some((_, filter)) = self.active_row_panel() else {
+        let Some((_, _, filter)) = self.active_row_panel() else {
             return;
         };
         let filter = filter.clone();

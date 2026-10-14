@@ -375,7 +375,9 @@ pub(crate) struct StaleEdit {
 #[derive(Clone)]
 pub(crate) enum StaleResume {
     Open,
-    Stage(NewValue),
+    /// The cell as well as the value: the row panel stages into cells other
+    /// than the active one.
+    Stage((usize, usize), NewValue),
     Delete,
 }
 
@@ -1045,6 +1047,9 @@ pub(crate) struct QueryTab {
     /// Whether this tab's row-inspector panel is folded away. Per tab, like
     /// the panel itself (see `RowPanel`), and not persisted.
     pub(crate) row_panel_folded: bool,
+    /// Whether this tab's row panel shows inputs rather than values. Held as
+    /// the fold is.
+    pub(crate) row_panel_editing: bool,
     /// What this tab's row panel is filtered by. The field is one for the
     /// window (`RowPanel::search`); this is what it shows while the tab is in
     /// front. Not persisted.
@@ -1379,6 +1384,7 @@ impl QueryTab {
             row_limit,
             showing_plan: false,
             row_panel_folded: false,
+            row_panel_editing: false,
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
         };
@@ -1670,6 +1676,8 @@ pub(crate) enum ObjectBody {
         /// Whether this tab's row-inspector panel is folded away. Per tab:
         /// see `RowPanel`.
         row_panel_folded: bool,
+        /// See [`QueryTab::row_panel_editing`].
+        row_panel_editing: bool,
         /// See [`QueryTab::row_panel_filter`].
         row_panel_filter: gpui::SharedString,
         /// The row-inspector split's state, per tab. See

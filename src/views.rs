@@ -18,7 +18,7 @@ use gpui_component::{
     ActiveTheme, Disableable, ElementExt, IconName, RopeExt, Sizable,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::{self, Editor, EditorState, Input, InputState, Rope},
+    input::{self, Editor, EditorState, Input, InputState, Rope, Textarea, TextareaState},
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
@@ -42,7 +42,7 @@ use crate::{
     keybindings,
     palette::{Command, Mode as PaletteMode},
     result_grid,
-    result_grid::ResultGrid,
+    result_grid::{NewValue, ResultGrid},
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
@@ -79,15 +79,36 @@ pub struct RowPanel {
     /// selection moves; one found by value comes and goes with the rows that
     /// hold it.
     pub search: Entity<InputState>,
-    /// Whether the last frame drew `search`, cleared and set as `on_screen`
-    /// is. A field unmounted while focused keeps the window's focus, and with
-    /// it every keybinding; render hands focus back when this comes up false.
+    /// Whether the last frame drew `search`, and with it Edit mode's inputs,
+    /// cleared and set as `on_screen` is. A field unmounted while focused
+    /// keeps the window's focus, and with it every keybinding; render hands
+    /// focus back when this comes up false.
     pub searched: std::cell::Cell<bool>,
+    /// Edit mode's inputs for the selected row, built before the frame by
+    /// `sync_row_panel_inputs`, which has the window an input needs.
+    pub inputs: Option<RowInputs>,
     /// The tab and grid cell the panel last scrolled to, so it scrolls once
     /// per click or arrow key and then leaves the panel to the wheel. Cleared
     /// whenever the panel is folded or off screen, so reopening it scrolls
     /// again.
     pub revealed: std::cell::RefCell<Option<(String, usize, usize)>>,
+}
+
+/// One row's inputs, rebuilt whenever the grid or the row they were made for
+/// is no longer the one selected.
+pub struct RowInputs {
+    pub grid: gpui::EntityId,
+    pub row: usize,
+    /// One slot per column, empty where the cell cannot be edited.
+    pub fields: Vec<Option<RowInput>>,
+}
+
+pub struct RowInput {
+    pub input: Entity<TextareaState>,
+    /// What the input was last filled with, so only text the user changed is
+    /// staged, and a cell changed elsewhere refills an input nobody is typing
+    /// in.
+    pub seed: SharedString,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -262,6 +283,7 @@ fn render_query_surface(
             shown_grid,
             Some(tab),
             tab.row_panel_folded,
+            tab.row_panel_editing,
             &tab.row_panel_split,
             row_panel,
             None,
@@ -725,6 +747,7 @@ fn render_object(
         filters,
         next_join,
         row_panel_folded,
+        row_panel_editing,
         row_panel_split,
         ..
     } = &tab.body
@@ -753,6 +776,7 @@ fn render_object(
             results,
             None,
             *row_panel_folded,
+            *row_panel_editing,
             row_panel_split,
             row_panel,
             form,
@@ -1178,6 +1202,7 @@ fn render_results(
     results: &Entity<TableState<ResultGrid>>,
     query_tab: Option<&QueryTab>,
     folded: bool,
+    editing: bool,
     split: &Entity<ResizableState>,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
@@ -1477,9 +1502,8 @@ fn render_results(
     // empty table and Delete's refusal is visible after a failed preview.
     let panel = match form {
         Some(form) => Some((render_new_row_panel(engine, form, scope, cx), false)),
-        None => {
-            render_row_inspector(results, folded, row_panel, scope, cx).map(|panel| (panel, folded))
-        }
+        None => render_row_inspector(results, folded, editing, row_panel, scope, cx)
+            .map(|panel| (panel, folded)),
     };
     let body = div().size_full().flex().min_h_0();
     let content = match panel {
@@ -1661,6 +1685,7 @@ fn result_chip(
 fn render_row_inspector(
     results: &Entity<TableState<ResultGrid>>,
     folded: bool,
+    editing: bool,
     row_panel: &RowPanel,
     scope: &str,
     cx: &mut Context<Workspace>,
@@ -1668,16 +1693,42 @@ fn render_row_inspector(
     let t = *theme(cx);
     let grid = fonts(cx).grid.clone();
 
-    let (row_ix, rows, fields, active) = {
+    let (row_ix, rows, fields, active, chips) = {
         let table = results.read(cx);
         let row_ix = table.selected_row()?;
+        let delegate = table.delegate();
+        // What each editable field offers to stage besides typed text, gated
+        // as the cell menu is; `None` for a field Edit mode leaves as text.
+        let chips: Vec<Option<Vec<(&'static str, NewValue)>>> = (0..delegate.columns().len())
+            .map(|col| {
+                delegate.editable(row_ix, col).then(|| {
+                    [
+                        (delegate.offers_null(col), "NULL", NewValue::Null),
+                        (
+                            delegate.offers_empty(col),
+                            "Empty",
+                            NewValue::Value(SharedString::default()),
+                        ),
+                        (delegate.offers_default(col), "DEFAULT", NewValue::Default),
+                    ]
+                    .into_iter()
+                    .filter_map(|(offered, label, value)| offered.then_some((label, value)))
+                    .collect()
+                })
+            })
+            .collect();
         (
             row_ix,
-            table.delegate().rows_count(cx),
-            table.delegate().fields(row_ix),
-            table.delegate().active(),
+            delegate.rows_count(cx),
+            delegate.fields(row_ix),
+            delegate.active(),
+            chips,
         )
     };
+    let inputs = row_panel
+        .inputs
+        .as_ref()
+        .filter(|inputs| editing && inputs.grid == results.entity_id() && inputs.row == row_ix);
     // A selection can outlive the rows it was made against.
     if fields.is_empty() {
         return None;
@@ -1737,6 +1788,25 @@ fn render_row_inspector(
 
     row_panel.searched.set(true);
     let table = results.clone();
+    let edit_toggle = chips.iter().any(Option::is_some).then(|| {
+        icon_button(
+            "edit-row-inspector",
+            icon::EDIT,
+            match editing {
+                true => Tone::Primary,
+                false => Tone::Quiet,
+            },
+            Control::Compact,
+            t,
+        )
+        .tooltip(match editing {
+            true => "Done editing",
+            false => "Edit this row",
+        })
+        .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_row_panel_edit(cx);
+        }))
+    });
     Some(
         div()
             .size_full()
@@ -1767,6 +1837,7 @@ fn render_row_inspector(
                             .ml_auto()
                             .flex()
                             .items_center()
+                            .children(edit_toggle)
                             .child(fold("hide-row-inspector", "Hide the row panel", cx))
                             .child(
                                 icon_button(
@@ -1867,6 +1938,25 @@ fn render_row_inspector(
                                 .into_any_element()
                         });
                         let current = active.is_some_and(|(_, col)| col == col_ix);
+                        let input = inputs
+                            .and_then(|inputs| inputs.fields.get(col_ix)?.as_ref())
+                            .map(|field| field.input.clone());
+                        let chips = input
+                            .is_some()
+                            .then(|| chips.get(col_ix).cloned().flatten())
+                            .flatten()
+                            .unwrap_or_default();
+                        // Which chip names what the cell holds, filled as the
+                        // new-row form's chip is: an empty input cannot say
+                        // whether it is a NULL, an empty string or a DEFAULT.
+                        let held = match (&field.edit, &field.value) {
+                            (Some(NewValue::Default), _) => Some(NewValue::Default),
+                            (_, None) if !field.missing => Some(NewValue::Null),
+                            (_, Some(value)) if value.is_empty() => {
+                                Some(NewValue::Value(SharedString::default()))
+                            }
+                            _ => None,
+                        };
                         div()
                             .group(group)
                             .flex()
@@ -1878,7 +1968,14 @@ fn render_row_inspector(
                             // the line after the value above.
                             .border_b_1()
                             .border_color(t.border)
-                            .when(current, |field| field.bg(t.element_active))
+                            // The grid's wash for a staged cell wins over the
+                            // active field's: the name's accent still says
+                            // which one is active.
+                            .map(|row| match (field.edit.is_some(), current) {
+                                (true, _) => row.bg(t.edited),
+                                (false, true) => row.bg(t.element_active),
+                                (false, false) => row,
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -1916,26 +2013,64 @@ fn render_row_inspector(
                                             .children(copy),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .font_family(grid.clone())
-                                    .text_size(px(layout::grid(layout::TEXT_SM)))
-                                    .map(|value| match field.value {
-                                        Some(text) if field.json => value.text_color(t.text).child(
-                                            StyledText::new(text.clone()).with_highlights(
-                                                json_highlights(&text, &cx.theme().highlight_theme),
+                            .map(|row| match input {
+                                Some(input) => row.child(
+                                    Textarea::new(&input)
+                                        .font_family(grid.clone())
+                                        .text_size(px(layout::grid(layout::TEXT_SM))),
+                                ),
+                                None => row.child(
+                                    div()
+                                        .font_family(grid.clone())
+                                        .text_size(px(layout::grid(layout::TEXT_SM)))
+                                        .map(|value| match field.value {
+                                            Some(text) if field.json => {
+                                                value.text_color(t.text).child(
+                                                    StyledText::new(text.clone()).with_highlights(
+                                                        json_highlights(
+                                                            &text,
+                                                            &cx.theme().highlight_theme,
+                                                        ),
+                                                    ),
+                                                )
+                                            }
+                                            Some(text) => value.text_color(t.text).child(text),
+                                            None if field.missing => value,
+                                            // Italic so a NULL cannot be read
+                                            // as the four-letter string.
+                                            None => value.text_color(t.text_faint).italic().child(
+                                                match field.edit {
+                                                    Some(NewValue::Default) => {
+                                                        result_grid::DEFAULT_LABEL
+                                                    }
+                                                    _ => result_grid::NULL_LABEL,
+                                                },
                                             ),
-                                        ),
-                                        Some(text) => value.text_color(t.text).child(text),
-                                        None if field.missing => value,
-                                        // Italic so a NULL cannot be read
-                                        // as the four-letter string.
-                                        None => value
-                                            .text_color(t.text_faint)
-                                            .italic()
-                                            .child(result_grid::NULL_LABEL),
+                                        }),
+                                ),
+                            })
+                            .when(!chips.is_empty(), |row| {
+                                row.child(div().flex().gap(px(layout::SPACE_XS)).children(
+                                    chips.into_iter().map(|(label, value)| {
+                                        let tone = match held.as_ref() == Some(&value) {
+                                            true => Tone::Primary,
+                                            false => Tone::Quiet,
+                                        };
+                                        button((label, col_ix), label, tone, Control::Inline, t)
+                                            .on_click(cx.listener(
+                                                move |workspace, _, window, cx| {
+                                                    workspace.stage_row_field(
+                                                        row_ix,
+                                                        col_ix,
+                                                        value.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
                                     }),
-                            )
+                                ))
+                            })
                     })),
             )
             .into_any_element(),

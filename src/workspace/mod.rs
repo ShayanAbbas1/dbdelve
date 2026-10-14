@@ -263,7 +263,7 @@ impl Workspace {
             |workspace, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value();
-                    if let Some((_, filter)) = workspace.active_row_panel() {
+                    if let Some((_, _, filter)) = workspace.active_row_panel() {
                         *filter = value;
                     }
                     cx.notify();
@@ -323,6 +323,7 @@ impl Workspace {
                 copied: None,
                 search: row_panel_search,
                 searched: Default::default(),
+                inputs: None,
                 revealed: Default::default(),
             },
             plan_copied: false,
@@ -920,6 +921,7 @@ impl Render for Workspace {
         self.restore_objects(window, cx);
         self.sync_page_input(window, cx);
         self.sync_row_panel_filter(window, cx);
+        self.sync_row_panel_inputs(window, cx);
         // Where a query tab that reached the front without `activate_tab` gets
         // its snapshot read. `session.active` is written in three places --
         // `Session::new`, `activate_tab` and `escape` -- and the first and last
@@ -1654,7 +1656,8 @@ impl Render for Workspace {
         // field went away -- folded, closed, or emptied by a run -- and the
         // handoff above has already run, so it lands on the next frame.
         if !self.row_panel.searched.get()
-            && self.row_panel.search.focus_handle(cx).is_focused(window)
+            && (self.row_panel.search.focus_handle(cx).is_focused(window)
+                || self.row_input_focused(window, cx))
         {
             cx.defer_in(window, |workspace, _, cx| {
                 workspace.refocus_front();

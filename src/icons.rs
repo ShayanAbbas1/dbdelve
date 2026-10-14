@@ -97,6 +97,8 @@ pub mod icon {
     pub const SIDEBAR: &str = "icons/panel-left.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
+    /// Switches the row panel between reading a row and editing it.
+    pub const EDIT: &str = "icons/pencil.svg";
     /// A column header's sort state: which way the server ordered the rows, or
     /// that it could be asked to.
     pub const SORT_UP: &str = "icons/sort-ascending.svg";
