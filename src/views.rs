@@ -1791,7 +1791,6 @@ fn render_row_inspector(
                     .items_center()
                     .gap(px(layout::SPACE_XS))
                     .px(px(layout::SPACE_SM))
-                    .mb(px(layout::SPACE_SM))
                     .border_y_1()
                     .border_color(t.border)
                     .child(row_icon(t, icon::SEARCH))
@@ -1814,14 +1813,13 @@ fn render_row_inspector(
                     .min_h_0()
                     .overflow_y_scroll()
                     .smooth_scroll(&smooth_scoped("row-inspector", scope, cx))
-                    .px(px(layout::SPACE_SM))
                     .pb(px(layout::SPACE_SM))
                     .flex()
                     .flex_col()
-                    .gap(px(layout::SPACE_MD))
                     .when(fields.is_empty(), |list| {
                         list.child(
                             div()
+                                .p(px(layout::SPACE_SM))
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child("No matching columns"),
@@ -1868,11 +1866,19 @@ fn render_row_inspector(
                                 )
                                 .into_any_element()
                         });
+                        let current = active.is_some_and(|(_, col)| col == col_ix);
                         div()
                             .group(group)
                             .flex()
                             .flex_col()
                             .gap(px(layout::SPACE_XS))
+                            .p(px(layout::SPACE_SM))
+                            // A hairline under every field, so a name reads as
+                            // the heading of the value below it rather than as
+                            // the line after the value above.
+                            .border_b_1()
+                            .border_color(t.border)
+                            .when(current, |field| field.bg(t.element_active))
                             .child(
                                 div()
                                     .flex()
@@ -1885,7 +1891,10 @@ fn render_row_inspector(
                                             .text_ellipsis()
                                             .whitespace_nowrap()
                                             .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                            .text_color(t.text_muted)
+                                            .text_color(match current {
+                                                true => t.accent,
+                                                false => t.text_muted,
+                                            })
                                             .child(field.name),
                                     )
                                     // Absent rather than guessed: a type
