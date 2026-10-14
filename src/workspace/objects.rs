@@ -159,7 +159,7 @@ impl Workspace {
         let (schema, relation) = (tab.schema.clone(), tab.name.clone());
         let (query, stale) = match &tab.body {
             ObjectBody::Relation { query, stale, .. } => (query, *stale),
-            // Asked for once, and again only after a failure.
+            // Asked for once per connection, and again only after a failure.
             ObjectBody::Structure { structure, .. } => {
                 let asked = self
                     .profile()

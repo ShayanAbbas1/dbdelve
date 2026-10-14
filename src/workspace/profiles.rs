@@ -1250,6 +1250,12 @@ impl Workspace {
         profile.in_transaction = false;
         profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
+        // Every structure still out was asked on the old generation, and
+        // `issued_to` drops its answer. A structure tab counts an entry here as
+        // asked and waits on it, so one caught mid-load would sit on Loading
+        // with nothing coming; forgetting them makes its next visit ask again,
+        // as `stale` does for a relation tab's rows.
+        profile.session.structure_requests.clear();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
