@@ -1613,8 +1613,10 @@ impl Workspace {
     /// clears them first, because rows from the previous statement sitting
     /// under the one now running cannot be told from fresh ones.
     ///
-    /// `explain` says this submission is an `EXPLAIN`, and diverts its result
-    /// away from the grid and into the tab's plan. It routes through here rather
+    /// `explain` says this submission is the Explain command's, the statement
+    /// under dbdelve's prefix, and diverts its result away from the grid and
+    /// into the tab's plan, as a lone statement the user typed as an `EXPLAIN`
+    /// is diverted without it (`sql::typed_explain`). It routes through here rather
     /// than down a path of its own because everything around the result — the
     /// single-flight guard, the generation check that drops a stale run, the
     /// cancel handle, the connection — is the same for a plan as for rows, and a
@@ -1655,6 +1657,18 @@ impl Workspace {
         let generation = profile.generation;
         let read_only = profile.mode == Mode::ReadOnly;
         let alongside = lane.is_some();
+        // A statement the user typed as an `EXPLAIN` is theirs, run and kept in
+        // the history as typed; only its answer goes where the Explain
+        // command's does. Not in a queue, where every result holds a grid.
+        let typed = match tab {
+            Tab::Query(query) if explain.is_none() && refresh.is_none() && !alongside => profile
+                .session
+                .query_tab(query)
+                .filter(|query| query.queue.is_none())
+                .and_then(|_| sql::typed_explain(engine, &sql)),
+            _ => None,
+        };
+        let explaining = explain.or(typed);
         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
@@ -1749,7 +1763,7 @@ impl Workspace {
                 table.delegate().column_view(),
             )
         };
-        if !keep_rows && explain.is_none() {
+        if !keep_rows && explaining.is_none() {
             results.update(cx, |table, cx| {
                 *table.delegate_mut() = ResultGrid::empty();
                 // Rows dropped from the gutter's multi-row selection too, for
@@ -1790,12 +1804,14 @@ impl Workspace {
         let statement = (matches!(tab, Tab::Query(_)) && explain.is_none()).then(|| sql.clone());
         // What the plan pane says it is a plan of: the user's statement, without
         // the prefix dbdelve put in front of it.
-        let explained = explain.map(|mode| {
-            let prefix = engine.explain_prefix(mode).unwrap_or_default();
-            let suffix = engine.explain_suffix(mode);
-            let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
-            bare.strip_suffix(suffix).unwrap_or(bare).to_string()
-        });
+        let explained = explain
+            .map(|mode| {
+                let prefix = engine.explain_prefix(mode).unwrap_or_default();
+                let suffix = engine.explain_suffix(mode);
+                let bare = sql.strip_prefix(prefix).unwrap_or(&sql);
+                bare.strip_suffix(suffix).unwrap_or(bare).to_string()
+            })
+            .or(typed.map(|_| sql.clone()));
         if let Tab::Query(query) = tab
             && lane.is_none()
             && let Some(tab) = self
@@ -1832,7 +1848,7 @@ impl Workspace {
         }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
-            Tab::Query(query) if explain.is_none() => self
+            Tab::Query(query) if explaining.is_none() => self
                 .issued_to(&id, generation)
                 .and_then(|profile| profile.session.query_tab(query))
                 .and_then(|query| query.row_limit),
@@ -1844,7 +1860,7 @@ impl Workspace {
         // preview is dbdelve's statement and streams like the user's; a query
         // tab's generated run is an edit, with no rows to stream.
         let streams = matches!(tab, Tab::Object(_)) || !generated;
-        let feed = (!keep_rows && streams && explain.is_none()).then(Feed::default);
+        let feed = (!keep_rows && streams && explaining.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
             let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
             let (names, widths, column_view) = (shown.0.clone(), shown.1.clone(), shown.4.clone());
@@ -2001,8 +2017,8 @@ impl Workspace {
                             // returning its rows, so nothing here reaches the
                             // grid: it keeps whatever the last real run put in
                             // it, which is what the Data tab flips back to.
-                            Ok(result) if explain.is_some() => {
-                                let mode = explain.unwrap_or_default();
+                            Ok(result) if explaining.is_some() => {
+                                let mode = explaining.unwrap_or_default();
                                 *state = QueryState::Explained {
                                     elapsed: result.elapsed,
                                     mode,
@@ -2185,7 +2201,7 @@ impl Workspace {
                         // to read one, so the pane turns to it rather than
                         // leaving the answer behind a tab the user has to find.
                         if let Some(plan) = plan
-                            && let Some(mode) = explain
+                            && let Some(mode) = explaining
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
                         {
