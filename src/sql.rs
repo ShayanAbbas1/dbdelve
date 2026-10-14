@@ -30,7 +30,7 @@ use sqlparser::parser::Parser as SqlParser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::db::{ColumnDefinition, Engine};
+use crate::db::{ColumnDefinition, Engine, ExplainMode};
 use crate::result_grid::{NewValue, PendingRow};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
@@ -1802,6 +1802,88 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
         | Engine::Turso
         | Engine::Snowflake
         | Engine::SqlServer => Ok(()),
+    }
+}
+
+/// The Explain mode of a statement the user typed as an `EXPLAIN` themselves,
+/// so its answer is shown as a plan rather than as rows. Read off the words in
+/// front of the statement explained, never off the statement itself.
+///
+/// `None` wherever the answer is a shape `explain::parse` does not read:
+/// MySQL's traditional `EXPLAIN` and both of MariaDB's are tables, SQLite's
+/// bare `EXPLAIN` is bytecode, and a `FORMAT` other than text or tree is JSON,
+/// XML or YAML. Those stay in the grid, where they are at least legible.
+pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
+    let Some(dialect) = dialect(engine) else {
+        return crate::mql::typed_explain(sql);
+    };
+    let tokens = Tokenizer::new(dialect.as_ref(), sql).tokenize().ok()?;
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    let word = |token: Option<&&Token>, word: &str| matches!(token, Some(Token::Word(found)) if found.value.eq_ignore_ascii_case(word));
+    if !word(tokens.next().as_ref(), "EXPLAIN") {
+        return None;
+    }
+    match engine {
+        Engine::Postgres if tokens.next_if(|token| **token == Token::LParen).is_some() => {
+            let mut mode = ExplainMode::Plan;
+            loop {
+                let name = tokens.next()?;
+                let argument: Vec<String> = std::iter::from_fn(|| {
+                    tokens.next_if(|token| !matches!(token, Token::Comma | Token::RParen))
+                })
+                .map(|token| token.to_string().trim_matches('\'').to_ascii_lowercase())
+                .collect();
+                if word(Some(&name), "ANALYZE") || word(Some(&name), "ANALYSE") {
+                    let off = matches!(
+                        argument.as_slice(),
+                        [value] if ["false", "off", "0", "no"].contains(&value.as_str())
+                    );
+                    mode = if off {
+                        ExplainMode::Plan
+                    } else {
+                        ExplainMode::Analyze
+                    };
+                }
+                if word(Some(&name), "FORMAT") && argument != ["text"] {
+                    return None;
+                }
+                if tokens.next()? == &Token::RParen {
+                    return Some(mode);
+                }
+            }
+        }
+        Engine::Postgres => Some(
+            match word(tokens.peek(), "ANALYZE") || word(tokens.peek(), "ANALYSE") {
+                true => ExplainMode::Analyze,
+                false => ExplainMode::Plan,
+            },
+        ),
+        Engine::MySql => {
+            let analyze = tokens
+                .next_if(|token| word(Some(token), "ANALYZE"))
+                .is_some();
+            let tree = match tokens.next_if(|token| word(Some(token), "FORMAT")) {
+                Some(_) => tokens.next()? == &Token::Eq && word(tokens.next().as_ref(), "TREE"),
+                None => analyze,
+            };
+            tree.then_some(match analyze {
+                true => ExplainMode::Analyze,
+                false => ExplainMode::Plan,
+            })
+        }
+        Engine::Sqlite => (word(tokens.next().as_ref(), "QUERY")
+            && word(tokens.next().as_ref(), "PLAN"))
+        .then_some(ExplainMode::Plan),
+        // Turso has no Explain at all (`Engine::explain_prefix`), and
+        // Snowflake's and SQL Server's plans are shapes the parser does not read.
+        Engine::MariaDb
+        | Engine::Turso
+        | Engine::Snowflake
+        | Engine::SqlServer
+        | Engine::MongoDb => None,
     }
 }
 
@@ -4868,6 +4950,135 @@ mod tests {
             classify(Engine::MySql, "ANALYZE SELECT * FROM t").destructive,
             vec![Destructive::Unreadable],
         );
+    }
+
+    #[test]
+    fn a_typed_explain_is_read_from_its_leading_words() {
+        use ExplainMode::{Analyze, Plan};
+        let cases = [
+            (Engine::Postgres, "EXPLAIN SELECT 1", Some(Plan)),
+            (Engine::Postgres, "explain verbose select 1", Some(Plan)),
+            (Engine::Postgres, "EXPLAIN ANALYZE SELECT 1", Some(Analyze)),
+            (
+                Engine::Postgres,
+                "EXPLAIN ANALYSE VERBOSE SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "-- why\nEXPLAIN ANALYZE SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "  /* why */ explain analyze select 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (analyze true) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (COSTS FALSE, ANALYZE ON) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE false) SELECT 1",
+                Some(Plan),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE OFF, BUFFERS) SELECT 1",
+                Some(Plan),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (FORMAT TEXT, ANALYZE) SELECT 1",
+                Some(Analyze),
+            ),
+            (Engine::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", None),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE, format yaml) SELECT 1",
+                None,
+            ),
+            (Engine::Postgres, "EXPLAIN (FORMAT XML) SELECT 1", None),
+            (Engine::Postgres, "SELECT 'EXPLAIN ANALYZE'", None),
+            (Engine::Postgres, "ANALYZE t", None),
+            (Engine::Postgres, "-- EXPLAIN\nSELECT 1", None),
+            (Engine::MySql, "EXPLAIN ANALYZE SELECT 1", Some(Analyze)),
+            (
+                Engine::MySql,
+                "/* why */ explain analyze select 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::MySql,
+                "EXPLAIN ANALYZE FORMAT=TREE SELECT 1",
+                Some(Analyze),
+            ),
+            (Engine::MySql, "EXPLAIN FORMAT=TREE SELECT 1", Some(Plan)),
+            (Engine::MySql, "explain format = tree select 1", Some(Plan)),
+            (Engine::MySql, "EXPLAIN ANALYZE FORMAT=JSON SELECT 1", None),
+            (Engine::MySql, "EXPLAIN FORMAT=JSON SELECT 1", None),
+            // Tabular, a shape the plan pane does not read.
+            (Engine::MySql, "EXPLAIN SELECT 1", None),
+            (Engine::MySql, "EXPLAIN FORMAT=TRADITIONAL SELECT 1", None),
+            (Engine::MySql, "EXPLAIN t", None),
+            (Engine::MySql, "DESCRIBE SELECT 1", None),
+            (Engine::MySql, "DESC t", None),
+            // Both of MariaDB's are tabular.
+            (Engine::MariaDb, "EXPLAIN SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE FORMAT=JSON SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE TABLE t", None),
+            (Engine::Sqlite, "EXPLAIN QUERY PLAN SELECT 1", Some(Plan)),
+            (
+                Engine::Sqlite,
+                "-- why\nexplain query plan select 1",
+                Some(Plan),
+            ),
+            // Bytecode, not a plan.
+            (Engine::Sqlite, "EXPLAIN SELECT 1", None),
+            (Engine::Snowflake, "EXPLAIN SELECT 1", None),
+            (Engine::SqlServer, "EXPLAIN SELECT 1", None),
+            (Engine::MongoDb, "db.c.find({a: 1}).explain()", Some(Plan)),
+            (
+                Engine::MongoDb,
+                "db.c.find().explain('queryPlanner')",
+                Some(Plan),
+            ),
+            (Engine::MongoDb, "db.c.find().explain(false)", Some(Plan)),
+            (
+                Engine::MongoDb,
+                "db.c.find().sort({a: 1}).explain('executionStats')",
+                Some(Analyze),
+            ),
+            (
+                Engine::MongoDb,
+                "db.c.aggregate([]).explain(\"allPlansExecution\")",
+                Some(Analyze),
+            ),
+            (
+                Engine::MongoDb,
+                "db.c.countDocuments({}).explain(true)",
+                Some(Analyze),
+            ),
+            (Engine::MongoDb, "// why\ndb.c.find().explain()", Some(Plan)),
+            (Engine::MongoDb, "db.c.find()", None),
+            (Engine::MongoDb, "db.c.find().explain(); db.c.find()", None),
+        ];
+        for (engine, sql, mode) in cases {
+            assert_eq!(typed_explain(engine, sql), mode, "{engine:?} {sql}");
+        }
     }
 
     /// `TO STDOUT` hands rows to the client; a `PROGRAM` or file target runs a

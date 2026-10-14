@@ -25,6 +25,7 @@ use time::parsing::Parsed;
 use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
+use crate::db::ExplainMode;
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -1709,6 +1710,34 @@ pub(crate) fn explainable(text: &str) -> Result<(), String> {
         return Err("Only a statement that reads can be explained.".into());
     }
     Ok(())
+}
+
+/// The Explain mode of a lone statement the user ended in `.explain(…)`
+/// themselves. Any verbosity that runs the plan is Analyze, as `true` and
+/// `allPlansExecution` do alongside `executionStats`.
+pub(crate) fn typed_explain(text: &str) -> Option<ExplainMode> {
+    let statements = parse(text).ok()?;
+    let [
+        Statement {
+            target: Target::Collection { cursor, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        return None;
+    };
+    let explain = cursor
+        .last()
+        .filter(|call| call.method == CursorMethod::Explain)?;
+    Some(match explain.args.first().map(|arg| &arg.value) {
+        Some(Value::Bool(true)) => ExplainMode::Analyze,
+        Some(Value::String(verbosity))
+            if verbosity == "executionStats" || verbosity == "allPlansExecution" =>
+        {
+            ExplainMode::Analyze
+        }
+        _ => ExplainMode::Plan,
+    })
 }
 
 /// `None` for a statement whose effect cannot be read off it: a command not
