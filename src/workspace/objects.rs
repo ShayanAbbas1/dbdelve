@@ -1043,6 +1043,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Off a structure tab, `show_structure` stays put, and the reveal
+        // would wait on whatever tab is in front -- to tell it later, after
+        // the user moved on, that its rows have no such column.
+        if !self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .is_some_and(|tab| matches!(tab.body, ObjectBody::Structure { .. }))
+        {
+            return;
+        }
         self.show_structure(false, window, cx);
         let ready = self.profile().is_some_and(|profile| {
             profile
