@@ -644,6 +644,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 icon::TABLE,
                 Command::ShowStructure(false),
             ));
+            items.push(Item::command(
+                "Refresh structure",
+                chord_hint("refresh_relation", overrides),
+                icon::RUN,
+                Command::RefreshRelation(tab.id),
+            ));
         }
         if let ObjectBody::Relation {
             query,
