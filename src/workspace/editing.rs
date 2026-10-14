@@ -14,7 +14,16 @@ impl Workspace {
     /// is offered on relations the grid refuses to edit.
     pub(crate) fn new_row(&mut self, _: &NewRow, window: &mut Window, cx: &mut Context<Self>) {
         // Does not route through `editable`: an insert has no existing row to
-        // check a column of, so the mode is asked outright.
+        // check a column of, so the mode is asked outright -- but not on a
+        // structure tab, which has no row to add and only needs pointing back.
+        if self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .is_some_and(|tab| matches!(tab.body, ObjectBody::Structure { .. }))
+        {
+            self.note("Switch to Data to add a row.".into(), cx);
+            return;
+        }
         if !self.require(Mode::ReadWrite, cx) {
             return;
         }
@@ -41,11 +50,7 @@ impl Workspace {
         };
         let structure = match &tab.body {
             ObjectBody::Relation { structure, .. } => structure,
-            ObjectBody::Structure { .. } => {
-                self.note("Switch to Data to add a row.".into(), cx);
-                return;
-            }
-            ObjectBody::Routine(_) => return,
+            ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
         };
         if !tab.takes_inserts(self.engine()) {
             self.note("This view takes no inserts.".into(), cx);
