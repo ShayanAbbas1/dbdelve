@@ -952,16 +952,16 @@ impl Workspace {
         value: NewValue,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.stage_cell(row, col, value, cx) {
-            return;
+            return false;
         }
         let Some(results) = self
             .profile()
             .and_then(|profile| profile.session.active_results())
             .cloned()
         else {
-            return;
+            return true;
         };
         let seed =
             gpui::SharedString::from(results.read(cx).delegate().edit_seed(row, col).to_string());
@@ -977,6 +977,7 @@ impl Workspace {
                 .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
             field.seed = seed;
         }
+        true
     }
 
     /// Whether an edit may go ahead on the grid in front: not while its rows are
@@ -1085,8 +1086,11 @@ impl Workspace {
             // Back to the panel input the value came from, if it did, so
             // stepping through the row carries on from there.
             StaleResume::Stage(cell, value) => match self.row_input(cell, cx) {
+                // Through the chips' path, which refills the input: a chip's
+                // value resumed here would otherwise leave typed text in it to
+                // be staged back over the value on the next blur.
                 Some(input) => {
-                    if self.stage_cell(cell.0, cell.1, value, cx) {
+                    if self.stage_row_field(cell.0, cell.1, value, window, cx) {
                         input.update(cx, |input, cx| input.focus(window, cx));
                     }
                 }
