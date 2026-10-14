@@ -41,9 +41,15 @@ impl Workspace {
         else {
             return;
         };
-        results.update(cx, |table, cx| {
+        let focused = results.update(cx, |table, cx| {
             crate::result_grid::reveal_column(table, col, window, cx)
         });
+        // The grid holds the keyboard now. Closing the palette asked for the
+        // tab's own focus back, which in a query tab is the editor, and the
+        // next render would hand it there, leaving the arrow keys typing.
+        if focused && let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
     }
 
     /// Change how the grid in front lays out its columns, then have the table
