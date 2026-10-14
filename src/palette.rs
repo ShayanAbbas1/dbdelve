@@ -640,7 +640,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         if matches!(tab.body, ObjectBody::Structure { .. }) {
             items.push(Item::command(
                 "Show data",
-                "",
+                chord_hint("toggle_structure", overrides),
                 icon::TABLE,
                 Command::ShowStructure(false),
             ));
@@ -662,7 +662,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         {
             items.push(Item::command(
                 "Show structure",
-                "",
+                chord_hint("toggle_structure", overrides),
                 icon::STRUCTURE,
                 Command::ShowStructure(true),
             ));

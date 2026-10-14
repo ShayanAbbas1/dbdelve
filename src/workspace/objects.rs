@@ -975,6 +975,22 @@ impl Workspace {
         Some(id)
     }
 
+    pub(crate) fn toggle_structure(
+        &mut self,
+        _: &ToggleStructure,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+        else {
+            return;
+        };
+        let to_structure = !matches!(tab.body, ObjectBody::Structure { .. });
+        self.show_structure(to_structure, window, cx);
+    }
+
     /// The Data | Structure toggle: the other view of the relation in front.
     pub(crate) fn show_structure(
         &mut self,
