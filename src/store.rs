@@ -166,6 +166,9 @@ pub struct StoredObject {
     pub name: String,
     #[serde(default)]
     pub routine: bool,
+    /// A relation's structure tab rather than its rows.
+    #[serde(default)]
+    pub structure: bool,
     /// A relation's kind, which the catalog would otherwise be the only source
     /// of -- and waiting for it is what kept a restored relation out of the tab
     /// strip. Meaningless for a routine.
@@ -280,8 +283,6 @@ pub struct StoredGrid {
     /// what a tab is showing.
     #[serde(default)]
     pub filter: String,
-    #[serde(default)]
-    pub showing_structure: bool,
     #[serde(default)]
     pub captured: u64,
     /// Where the rows can be written back to, and each column's type -- the
@@ -780,7 +781,6 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             last_query: grid.last_query.clone(),
             limit: grid.limit,
             filter: grid.filter.clone(),
-            showing_structure: grid.showing_structure,
             captured: grid.captured,
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
@@ -1417,6 +1417,7 @@ user = "shayan"
                     schema: "public".into(),
                     name: "accounts".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::MaterializedView,
                     filter: String::new(),
                     filter_engine: None,
@@ -1428,6 +1429,7 @@ user = "shayan"
                     schema: "public".into(),
                     name: "total(integer)".into(),
                     routine: true,
+                    structure: false,
                     kind: RelationKind::default(),
                     filter: String::new(),
                     filter_engine: None,
@@ -1635,6 +1637,7 @@ open_objects = []
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -1706,6 +1709,7 @@ open_objects = []
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -1869,6 +1873,7 @@ open_objects = []
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -2377,6 +2382,7 @@ open_objects = []
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -2427,7 +2433,6 @@ open_objects = []
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
@@ -2478,7 +2483,6 @@ open_objects = []
                 last_query: Some("select * from accounts".into()),
                 limit: Some(1_000),
                 filter: String::new(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: Some(EditTarget {
                     schema: "public".into(),
@@ -2518,7 +2522,6 @@ open_objects = []
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
@@ -2570,7 +2573,6 @@ open_objects = []
                 last_query: None,
                 limit: Some(1_000),
                 filter: r#""state" = 'ok'"#.into(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
@@ -2682,6 +2684,7 @@ name = \"accounts\"
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::Table,
                     filter: String::new(),
                     filter_engine: None,
@@ -2693,6 +2696,7 @@ name = \"accounts\"
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::Table,
                     filter: r#""id" = '42'"#.into(),
                     filter_engine: Some("postgres".into()),
@@ -2731,6 +2735,7 @@ name = \"accounts\"
             schema: "public".into(),
             name: "customers".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::Table,
             filter: r#"("state" = 'it''s ok') OR ("tier" LIKE '%2%' ESCAPE '\')"#.into(),
             filter_engine: Some("postgres".into()),

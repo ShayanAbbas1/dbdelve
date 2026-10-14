@@ -101,7 +101,7 @@ impl Workspace {
                     };
                     Some(derived_filter(engine, &filter_bars(filters), columns))
                 }
-                ObjectBody::Routine(_) => None,
+                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
             }
         }) else {
             return;
@@ -361,7 +361,7 @@ impl Workspace {
     pub(crate) fn filter_rows_mut(&mut self, id: u64) -> Option<&mut Vec<FilterRow>> {
         match self.object_body_mut(id)? {
             ObjectBody::Relation { filters, .. } => Some(filters),
-            ObjectBody::Routine(_) => None,
+            ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
         }
     }
 

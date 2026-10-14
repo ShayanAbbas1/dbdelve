@@ -33,7 +33,7 @@ impl Workspace {
     /// with the cells about what is editable.
     pub(crate) fn has_editable_cell(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.session.shown_results().is_some_and(|results| {
+            profile.session.active_results().is_some_and(|results| {
                 let grid = results.read(cx);
                 grid.delegate()
                     .active()
@@ -47,7 +47,7 @@ impl Workspace {
     /// [`Workspace::has_editable_cell`] is.
     pub(crate) fn has_nameable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.session.shown_results().is_some_and(|results| {
+            profile.session.active_results().is_some_and(|results| {
                 let grid = results.read(cx);
                 grid.delegate()
                     .active()
@@ -63,7 +63,7 @@ impl Workspace {
         self.profile().is_some_and(|profile| {
             profile
                 .session
-                .shown_results()
+                .active_results()
                 .is_some_and(|results| results.read(cx).delegate().active().is_some())
         })
     }
@@ -72,7 +72,7 @@ impl Workspace {
         self.profile().is_some_and(|profile| {
             profile
                 .session
-                .shown_results()
+                .active_results()
                 .is_some_and(|results| !results.read(cx).delegate().result().columns.is_empty())
         })
     }

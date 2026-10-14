@@ -637,8 +637,15 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
 
     if let Some(tab) = session.active_object() {
+        if matches!(tab.body, ObjectBody::Structure { .. }) {
+            items.push(Item::command(
+                "Show data",
+                "",
+                icon::TABLE,
+                Command::ShowStructure(false),
+            ));
+        }
         if let ObjectBody::Relation {
-            showing_structure,
             query,
             filter,
             limit,
@@ -647,16 +654,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             ..
         } = &tab.body
         {
-            items.push(if *showing_structure {
-                Item::command("Show data", "", icon::TABLE, Command::ShowStructure(false))
-            } else {
-                Item::command(
-                    "Show structure",
-                    "",
-                    icon::STRUCTURE,
-                    Command::ShowStructure(true),
-                )
-            });
+            items.push(Item::command(
+                "Show structure",
+                "",
+                icon::STRUCTURE,
+                Command::ShowStructure(true),
+            ));
             items.push(Item::command(
                 "Refresh rows",
                 chord_hint("refresh_relation", overrides),
@@ -665,62 +668,60 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             ));
             // The same gates the pager buttons stand behind: forward only off
             // a full page, backwards only off a page that is not the first.
-            if !*showing_structure {
-                if matches!(
-                    query,
-                    QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
-                ) {
-                    items.push(Item::command(
-                        "Next page",
-                        "",
-                        icon::CHEVRON_RIGHT,
-                        Command::NextPage,
-                    ));
-                }
-                if *offset > 0 {
-                    items.push(Item::command(
-                        "Previous page",
-                        "",
-                        icon::CHEVRON_LEFT,
-                        Command::PreviousPage,
-                    ));
-                }
-                if !count.answers(filter) {
-                    items.push(Item::command(
-                        "Count rows",
-                        "",
-                        icon::TABLE,
-                        Command::CountRows(tab.id),
-                    ));
-                }
+            if matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ) {
                 items.push(Item::command(
-                    "Filter rows…",
+                    "Next page",
                     "",
-                    icon::SEARCH,
-                    Command::FilterRows,
+                    icon::CHEVRON_RIGHT,
+                    Command::NextPage,
                 ));
-                // A row that would do nothing is worse than no row at all.
-                if !filter.is_empty() {
-                    items.push(Item::command(
-                        "Clear filter",
-                        "",
-                        icon::CLOSE,
-                        Command::ClearFilter,
-                    ));
-                }
-                if tab.takes_inserts(profile.config.engine()) {
-                    items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
-                }
-                // Only on a row dbdelve can name by its primary key -- the same
-                // condition that makes a cell of it editable.
-                if workspace.has_nameable_row(cx) {
-                    items.push(Item::command(
-                        "Delete row…",
-                        "",
-                        icon::DELETE,
-                        Command::DeleteRow,
-                    ));
-                }
+            }
+            if *offset > 0 {
+                items.push(Item::command(
+                    "Previous page",
+                    "",
+                    icon::CHEVRON_LEFT,
+                    Command::PreviousPage,
+                ));
+            }
+            if !count.answers(filter) {
+                items.push(Item::command(
+                    "Count rows",
+                    "",
+                    icon::TABLE,
+                    Command::CountRows(tab.id),
+                ));
+            }
+            items.push(Item::command(
+                "Filter rows…",
+                "",
+                icon::SEARCH,
+                Command::FilterRows,
+            ));
+            // A row that would do nothing is worse than no row at all.
+            if !filter.is_empty() {
+                items.push(Item::command(
+                    "Clear filter",
+                    "",
+                    icon::CLOSE,
+                    Command::ClearFilter,
+                ));
+            }
+            if tab.takes_inserts(profile.config.engine()) {
+                items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+            }
+            // Only on a row dbdelve can name by its primary key -- the same
+            // condition that makes a cell of it editable.
+            if workspace.has_nameable_row(cx) {
+                items.push(Item::command(
+                    "Delete row…",
+                    "",
+                    icon::DELETE,
+                    Command::DeleteRow,
+                ));
             }
         }
         items.push(Item::command(

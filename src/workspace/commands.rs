@@ -37,7 +37,7 @@ impl Workspace {
     ) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.shown_results().cloned())
+            .and_then(|profile| profile.session.active_results().cloned())
         else {
             return;
         };
@@ -55,7 +55,7 @@ impl Workspace {
     ) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.shown_results().cloned())
+            .and_then(|profile| profile.session.active_results().cloned())
         else {
             return;
         };
@@ -69,7 +69,7 @@ impl Workspace {
 
     /// The column under the ring, which the cell menu acts on.
     fn active_column(&self, cx: &App) -> Option<usize> {
-        let results = self.profile()?.session.shown_results()?;
+        let results = self.profile()?.session.active_results()?;
         results.read(cx).delegate().active().map(|(_, col)| col)
     }
 
@@ -99,14 +99,12 @@ impl Workspace {
         self.relay_columns(cx, |grid| grid.show_all_columns());
     }
 
-    /// From a column listed in Structure: back to the rows, at that column.
     pub(crate) fn reveal_column_named(
         &mut self,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_structure(false, cx);
         let Some(col) = self
             .profile()
             .and_then(|profile| profile.session.active_results())
@@ -400,7 +398,7 @@ impl Workspace {
             Command::RenameQuery => self.rename_query(window, cx),
             Command::QueryHistory => self.open_palette(PaletteMode::History, window, cx),
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
-            Command::ShowStructure(showing) => self.show_structure(showing, cx),
+            Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
             Command::CountRows(id) => self.count_rows(id, cx),
             Command::NextPage => self.turn_page(true, cx),

@@ -5,7 +5,7 @@
 
 use super::*;
 
-use crate::db::ColumnDefinition;
+use crate::db::{ColumnDefinition, Structure};
 use crate::session::{Finished, Queue, TabKey};
 
 impl Workspace {
@@ -67,12 +67,14 @@ impl Workspace {
         let row_limit = self.settings.row_limit;
         let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
+        let structure = matches!(opened, OpenedObject::Structure { .. });
         let profile = self.profile_mut()?;
         let existing = matching_tab(
             profile
                 .session
                 .objects
                 .iter()
+                .filter(|tab| matches!(tab.body, ObjectBody::Structure { .. }) == structure)
                 .map(|tab| (tab.id, tab.schema.as_str(), tab.name.as_str(), tab.filter())),
             &schema,
             &name,
@@ -87,6 +89,10 @@ impl Workspace {
         profile.session.next_object_id += 1;
         let body = match opened {
             OpenedObject::Routine { routine, .. } => ObjectBody::Routine(routine),
+            OpenedObject::Structure { .. } => ObjectBody::Structure {
+                structure: StructureState::Loading,
+                grid: structure_grid::new_grid(window, cx),
+            },
             OpenedObject::Relation {
                 filter, filters, ..
             } => {
@@ -95,9 +101,7 @@ impl Workspace {
                     .map(|bar| filter_row(engine, id, bar, window, cx))
                     .collect();
                 ObjectBody::Relation {
-                    showing_structure: false,
                     structure: StructureState::Loading,
-                    structure_grid: structure_grid::new_grid(window, cx),
                     results: result_grid::new_grid(window, cx),
                     query: QueryState::Idle,
                     sort: Vec::new(),
@@ -142,9 +146,6 @@ impl Workspace {
         else {
             return;
         };
-        let ObjectBody::Relation { query, stale, .. } = &tab.body else {
-            return;
-        };
         // The connect's completion runs the tab in front, and switching back to
         // the profile runs it if the connect landed behind another one. Run
         // now, it would only fail on the connection still opening -- over the
@@ -155,14 +156,28 @@ impl Workspace {
         ) {
             return;
         }
+        let (schema, relation) = (tab.schema.clone(), tab.name.clone());
+        let (query, stale) = match &tab.body {
+            ObjectBody::Relation { query, stale, .. } => (query, *stale),
+            // Asked for once, and again only after a failure.
+            ObjectBody::Structure { structure, .. } => {
+                let asked = self
+                    .profile()
+                    .is_some_and(|profile| profile.session.structure_requests.contains_key(&id));
+                if !asked || matches!(structure, StructureState::Failed(_)) {
+                    self.load_structure(id, schema, relation, cx);
+                }
+                return;
+            }
+            ObjectBody::Routine(_) => return,
+        };
         // A tab restored from a snapshot is `Complete` over rows nothing has
         // checked against the server, so it gets exactly one run -- and its
         // structure, which no snapshot keeps.
-        if !*stale && !matches!(query, QueryState::Idle | QueryState::Failed(_)) {
+        if !stale && !matches!(query, QueryState::Idle | QueryState::Failed(_)) {
             return;
         }
 
-        let (schema, relation) = (tab.schema.clone(), tab.name.clone());
         self.load_structure(id, schema, relation, cx);
         self.requery_relation(id, |_, _, _, _| true, cx);
     }
@@ -555,23 +570,21 @@ impl Workspace {
                         return;
                     };
                     let mut waited = false;
-                    if let ObjectBody::Relation {
-                        structure,
-                        structure_grid,
-                        ..
-                    } = &mut tab.body
-                    {
-                        waited = matches!(structure, StructureState::Loading);
-                        *structure = match result {
-                            Ok(loaded) => {
-                                let section = structure_grid.read(cx).delegate().section();
-                                structure_grid::show(structure_grid, &loaded, section, cx);
-                                StructureState::Loaded(loaded)
+                    match &mut tab.body {
+                        ObjectBody::Relation { structure, .. } => {
+                            waited = matches!(structure, StructureState::Loading);
+                            *structure = loaded(result);
+                        }
+                        ObjectBody::Structure { structure, grid } => {
+                            if let Ok(loaded) = &result {
+                                let section = grid.read(cx).delegate().section();
+                                structure_grid::show(grid, loaded, section, cx);
                             }
-                            Err(error) => StructureState::Failed(error.message),
-                        };
-                        cx.notify();
+                            *structure = loaded(result);
+                        }
+                        ObjectBody::Routine(_) => {}
                     }
+                    cx.notify();
                     // The rows and the structure are two requests and either can
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
@@ -649,7 +662,6 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
-            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..
@@ -736,7 +748,6 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
-            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..
@@ -842,7 +853,6 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
-            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..
@@ -900,21 +910,112 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn show_structure(&mut self, showing_structure: bool, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile_mut() else {
+    /// Open a relation's rows or its structure, or bring forward the tab
+    /// already showing them. The rows open unfiltered.
+    pub(crate) fn open_relation_view(
+        &mut self,
+        schema: String,
+        name: String,
+        kind: RelationKind,
+        structure: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let opened = match structure {
+            true => OpenedObject::Structure { schema, name, kind },
+            false => OpenedObject::Relation {
+                schema,
+                name,
+                kind,
+                filter: String::new(),
+                filters: Vec::new(),
+            },
+        };
+        let id = self.open_object(opened, window, cx)?;
+        self.activate_tab(Tab::Object(id), window, cx);
+        self.remember_profiles(cx);
+        Some(id)
+    }
+
+    /// The Data | Structure toggle: the other view of the relation in front.
+    pub(crate) fn show_structure(
+        &mut self,
+        structure: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+        else {
             return;
         };
-        let Tab::Object(id) = profile.session.active else {
+        let ObjectKind::Relation(kind) = tab.kind else {
             return;
         };
-        if let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
-            && let ObjectBody::Relation {
-                showing_structure: showing,
-                ..
-            } = &mut tab.body
-        {
-            *showing = showing_structure;
-            cx.notify();
+        if matches!(tab.body, ObjectBody::Structure { .. }) == structure {
+            return;
+        }
+        let (schema, name) = (tab.schema.clone(), tab.name.clone());
+        self.open_relation_view(schema, name, kind, structure, window, cx);
+    }
+
+    /// From a structure tab's Columns section: the relation's rows, at that
+    /// column. Rows still on their way are revealed at once they land.
+    pub(crate) fn reveal_in_data(
+        &mut self,
+        column: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_structure(false, window, cx);
+        let ready = self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .active_results()
+                .is_some_and(|results| results.read(cx).delegate().column_named(&column).is_some())
+        });
+        match ready {
+            true => self.reveal_column_named(&column, window, cx),
+            false => {
+                self.reveal_on_rows =
+                    self.profile()
+                        .and_then(|profile| match profile.session.active {
+                            Tab::Object(id) => Some((id, column)),
+                            Tab::Query(_) => None,
+                        });
+            }
+        }
+    }
+
+    /// `reveal_on_rows`, once its rows are in: here rather than where they
+    /// land, which has no window to move focus in.
+    pub(crate) fn reveal_landed_column(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.reveal_on_rows else {
+            return;
+        };
+        let waiting = self.profile().is_some_and(|profile| {
+            profile.session.active == Tab::Object(*id)
+                && matches!(
+                    profile.session.active_query(),
+                    Some(QueryState::Idle | QueryState::Running { .. })
+                )
+        });
+        if waiting {
+            return;
+        }
+        let Some((id, column)) = self.reveal_on_rows.take() else {
+            return;
+        };
+        let landed = self.profile().is_some_and(|profile| {
+            profile.session.active == Tab::Object(id)
+                && matches!(
+                    profile.session.active_query(),
+                    Some(QueryState::Complete { .. })
+                )
+        });
+        if landed {
+            self.reveal_column_named(&column, window, cx);
         }
     }
 
@@ -927,7 +1028,7 @@ impl Workspace {
         else {
             return;
         };
-        let ObjectBody::Relation {
+        let ObjectBody::Structure {
             structure: StructureState::Loaded(structure),
             ..
         } = &tab.body
@@ -957,13 +1058,12 @@ impl Workspace {
         else {
             return;
         };
-        if let ObjectBody::Relation {
+        if let ObjectBody::Structure {
             structure: StructureState::Loaded(structure),
-            structure_grid,
-            ..
+            grid,
         } = &tab.body
         {
-            structure_grid::show(structure_grid, structure, section, cx);
+            structure_grid::show(grid, structure, section, cx);
             cx.notify();
         }
     }
@@ -1063,7 +1163,6 @@ impl Workspace {
             Tab::Object(id) => {
                 if let Some(object) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
                     && let ObjectBody::Relation {
-                        showing_structure,
                         query,
                         sort,
                         filter,
@@ -1072,7 +1171,6 @@ impl Workspace {
                         ..
                     } = &mut object.body
                 {
-                    *showing_structure = snapshot.showing_structure;
                     *query = restored_state(&snapshot);
                     // The sort the snapshot's rows are actually in, so the
                     // refresh asks for the same order rather than whatever the
@@ -1334,6 +1432,17 @@ fn restorable(
                 ),
                 _ => still_pending.push(stored.clone()),
             }
+        } else if stored.structure {
+            opened.push((
+                OpenedObject::Structure {
+                    schema: stored.schema.clone(),
+                    name: stored.name.clone(),
+                    kind: catalog
+                        .and_then(|catalog| relation_kind(catalog, &stored.schema, &stored.name))
+                        .unwrap_or(stored.kind),
+                },
+                stored.active,
+            ));
         } else {
             let (filter, filters) = restored_filter(engine, stored);
             opened.push((
@@ -1405,6 +1514,13 @@ fn columns_with_defaults(engine: Engine, columns: &[ColumnDefinition]) -> Vec<St
         .collect()
 }
 
+fn loaded(result: Result<Structure, DbError>) -> StructureState {
+    match result {
+        Ok(structure) => StructureState::Loaded(structure),
+        Err(error) => StructureState::Failed(error.message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1416,6 +1532,7 @@ mod tests {
             schema: "public".into(),
             name: name.into(),
             routine,
+            structure: false,
             kind: RelationKind::Table,
             filter: String::new(),
             filter_engine: None,
@@ -1466,6 +1583,22 @@ mod tests {
             restorable(Engine::Postgres, &catalog_with(Routines::Loaded), &pending);
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_structure_tab_comes_back_as_a_structure_tab() {
+        let pending = [
+            store::StoredObject {
+                structure: true,
+                ..stored("accounts", false)
+            },
+            stored("accounts", false),
+        ];
+
+        let (opened, _) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+
+        assert!(matches!(opened[0].0, OpenedObject::Structure { .. }));
+        assert!(matches!(opened[1].0, OpenedObject::Relation { .. }));
     }
 
     #[test]

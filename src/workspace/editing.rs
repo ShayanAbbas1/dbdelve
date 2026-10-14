@@ -47,9 +47,7 @@ impl Workspace {
             return;
         }
         // The columns are the form: without them there is nothing to draw, and
-        // guessing at them would be inventing a table. Checked before
-        // `show_structure` flips the tab, so a refused New row leaves
-        // Structure showing rather than switching to Data for nothing.
+        // guessing at them would be inventing a table.
         let StructureState::Loaded(structure) = structure else {
             self.note(
                 "DBDelve has not read this relation's columns yet.".into(),
@@ -63,10 +61,6 @@ impl Workspace {
             .iter()
             .map(|column| (column.name.clone(), column.data_type.clone()))
             .collect();
-        // From the structure view the form belongs to the data, so it goes
-        // back there first -- now that every refusal above is past.
-        self.show_structure(false, cx);
-
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
             let input = cx.new(|cx| InputState::new(window, cx));
@@ -694,7 +688,7 @@ impl Workspace {
         if profile.session.apply_review.is_some() {
             return;
         }
-        let Some(results) = profile.session.shown_results().cloned() else {
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
         // The grid's own active cell, not the library's selection: its selected
@@ -805,7 +799,7 @@ impl Workspace {
         if profile.session.apply_review.is_some() {
             return;
         }
-        let Some(results) = profile.session.shown_results().cloned() else {
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
         let Some((row, col)) = results.read(cx).delegate().active() else {
@@ -1000,7 +994,7 @@ impl Workspace {
             );
             return;
         }
-        let Some(results) = profile.session.shown_results() else {
+        let Some(results) = profile.session.active_results() else {
             return;
         };
         let grid = results.read(cx);
@@ -1072,7 +1066,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let Some(results) = profile.session.shown_results() else {
+        let Some(results) = profile.session.active_results() else {
             return;
         };
         let Some(value) = results
@@ -1091,7 +1085,7 @@ impl Workspace {
     pub(crate) fn copy_row(&mut self, _: &CopyRow, _: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.shown_results())
+            .and_then(|profile| profile.session.active_results())
         else {
             return;
         };
@@ -1114,7 +1108,7 @@ impl Workspace {
     pub(crate) fn copy_rows(&mut self, action: &CopyRows, _: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.shown_results())
+            .and_then(|profile| profile.session.active_results())
         else {
             return;
         };

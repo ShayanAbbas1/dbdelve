@@ -569,7 +569,6 @@ impl ResultGrid {
             last_query: None,
             limit: None,
             filter: String::new(),
-            showing_structure: false,
             // A snapshot that is written back unchanged keeps its own age: it
             // is still the rows it was, and restamping it would make every
             // restart claim the cache was just taken.
@@ -3651,7 +3650,6 @@ mod tests {
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),

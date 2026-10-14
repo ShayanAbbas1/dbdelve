@@ -379,7 +379,7 @@ impl TableDelegate for StructureGrid {
                         // Or the cell underneath takes the click as a selection.
                         cx.stop_propagation();
                         _ = reveal.update(cx, |workspace, cx| {
-                            workspace.reveal_column_named(&name, window, cx);
+                            workspace.reveal_in_data(name.to_string(), window, cx);
                         });
                     })
             }))

@@ -576,10 +576,31 @@ fn render_object(
     // Scopes this tab's scroll state to its own id -- see the same line in
     // `render_query_surface`.
     let scope = Tab::Object(tab.id).scroll_scope(profile_id);
+    if let ObjectBody::Structure { structure, grid } = &tab.body {
+        // No New row here: the form belongs to the rows, in the other tab.
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                control_row()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(div().flex_1())
+                    .child(relation_controls(true, false, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .bg(t.data_glass())
+                    .child(render_structure(structure, grid, &scope, cx)),
+            )
+            .into_any_element();
+    }
     let ObjectBody::Relation {
-        showing_structure,
-        structure,
-        structure_grid,
         results,
         query,
         filters,
@@ -593,30 +614,6 @@ fn render_object(
     };
 
     let takes_inserts = tab.takes_inserts(engine);
-    if *showing_structure {
-        return div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                control_row()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(div().flex_1())
-                    .child(relation_controls(true, takes_inserts, cx)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .bg(t.data_glass())
-                    .child(render_structure(structure, structure_grid, &scope, cx)),
-            )
-            .into_any_element();
-    }
-
     let controls = relation_controls(false, takes_inserts, cx).into_any_element();
     div()
         .size_full()
@@ -2031,7 +2028,6 @@ fn relation_preview(session: &Session) -> Option<(Option<usize>, usize, bool)> {
             limit,
             offset,
             query,
-            showing_structure: false,
             ..
         } => Some((
             *limit,
@@ -2554,7 +2550,13 @@ fn render_tab_strip(
             .id(("object-tab", id as usize))
             .group(group.clone())
             .px(px(layout::SPACE_SM))
-            .child(row_icon(t, object_icon(object.kind)))
+            .child(row_icon(
+                t,
+                match object.body {
+                    ObjectBody::Structure { .. } => icon::STRUCTURE,
+                    _ => object_icon(object.kind),
+                },
+            ))
             .child(name_label(object.name.clone()))
             // One relation can have as many tabs as it has filters (spec §6.3),
             // so a strip that labelled them all `customers` would cost a click
@@ -2895,10 +2897,11 @@ fn render_query_toolbar(
         .into_any_element()
 }
 
-/// A relation's two views and its New row, on the right of whatever bar sits
-/// over the view: the filters' last line, or a bar of its own over Structure.
+/// A relation's two views, each a tab of its own, and its New row: on the right
+/// of whatever bar sits over the view, the filters' last line or a structure
+/// tab's bar of its own.
 fn relation_controls(
-    showing_structure: bool,
+    structure: bool,
     takes_inserts: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -2915,20 +2918,18 @@ fn relation_controls(
                 .child(preview_tab(
                     "Data",
                     icon::TABLE,
-                    !showing_structure,
+                    !structure,
                     Command::ShowStructure(false),
                     cx,
                 ))
                 .child(preview_tab(
                     "Structure",
                     icon::STRUCTURE,
-                    showing_structure,
+                    structure,
                     Command::ShowStructure(true),
                     cx,
                 )),
         )
-        // On the structure view too: there it takes you back to the data
-        // before opening the form.
         .children(takes_inserts.then(|| {
             button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
                 |_, window, cx| {

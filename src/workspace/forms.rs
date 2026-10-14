@@ -2451,7 +2451,22 @@ impl Workspace {
                     };
                     let ddl_workspace = menu_workspace.clone();
                     let ddl_names = (schema.clone(), relation.clone());
+                    let open = |label: &'static str, structure: bool| {
+                        let workspace = menu_workspace.clone();
+                        let (schema, relation) = (schema.clone(), relation.clone());
+                        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            let (schema, relation) = (schema.clone(), relation.clone());
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.open_relation_view(
+                                    schema, relation, kind, structure, window, cx,
+                                );
+                            });
+                        })
+                    };
                     let menu = menu
+                        .item(open("Open Data", false))
+                        .item(open("Open Structure", true))
+                        .separator()
                         .item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
                             let (schema, relation) = ddl_names.clone();
                             _ = ddl_workspace.update(cx, |workspace, cx| {

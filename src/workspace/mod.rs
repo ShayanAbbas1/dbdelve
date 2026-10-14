@@ -224,6 +224,9 @@ pub(crate) struct Workspace {
     /// The welcome surface's half of `editor_needs_focus`: set when whatever
     /// held focus over it has gone, applied on the next frame.
     pub(crate) welcome_needs_focus: bool,
+    /// A column a structure tab asked to see, waiting for its data tab's rows:
+    /// the tab's id and the column's name.
+    pub(crate) reveal_on_rows: Option<(u64, String)>,
     /// Whether `store::load_profiles` failed and could not move the file it
     /// failed on aside. Set once at startup and never cleared: the file is
     /// still sitting there, and a session that never saw it must not be the
@@ -332,6 +335,7 @@ impl Workspace {
             welcome_notice: None,
             project_name_error: None,
             welcome_needs_focus: true,
+            reveal_on_rows: None,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
@@ -894,6 +898,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
         self.settle_sidebar(window, cx);
+        self.reveal_landed_column(window, cx);
         self.row_panel.on_screen.set(false);
         self.row_panel.searched.set(false);
         // Every way the switcher closes ends here, so this is the one place
@@ -974,10 +979,12 @@ impl Render for Workspace {
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
                     // A routine's tab is read: nothing in it takes a
-                    // keystroke. The window still has to hold focus, or the
+                    // keystroke; a structure tab's grid takes focus on a click. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
+                    Some(ObjectBody::Routine(_) | ObjectBody::Structure { .. }) | None => {
+                        Focus::Window
+                    }
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -1170,7 +1177,6 @@ impl Render for Workspace {
                     query,
                     limit,
                     offset,
-                    showing_structure: false,
                     ..
                 } => Some((tab, count, filter, query, *limit, *offset)),
                 _ => None,
@@ -1329,25 +1335,12 @@ impl Render for Workspace {
         let newer_release = self.newer_release.clone();
         let pending_count = self.pending_edit_count(cx);
         let has_pending = pending_count > 0;
-        let grid_shown = !profile.session.active_object().is_some_and(|tab| {
-            matches!(
-                tab.body,
-                ObjectBody::Relation {
-                    showing_structure: true,
-                    ..
-                }
-            )
-        });
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
-        // In place of the rows' copy and export, behind Structure: the
+        // A structure tab's in place of the rows' copy and export: the
         // relation's own definition, and a statement to fill it with.
         let structure_copies = profile.session.active_object().and_then(|tab| {
-            let ObjectBody::Relation {
-                showing_structure: true,
-                structure,
-                ..
-            } = &tab.body
+            let ObjectBody::Structure { structure, .. } = &tab.body
             else {
                 return None;
             };
@@ -1569,11 +1562,6 @@ impl Render for Workspace {
                                     "{pending_count} pending {}",
                                     if pending_count == 1 { "edit" } else { "edits" }
                                 ));
-                            // Behind Structure the grid is not drawn, and a
-                            // walk over it would move a ring nobody sees.
-                            if !grid_shown {
-                                return label.into_any_element();
-                            }
                             div()
                                 .min_w_0()
                                 .flex()
