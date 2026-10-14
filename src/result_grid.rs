@@ -587,6 +587,7 @@ impl ResultGrid {
                 .iter()
                 .map(|column| column.data_type.clone())
                 .collect(),
+            plan: None,
         }
     }
 
@@ -3656,6 +3657,7 @@ mod tests {
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
             },
             Mode::ReadWrite,
         );

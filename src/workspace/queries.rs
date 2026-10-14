@@ -2035,7 +2035,8 @@ impl Workspace {
                                     .map(|column| column.name.clone())
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
-                                (true, false, Some(plan), Vec::new(), result.notice)
+                                let answer = (plan, columns, result.rows);
+                                (true, false, Some(answer), Vec::new(), result.notice)
                             }
                             Ok(mut result) => {
                                 // Rows that streamed in were scrolled through as
@@ -2103,7 +2104,11 @@ impl Workspace {
                                         .iter()
                                         .map(|column| column.name.clone())
                                         .collect();
-                                    explain::parse(&columns, &result.rows)
+                                    (
+                                        explain::parse(&columns, &result.rows),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    )
                                 });
                                 *state = QueryState::Complete {
                                     rows: result.total_rows(),
@@ -2221,7 +2226,7 @@ impl Workspace {
                         // Shown as soon as it lands: asking for a plan is asking
                         // to read one, so the pane turns to it rather than
                         // leaving the answer behind a tab the user has to find.
-                        if let Some(plan) = plan
+                        if let Some((plan, columns, rows)) = plan
                             && let Some(mode) = explaining
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
@@ -2231,6 +2236,8 @@ impl Workspace {
                                 mode,
                                 sql: explained.unwrap_or_default(),
                                 typed: typed.is_some(),
+                                columns,
+                                rows,
                             });
                             tab.showing_plan = true;
                         }
