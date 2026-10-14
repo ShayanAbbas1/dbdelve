@@ -1092,7 +1092,17 @@ impl ResultGrid {
                     // enough to need the help.
                     value: cell.map(|value| {
                         let value = json.as_deref().unwrap_or(value);
-                        clip_to(value, FIELD_DISPLAY_LIMIT).into()
+                        let clipped = clip_to(value, FIELD_DISPLAY_LIMIT);
+                        // Whole lines only, so the highlighter never sees a
+                        // document cut mid-string or mid-number.
+                        match (json.is_some(), clipped.strip_suffix('…')) {
+                            (true, Some(body)) => match body.rfind('\n') {
+                                Some(newline) => format!("{}…", &body[..=newline]),
+                                None => clipped,
+                            },
+                            _ => clipped,
+                        }
+                        .into()
                     }),
                     json: json.is_some(),
                 }
@@ -2098,24 +2108,23 @@ fn clip(value: &str) -> String {
     flattened
 }
 
-/// A JSON object or array laid out over indented lines, or the value unchanged
-/// where it is not one.
+/// A JSON object or array laid out over indented lines, `None` where the value
+/// is not one.
 ///
 /// Parsed rather than taken from the column's type. SQLite has no JSON type to
 /// report — a document there lives in whatever `text` column was declared for
 /// it — so the type name answers this question for two engines out of three,
 /// and the value itself answers it for all of them.
 ///
-/// `None` where it is not a document, so the caller keeps the original text.
+/// The caller keeps the original text on `None`.
 ///
 /// Objects and arrays only. A bare number, string or `true` is also valid JSON,
 /// and reformatting one produces the same characters back.
 ///
-/// ponytail: runs on every repaint of the inspector rather than caching, which
-/// the leading-byte check is what makes affordable — it costs one comparison
-/// for a UUID or a timestamp and only reaches the parser for a value already
-/// shaped like a document. Cache per cell if a wide row of large documents ever
-/// makes the panel feel slow.
+/// ponytail: runs on every repaint of the inspector rather than caching. The
+/// leading-byte check keeps a UUID or a timestamp to one comparison, but a value
+/// shaped like a document pays for the parse and the pretty-print both. Cache
+/// per cell if a wide row of large documents ever makes the panel feel slow.
 fn indented_json(value: &str) -> Option<String> {
     let trimmed = value.trim_start();
     if !trimmed.starts_with(['{', '[']) {
@@ -4977,8 +4986,8 @@ mod tests {
             assert_eq!(indented_json(scalar), None);
         }
         // Shaped like a document without being one -- a truncated value, or
-        // prose that opens with a brace. Handed back as it arrived rather than
-        // swallowed by a parse that failed.
+        // prose that opens with a brace. Not a document, so `None`, and `fields`
+        // keeps the original text.
         for other in ["{not json at all", "[1, 2", "an ordinary sentence", ""] {
             assert_eq!(indented_json(other), None);
         }
@@ -4989,6 +4998,23 @@ mod tests {
         let grid = grid_of(&[Some(r#"{"a":1}"#), Some("[not json")]);
         assert!(grid.fields(0)[0].json);
         assert!(!grid.fields(1)[0].json);
+        assert_eq!(grid.fields(1)[0].value.as_deref(), Some("[not json"));
+    }
+
+    #[test]
+    fn a_clipped_document_ends_after_a_complete_line() {
+        let document = format!(
+            "[{}]",
+            (0..2_000)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let grid = grid_of(&[Some(&document)]);
+        let shown = grid.fields(0).remove(0).value.unwrap();
+
+        assert!(shown.len() < document.len());
+        assert!(shown.ends_with(",\n…"), "{}", &shown[shown.len() - 20..]);
     }
 
     #[test]
