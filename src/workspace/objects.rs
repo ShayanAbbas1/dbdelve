@@ -87,13 +87,43 @@ impl Workspace {
 
         let id = profile.session.next_object_id;
         profile.session.next_object_id += 1;
+        // A data tab for the relation has already read this definition, and
+        // reading it again is several statements -- on Snowflake, a warehouse
+        // woken -- for the same answer. Recorded as asked, so `load_relation`
+        // takes it as this tab's own; Refresh still asks, and a reconnect
+        // forgets it.
+        let known = structure
+            .then(|| {
+                profile
+                    .session
+                    .objects
+                    .iter()
+                    .find_map(|tab| match &tab.body {
+                        ObjectBody::Relation {
+                            structure: StructureState::Loaded(loaded),
+                            ..
+                        } if tab.schema == schema && tab.name == name => Some(loaded.clone()),
+                        _ => None,
+                    })
+            })
+            .flatten();
+        if known.is_some() {
+            profile.session.structure_requests.insert(id, 0);
+        }
         let body = match opened {
             OpenedObject::Routine { routine, .. } => ObjectBody::Routine(routine),
-            OpenedObject::Structure { .. } => ObjectBody::Structure {
-                structure: StructureState::Loading,
-                grid: structure_grid::new_grid(window, cx),
-                origin: None,
-            },
+            OpenedObject::Structure { .. } => {
+                let grid = structure_grid::new_grid(window, cx);
+                if let Some(loaded) = &known {
+                    let section = grid.read(cx).delegate().section();
+                    structure_grid::show(&grid, loaded, section, cx);
+                }
+                ObjectBody::Structure {
+                    structure: known.map_or(StructureState::Loading, StructureState::Loaded),
+                    grid,
+                    origin: None,
+                }
+            }
             OpenedObject::Relation {
                 filter, filters, ..
             } => {
