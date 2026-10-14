@@ -422,7 +422,7 @@ fn render_plan(
                                     t.success.into(),
                                 )
                             }))
-                            .children(node.misestimate().map(|factor| {
+                            .children(plan.misestimate(index).map(|factor| {
                                 div().text_color(t.danger).child(format!(
                                     "×{} misestimate",
                                     group_thousands(factor.round() as u64)

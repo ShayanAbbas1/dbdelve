@@ -498,6 +498,29 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
     }
 }
 
+impl Plan {
+    /// The node's `misestimate`, unless it only ran short because an ancestor
+    /// stopped pulling rows. Estimates are for running to completion, so a
+    /// scan under a `Limit` or a semi/anti join's inner side reads as a
+    /// huge overestimate on a healthy plan.
+    pub fn misestimate(&self, index: usize) -> Option<f64> {
+        let node = &self.nodes[index];
+        let factor = node.misestimate()?;
+        let under = node.actual?.rows < node.estimated?.rows as f64;
+        let mut depth = node.depth;
+        let stopped = self.nodes[..index].iter().rev().any(|ancestor| {
+            let is_ancestor = ancestor.depth < depth;
+            depth = depth.min(ancestor.depth);
+            let label = ancestor.label.to_lowercase();
+            is_ancestor
+                && (label.starts_with("limit")
+                    || label.contains("semi join")
+                    || label.contains("anti join"))
+        });
+        (!(under && stopped)).then_some(factor)
+    }
+}
+
 impl PlanNode {
     /// How many times over or under the planner's row count was, when it was
     /// off by ten or more. Postgres reports both per loop, so they compare
@@ -1092,6 +1115,65 @@ Planning Time: broken"#,
         assert_eq!(node(0, 20.0).misestimate(), Some(20.0));
         assert_eq!(node(10, 99.0).misestimate(), None);
         assert_eq!(PlanNode::default().misestimate(), None);
+    }
+
+    #[test]
+    fn a_parent_that_stops_early_explains_a_short_scan() {
+        let node = |label: &str, depth: usize, estimated: u64, actual: f64| PlanNode {
+            label: label.into(),
+            depth,
+            estimated: Some(Estimated {
+                startup_cost: 0.0,
+                total_cost: 1.0,
+                rows: estimated,
+                width: 0,
+            }),
+            actual: Some(Actual {
+                startup_ms: 0.0,
+                total_ms: 1.0,
+                rows: actual,
+                loops: 1.0,
+            }),
+            ..PlanNode::default()
+        };
+        let plan = |nodes| Plan {
+            nodes,
+            ..Plan::default()
+        };
+        let limit = plan(vec![
+            node("Limit", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(limit.misestimate(1), None);
+        let mysql = plan(vec![
+            node("Limit: 10 row(s)", 0, 10, 10.0),
+            node("Table scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(mysql.misestimate(1), None);
+        let semi = plan(vec![
+            node("Nested Loop Semi Join", 0, 5, 5.0),
+            node("Seq Scan on a", 1, 5, 5.0),
+            node("Hash Anti Join", 1, 5, 5.0),
+            node("Index Scan on b", 2, 100_000, 1.0),
+        ]);
+        assert_eq!(semi.misestimate(3), None);
+        let overshoot = plan(vec![
+            node("Limit", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 10, 5000.0),
+        ]);
+        assert_eq!(overshoot.misestimate(1), Some(500.0));
+        let sibling = plan(vec![
+            node("Append", 0, 1, 1.0),
+            node("Limit", 1, 10, 10.0),
+            node("Seq Scan on a", 2, 10, 10.0),
+            node("Seq Scan on b", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(sibling.misestimate(3), Some(100_000.0));
+        let plain = plan(vec![
+            node("Sort", 0, 10, 10.0),
+            node("Seq Scan on big", 1, 1_000_000, 10.0),
+        ]);
+        assert_eq!(plain.misestimate(1), Some(100_000.0));
     }
 
     #[test]
