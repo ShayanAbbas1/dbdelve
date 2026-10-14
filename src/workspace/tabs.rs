@@ -61,25 +61,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The keystroke for the pencil, which it can reach only where the pencil
-    /// is drawn: a row with something in it to edit.
+    /// The keystroke for the pencil. It turns Edit on only where the pencil
+    /// is drawn, a row with something in it to edit, but always turns it off,
+    /// so a tab whose rows stopped being editable is not left stuck in it.
     pub(crate) fn toggle_row_edit(
         &mut self,
         _: &ToggleRowEdit,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let editing = self
+            .active_row_panel()
+            .is_some_and(|(_, editing, _)| *editing);
         let editable = self
             .profile()
             .and_then(|profile| profile.session.active_results())
             .is_some_and(|results| {
                 let table = results.read(cx);
-                table.selected_row().is_some_and(|row| {
-                    let grid = table.delegate();
-                    (0..grid.columns().len()).any(|col| grid.editable(row, col))
-                })
+                table
+                    .selected_row()
+                    .is_some_and(|row| table.delegate().row_editable(row))
             });
-        if self.row_panel.on_screen.get() && editable {
+        if self.row_panel.on_screen.get() && (editing || editable) {
             self.toggle_row_panel_edit(cx);
         }
     }
@@ -128,26 +131,25 @@ impl Workspace {
                 Some((results, row))
             })
             .flatten();
-        if self
-            .row_panel
-            .inputs
-            .as_ref()
-            .map(|inputs| (inputs.grid, inputs.row))
-            != target
+        if self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            !target
                 .as_ref()
-                .map(|(results, row)| (results.entity_id(), *row))
-        {
+                .is_some_and(|(results, row)| inputs.name(results, *row, cx))
+        }) {
             self.drop_row_inputs(window, cx);
         }
+        self.row_panel.typing = None;
         let Some((results, row)) = target else {
             return;
         };
+        let rows = results.read(cx).delegate().rows_id();
         let inputs = self
             .row_panel
             .inputs
             .get_or_insert_with(|| views::RowInputs {
-                grid: results.entity_id(),
+                grid: results.clone(),
                 row,
+                rows,
                 fields: Vec::new(),
             });
         // Only the cells that need an input made or refilled are copied out,
@@ -172,12 +174,27 @@ impl Workspace {
         for (col, seed) in changed {
             let slot = &mut inputs.fields[col];
             match (slot.as_mut(), seed) {
-                (_, None) => *slot = None,
-                (Some(field), Some(_)) if field.input.focus_handle(cx).is_focused(window) => {}
+                (_, None) => {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|field| field.input.focus_handle(cx).is_focused(window))
+                    {
+                        refocus_front_later(window, cx);
+                    }
+                    *slot = None;
+                }
                 (Some(field), Some(seed)) => {
-                    field
-                        .input
-                        .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
+                    // Text typed and not staged yet is kept over a change made
+                    // elsewhere; anything else follows the cell.
+                    let typed = field.input.read(cx).value();
+                    if typed != field.seed && typed != seed {
+                        continue;
+                    }
+                    if typed != seed {
+                        field
+                            .input
+                            .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
+                    }
                     field.seed = seed;
                 }
                 (None, Some(seed)) => {
@@ -201,6 +218,11 @@ impl Workspace {
                 }
             }
         }
+        self.row_panel.typing = inputs.fields.iter().position(|field| {
+            field
+                .as_ref()
+                .is_some_and(|field| field.input.focus_handle(cx).is_focused(window))
+        });
         if std::mem::take(&mut self.row_panel.focus_input) {
             let active = results
                 .read(cx)
@@ -256,12 +278,24 @@ impl Workspace {
             .iter()
             .any(|input| input.focus_handle(cx).is_focused(window))
         {
-            cx.defer_in(window, |workspace, _, cx| {
-                workspace.refocus_front();
-                cx.notify();
-            });
+            refocus_front_later(window, cx);
         }
         self.row_panel.inputs = None;
+    }
+
+    /// Edit mode's input on a cell of the grid in front, if one is built.
+    pub(crate) fn row_input(
+        &self,
+        (row, col): (usize, usize),
+        cx: &App,
+    ) -> Option<Entity<gpui_component::input::TextareaState>> {
+        let results = self.profile()?.session.active_results()?;
+        let inputs = self
+            .row_panel
+            .inputs
+            .as_ref()
+            .filter(|inputs| inputs.name(results, row, cx))?;
+        Some(inputs.fields.get(col)?.as_ref()?.input.clone())
     }
 
     /// Whether one of Edit mode's inputs has the keyboard.
@@ -788,4 +822,14 @@ impl Workspace {
         }
         cancelled
     }
+}
+
+/// Hand the keyboard back to the tab in front on the next frame, for an input
+/// taken away while it had it: an unmounted input keeps the window's focus,
+/// and with it every keybinding.
+fn refocus_front_later(window: &mut Window, cx: &mut Context<Workspace>) {
+    cx.defer_in(window, |workspace, _, cx| {
+        workspace.refocus_front();
+        cx.notify();
+    });
 }

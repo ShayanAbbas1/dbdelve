@@ -325,6 +325,7 @@ impl Workspace {
                 searched: Default::default(),
                 inputs: None,
                 focus_input: false,
+                typing: None,
                 revealed: Default::default(),
             },
             plan_copied: false,

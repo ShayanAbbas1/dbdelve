@@ -734,10 +734,7 @@ impl Workspace {
         // would read as untraceable too.
         let (traced, snapshot) = {
             let grid = results.read(cx).delegate();
-            (
-                (0..grid.columns().len()).any(|col| grid.editable(row, col)),
-                grid.captured().is_some(),
-            )
+            (grid.row_editable(row), grid.captured().is_some())
         };
         // Checked before the snapshot: running a write again is not the way
         // back to editable rows.
@@ -887,24 +884,23 @@ impl Workspace {
         }) else {
             return;
         };
-        let (grid, row) = (inputs.grid, inputs.row);
+        let (grid, row, rows) = (inputs.grid.clone(), inputs.row, inputs.rows);
         let text = input.read(cx).value();
-        if text == seed {
+        // Rows replaced or reordered since: another record is at `row` now,
+        // and the text goes the way the grid's own open input does.
+        if text == seed || grid.read(cx).delegate().rows_id() != rows {
             return;
         }
-        // A blur from a click on another tab arrives with that tab in front,
-        // and every gate below reads the tab in front.
-        // ponytail: the text is dropped then; carrying the tab through the
-        // gates would keep it.
-        if self
+        let in_front = self
             .profile()
             .and_then(|profile| profile.session.active_results())
-            .map(|results| results.entity_id())
-            != Some(grid)
-        {
-            return;
-        }
-        if self.stage_cell(row, col, NewValue::Value(text.clone()), cx)
+            == Some(&grid);
+        let value = NewValue::Value(text.clone());
+        let staged = match in_front {
+            true => self.stage_cell(row, col, value, cx),
+            false => self.stage_behind(&grid, row, col, value, cx),
+        };
+        if staged
             && let Some(field) = self
                 .row_panel
                 .inputs
@@ -913,6 +909,37 @@ impl Workspace {
         {
             field.seed = text;
         }
+    }
+
+    /// Stage typed text on a grid no longer in front, which is where a blur
+    /// from switching tabs lands. `stage_cell`'s gates read the tab in front,
+    /// so this asks the grid itself, and leaves text that would need the
+    /// stale-rows prompt unstaged rather than raise it over another tab.
+    fn stage_behind(
+        &mut self,
+        grid: &Entity<gpui_component::table::TableState<ResultGrid>>,
+        row: usize,
+        col: usize,
+        value: NewValue,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let reviewing = self
+            .profile()
+            .is_none_or(|profile| profile.session.apply_review.is_some());
+        let staged = !reviewing
+            && grid.update(cx, |table, cx| {
+                let staged =
+                    !table.delegate().unconfirmed() && table.delegate_mut().stage(row, col, value);
+                cx.notify();
+                staged
+            });
+        if !staged {
+            self.note(
+                "A value typed in the row panel was not staged before switching tabs.".into(),
+                cx,
+            );
+        }
+        staged
     }
 
     /// A row panel chip. The input beside it is refilled even while it has
@@ -942,7 +969,7 @@ impl Workspace {
             .row_panel
             .inputs
             .as_mut()
-            .filter(|inputs| inputs.grid == results.entity_id() && inputs.row == row)
+            .filter(|inputs| inputs.name(&results, row, cx))
             .and_then(|inputs| inputs.fields.get_mut(col)?.as_mut())
         {
             field
@@ -1055,7 +1082,16 @@ impl Workspace {
         }
         match resume {
             StaleResume::Open => self.edit_cell(&EditCell, window, cx),
-            StaleResume::Stage(cell, value) => self.stage_and_refocus(cell, value, window, cx),
+            // Back to the panel input the value came from, if it did, so
+            // stepping through the row carries on from there.
+            StaleResume::Stage(cell, value) => match self.row_input(cell, cx) {
+                Some(input) => {
+                    if self.stage_cell(cell.0, cell.1, value, cx) {
+                        input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }
+                None => self.stage_and_refocus(cell, value, window, cx),
+            },
             StaleResume::Delete => self.delete_row(&DeleteRow, window, cx),
         }
         cx.notify();

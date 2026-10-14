@@ -90,6 +90,10 @@ pub struct RowPanel {
     /// Put the keyboard in an input once Edit mode has built them, so turning
     /// it on from the keyboard leaves the hands there.
     pub focus_input: bool,
+    /// The column whose input has the keyboard, kept through the filter so a
+    /// value typed out of the filter's reach does not take the focused input
+    /// off screen with it.
+    pub typing: Option<usize>,
     /// The tab and grid cell the panel last scrolled to, so it scrolls once
     /// per click or arrow key and then leaves the panel to the wheel. Cleared
     /// whenever the panel is folded or off screen, so reopening it scrolls
@@ -100,10 +104,29 @@ pub struct RowPanel {
 /// One row's inputs, rebuilt whenever the grid or the row they were made for
 /// is no longer the one selected.
 pub struct RowInputs {
-    pub grid: gpui::EntityId,
+    pub grid: Entity<TableState<ResultGrid>>,
     pub row: usize,
+    /// The grid's `rows_id` when these were built: a refresh or a sort puts
+    /// another record at `row`, and text typed against the old one must not
+    /// land on it.
+    pub rows: u64,
     /// One slot per column, empty where the cell cannot be edited.
     pub fields: Vec<Option<RowInput>>,
+}
+
+impl RowInputs {
+    /// Whether these are still the inputs for `row` of `results` as it holds
+    /// its rows now.
+    pub fn name(
+        &self,
+        results: &Entity<TableState<ResultGrid>>,
+        row: usize,
+        cx: &gpui::App,
+    ) -> bool {
+        self.grid == *results
+            && self.row == row
+            && self.rows == results.read(cx).delegate().rows_id()
+    }
 }
 
 pub struct RowInput {
@@ -1696,13 +1719,14 @@ fn render_row_inspector(
     let t = *theme(cx);
     let grid = fonts(cx).grid.clone();
 
-    let (row_ix, rows, fields, active, chips) = {
+    let (row_ix, rows, fields, active, row_editable, chips) = {
         let table = results.read(cx);
         let row_ix = table.selected_row()?;
         let delegate = table.delegate();
         // What each editable field offers to stage besides typed text, gated
         // as the cell menu is; `None` for a field Edit mode leaves as text.
         let chips: Vec<Option<Vec<(&'static str, NewValue)>>> = (0..delegate.columns().len())
+            .filter(|_| editing)
             .map(|col| {
                 delegate.editable(row_ix, col).then(|| {
                     [
@@ -1725,13 +1749,14 @@ fn render_row_inspector(
             delegate.rows_count(cx),
             delegate.fields(row_ix),
             delegate.active(),
+            delegate.row_editable(row_ix),
             chips,
         )
     };
     let inputs = row_panel
         .inputs
         .as_ref()
-        .filter(|inputs| editing && inputs.grid == results.entity_id() && inputs.row == row_ix);
+        .filter(|inputs| editing && inputs.name(results, row_ix, cx));
     // A selection can outlive the rows it was made against.
     if fields.is_empty() {
         return None;
@@ -1769,10 +1794,11 @@ fn render_row_inspector(
     let fields: Vec<_> = fields
         .into_iter()
         .enumerate()
-        .filter(|(_, field)| {
+        .filter(|(col, field)| {
             // Checked before lowercasing anything: a value can be a whole
             // JSON document, and this runs every frame.
             query.is_empty()
+                || inputs.is_some() && row_panel.typing == Some(*col)
                 || field.name.to_lowercase().contains(query.as_str())
                 || field
                     .value
@@ -1799,7 +1825,7 @@ fn render_row_inspector(
 
     row_panel.searched.set(true);
     let table = results.clone();
-    let edit_toggle = chips.iter().any(Option::is_some).then(|| {
+    let edit_toggle = row_editable.then(|| {
         icon_button(
             "edit-row-inspector",
             icon::EDIT,
@@ -1907,7 +1933,7 @@ fn render_row_inspector(
                                 .child("No matching columns"),
                         )
                     })
-                    .children(fields.into_iter().map(|(col_ix, field)| {
+                    .children(fields.into_iter().enumerate().map(|(ix, (col_ix, field))| {
                         let group = format!("row-field-{col_ix}");
                         let copy = field.value.is_some().then(|| {
                             if row_panel.copied == Some((row_ix, col_ix)) {
@@ -2026,7 +2052,7 @@ fn render_row_inspector(
                             )
                             .map(|row| match input {
                                 Some(input) => {
-                                    let at = order.iter().position(|(_, other)| *other == input);
+                                    let at = order.binary_search_by_key(&ix, |(at, _)| *at).ok();
                                     let beside = |by: isize| {
                                         at.and_then(|at| at.checked_add_signed(by))
                                             .and_then(|to| order.get(to).cloned())

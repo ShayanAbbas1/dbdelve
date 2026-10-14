@@ -99,6 +99,9 @@ pub struct ColumnView {
 type ColumnKey = (String, usize);
 
 pub struct ResultGrid {
+    /// Which rows sit at which index: new with every grid and every reorder,
+    /// so whatever holds a row by its index can tell it now names another.
+    rows_id: u64,
     columns: Vec<Column>,
     /// The columns as drawn, left to right: indices into `columns`, the pinned
     /// ones first. A column missing from it is hidden. Everything else in the
@@ -292,6 +295,11 @@ pub struct PendingRow {
     pub types: Vec<(String, String)>,
 }
 
+fn next_rows_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl ResultGrid {
     /// An empty grid never has an edit target, so `editable` refuses on that
     /// alone -- the mode it starts with cannot matter, and callers that build
@@ -324,6 +332,7 @@ impl ResultGrid {
             .collect();
 
         Self {
+            rows_id: next_rows_id(),
             view: (0..result.columns.len()).collect(),
             pinned: 0,
             columns,
@@ -1197,6 +1206,10 @@ impl ResultGrid {
     /// against those rows. The ring, the row selection and an open input are
     /// dropped, as a sort the server runs drops them by replacing the grid:
     /// each names a position, and a different row is there now.
+    pub fn rows_id(&self) -> u64 {
+        self.rows_id
+    }
+
     pub fn sort_in_memory(&mut self, keys: Vec<(usize, bool)>) {
         let order = self.client_order(&keys);
         let mut moved_to = vec![0; order.len()];
@@ -1216,6 +1229,7 @@ impl ResultGrid {
         self.editing = None;
         self.pointer_row = None;
         self.clear_row_selection();
+        self.rows_id = next_rows_id();
         self.sort = keys;
         // A sort in memory asks nothing of the statement, so every header
         // takes a click.
@@ -1390,6 +1404,12 @@ impl ResultGrid {
     /// user could not type a replacement for anyway, and the value that came
     /// back would be written as the text it looks like — see
     /// [`db::Engine::is_binary_type`].
+    /// Whether any cell of the row can be edited: what the row panel's pencil
+    /// and the "cannot be edited" refusal both ask.
+    pub fn row_editable(&self, row: usize) -> bool {
+        (0..self.columns.len()).any(|col| self.editable(row, col))
+    }
+
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -4124,6 +4144,27 @@ mod tests {
         assert!(grid.set_pending(0, 1, NewValue::Null));
         assert!(!grid.has_pending());
         assert!(grid.pending_updates().is_empty());
+    }
+
+    #[test]
+    fn a_row_is_editable_when_any_cell_of_it_is() {
+        assert!(editable_grid().row_editable(0));
+        assert!(!editable_grid().row_editable(2));
+        assert!(!grid_of(&[Some("x")]).row_editable(0));
+    }
+
+    #[test]
+    fn a_new_grid_or_a_sort_puts_other_rows_at_the_same_indices() {
+        // What the row panel's inputs check before staging text typed against
+        // a row index: a record at that index now may not be the one typed at.
+        let mut grid = editable_grid();
+        let before = grid.rows_id();
+        assert_ne!(editable_grid().rows_id(), before);
+
+        grid.append_rows(Vec::new());
+        assert_eq!(grid.rows_id(), before);
+        grid.sort_in_memory(vec![(1, false)]);
+        assert_ne!(grid.rows_id(), before);
     }
 
     #[test]
