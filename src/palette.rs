@@ -142,6 +142,7 @@ pub enum Command {
     SetFont(FontSlot, String),
     ToggleSidebar,
     ToggleRowPanel,
+    ToggleRowEdit,
     ResetEditorZoom,
     OpenSettings,
     /// Put the palette up over the columns of the grid in front.
@@ -944,6 +945,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         chord_hint("toggle_row_panel", overrides),
         icon::ROW_PANEL,
         Command::ToggleRowPanel,
+    ));
+    items.push(Item::command(
+        "Toggle row panel edit mode",
+        chord_hint("toggle_row_edit", overrides),
+        icon::EDIT,
+        Command::ToggleRowEdit,
     ));
     if matches!(session.active, Tab::Query(_)) {
         items.push(Item::command(

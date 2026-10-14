@@ -51,10 +51,37 @@ impl Workspace {
         if !editing && !self.require(Mode::ReadWrite, cx) {
             return;
         }
-        if let Some((_, editing, _)) = self.active_row_panel() {
+        if let Some((folded, editing, _)) = self.active_row_panel() {
             *editing = !*editing;
+            if *editing {
+                *folded = false;
+            }
+            self.row_panel.focus_input = *editing;
         }
         cx.notify();
+    }
+
+    /// The keystroke for the pencil, which it can reach only where the pencil
+    /// is drawn: a row with something in it to edit.
+    pub(crate) fn toggle_row_edit(
+        &mut self,
+        _: &ToggleRowEdit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editable = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .is_some_and(|results| {
+                let table = results.read(cx);
+                table.selected_row().is_some_and(|row| {
+                    let grid = table.delegate();
+                    (0..grid.columns().len()).any(|col| grid.editable(row, col))
+                })
+            });
+        if self.row_panel.on_screen.get() && editable {
+            self.toggle_row_panel_edit(cx);
+        }
     }
 
     /// The tab in front's row-panel state: whether it is folded, whether it
@@ -174,6 +201,36 @@ impl Workspace {
                 }
             }
         }
+        if std::mem::take(&mut self.row_panel.focus_input) {
+            let active = results
+                .read(cx)
+                .delegate()
+                .active()
+                .filter(|(at, _)| *at == row)
+                .and_then(|(_, col)| inputs.fields.get(col)?.as_ref());
+            if let Some(field) = active.or_else(|| inputs.fields.iter().flatten().next()) {
+                field.input.update(cx, |input, cx| input.focus(window, cx));
+            }
+        }
+    }
+
+    /// `up` off a field's first line or `down` off its last: stage it and put
+    /// the keyboard in the field beside, scrolled into view.
+    pub(crate) fn step_row_input(
+        &mut self,
+        from: &Entity<gpui_component::input::TextareaState>,
+        to: Option<(usize, Entity<gpui_component::input::TextareaState>)>,
+        scope: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ix, to)) = to else {
+            return;
+        };
+        cx.stop_propagation();
+        self.commit_row_input(from, cx);
+        to.update(cx, |input, cx| input.focus(window, cx));
+        crate::scroller::scroll_to("row-inspector", scope.to_string(), ix, cx);
     }
 
     /// Put Edit mode's inputs away, staging first whatever any of them holds

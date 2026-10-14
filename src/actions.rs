@@ -197,6 +197,7 @@ actions!(
         CloseTab,
         ToggleSidebar,
         ToggleRowPanel,
+        ToggleRowEdit,
         ToggleStructure,
         AcceptCompletion,
         OpenSettings,

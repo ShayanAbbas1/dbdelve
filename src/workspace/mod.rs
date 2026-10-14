@@ -324,6 +324,7 @@ impl Workspace {
                 search: row_panel_search,
                 searched: Default::default(),
                 inputs: None,
+                focus_input: false,
                 revealed: Default::default(),
             },
             plan_copied: false,
@@ -1769,6 +1770,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::palette_previous))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_row_panel))
+            .on_action(cx.listener(Self::toggle_row_edit))
             .on_action(cx.listener(Self::toggle_structure))
             .on_action(cx.listener(Self::accept_completion))
             .on_action(cx.listener(Self::open_settings))

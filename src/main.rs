@@ -61,8 +61,8 @@ use actions::{
     SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
     SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
     ShowAllColumns, ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin,
-    ToggleNextJoin, TogglePinColumn, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
-    ZoomEditorOut,
+    ToggleNextJoin, TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure,
+    ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -336,6 +336,7 @@ fn main() {
                     items: vec![
                         MenuItem::action("Toggle Sidebar", ToggleSidebar),
                         MenuItem::action("Toggle Row Panel", ToggleRowPanel),
+                        MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
                         MenuItem::action("Toggle Data / Structure", ToggleStructure),
                         MenuItem::separator(),
                         MenuItem::action("Zoom In", ZoomEditorIn),

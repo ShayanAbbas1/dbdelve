@@ -87,6 +87,9 @@ pub struct RowPanel {
     /// Edit mode's inputs for the selected row, built before the frame by
     /// `sync_row_panel_inputs`, which has the window an input needs.
     pub inputs: Option<RowInputs>,
+    /// Put the keyboard in an input once Edit mode has built them, so turning
+    /// it on from the keyboard leaves the hands there.
+    pub focus_input: bool,
     /// The tab and grid cell the panel last scrolled to, so it scrolls once
     /// per click or arrow key and then leaves the panel to the wheel. Cleared
     /// whenever the panel is folded or off screen, so reopening it scrolls
@@ -1786,6 +1789,14 @@ fn render_row_inspector(
         row_panel.revealed.replace(reveal);
     }
 
+    // The inputs in the order they are drawn, each with its place among the
+    // scroll's children, for `up` and `down` to step through.
+    let order: Vec<(usize, Entity<TextareaState>)> = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, (col, _))| Some((ix, inputs?.fields.get(*col)?.as_ref()?.input.clone())))
+        .collect();
+
     row_panel.searched.set(true);
     let table = results.clone();
     let edit_toggle = chips.iter().any(Option::is_some).then(|| {
@@ -2014,11 +2025,57 @@ fn render_row_inspector(
                                     ),
                             )
                             .map(|row| match input {
-                                Some(input) => row.child(
-                                    Textarea::new(&input)
-                                        .font_family(grid.clone())
-                                        .text_size(px(layout::grid(layout::TEXT_SM))),
-                                ),
+                                Some(input) => {
+                                    let at = order.iter().position(|(_, other)| *other == input);
+                                    let beside = |by: isize| {
+                                        at.and_then(|at| at.checked_add_signed(by))
+                                            .and_then(|to| order.get(to).cloned())
+                                    };
+                                    let (up, down) = (beside(-1), beside(1));
+                                    let (up_input, down_input) = (input.clone(), input.clone());
+                                    let (up_scope, down_scope) =
+                                        (scope.to_string(), scope.to_string());
+                                    // Lines as typed, not as wrapped: a long
+                                    // value on one line steps off at once.
+                                    row.child(
+                                        div()
+                                            .capture_action(cx.listener(
+                                                move |workspace, _: &input::MoveUp, window, cx| {
+                                                    if up_input.read(cx).cursor_position().line == 0
+                                                    {
+                                                        workspace.step_row_input(
+                                                            &up_input,
+                                                            up.clone(),
+                                                            &up_scope,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            ))
+                                            .capture_action(cx.listener(
+                                                move |workspace, _: &input::MoveDown, window, cx| {
+                                                    let state = down_input.read(cx);
+                                                    if state.cursor_position().line as usize + 1
+                                                        >= state.text().lines_len()
+                                                    {
+                                                        workspace.step_row_input(
+                                                            &down_input,
+                                                            down.clone(),
+                                                            &down_scope,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            ))
+                                            .child(
+                                                Textarea::new(&input)
+                                                    .font_family(grid.clone())
+                                                    .text_size(px(layout::grid(layout::TEXT_SM))),
+                                            ),
+                                    )
+                                }
                                 None => row.child(
                                     div()
                                         .font_family(grid.clone())
