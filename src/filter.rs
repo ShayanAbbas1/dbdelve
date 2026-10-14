@@ -1587,6 +1587,7 @@ mod tests {
             kind: RelationKind::default(),
             filter: String::new(),
             filter_engine: None,
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1638,6 +1639,7 @@ mod tests {
             kind: RelationKind::default(),
             filter: r#"("state" ~ '^a') AND ("tier" = '2')"#.into(),
             filter_engine: None,
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1681,6 +1683,7 @@ mod tests {
             kind: RelationKind::default(),
             filter: r#""hash" = 0x00FF"#.into(),
             filter_engine: Some("mssql".into()),
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![store::StoredFilter {
@@ -1719,6 +1722,7 @@ mod tests {
             kind: RelationKind::default(),
             filter: r#""state" = 'ok'"#.into(),
             filter_engine: None,
+            origin: None,
             filters: vec![("state".into(), "ok".into())],
             active: true,
             bars: Vec::new(),

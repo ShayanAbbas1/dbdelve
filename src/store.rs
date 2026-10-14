@@ -198,6 +198,12 @@ pub struct StoredObject {
     /// written before it was kept, the filter is re-derived from the bars.
     #[serde(default)]
     pub filter_engine: Option<String>,
+    /// A structure tab's way back to Data: the filter of the data tab that
+    /// switched to it, that tab's identity once ids are reassigned on restore.
+    /// Absent is a structure tab opened from the sidebar, or one written before
+    /// it was kept, and goes back to any data tab for the relation.
+    #[serde(default)]
+    pub origin: Option<String>,
     /// The filter bars [`Self::filter`] was derived from. The bars are the
     /// editable state and the expression is what runs, so both are kept:
     /// nothing here parses a `WHERE` back into controls. Last, because TOML
@@ -1421,6 +1427,7 @@ user = "shayan"
                     kind: RelationKind::MaterializedView,
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: true,
                     bars: Vec::new(),
@@ -1433,6 +1440,7 @@ user = "shayan"
                     kind: RelationKind::default(),
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -1641,6 +1649,7 @@ open_objects = []
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1713,6 +1722,7 @@ open_objects = []
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1877,6 +1887,7 @@ open_objects = []
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -2386,6 +2397,7 @@ open_objects = []
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -2649,6 +2661,35 @@ name = \"accounts\"
     }
 
     #[test]
+    fn a_structure_tab_keeps_the_data_tab_it_came_from() {
+        let object = StoredObject {
+            schema: "public".into(),
+            name: "customers".into(),
+            routine: false,
+            structure: true,
+            kind: RelationKind::Table,
+            filter: String::new(),
+            filter_engine: None,
+            origin: Some(r#""id" = '42'"#.into()),
+            filters: Vec::new(),
+            active: false,
+            bars: Vec::new(),
+        };
+
+        let text = toml::to_string(&object).expect("an object must encode");
+        let decoded: StoredObject = toml::from_str(&text).expect("an object must decode");
+        assert_eq!(decoded, object);
+
+        let older = text
+            .lines()
+            .filter(|line| !line.starts_with("origin"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let decoded: StoredObject = toml::from_str(&older).expect("an older object must decode");
+        assert_eq!(decoded.origin, None);
+    }
+
+    #[test]
     fn two_tabs_on_one_relation_survive_the_round_trip_as_two() {
         // The whole point of the filter being stored: a restart that collapsed
         // these two into one would lose whichever tab it dropped.
@@ -2688,6 +2729,7 @@ name = \"accounts\"
                     kind: RelationKind::Table,
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -2700,6 +2742,7 @@ name = \"accounts\"
                     kind: RelationKind::Table,
                     filter: r#""id" = '42'"#.into(),
                     filter_engine: Some("postgres".into()),
+                    origin: None,
                     filters: Vec::new(),
                     active: true,
                     bars: vec![StoredFilter {
@@ -2739,6 +2782,7 @@ name = \"accounts\"
             kind: RelationKind::Table,
             filter: r#"("state" = 'it''s ok') OR ("tier" LIKE '%2%' ESCAPE '\')"#.into(),
             filter_engine: Some("postgres".into()),
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![

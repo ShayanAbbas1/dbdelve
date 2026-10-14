@@ -1394,6 +1394,10 @@ impl ObjectTab {
             name: self.name.clone(),
             filter: self.filter().to_string(),
             filter_engine: (!self.filter().is_empty()).then(|| engine.as_str().to_string()),
+            origin: match &self.body {
+                ObjectBody::Structure { origin, .. } => origin.clone(),
+                ObjectBody::Relation { .. } | ObjectBody::Routine(_) => None,
+            },
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
             filters: Vec::new(),
@@ -1430,6 +1434,8 @@ pub(crate) enum OpenedObject {
         schema: String,
         name: String,
         kind: RelationKind,
+        /// See `ObjectBody::Structure`'s.
+        origin: Option<String>,
     },
     Routine {
         schema: String,
@@ -1627,10 +1633,12 @@ pub(crate) enum ObjectBody {
         structure: StructureState,
         /// Over whichever section its chips picked.
         grid: Entity<TableState<StructureGrid>>,
-        /// The data tab that last switched here, which going back to Data
-        /// returns to: a relation can have several, filtered ones among them,
-        /// and its unfiltered rows are not the ones the user left.
-        origin: Option<u64>,
+        /// The filter of the data tab that last switched here, which going back
+        /// to Data returns to: a relation can have several, filtered ones among
+        /// them, and its unfiltered rows are not the ones the user left. The
+        /// filter rather than the id, because ids do not survive a restart.
+        /// A filter edited since names no tab, and Data falls back to any.
+        origin: Option<String>,
     },
     Routine(Routine),
 }

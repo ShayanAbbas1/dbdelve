@@ -112,7 +112,7 @@ impl Workspace {
         }
         let body = match opened {
             OpenedObject::Routine { routine, .. } => ObjectBody::Routine(routine),
-            OpenedObject::Structure { .. } => {
+            OpenedObject::Structure { origin, .. } => {
                 let grid = structure_grid::new_grid(window, cx);
                 if let Some(loaded) = &known {
                     let section = grid.read(cx).delegate().section();
@@ -121,7 +121,7 @@ impl Workspace {
                 ObjectBody::Structure {
                     structure: known.map_or(StructureState::Loading, StructureState::Loaded),
                     grid,
-                    origin: None,
+                    origin,
                 }
             }
             OpenedObject::Relation {
@@ -955,7 +955,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let opened = match structure {
-            true => OpenedObject::Structure { schema, name, kind },
+            true => OpenedObject::Structure {
+                schema,
+                name,
+                kind,
+                origin: None,
+            },
             false => OpenedObject::Relation {
                 schema,
                 name,
@@ -987,8 +992,8 @@ impl Workspace {
             return;
         };
         let origin = match &tab.body {
-            ObjectBody::Structure { origin, .. } if !structure => *origin,
-            ObjectBody::Relation { .. } if structure => Some(tab.id),
+            ObjectBody::Structure { origin, .. } if !structure => origin.clone(),
+            ObjectBody::Relation { .. } if structure => Some(tab.filter().to_string()),
             _ => return,
         };
         let (schema, name) = (tab.schema.clone(), tab.name.clone());
@@ -1005,6 +1010,8 @@ impl Workspace {
             {
                 *slot = origin;
             }
+            // Opening saved the tab before it had an origin to save.
+            self.remember_profiles(cx);
             return;
         }
         let data = self.profile().and_then(|profile| {
@@ -1016,7 +1023,7 @@ impl Workspace {
                 })
             };
             rows()
-                .find(|tab| Some(tab.id) == origin)
+                .find(|tab| origin.as_deref() == Some(tab.filter()))
                 .or_else(|| rows().next())
                 .map(|tab| tab.id)
         });
@@ -1516,6 +1523,7 @@ fn restorable(
                     kind: catalog
                         .and_then(|catalog| relation_kind(catalog, &stored.schema, &stored.name))
                         .unwrap_or(stored.kind),
+                    origin: stored.origin.clone(),
                 },
                 stored.active,
             ));
@@ -1612,6 +1620,7 @@ mod tests {
             kind: RelationKind::Table,
             filter: String::new(),
             filter_engine: None,
+            origin: None,
             filters: Vec::new(),
             active: false,
             bars: Vec::new(),
