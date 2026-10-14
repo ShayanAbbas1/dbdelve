@@ -9,13 +9,15 @@
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
+    Entity, FontWeight, HighlightStyle, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
-    Disableable, ElementExt, IconName, Sizable,
+    ActiveTheme, Disableable, ElementExt, IconName, Rope, Sizable,
     button::Button,
+    highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{self, Editor, EditorState, Input, InputState},
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -1786,6 +1788,11 @@ fn render_row_inspector(
                                     .font_family(grid.clone())
                                     .text_size(px(layout::grid(layout::TEXT_SM)))
                                     .map(|value| match field.value {
+                                        Some(text) if field.json => value.text_color(t.text).child(
+                                            StyledText::new(text.clone()).with_highlights(
+                                                json_highlights(&text, &cx.theme().highlight_theme),
+                                            ),
+                                        ),
                                         Some(text) => value.text_color(t.text).child(text),
                                         None if field.missing => value,
                                         // Italic so a NULL cannot be read
@@ -1800,6 +1807,30 @@ fn render_row_inspector(
             )
             .into_any_element(),
     )
+}
+
+thread_local! {
+    // Building one compiles the grammar's highlight query, which is far too
+    // slow to pay for every field on every frame the inspector redraws.
+    static JSON_HIGHLIGHTER: std::cell::RefCell<SyntaxHighlighter> =
+        std::cell::RefCell::new(SyntaxHighlighter::new("json"));
+}
+
+fn json_highlights(
+    text: &str,
+    syntax: &HighlightTheme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    JSON_HIGHLIGHTER
+        .with_borrow_mut(|highlighter| {
+            highlighter.update(None, &Rope::from_str(text), None);
+            highlighter.styles(&(0..text.len()), syntax)
+        })
+        .into_iter()
+        .filter_map(|(range, style)| {
+            let end = range.end.min(text.len());
+            (range.start < end).then_some((range.start..end, style))
+        })
+        .collect()
 }
 
 /// One segment of the Data | Structure pair. A quiet chip rather than a
