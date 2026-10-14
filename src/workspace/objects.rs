@@ -1320,12 +1320,14 @@ impl Workspace {
             }
             // Read before the tab goes, because the key is made of its schema,
             // name and filter, and there is nothing left to make it from
-            // afterwards.
+            // afterwards. Only a relation tab writes a snapshot: a structure
+            // tab's key, filterless, is its unfiltered data tab's, whose rows
+            // are not this tab's to throw away.
             let snapshot = profile
                 .session
                 .objects
                 .iter()
-                .find(|tab| tab.id == id)
+                .find(|tab| tab.id == id && matches!(tab.body, ObjectBody::Relation { .. }))
                 .map(|tab| store::object_grid_key(&tab.schema, &tab.name, tab.filter()));
             let profile_id = profile.id.clone();
             profile.session.objects.retain(|tab| tab.id != id);
