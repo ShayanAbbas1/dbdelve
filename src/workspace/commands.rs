@@ -37,7 +37,7 @@ impl Workspace {
     ) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_results().cloned())
+            .and_then(|profile| profile.session.shown_results().cloned())
         else {
             return;
         };
@@ -55,7 +55,7 @@ impl Workspace {
     ) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_results().cloned())
+            .and_then(|profile| profile.session.shown_results().cloned())
         else {
             return;
         };
@@ -69,7 +69,7 @@ impl Workspace {
 
     /// The column under the ring, which the cell menu acts on.
     fn active_column(&self, cx: &App) -> Option<usize> {
-        let results = self.profile()?.session.active_results()?;
+        let results = self.profile()?.session.shown_results()?;
         results.read(cx).delegate().active().map(|(_, col)| col)
     }
 

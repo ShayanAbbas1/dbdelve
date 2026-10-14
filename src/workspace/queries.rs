@@ -33,7 +33,7 @@ impl Workspace {
     /// with the cells about what is editable.
     pub(crate) fn has_editable_cell(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.session.active_results().is_some_and(|results| {
+            profile.session.shown_results().is_some_and(|results| {
                 let grid = results.read(cx);
                 grid.delegate()
                     .active()
@@ -47,7 +47,7 @@ impl Workspace {
     /// [`Workspace::has_editable_cell`] is.
     pub(crate) fn has_nameable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.session.active_results().is_some_and(|results| {
+            profile.session.shown_results().is_some_and(|results| {
                 let grid = results.read(cx);
                 grid.delegate()
                     .active()
@@ -63,30 +63,17 @@ impl Workspace {
         self.profile().is_some_and(|profile| {
             profile
                 .session
-                .active_results()
+                .shown_results()
                 .is_some_and(|results| results.read(cx).delegate().active().is_some())
         })
     }
 
-    /// Whether rows are in front of the user. Not behind Structure: the grid
-    /// is still there, and copying or exporting it from a view of something
-    /// else would act on rows nobody is looking at.
     pub(crate) fn has_results(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            let structure = profile.session.active_object().is_some_and(|tab| {
-                matches!(
-                    tab.body,
-                    ObjectBody::Relation {
-                        showing_structure: true,
-                        ..
-                    }
-                )
-            });
-            !structure
-                && profile
-                    .session
-                    .active_results()
-                    .is_some_and(|results| !results.read(cx).delegate().result().columns.is_empty())
+            profile
+                .session
+                .shown_results()
+                .is_some_and(|results| !results.read(cx).delegate().result().columns.is_empty())
         })
     }
 

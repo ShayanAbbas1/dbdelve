@@ -620,6 +620,21 @@ impl Session {
         }
     }
 
+    /// [`Session::active_results`] while its rows are on screen, and `None`
+    /// behind Structure: the gate for everything that acts on the grid's ring
+    /// or its rows, which must not reach rows nobody is looking at. Pending
+    /// edits and the sort still read `active_results`, since those stay the
+    /// tab's whichever view is in front.
+    pub(crate) fn shown_results(&self) -> Option<&Entity<TableState<ResultGrid>>> {
+        match self.active_object().map(|tab| &tab.body) {
+            Some(ObjectBody::Relation {
+                showing_structure: true,
+                ..
+            }) => None,
+            _ => self.active_results(),
+        }
+    }
+
     /// Every buffer highlighted and prompted for `syntax`, once an edit has
     /// moved the profile to an engine written in another language.
     pub(crate) fn set_syntax(&self, syntax: Syntax, window: &mut Window, cx: &mut App) {

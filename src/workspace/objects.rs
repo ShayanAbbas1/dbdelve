@@ -649,6 +649,7 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
+            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..
@@ -735,6 +736,7 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
+            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..
@@ -840,6 +842,7 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
+            showing_structure: false,
             structure: StructureState::Loaded(structure),
             results,
             ..

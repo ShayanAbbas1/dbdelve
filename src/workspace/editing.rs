@@ -694,7 +694,7 @@ impl Workspace {
         if profile.session.apply_review.is_some() {
             return;
         }
-        let Some(results) = profile.session.active_results().cloned() else {
+        let Some(results) = profile.session.shown_results().cloned() else {
             return;
         };
         // The grid's own active cell, not the library's selection: its selected
@@ -805,7 +805,7 @@ impl Workspace {
         if profile.session.apply_review.is_some() {
             return;
         }
-        let Some(results) = profile.session.active_results().cloned() else {
+        let Some(results) = profile.session.shown_results().cloned() else {
             return;
         };
         let Some((row, col)) = results.read(cx).delegate().active() else {
@@ -1000,7 +1000,7 @@ impl Workspace {
             );
             return;
         }
-        let Some(results) = profile.session.active_results() else {
+        let Some(results) = profile.session.shown_results() else {
             return;
         };
         let grid = results.read(cx);
@@ -1072,7 +1072,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let Some(results) = profile.session.active_results() else {
+        let Some(results) = profile.session.shown_results() else {
             return;
         };
         let Some(value) = results
@@ -1091,7 +1091,7 @@ impl Workspace {
     pub(crate) fn copy_row(&mut self, _: &CopyRow, _: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_results())
+            .and_then(|profile| profile.session.shown_results())
         else {
             return;
         };
@@ -1114,7 +1114,7 @@ impl Workspace {
     pub(crate) fn copy_rows(&mut self, action: &CopyRows, _: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_results())
+            .and_then(|profile| profile.session.shown_results())
         else {
             return;
         };
