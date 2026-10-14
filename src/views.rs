@@ -306,7 +306,9 @@ fn render_plan(
     let t = *theme(cx);
     let code = fonts(cx).editor.clone();
     let syntax = cx.theme().highlight_theme.clone();
-    let Explained { plan, mode, sql } = explained;
+    let Explained {
+        plan, mode, sql, ..
+    } = explained;
     // What every bar is a share of. A plan with no timings draws none, and the
     // guard against zero is what keeps a 0ms plan from dividing by it.
     let total = plan.total_ms.filter(|total| *total > 0.0);
@@ -2879,7 +2881,7 @@ fn render_query_toolbar(
     // a control with one working half, which is the same as no control at all.
     let plan_toggle = session
         .active_query_tab()
-        .filter(|tab| tab.plan.is_some())
+        .filter(|tab| tab.flips_to_plan())
         .map(|tab| {
             div()
                 .flex_shrink_0()

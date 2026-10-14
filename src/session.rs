@@ -1064,6 +1064,10 @@ pub(crate) struct Explained {
     /// plan that silently re-labels itself against edited text would be
     /// describing a statement nobody ran.
     pub(crate) sql: String,
+    /// Typed by the user as an `EXPLAIN` rather than asked of the Explain
+    /// command. Its rows are the grid's own, so there is no other Data to
+    /// flip to.
+    pub(crate) typed: bool,
 }
 
 /// The statements a selection covers, run one at a time, and what each has
@@ -1262,6 +1266,11 @@ pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> b
 }
 
 impl QueryTab {
+    /// Whether the results pane offers Data and Plan to flip between.
+    pub(crate) fn flips_to_plan(&self) -> bool {
+        self.plan.as_ref().is_some_and(|plan| !plan.typed)
+    }
+
     /// The result on screen: whichever of a queue's finished statements the
     /// switcher has selected, else the tab's own slot, which is what a run
     /// writes into.

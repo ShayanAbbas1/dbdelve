@@ -601,7 +601,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             Command::FormatQuery,
         ));
         if let Some(tab) = session.active_query_tab()
-            && tab.plan.is_some()
+            && tab.flips_to_plan()
         {
             items.push(match tab.showing_plan {
                 true => Item::command("Show data", "", icon::TABLE, Command::ShowPlan(false)),

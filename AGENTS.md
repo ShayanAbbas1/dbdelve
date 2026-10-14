@@ -754,7 +754,10 @@ Decided, and not to be re-litigated:
   A lone statement the user typed as an explain lands in the plan pane as the
   command's does, but only where its answer is a shape `explain.rs` reads
   (`sql::typed_explain`): Postgres text, MySQL's tree, SQLite's `QUERY PLAN`,
-  MongoDB's `.explain()`. Tables, JSON and bytecode stay in the grid.
+  MongoDB's `.explain()`. Tables, JSON and bytecode stay in the grid. Its
+  rows still land in the grid, for copying and export, with the plan drawn
+  over them and no Data toggle. It never becomes `last_query`, so no sort or
+  refresh runs an `EXPLAIN ANALYZE` again, and a restored tab shows the rows.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
 - **Read-only has no server-side backstop on SQLite, Snowflake or SQL Server.**
