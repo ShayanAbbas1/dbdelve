@@ -984,13 +984,6 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|workspace, _, _, cx| {
-                        workspace.reference_popup = None;
-                        cx.notify();
-                    }),
-                )
                 .child(
                     div()
                         .absolute()
@@ -1005,7 +998,14 @@ impl Workspace {
                         .bg(t.overlay)
                         .border_1()
                         .border_color(t.border)
-                        .children(rows),
+                        .children(rows)
+                        // Out of the panel, not on the backdrop: a press on a
+                        // choice is also a press on the backdrop, and closing
+                        // there drops the choice before its click lands.
+                        .on_mouse_down_out(cx.listener(|workspace, _, _, cx| {
+                            workspace.reference_popup = None;
+                            cx.notify();
+                        })),
                 )
                 .into_any_element(),
         )
