@@ -537,10 +537,12 @@ impl Connection {
                 // No columns is a command rather than a query, and only a
                 // command has rows to have affected.
                 if columns.is_empty() {
+                    // Read first: draining the set moves the driver past its
+                    // OK packet, after which the count reads as zero.
+                    result.rows_affected = Some(set.affected_rows());
                     for row in &mut set {
                         row.map_err(|error| query_error(&error))?;
                     }
-                    result.rows_affected = Some(set.affected_rows());
                     continue;
                 }
 
