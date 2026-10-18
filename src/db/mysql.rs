@@ -1989,6 +1989,25 @@ mod tests {
         connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
+    fn live_a_write_reports_the_rows_it_affected(engine: Engine) {
+        let connection = live(engine);
+        connection
+            .query("CREATE TEMPORARY TABLE counted (n INT)", Fetch::default())
+            .unwrap();
+        let inserted = connection
+            .query("INSERT INTO counted VALUES (1), (2), (3)", Fetch::default())
+            .unwrap();
+        let updated = connection
+            .query(
+                "UPDATE counted SET n = n + 10 WHERE n > 1",
+                Fetch::default(),
+            )
+            .unwrap();
+
+        assert_eq!(inserted.rows_affected, Some(3));
+        assert_eq!(updated.rows_affected, Some(2));
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -2049,6 +2068,7 @@ mod tests {
         live_the_databases_list_flags_the_one_connected_to,
         live_a_blank_database_connects_to_none,
         live_query_round_trip,
+        live_a_write_reports_the_rows_it_affected,
         live_a_multi_statement_selection_keeps_one_result_shape,
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,
