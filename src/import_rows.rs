@@ -5,8 +5,10 @@
 use std::path::Path;
 
 mod read;
+mod values;
 
 pub(crate) use read::*;
+pub(crate) use values::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Format {
@@ -62,6 +64,7 @@ pub(crate) struct Options {
     pub(crate) empty: EmptyField,
     pub(crate) null_word: String,
     pub(crate) trim: bool,
+    pub(crate) booleans: Spellings,
     pub(crate) on_duplicate: OnDuplicate,
     pub(crate) transaction: Transaction,
 }
@@ -78,6 +81,7 @@ impl Options {
             empty: EmptyField::Null,
             null_word: String::new(),
             trim: false,
+            booleans: Spellings::default(),
             on_duplicate: OnDuplicate::Stop,
             transaction: Transaction::AllOrNothing,
         }

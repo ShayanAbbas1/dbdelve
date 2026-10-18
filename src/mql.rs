@@ -1500,7 +1500,7 @@ const ISO_8601: &[BorrowedFormatItem] = format_description!(
 
 /// Milliseconds since 1970, and whether the text gives a time with no offset:
 /// UTC to `ISODate`, local time to JavaScript's `Date`.
-fn iso_millis(text: &str) -> Option<(i64, bool)> {
+pub(crate) fn iso_millis(text: &str) -> Option<(i64, bool)> {
     let mut parsed = Parsed::new();
     if !parsed
         .parse_items(text.as_bytes(), ISO_8601)
