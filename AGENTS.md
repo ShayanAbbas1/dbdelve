@@ -80,10 +80,12 @@ require it, stop and raise it instead.
    - a batch of `UPDATE`s, optionally bracketed by a `BEGIN`/`COMMIT` the gate
      can see closed;
    - one `INSERT`, naming the columns it fills, of one or more rows whose
-     values are only single-quoted literals (`N'…'` too), a bare `0x…` hex
-     literal or `NULL` (no subquery, function call or `SELECT` source),
-     optionally ending in exactly `ON CONFLICT DO NOTHING` or
-     `ON DUPLICATE KEY UPDATE c = c` (Import Rows' Skip);
+     values are each exactly one single-quoted literal (`N'…'` too, never two
+     adjacent), a bare `0x…` hex literal or `NULL` (no subquery, function call
+     or `SELECT` source), with no comment anywhere in it (MySQL runs
+     `/*! … */`), optionally ending in exactly `ON CONFLICT DO NOTHING` or
+     `ON DUPLICATE KEY UPDATE c = c` with `c` bare or backticked (Import Rows'
+     Skip);
    - one `DELETE` whose `WHERE` is a conjunction of equality predicates over
      distinct, unqualified columns against single-quoted literals (or a bare
      `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
