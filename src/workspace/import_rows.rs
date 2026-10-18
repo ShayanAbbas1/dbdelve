@@ -346,11 +346,8 @@ impl Workspace {
 
     /// Show the dialog's problem `index` where it is: its row in the preview,
     /// or the mapping of the file column it belongs to.
-    pub(crate) fn jump_to_problem(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
-            return;
-        };
-        let Some(dialog) = self.import_dialog_mut(&profile) else {
+    pub(crate) fn jump_to_problem(&mut self, profile: &str, index: usize, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog_mut(profile) else {
             return;
         };
         let Some(Ok(prepared)) = &dialog.prepared else {
@@ -367,24 +364,22 @@ impl Workspace {
                 show_preview_row(dialog, row, cx);
                 cx.notify();
             }
-            (None, Some(column)) => self.focus_import_mapping(&profile, column, cx),
+            (None, Some(column)) => self.focus_import_mapping(profile, column, cx),
             (None, None) => cx.notify(),
         }
     }
 
     /// Every statement the import would send, onto the clipboard. Written off
     /// the main thread: it is the whole file again, as SQL.
-    pub(crate) fn copy_import_sql(&mut self, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
-            return;
-        };
+    pub(crate) fn copy_import_sql(&mut self, profile: &str, cx: &mut Context<Self>) {
         let Some(plan) = self
-            .import_dialog_mut(&profile)
+            .import_dialog_mut(profile)
             .and_then(|dialog| dialog.plan.clone())
         else {
             return;
         };
         let script = cx.background_executor().spawn(async move { plan.script() });
+        let profile = profile.to_string();
         cx.spawn(async move |workspace, cx| {
             let script = script.await;
             _ = workspace.update(cx, |workspace, cx| match script {
@@ -401,12 +396,13 @@ impl Workspace {
     }
 
     /// Write the newest check's first statement into the SQL view, which a
-    /// check landing without a window cannot.
+    /// check landing without a window cannot. Only while the view is shown:
+    /// the statement can be a whole chunk, and a check lands per keystroke.
     pub(crate) fn sync_import_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self
             .profile_mut()
             .and_then(|profile| profile.session.import_rows.as_mut())
-            .filter(|dialog| dialog.sql_stale)
+            .filter(|dialog| dialog.sql_stale && dialog.showing_sql)
         else {
             return;
         };

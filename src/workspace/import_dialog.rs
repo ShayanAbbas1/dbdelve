@@ -327,7 +327,7 @@ impl Workspace {
             cx,
         );
         let footer = match &dialog.phase {
-            ImportPhase::Editing => import_footer(dialog, cx),
+            ImportPhase::Editing => import_footer(&profile.id, dialog, cx),
             ImportPhase::Running { .. } => import_progress(dialog, cx),
         };
 
@@ -1255,9 +1255,12 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
                             Control::Compact,
                             t,
                         )
-                        .on_click(cx.listener(|workspace, _, _, cx| {
-                            workspace.copy_import_sql(cx);
-                        })),
+                        .on_click({
+                            let profile = editing.profile.clone();
+                            cx.listener(move |workspace, _, _, cx| {
+                                workspace.copy_import_sql(&profile, cx);
+                            })
+                        }),
                     ),
             )
             .into_any_element()
@@ -1408,7 +1411,12 @@ fn problem_summary(problems: &[Problem], at: usize) -> String {
 
 /// The problem summary, which jumps to the problem it names, and the arrows
 /// that step through the rest.
-fn problem_navigation(problems: &[Problem], at: usize, cx: &mut Context<Workspace>) -> gpui::Div {
+fn problem_navigation(
+    profile: &str,
+    problems: &[Problem],
+    at: usize,
+    cx: &mut Context<Workspace>,
+) -> gpui::Div {
     let t = *theme(cx);
     let summary = div()
         .id("import-problem-summary")
@@ -1416,19 +1424,21 @@ fn problem_navigation(problems: &[Problem], at: usize, cx: &mut Context<Workspac
     let summary = if problems.is_empty() {
         summary
     } else {
+        let profile = profile.to_string();
         summary
             .cursor_pointer()
             .hover(|style| style.text_color(t.accent))
             .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                workspace.jump_to_problem(at, cx);
+                workspace.jump_to_problem(&profile, at, cx);
             }))
     };
     let step = |id: &'static str, path: &'static str, to: Option<usize>| {
+        let profile = profile.to_string();
         icon_button(id, path, Tone::Quiet, Control::Inline, t)
             .disabled(to.is_none())
             .on_click(cx.listener(move |workspace, _, _, cx| {
                 if let Some(to) = to {
-                    workspace.jump_to_problem(to, cx);
+                    workspace.jump_to_problem(&profile, to, cx);
                 }
             }))
     };
@@ -1454,7 +1464,7 @@ fn problem_navigation(problems: &[Problem], at: usize, cx: &mut Context<Workspac
         .children(steps.into_iter().flatten())
 }
 
-fn import_footer(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> AnyElement {
+fn import_footer(profile: &str, dialog: &ImportDialog, cx: &mut Context<Workspace>) -> AnyElement {
     let t = *theme(cx);
     let cancel_workspace = cx.entity().downgrade();
     let import_workspace = cancel_workspace.clone();
@@ -1462,7 +1472,7 @@ fn import_footer(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> AnyEleme
         Some(Ok(prepared)) => {
             let problems = &prepared.checked.problems;
             let at = dialog.problem_at.min(problems.len().saturating_sub(1));
-            Some(problem_navigation(problems, at, cx))
+            Some(problem_navigation(profile, problems, at, cx))
         }
         _ => None,
     };
@@ -1628,5 +1638,36 @@ mod tests {
         assert_eq!(preview_window(412, 1000), 402);
         assert_eq!(preview_window(995, 1000), 900);
         assert_eq!(preview_window(5, 50), 0);
+    }
+
+    #[test]
+    fn the_problem_summary_names_the_one_the_arrows_are_on() {
+        let at_line = |line| Problem {
+            row: Some(0),
+            line: Some(line),
+            column: None,
+            message: "bad".into(),
+        };
+        assert_eq!(problem_summary(&[], 0), "No problems found");
+        assert_eq!(
+            problem_summary(&[at_line(412)], 0),
+            "1 problem: first at line 412"
+        );
+        let three = [at_line(412), at_line(1_500), at_line(2_000)];
+        assert_eq!(problem_summary(&three, 0), "3 problems: first at line 412");
+        assert_eq!(
+            problem_summary(&three, 1),
+            "3 problems: 2 of 3 at line 1,500"
+        );
+        let whole = Problem {
+            row: None,
+            line: None,
+            column: None,
+            message: "The file has no rows to import.".into(),
+        };
+        assert_eq!(
+            problem_summary(&[whole], 0),
+            "The file has no rows to import."
+        );
     }
 }
