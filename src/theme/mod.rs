@@ -116,6 +116,9 @@ pub mod layout {
     /// A statement or an error shown on a modal, capped so a long one scrolls
     /// inside the card instead of pushing its buttons off the window.
     pub const DIALOG_TEXT_MAX_HEIGHT: f32 = 220.0;
+    /// Import Rows lays its options, mapping and preview side by side.
+    pub const IMPORT_DIALOG_WIDTH: f32 = 960.0;
+    pub const IMPORT_DIALOG_HEIGHT: f32 = 640.0;
     /// The palette. Wide enough for a schema-qualified name and its kind, and
     /// capped so a catalog of thousands scrolls rather than filling the window.
     pub const PALETTE_WIDTH: f32 = 520.0;

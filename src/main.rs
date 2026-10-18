@@ -10,8 +10,8 @@ mod explorer;
 mod export;
 mod filter;
 mod import;
-// Nothing calls it until the import dialog is wired in. Unlike `mql`, tests
-// leave some options unread, so the allow holds under `cfg(test)` too.
+// The rest of the options, rules and preview are read by the dialog's controls,
+// which come next (Task 8); drop the allow then.
 #[allow(dead_code)]
 mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
@@ -58,15 +58,15 @@ use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
     CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, DeleteRow, DiscardEdits, EditCell,
     ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, LimitTarget, NewConnection, NewProject, NewQuery, NewRow, NextEdit,
-    NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext, PalettePrevious,
-    PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection,
-    RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery,
-    SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
-    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
-    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin,
-    ToggleNextJoin, TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure,
-    ZoomEditorIn, ZoomEditorOut,
+    ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
+    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext,
+    PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
+    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
+    ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault,
+    SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode,
+    SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor, ShowReferences, SortColumn,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

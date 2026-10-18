@@ -860,6 +860,10 @@ impl Workspace {
     /// nothing answers on, and one that was down at connect leaves `Failed`
     /// with nothing that tries again.
     pub(crate) fn reconnect(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
+            return;
+        };
+        self.abandon_import(&id, None, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1002,6 +1006,8 @@ impl Workspace {
         // query tab that stays rather than a sibling about to close too.
         closing.sort_by_key(|id| Tab::Object(*id) == active);
         let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let profile_id = profile.id.clone();
+        self.abandon_import(&profile_id, None, cx);
         for id in closing {
             self.close_object(id, window, cx);
         }
@@ -1672,6 +1678,8 @@ impl Workspace {
         // Counted before the directory goes, because afterwards there is
         // nothing left to count and the number is what the note reports.
         let queries = store::saved_queries(&id).len();
+
+        self.abandon_import(&id, None, cx);
 
         let removed = self.profiles.remove(index);
         if let Some(key) = identity_file(&removed.config)

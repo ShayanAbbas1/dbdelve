@@ -8,6 +8,8 @@ mod commands;
 mod editing;
 mod filters;
 mod forms;
+mod import_dialog;
+mod import_rows;
 mod modes;
 mod objects;
 mod profiles;
@@ -1748,6 +1750,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_filter_join))
             .on_action(cx.listener(Self::toggle_next_join))
             .on_action(cx.listener(Self::new_row))
+            .on_action(cx.listener(Self::import_rows))
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_database))
@@ -1873,6 +1876,7 @@ impl Render for Workspace {
             ))
             .child(div().flex_1().min_h_0().child(main_pane))
             .children(self.render_apply_review(cx))
+            .children(self.render_import_rows(window, cx))
             .children(self.render_close_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))

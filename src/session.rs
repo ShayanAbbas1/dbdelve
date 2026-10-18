@@ -9,7 +9,7 @@
 //! These were plain types at the crate root. They moved out whole; nothing
 //! changed but their visibility.
 
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{collections::HashMap, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{App, AppContext, Context, Entity, Window};
 use gpui_component::{
@@ -31,7 +31,7 @@ use crate::{
         Conjunction, FilterBar, FilterRow, applied_filters, filter_bars, restored_filter,
         stored_filter,
     },
-    result_grid,
+    import_rows, result_grid,
     result_grid::{NewValue, ResultGrid},
     sql::{self, Destructive, Mode, SortKey, Verdict},
     store,
@@ -270,6 +270,8 @@ pub(crate) struct Session {
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
     pub(crate) insert_form: Option<InsertForm>,
+    /// The Import Rows dialog, over the object tab it imports into.
+    pub(crate) import_rows: Option<ImportDialog>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
     /// The query tab whose queue stopped on a failed statement, held until
@@ -322,6 +324,39 @@ pub(crate) struct InsertField {
     /// Whether this field has been typed into. The reason `insert_value`
     /// answers three ways rather than two.
     pub(crate) touched: bool,
+}
+
+/// A file on its way into the table an object tab shows.
+pub(crate) struct ImportDialog {
+    pub(crate) tab: u64,
+    pub(crate) schema: String,
+    pub(crate) table: String,
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Arc<[u8]>,
+    pub(crate) options: import_rows::Options,
+    pub(crate) mappings: Vec<import_rows::Mapping>,
+    pub(crate) prepared: Option<Result<Arc<import_rows::Prepared>, String>>,
+    pub(crate) plan: Option<Arc<import_rows::Plan>>,
+    /// Bumped by every recheck, so only the newest one's answer lands.
+    pub(crate) checks: u64,
+    pub(crate) checking: bool,
+    pub(crate) phase: ImportPhase,
+    pub(crate) error: Option<String>,
+}
+
+// At most one per session: boxing the run saves nothing worth an indirection.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ImportPhase {
+    Editing,
+    Running {
+        plan: Arc<import_rows::Plan>,
+        run: import_rows::Run,
+        /// `None` while the import's own session is still opening.
+        connection: Option<Connection>,
+        cancel: CancelToken,
+        started: std::time::Instant,
+        cancelling: bool,
+    },
 }
 
 /// What one field contributes to the `INSERT`. The outer `None` is a column
@@ -488,6 +523,7 @@ impl Session {
             notice,
             apply_review: None,
             insert_form: None,
+            import_rows: None,
             pending_run: None,
             queue_failure: None,
             stale_edit: None,

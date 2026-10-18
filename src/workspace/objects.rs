@@ -6,7 +6,7 @@
 use super::*;
 
 use crate::db::{ColumnDefinition, Structure};
-use crate::session::{Explained, Finished, Queue, TabKey};
+use crate::session::{Explained, Finished, ImportPhase, Queue, TabKey};
 
 impl Workspace {
     pub(crate) fn open_explorer_target(
@@ -618,10 +618,17 @@ impl Workspace {
                         }
                         ObjectBody::Routine(_) => {}
                     }
+                    // An import checks its file against these columns.
+                    let rechecks = profile.session.import_rows.as_ref().is_some_and(|dialog| {
+                        dialog.tab == id && matches!(dialog.phase, ImportPhase::Editing)
+                    });
                     cx.notify();
                     // The rows and the structure are two requests and either can
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
+                    if rechecks {
+                        workspace.recheck_import(&profile_id, cx);
+                    }
                     // The page `requery_relation` held back for this key.
                     if waited && workspace.engine().pages_by_key() {
                         workspace.requery_relation(id, |_, _, _, _| true, cx);
@@ -1422,6 +1429,9 @@ impl Workspace {
 
     pub(crate) fn close_object(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_run(Tab::Object(id), cx);
+        if let Some(profile) = self.profile().map(|profile| profile.id.clone()) {
+            self.abandon_import(&profile, Some(id), cx);
+        }
         // A count outliving its tab would hold the connection for an answer
         // nothing is left to show.
         self.cancel_count(id, cx);

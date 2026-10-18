@@ -612,6 +612,9 @@ impl Workspace {
         if self.close_apply_review(cx) {
             return;
         }
+        if self.close_import(cx) {
+            return;
+        }
         // Below the modals and prompts, which paint over the switcher.
         if self.switcher_open {
             self.switcher_open = false;

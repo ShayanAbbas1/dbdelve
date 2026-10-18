@@ -28,8 +28,8 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget,
-        NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
+        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, ImportRows,
+        LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
         SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit,
         SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
@@ -3329,6 +3329,13 @@ fn relation_controls(
             button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
                 |_, window, cx| {
                     window.dispatch_action(Box::new(NewRow), cx);
+                },
+            )
+        }))
+        .children(takes_inserts.then(|| {
+            button("import-rows", "Import…", Tone::Quiet, Control::Compact, t).on_click(
+                |_, window, cx| {
+                    window.dispatch_action(Box::new(ImportRows), cx);
                 },
             )
         }))

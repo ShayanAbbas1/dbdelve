@@ -546,8 +546,6 @@ pub fn insert_row(
 /// data_type)`, each row its values in that order; a `None` has no SQL
 /// spelling, so it is an error. Every value is quoted through `Engine`, which
 /// is what the write gate's literal check relies on.
-// Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) fn insert_rows(
     engine: Engine,
     schema: &str,

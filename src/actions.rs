@@ -172,6 +172,7 @@ actions!(
         AddFilter,
         ToggleNextJoin,
         NewRow,
+        ImportRows,
         EditCell,
         CopyCell,
         HideColumn,

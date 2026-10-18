@@ -50,6 +50,8 @@ require it, stop and raise it instead.
    - Grid edits on a query tab are appended to the buffer
      (`sql::appended_statement`) and run from there. On an object tab, which
      has no buffer, the statement is shown in a review dialog before it runs.
+   - Import Rows shows every statement it will send in its dialog's SQL view
+     before any runs.
    - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
      statement, never into the buffer.
    - **Format Query** rewrites the buffer on command only, through

@@ -11,11 +11,8 @@ mod run;
 mod values;
 
 pub(crate) use mapping::*;
-// Nothing outside the module reads the plan or runs it until the dialog is wired in (Task 7).
-#[allow(unused_imports)]
 pub(crate) use plan::*;
 pub(crate) use read::*;
-#[allow(unused_imports)]
 pub(crate) use run::*;
 pub(crate) use values::*;
 

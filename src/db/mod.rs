@@ -444,8 +444,6 @@ impl Engine {
     /// How a boolean is spelled as an Import Rows value. MySQL reads `'true'`
     /// into a `tinyint` as an error in strict mode, and SQL Server's `bit` and
     /// SQLite's integers take `1` and `0` only.
-    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-    #[allow(dead_code)]
     pub fn boolean_literal(self, value: bool) -> &'static str {
         match (self, value) {
             (Self::Postgres | Self::Snowflake | Self::MongoDb, true) => "true",
@@ -462,8 +460,6 @@ impl Engine {
     /// Whether an insert can be told to leave a row that collides with an
     /// existing key alone. SQL Server and Snowflake have no such clause short
     /// of `MERGE`, and MongoDB's `insertMany` would stop at the first collision.
-    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-    #[allow(dead_code)]
     pub fn skips_duplicates(self) -> bool {
         match self {
             Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso => true,
@@ -473,8 +469,6 @@ impl Engine {
 
     /// The statement that opens a transaction spanning an import's chunks, or
     /// why there cannot be one.
-    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-    #[allow(dead_code)]
     pub fn all_or_nothing(self) -> Result<&'static str, &'static str> {
         match self {
             Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso => {
@@ -493,8 +487,6 @@ impl Engine {
     /// Whether an import may map a column to a field the sample has not seen.
     /// A collection has no fixed columns, and an unmapped field is left out
     /// rather than written as null.
-    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-    #[allow(dead_code)]
     pub fn takes_new_fields(self) -> bool {
         match self {
             Self::MongoDb => true,
@@ -1343,8 +1335,6 @@ impl Connection {
     /// a Cancel on it stops only the import's. Dropping it ends the session,
     /// and the server rolls back whatever it left open. Snowflake and MongoDB
     /// keep no session to hold apart, so it is this one.
-    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
-    #[allow(dead_code)]
     pub fn apart(&self) -> Result<Self, DbError> {
         match self {
             Self::Snowflake(_) | Self::MongoDb(_) => Ok(self.clone()),
