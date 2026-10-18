@@ -25,7 +25,8 @@ impl TargetColumn {
             .map(|column| Self {
                 name: column.name.clone(),
                 data_type: column.data_type.clone(),
-                nullable: column.nullable,
+                // A sampled field that was always present is not a NOT NULL constraint.
+                nullable: column.nullable || engine.takes_new_fields(),
                 has_default: column.default.is_some(),
                 generated: engine.generates(column),
             })
@@ -156,8 +157,11 @@ pub(crate) fn offered_rules(target: Option<&TargetColumn>) -> Vec<Rule> {
         rules.push(Rule::Date(DateFormat::Iso));
     }
     if has(&[
-        "int", "numeric", "decimal", "float", "double", "real", "number", "money", "serial",
-    ]) {
+        "int", "long", "numeric", "decimal", "float", "double", "real", "number", "money", "serial",
+    ]) && !kind
+        .as_ref()
+        .is_some_and(|k| k.contains("interval") || k.contains("point"))
+    {
         rules.push(Rule::Number(Decimal::Dot));
     }
     if has(&["bool", "bit", "tinyint(1)"]) {
@@ -340,7 +344,15 @@ pub(crate) fn prepare(
 ) -> Result<Prepared, String> {
     let table = super::read(bytes, options)?;
     let mappings = match previous {
-        Some((columns, mappings)) if columns == table.columns => mappings.to_vec(),
+        Some((columns, mappings))
+            if columns == table.columns
+                && !targets.is_empty()
+                && mappings
+                    .iter()
+                    .all(|m| !matches!(m.target, Target::Column(i) if i >= targets.len())) =>
+        {
+            mappings.to_vec()
+        }
         _ => auto_map(
             &table.columns,
             targets,
@@ -512,6 +524,8 @@ mod tests {
         assert!(offered("numeric(10,2)").contains(&Rule::Number(Decimal::Dot)));
         assert!(offered("boolean").contains(&Rule::Boolean));
         assert!(offered("bit").contains(&Rule::Boolean));
+        assert!(offered("long").contains(&Rule::Number(Decimal::Dot)));
+        assert!(!offered("interval").contains(&Rule::Number(Decimal::Dot)));
         for t in ["date", "text", "boolean"] {
             assert!(offered(t).contains(&Rule::AsIs) && offered(t).contains(&Rule::Exact));
         }
@@ -670,6 +684,48 @@ mod tests {
                 message: "This row has no values to import.".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_sampled_mongo_field_is_never_not_null() {
+        use crate::db::ColumnDefinition;
+        let structure = Structure {
+            columns: ["_id", "email"]
+                .map(|name| ColumnDefinition {
+                    name: name.into(),
+                    data_type: "string".into(),
+                    nullable: false,
+                    default: None,
+                })
+                .to_vec(),
+            ..Default::default()
+        };
+        let targets = TargetColumn::from_structure(&structure, Engine::MongoDb);
+        let bytes = br#"[{"email": null}, {"email": "a"}]"#;
+        let options = opts("a.json", bytes);
+        let prepared = prepare(bytes, &options, &targets, None, Engine::MongoDb).unwrap();
+        assert_eq!(prepared.checked.problems, []);
+    }
+
+    #[test]
+    fn prepare_remaps_when_the_kept_mapping_no_longer_fits_the_targets() {
+        let csv = b"id\n1\n";
+        let options = opts("a.csv", csv);
+        let columns = vec!["id".to_string()];
+        let stale = [Mapping {
+            target: Target::Column(5),
+            rule: Rule::AsIs,
+        }];
+        let targets = [col("id", "int", false, false, false)];
+        let got = prepare(
+            csv,
+            &options,
+            &targets,
+            Some((&columns, &stale)),
+            Engine::Postgres,
+        )
+        .unwrap();
+        assert_eq!(targets_of(&got.mappings), [Target::Column(0)]);
     }
 
     #[test]

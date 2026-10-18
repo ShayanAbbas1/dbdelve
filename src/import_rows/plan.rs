@@ -15,7 +15,20 @@ fn weight(row: &CheckedRow) -> usize {
     row.values
         .iter()
         .flatten()
-        .map(|v| v.shown().map_or(0, |text| text.len()) + 4)
+        .map(|v| {
+            4 + match v {
+                Value::Null => 0,
+                Value::Bool(b) => {
+                    if *b {
+                        4
+                    } else {
+                        5
+                    }
+                }
+                Value::Json(json) => json.to_string().len(),
+                Value::Text(text) | Value::Number(text) | Value::Date { text, .. } => text.len(),
+            }
+        })
         .sum()
 }
 
