@@ -95,7 +95,10 @@ require it, stop and raise it instead.
    Because it is a whitelist, `DROP` and `TRUNCATE` are refused structurally,
    anywhere in the tree, CTEs included (`sql::forbidden`), and so is every
    `delete` outside that one shape (`sql::deletes_anything`, checked on the
-   `INSERT` and `UPDATE` arms).
+   `INSERT` and `UPDATE` arms). On an engine where a backslash escapes
+   (`Engine::backslash_escapes`), an `INSERT` value or `DELETE` key whose `'`
+   follows an odd run of backslashes is refused: the grammar ends the string
+   there and the engine does not.
 
    `sql::is_generated_select` guards the filter bar, the one place user text is
    spliced into DBDelve's statement: exactly one query, nothing destructive

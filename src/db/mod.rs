@@ -601,6 +601,17 @@ impl Engine {
         }
     }
 
+    /// Whether a backslash in a single-quoted literal escapes the character
+    /// after it. Snowflake reads it so unconditionally; MySQL and MariaDB unless
+    /// `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know, so they
+    /// are taken to.
+    pub fn backslash_escapes(self) -> bool {
+        match self {
+            Self::MySql | Self::MariaDb | Self::Snowflake => true,
+            Self::Postgres | Self::Sqlite | Self::Turso | Self::SqlServer | Self::MongoDb => false,
+        }
+    }
+
     /// Doubling the quote is enough for two of them: neither Postgres nor
     /// SQLite reads a backslash as an escape, the first because
     /// `standard_conforming_strings` is on by default and the second because it
@@ -609,12 +620,17 @@ impl Engine {
     /// survive as two.
     pub fn quote_literal(self, value: &str) -> String {
         match self {
-            Self::Postgres | Self::Sqlite | Self::Turso => {
+            Self::Postgres
+            | Self::Sqlite
+            | Self::Turso
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Snowflake => {
+                let value = match self.backslash_escapes() {
+                    true => value.replace('\\', r"\\"),
+                    false => value.to_string(),
+                };
                 format!("'{}'", value.replace('\'', "''"))
-            }
-            // Snowflake reads a backslash as an escape too, and unconditionally.
-            Self::MySql | Self::MariaDb | Self::Snowflake => {
-                format!("'{}'", value.replace('\\', r"\\").replace('\'', "''"))
             }
             // `N` because a bare literal is converted to the database's code
             // page first, and a character it lacks arrives as `?`. No

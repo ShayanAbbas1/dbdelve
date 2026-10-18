@@ -2327,14 +2327,11 @@ pub(crate) fn is_generated_write(text: &str) -> bool {
     }
     match calls.as_slice() {
         [(_, call)] if call.method == Method::InsertOne => {
-            matches!(arguments(call)[..], [document @ Value::Document(fields)]
-                if !fields.is_empty() && distinct(fields) && operator_free(document))
+            matches!(arguments(call)[..], [document] if literal_document(document))
         }
         [(_, call)] if call.method == Method::InsertMany => {
             matches!(arguments(call)[..], [Value::Array(documents)]
-                if !documents.is_empty() && documents.iter().all(|document| matches!(document,
-                    Value::Document(fields)
-                        if !fields.is_empty() && distinct(fields) && operator_free(document))))
+                if !documents.is_empty() && documents.iter().all(literal_document))
         }
         [(_, call)] if call.method == Method::DeleteOne => {
             matches!(arguments(call)[..], [filter] if names_by_id(filter))
@@ -2377,6 +2374,12 @@ pub(crate) fn delete_matches_key(text: &str, keys: &[&str]) -> bool {
         && fields
             .iter()
             .all(|(field, _)| keys.contains(&field.as_str()))
+}
+
+/// A non-empty document of distinct fields with no operator anywhere in it.
+fn literal_document(document: &Value) -> bool {
+    matches!(document, Value::Document(fields)
+        if !fields.is_empty() && distinct(fields) && operator_free(document))
 }
 
 /// `{_id: <value>}` alone, where the value is one an equality finds only

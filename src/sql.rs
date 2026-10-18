@@ -639,7 +639,19 @@ pub fn delete_row(
 /// admits more than one now: a rule that lets an `INSERT` through under a name
 /// promising an `UPDATE` is how a whitelist quietly becomes a list of things
 /// nobody refused.
+///
+/// Reads every literal as a backslash-escaping engine would, the stricter of
+/// the two readings. Every caller outside the tests has an engine and goes
+/// through [`is_generated_write_on`], which reads it as that engine does.
+#[cfg(test)]
 pub fn is_generated_write(sql: &str) -> bool {
+    generated_write(sql, true)
+}
+
+/// `backslash_escapes` is [`Engine::backslash_escapes`] for the engine the
+/// statement is bound for, which this grammar does not know: it ends a string
+/// at the first lone `'` whatever precedes it.
+fn generated_write(sql: &str, backslash_escapes: bool) -> bool {
     // An exact-text whitelist rather than a parse, so nothing can ride along.
     if is_transaction_bracket(sql) {
         return true;
@@ -669,12 +681,12 @@ pub fn is_generated_write(sql: &str) -> bool {
     // The one place a `delete` node is tolerated, and only for the shape read
     // back out of the tree rather than trusted because dbdelve wrote it.
     if kinds == ["delete"] {
-        return delete_key_columns(sql).is_some();
+        return delete_key_columns(sql, backslash_escapes).is_some();
     }
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
-    ((kinds == ["insert"] && literal_insert(statements[0], sql))
+    ((kinds == ["insert"] && literal_insert(statements[0], sql, backslash_escapes))
         || (!kinds.is_empty() && kinds.iter().all(|kind| *kind == "update")))
         && !deletes_anything(root)
 }
@@ -697,7 +709,7 @@ pub(crate) fn is_transaction_bracket(sql: &str) -> bool {
 /// compared as text as well as read from the tree: `ON CONFLICT (a) DO NOTHING`
 /// and `ON DUPLICATE KEY UPDATE a = VALUES(a)` are real clauses nothing
 /// generates.
-fn literal_insert(statement: Node, sql: &str) -> bool {
+fn literal_insert(statement: Node, sql: &str, backslash_escapes: bool) -> bool {
     // `RETURNING` hangs beside the insert, not under it.
     let Some(insert) = statement
         .named_child(0)
@@ -738,7 +750,7 @@ fn literal_insert(statement: Node, sql: &str) -> bool {
         !values.is_empty()
             && values
                 .iter()
-                .all(|value| literal_value(*value, sql) || null(value))
+                .all(|value| literal_value(*value, sql, backslash_escapes) || null(value))
     });
     let Some(last) = rows.last() else {
         return false;
@@ -811,8 +823,16 @@ fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> 
 ///
 /// Set equality, order-independent. A composite key matched on half of itself
 /// reaches every row sharing that half.
+///
+/// Reads literals as strictly as [`is_generated_write`] does; callers outside
+/// the tests go through [`delete_matches_key_on`].
+#[cfg(test)]
 pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
-    let Some(columns) = delete_key_columns(sql) else {
+    delete_key_matches(sql, keys, true)
+}
+
+fn delete_key_matches(sql: &str, keys: &[&str], backslash_escapes: bool) -> bool {
+    let Some(columns) = delete_key_columns(sql, backslash_escapes) else {
         return false;
     };
     columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
@@ -831,7 +851,7 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
         | Engine::Sqlite
         | Engine::Turso
         | Engine::Snowflake
-        | Engine::SqlServer => is_generated_write(statement),
+        | Engine::SqlServer => generated_write(statement, engine.backslash_escapes()),
     }
 }
 
@@ -845,7 +865,7 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
         | Engine::Sqlite
         | Engine::Turso
         | Engine::Snowflake
-        | Engine::SqlServer => delete_matches_key(statement, keys),
+        | Engine::SqlServer => delete_key_matches(statement, keys, engine.backslash_escapes()),
     }
 }
 
@@ -1009,7 +1029,7 @@ fn deletes_anything(node: tree_sitter::Node) -> bool {
 /// a `RETURNING`, a `LIMIT`, an `OR`, a subquery, a function call, a qualified
 /// column or a second statement all change that child list or that expression
 /// tree, and so all arrive here as `None`.
-fn delete_key_columns(sql: &str) -> Option<Vec<String>> {
+fn delete_key_columns(sql: &str, backslash_escapes: bool) -> Option<Vec<String>> {
     let tree = parse(sql)?;
     let root = tree.root_node();
     if forbidden(root) {
@@ -1056,7 +1076,7 @@ fn delete_key_columns(sql: &str) -> Option<Vec<String>> {
     }
 
     let mut columns = Vec::new();
-    if !equality_columns(*predicate, sql, &mut columns) {
+    if !equality_columns(*predicate, sql, backslash_escapes, &mut columns) {
         return None;
     }
 
@@ -1069,7 +1089,12 @@ fn delete_key_columns(sql: &str) -> Option<Vec<String>> {
 /// Walks a conjunction, pushing the column each `=` predicate names. False the
 /// moment anything else appears — an `OR`, another operator, a parenthesized
 /// group, a subquery, a function call.
-fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String>) -> bool {
+fn equality_columns(
+    node: tree_sitter::Node,
+    sql: &str,
+    backslash_escapes: bool,
+    columns: &mut Vec<String>,
+) -> bool {
     if node.kind() != "binary_expression" {
         return false;
     }
@@ -1081,10 +1106,11 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
 
     match operator.kind() {
         "keyword_and" => {
-            equality_columns(*left, sql, columns) && equality_columns(*right, sql, columns)
+            equality_columns(*left, sql, backslash_escapes, columns)
+                && equality_columns(*right, sql, backslash_escapes, columns)
         }
         "=" => {
-            if !literal_value(*right, sql) {
+            if !literal_value(*right, sql, backslash_escapes) {
                 return false;
             }
             match column_name(*left, sql) {
@@ -1106,7 +1132,12 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
 ///
 /// Not `NULL`: `WHERE id = NULL` matches no row, so only an insert admits it,
 /// and beside this rather than through it.
-fn literal_value(node: Node, sql: &str) -> bool {
+///
+/// On an engine where a backslash escapes, a `'` after an odd run of
+/// backslashes is one the grammar reads as closing the string and the engine
+/// reads as part of it. Everything after it would then be SQL to the engine
+/// and string to this gate, so such a literal is refused.
+fn literal_value(node: Node, sql: &str, backslash_escapes: bool) -> bool {
     let Some(value) = sql.get(node.byte_range()) else {
         return false;
     };
@@ -1114,7 +1145,21 @@ fn literal_value(node: Node, sql: &str) -> bool {
     let hex = value
         .strip_prefix("0x")
         .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    node.kind() == "literal" && (quoted.starts_with('\'') || hex)
+    let escaped_quote = || {
+        let bytes = quoted.as_bytes();
+        bytes.iter().enumerate().skip(1).any(|(at, &byte)| {
+            byte == b'\''
+                && bytes[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|&&b| b == b'\\')
+                    .count()
+                    % 2
+                    == 1
+        })
+    };
+    node.kind() == "literal"
+        && ((quoted.starts_with('\'') && !(backslash_escapes && escaped_quote())) || hex)
 }
 
 /// The unqualified column a predicate's left side names, unquoted.
@@ -3931,6 +3976,9 @@ mod tests {
             "INSERT INTO t VALUES ('1')",
             "INSERT INTO t (a) VALUES ('1') RETURNING *",
             "INSERT INTO t (a) DEFAULT VALUES",
+            "REPLACE INTO t (a) VALUES ('1')",
+            "INSERT OR REPLACE INTO t (a) VALUES ('1')",
+            "INSERT IGNORE INTO t (a) VALUES ('1')",
         ] {
             assert!(!is_generated_write(sql), "{sql} passed the gate");
         }
@@ -3982,6 +4030,59 @@ mod tests {
             "COMMIT;;",
         ] {
             assert!(!is_generated_write(sql), "{sql:?} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_quote_a_backslash_escapes_where_the_engine_reads_one() {
+        // The grammar ends each of these strings at the second `'`; MySQL and
+        // Snowflake read `\'` as a quote inside it, and the rest as SQL.
+        let probes = [
+            r"INSERT INTO t (a, b) VALUES ('a\', ', (SELECT password FROM users LIMIT 1)) # ')",
+            r"INSERT INTO t (a, b) VALUES ('a\', ', sleep(5)) -- ')",
+            r"DELETE FROM t WHERE id = 'a\' AND b = ' OR 1=1 # '",
+        ];
+        for sql in probes {
+            assert!(!is_generated_write(sql), "{sql} passed the gate");
+        }
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
+            for sql in probes {
+                assert!(
+                    !is_generated_write_on(engine, sql),
+                    "{sql} passed the gate on {engine:?}"
+                );
+            }
+            assert!(!delete_matches_key_on(engine, probes[2], &["id", "b"]));
+            // What `quote_literal` writes there still reads as one literal.
+            for value in [r"a\", "it's", r"it\'s", r"\\", r"\"] {
+                let literal = engine.quote_literal(value);
+                for sql in [
+                    format!("INSERT INTO t (a) VALUES ({literal})"),
+                    format!("DELETE FROM t WHERE id = {literal}"),
+                ] {
+                    assert!(
+                        is_generated_write_on(engine, &sql),
+                        "{sql} was refused on {engine:?}"
+                    );
+                }
+            }
+        }
+        // A backslash is an ordinary character where the engine says so.
+        for engine in [Engine::Postgres, Engine::Sqlite, Engine::SqlServer] {
+            for sql in [
+                r"INSERT INTO t (a) VALUES ('C:\')",
+                r"DELETE FROM t WHERE id = 'C:\'",
+            ] {
+                assert!(
+                    is_generated_write_on(engine, sql),
+                    "{sql} was refused on {engine:?}"
+                );
+            }
+            assert!(delete_matches_key_on(
+                engine,
+                r"DELETE FROM t WHERE id = 'C:\'",
+                &["id"]
+            ));
         }
     }
 
