@@ -223,11 +223,11 @@ fn number(text: &str, decimal: Decimal) -> Result<Value, String> {
         Decimal::Dot => trimmed.replace(',', ""),
         Decimal::Comma => trimmed.replace('.', "").replace(',', "."),
     };
-    // The character check keeps `inf` and `nan`, which f64 parses, out.
+    // The character check keeps `inf` and `nan` out; the finite check keeps `1e999`, which overflows to inf.
     let plain = cleaned
         .chars()
         .all(|c| c.is_ascii_digit() || "+-.eE".contains(c));
-    if plain && cleaned.parse::<f64>().is_ok() {
+    if plain && cleaned.parse::<f64>().is_ok_and(f64::is_finite) {
         Ok(Value::Number(cleaned))
     } else {
         Err(format!("{} is not a number", shown(text)))
@@ -609,6 +609,9 @@ mod tests {
             Err("`1.2.3` is not a number".into())
         );
         assert!(v(text("inf", false), Rule::Number(Decimal::Dot), &opts()).is_err());
+        for huge in ["1e999", "-1e999"] {
+            assert!(v(text(huge, false), Rule::Number(Decimal::Dot), &opts()).is_err());
+        }
     }
 
     #[test]

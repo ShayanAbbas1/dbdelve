@@ -2904,6 +2904,7 @@ pub(super) mod at_once {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn every_engine_answers_the_import_questions() {
@@ -2924,7 +2925,6 @@ mod tests {
             assert_eq!(engine.takes_new_fields(), new_fields);
         }
     }
-    use super::*;
 
     #[test]
     fn a_packed_row_holds_what_its_cells_did() {

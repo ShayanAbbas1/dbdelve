@@ -2071,10 +2071,15 @@ fn imported(value: &ImportValue) -> Value {
     }
 }
 
+// Whole numbers keep their width and anything else is a double, unlike
+// `number` above, which is mongosh's rule for typed text (`1.0` is an Int32).
 fn whole_or_double(text: &str) -> Value {
     match text.parse::<i64>() {
         Ok(n) => i32::try_from(n).map_or(Value::Int64(n), Value::Int32),
-        Err(_) => Value::Double(text.parse().unwrap_or(f64::NAN)),
+        Err(_) => Value::Double(
+            text.parse()
+                .expect("value rules only produce finite numbers"),
+        ),
     }
 }
 
