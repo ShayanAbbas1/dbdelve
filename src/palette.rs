@@ -967,7 +967,29 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             Command::ResetEditorZoom,
         ));
     }
+    if session.import_rows.is_some() {
+        items.retain(|item| beside_import(&item.command));
+    }
     items
+}
+
+/// Whether `command` acts on the app or a connection rather than the tab the
+/// import dialog covers, where it would act out of sight or open under it.
+fn beside_import(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::SwitchProfile(_)
+            | Command::NextProfile
+            | Command::PreviousProfile
+            | Command::NewConnection
+            | Command::NewProject
+            | Command::ImportConnections(_)
+            | Command::RefreshConnection
+            | Command::SelectTheme
+            | Command::PickFont(_)
+            | Command::OpenSettings
+            | Command::ToggleSidebar
+    )
 }
 
 fn kind_label(kind: ObjectKind) -> &'static str {

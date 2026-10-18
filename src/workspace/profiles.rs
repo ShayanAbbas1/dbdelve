@@ -721,6 +721,21 @@ impl Workspace {
             }
         };
 
+        if let Some(running) = editing.as_deref().and_then(|id| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .filter(|profile| profile.config.needs_reconnect(&config))
+                .and_then(|_| self.running_import_into(id))
+        }) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(format!(
+                    "An import into {running} is running on this connection. Save once it ends."
+                ));
+            }
+            cx.notify();
+            return;
+        }
         self.form = None;
         if let Some(project) = &project {
             self.project_named(project);
@@ -863,7 +878,15 @@ impl Workspace {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;
         };
-        self.abandon_import(&id, cx);
+        if let Some(running) = self.running_import_into(&id) {
+            self.note(
+                format!(
+                    "An import into {running} is running, so the connection was not refreshed."
+                ),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -964,6 +987,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
+        if let Some(running) = self
+            .profile()
+            .and_then(|profile| self.running_import_into(&profile.id))
+        {
+            self.note(
+                format!("An import into {running} is running, so the database was not switched."),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };
@@ -1007,6 +1040,8 @@ impl Workspace {
         closing.sort_by_key(|id| Tab::Object(*id) == active);
         let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
         let profile_id = profile.id.clone();
+        // Not running, which is refused above: the dialog names a table of
+        // the database being left.
         self.abandon_import(&profile_id, cx);
         for id in closing {
             self.close_object(id, window, cx);
@@ -1314,6 +1349,7 @@ impl Workspace {
                         Err(message) => ProfileState::Failed(message),
                     };
                     workspace.load_catalog(&id, generation, cx);
+                    workspace.load_import_columns(&id, cx);
                     // The tab in front is already being looked at, so a
                     // reconnect has no later visit to re-run it on.
                     let active = workspace
@@ -1679,7 +1715,7 @@ impl Workspace {
         // nothing left to count and the number is what the note reports.
         let queries = store::saved_queries(&id).len();
 
-        self.abandon_import(&id, cx);
+        let stopped = self.abandon_import(&id, cx);
 
         let removed = self.profiles.remove(index);
         if let Some(key) = identity_file(&removed.config)
@@ -1709,7 +1745,14 @@ impl Workspace {
             self.refocus_front();
         }
         self.connect_active(cx);
-        self.note(removal_note(&name, queries, removed_queries.err()), cx);
+        let note = removal_note(&name, queries, removed_queries.err());
+        self.note(
+            match stopped {
+                Some(stopped) => format!("{note} {stopped}"),
+                None => note,
+            },
+            cx,
+        );
     }
 }
 

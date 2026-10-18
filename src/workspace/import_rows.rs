@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use gpui::PathPromptOptions;
 
-use super::import_dialog::{new_preview, show_preview, show_preview_row};
+use super::import_dialog::{import_blocked, new_preview, show_preview, show_preview_row};
 use super::*;
 use crate::import_rows::{
     Delimiter, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, prepare, send,
@@ -64,21 +64,30 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        match &profile.session.import_rows {
-            // A session holds one dialog, and replacing a running one would
-            // drop its connection mid-import.
-            Some(ImportDialog {
-                phase: ImportPhase::Running { .. },
-                schema,
-                table,
-                ..
-            }) => {
-                let message = format!("An import into `{schema}.{table}` is running.");
-                self.note(message, cx);
-            }
-            Some(_) => {}
-            None => self.prompt_import_file(schema, table, window, cx),
+        // A session holds one dialog, and replacing a running one would drop
+        // its connection mid-import.
+        if let Some(running) = self.running_import_into(&profile.id) {
+            self.note(format!("An import into {running} is running."), cx);
+        } else if profile.session.import_rows.is_none() {
+            self.prompt_import_file(schema, table, window, cx);
         }
+    }
+
+    /// Whether the import dialog covers the tab in front, where whatever acts
+    /// on that tab's buffer or grid would act out of sight, or open under it.
+    pub(crate) fn import_covers(&self) -> bool {
+        self.profile()
+            .is_some_and(|profile| profile.session.import_rows.is_some())
+    }
+
+    /// `` `schema.table` ``, while `profile` has an import running. What would
+    /// end the run's session or the dialog it reports to is refused meanwhile:
+    /// a reconnect, a database switch, a second import.
+    pub(crate) fn running_import_into(&self, profile: &str) -> Option<String> {
+        let found = self.profiles.iter().find(|found| found.id == profile)?;
+        let dialog = found.session.import_rows.as_ref()?;
+        matches!(dialog.phase, ImportPhase::Running { .. })
+            .then(|| format!("`{}.{}`", dialog.schema, dialog.table))
     }
 
     /// Ask for a file to import into `schema.table`. A dismissed picker does
@@ -155,6 +164,7 @@ impl Workspace {
                     return;
                 }
                 let options = Options::detected(&path, &bytes);
+                session.editor_needs_focus = true;
                 session.import_rows = Some(ImportDialog {
                     schema,
                     table,
@@ -170,6 +180,7 @@ impl Workspace {
                     checking: false,
                     phase: ImportPhase::Editing,
                     error: None,
+                    committed: 0,
                     preview: new_preview(window, cx),
                     sql: cx.new(|cx| {
                         EditorState::new(window, cx)
@@ -191,18 +202,28 @@ impl Workspace {
 
     /// Read the columns of the table `profile`'s dialog imports into, with the
     /// same catalog call a relation tab's structure makes, and check the file
-    /// against them once they land.
-    fn load_import_columns(&mut self, profile: &str, cx: &mut Context<Self>) {
+    /// against them once they land. Again after a reconnect, which may have
+    /// moved the profile to another server or database.
+    pub(crate) fn load_import_columns(&mut self, profile: &str, cx: &mut Context<Self>) {
         let Some(found) = self.profiles.iter_mut().find(|found| found.id == profile) else {
             return;
         };
         let connection = found.connection();
-        let Some(dialog) = found.session.import_rows.as_mut() else {
+        let connecting = matches!(found.state, ProfileState::Connecting);
+        let Some(dialog) = found
+            .session
+            .import_rows
+            .as_mut()
+            .filter(|dialog| matches!(dialog.phase, ImportPhase::Editing))
+        else {
             return;
         };
         let Some(connection) = connection else {
-            dialog.structure = StructureState::Failed("The connection is not open.".into());
-            cx.notify();
+            // The connect landing loads them.
+            if !connecting {
+                dialog.structure = StructureState::Failed("The connection is not open.".into());
+                self.recheck_import(profile, cx);
+            }
             return;
         };
         let (schema, table, file) = (
@@ -449,9 +470,8 @@ impl Workspace {
             .and_then(|profile| profile.session.import_rows.as_ref())
             .is_some_and(|dialog| {
                 matches!(dialog.phase, ImportPhase::Editing)
-                    && !dialog.checking
                     && dialog.plan.is_some()
-                    && matches!(&dialog.prepared, Some(Ok(prepared)) if prepared.checked.problems.is_empty())
+                    && import_blocked(dialog).is_none()
             });
         if !ready || !self.require(Mode::ReadWrite, cx) {
             return;
@@ -536,8 +556,8 @@ impl Workspace {
     }
 
     /// The import `started` began, found by its start rather than by the
-    /// profile's generation: it runs on a session of its own, which a
-    /// reconnect of the profile's does not end.
+    /// profile's generation: it runs on a session of its own, and a reconnect
+    /// of the profile's is refused until it ends.
     fn running_import(&mut self, profile: &str, started: Instant) -> Option<&mut ImportDialog> {
         self.import_dialog_mut(profile).filter(|dialog| {
             matches!(dialog.phase, ImportPhase::Running { started: at, .. } if at == started)
@@ -627,16 +647,28 @@ impl Workspace {
         true
     }
 
-    /// Drop `profile`'s dialog, stopping what it is running. Dropping its
-    /// session rolls back an open transaction.
-    pub(crate) fn abandon_import(&mut self, profile: &str, cx: &mut Context<Self>) {
-        let Some(found) = self.profiles.iter_mut().find(|found| found.id == profile) else {
-            return;
+    /// Drop `profile`'s dialog, stopping what it is running, and say what a
+    /// stopped run left behind. Dropping its session rolls back an open
+    /// transaction.
+    pub(crate) fn abandon_import(
+        &mut self,
+        profile: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let found = self.profiles.iter_mut().find(|found| found.id == profile)?;
+        let mut dialog = found.session.import_rows.take()?;
+        cx.notify();
+        let ImportPhase::Running { plan, run, .. } = &dialog.phase else {
+            return None;
         };
-        if let Some(mut dialog) = found.session.import_rows.take() {
-            stop_import(&mut dialog, cx);
-            cx.notify();
-        }
+        let stopped = stopped_note(
+            &format!("`{}.{}`", dialog.schema, dialog.table),
+            plan.begin.is_some(),
+            run.inserted(),
+            plan.chunks.iter().map(|chunk| chunk.len()).sum(),
+        );
+        stop_import(&mut dialog, cx);
+        Some(stopped)
     }
 
     /// Say how the run ended. Only a failure keeps the dialog, on the error.
@@ -660,7 +692,10 @@ impl Workspace {
         let (changed, closes) = match outcome {
             Outcome::Imported { .. } => (true, true),
             Outcome::Cancelled { committed } => (committed > 0, true),
-            Outcome::Failed { committed, .. } => (committed > 0, false),
+            Outcome::Failed { committed, .. } => {
+                dialog.committed = committed;
+                (committed > 0, false)
+            }
         };
         if closes {
             session.import_rows = None;
@@ -672,7 +707,7 @@ impl Workspace {
         if changed {
             let active = session.active;
             for object in &mut session.objects {
-                let ObjectBody::Relation { stale, .. } = &mut object.body else {
+                let ObjectBody::Relation { stale, count, .. } = &mut object.body else {
                     continue;
                 };
                 if object.schema != schema || object.name != table {
@@ -682,8 +717,12 @@ impl Workspace {
                     shown = Some(object.id);
                 } else {
                     // Read again when it is next looked at, as after a
-                    // reconnect.
+                    // reconnect, and counted again as `refresh_relation`
+                    // would.
                     *stale = true;
+                    if let RowCount::Counted(..) = count {
+                        *count = RowCount::Unasked;
+                    }
                 }
             }
         }
@@ -767,6 +806,32 @@ fn writes_option(
     .detach();
 }
 
+/// What an import stopped from outside its dialog left in `target`, after
+/// `landed` of its `rows` were sent. A transaction rolls back with its
+/// session, unless its `COMMIT` is already out, which a stop does not reach;
+/// commit as it goes keeps the chunks that landed, and the one out when it
+/// stopped may land too.
+fn stopped_note(target: &str, atomic: bool, landed: usize, rows: usize) -> String {
+    let committed = match (atomic, landed) {
+        (true, _) if landed == rows => {
+            return format!(
+                "The import into {target} was stopped as it committed, so its rows may have \
+                 been imported."
+            );
+        }
+        (true, _) => {
+            return format!("The import into {target} was stopped, and nothing was imported.");
+        }
+        (false, 0) => "no rows".to_string(),
+        (false, 1) => "1 row".to_string(),
+        (false, n) => format!("{} rows", group_thousands(n as u64)),
+    };
+    format!(
+        "The import into {target} was stopped with {committed} committed, and perhaps the chunk \
+         it was sending."
+    )
+}
+
 /// Stop asking for more of the run, and stop the statement it has out on the
 /// server. A failed stop leaves that statement to finish, after which the run
 /// sends nothing more but its `ROLLBACK`.
@@ -794,5 +859,33 @@ fn stop_import(dialog: &mut ImportDialog, cx: &mut Context<Workspace>) {
         cx.background_executor()
             .spawn(on_own_thread(move || connection.cancel(&cancel)))
             .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stopped_note;
+
+    #[test]
+    fn a_stopped_import_says_what_it_left_committed() {
+        assert_eq!(
+            stopped_note("`public.users`", true, 4, 10),
+            "The import into `public.users` was stopped, and nothing was imported."
+        );
+        assert_eq!(
+            stopped_note("`public.users`", true, 10, 10),
+            "The import into `public.users` was stopped as it committed, so its rows may have \
+             been imported."
+        );
+        assert_eq!(
+            stopped_note("`public.users`", false, 1, 10),
+            "The import into `public.users` was stopped with 1 row committed, and perhaps the \
+             chunk it was sending."
+        );
+        assert_eq!(
+            stopped_note("`public.users`", false, 12_000, 20_000),
+            "The import into `public.users` was stopped with 12,000 rows committed, and perhaps \
+             the chunk it was sending."
+        );
     }
 }

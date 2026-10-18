@@ -300,6 +300,9 @@ impl Workspace {
     }
 
     pub(crate) fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_covers() {
+            return;
+        }
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
@@ -1028,6 +1031,9 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_covers() {
+            return;
+        }
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
@@ -1127,6 +1133,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_covers() {
+            return;
+        }
         // No buffer in front is nothing to save, and a name asked for anyway
         // would have nowhere to go when it is given.
         if self
@@ -2371,6 +2380,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_covers() {
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };

@@ -601,6 +601,10 @@ impl Workspace {
         if self.cancel_close_tab(cx) {
             return;
         }
+        // The import dialog paints over the new row form and the apply review.
+        if self.close_import(cx) {
+            return;
+        }
         // Before the apply review, though confirming a row clears the form in
         // the same step that opens the review, so the two are never both open
         // on one tab. `close_new_row` is scoped to the active tab's own form,
@@ -610,9 +614,6 @@ impl Workspace {
             return;
         }
         if self.close_apply_review(cx) {
-            return;
-        }
-        if self.close_import(cx) {
             return;
         }
         // Below the modals and prompts, which paint over the switcher.

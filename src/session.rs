@@ -344,6 +344,9 @@ pub(crate) struct ImportDialog {
     pub(crate) checking: bool,
     pub(crate) phase: ImportPhase,
     pub(crate) error: Option<String>,
+    /// Rows a failed run of this file committed before it stopped. Running it
+    /// again would send them twice.
+    pub(crate) committed: usize,
     pub(crate) inputs: ImportInputs,
     pub(crate) preview: Entity<TableState<crate::workspace::PreviewGrid>>,
     pub(crate) sql: Entity<EditorState>,

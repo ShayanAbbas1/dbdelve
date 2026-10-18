@@ -1354,7 +1354,14 @@ fn lines(text: &str) -> impl Iterator<Item = gpui::Div> + '_ {
 }
 
 /// What stops the import, if anything: the reason the button is disabled.
-fn import_blocked(dialog: &ImportDialog) -> Option<String> {
+pub(super) fn import_blocked(dialog: &ImportDialog) -> Option<String> {
+    if dialog.committed > 0 {
+        return Some(
+            "Rows of this file are already in the table, and importing it again would add them \
+             twice. Change the file to import the rest."
+                .into(),
+        );
+    }
     if dialog.checking {
         return Some("Checking the file…".into());
     }

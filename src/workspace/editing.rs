@@ -13,6 +13,9 @@ impl Workspace {
     /// Requires a schema and a table and not a primary key, which is why this
     /// is offered on relations the grid refuses to edit.
     pub(crate) fn new_row(&mut self, _: &NewRow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_covers() {
+            return;
+        }
         // Does not route through `editable`: an insert has no existing row to
         // check a column of, so the mode is asked outright -- but not on a
         // structure tab, which has no row to add and only needs pointing back.
@@ -695,7 +698,7 @@ impl Workspace {
         // A batch already on screen was generated from the pending set as it
         // stood. Another edit behind the modal would leave the statement the
         // user is reading describing something other than what the grid holds.
-        if profile.session.apply_review.is_some() {
+        if profile.session.apply_review.is_some() || profile.session.import_rows.is_some() {
             return;
         }
         let Some(results) = profile.session.active_results().cloned() else {
@@ -840,7 +843,7 @@ impl Workspace {
         };
         // The gate `edit_cell` holds, for its reason: a batch already on screen
         // was generated from the pending set as it stood.
-        if profile.session.apply_review.is_some() {
+        if profile.session.apply_review.is_some() || profile.session.import_rows.is_some() {
             return false;
         }
         let Some(results) = profile.session.active_results().cloned() else {
@@ -923,9 +926,9 @@ impl Workspace {
         value: NewValue,
         cx: &mut Context<Self>,
     ) -> bool {
-        let reviewing = self
-            .profile()
-            .is_none_or(|profile| profile.session.apply_review.is_some());
+        let reviewing = self.profile().is_none_or(|profile| {
+            profile.session.apply_review.is_some() || profile.session.import_rows.is_some()
+        });
         let staged = !reviewing
             && grid.update(cx, |table, cx| {
                 let staged =
@@ -1132,7 +1135,7 @@ impl Workspace {
         };
         // A statement already generated is the one the user is reading; another
         // behind it would leave that panel describing something else.
-        if profile.session.apply_review.is_some() {
+        if profile.session.apply_review.is_some() || profile.session.import_rows.is_some() {
             return;
         }
         // Scoped to the active tab's own form: one left open on another tab
@@ -1598,6 +1601,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_covers() {
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };

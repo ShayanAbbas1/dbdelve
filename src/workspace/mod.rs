@@ -989,6 +989,10 @@ impl Render for Workspace {
             // workspace along the focused element's dispatch path, so a
             // surface with nothing focused makes every keybinding dead.
             let focus = match profile.session.active {
+                // Under the import dialog, which only stops the mouse: a
+                // buffer or grid holding focus there would take keys for a
+                // surface nobody can see.
+                _ if profile.session.import_rows.is_some() => Focus::Window,
                 // No tab at all is still a surface: the window holds focus
                 // for the bindings that open one.
                 Tab::Query(id) => match profile.session.query_tab(id) {
