@@ -7,13 +7,16 @@ use std::path::Path;
 mod mapping;
 mod plan;
 mod read;
+mod run;
 mod values;
 
 pub(crate) use mapping::*;
-// Nothing outside the module reads the plan until the dialog is wired in (Task 7).
+// Nothing outside the module reads the plan or runs it until the dialog is wired in (Task 7).
 #[allow(unused_imports)]
 pub(crate) use plan::*;
 pub(crate) use read::*;
+#[allow(unused_imports)]
+pub(crate) use run::*;
 pub(crate) use values::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

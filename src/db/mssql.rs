@@ -887,6 +887,12 @@ impl Connection {
 
         let submitted = match origin {
             Origin::User => statement.clone(),
+            // A transaction opened or closed inside `sp_executesql` changes
+            // `@@TRANCOUNT` across a module boundary, which the server reports
+            // as error 266, so an import's brackets go out bare.
+            Origin::Generated if crate::sql::is_transaction_bracket(&statement) => {
+                statement.clone()
+            }
             Origin::Generated | Origin::Internal => scoped(&statement),
         };
         // A lone read is stopped at the limit by the server: one row past it

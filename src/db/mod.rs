@@ -1338,6 +1338,24 @@ impl Connection {
         result
     }
 
+    /// A session of its own for an import, opened the way this one was, so a
+    /// transaction spanning its submissions holds nobody else's statements and
+    /// a Cancel on it stops only the import's. Dropping it ends the session,
+    /// and the server rolls back whatever it left open. Snowflake and MongoDB
+    /// keep no session to hold apart, so it is this one.
+    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+    #[allow(dead_code)]
+    pub fn apart(&self) -> Result<Self, DbError> {
+        match self {
+            Self::Snowflake(_) | Self::MongoDb(_) => Ok(self.clone()),
+            Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
+            Self::MySql(connection) => connection.alongside().map(Self::MySql),
+            Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
+            Self::Turso(connection) => connection.alongside().map(Self::Turso),
+        }
+    }
+
     /// Open now what the first run would otherwise wait on opening.
     pub fn warm(&self) {
         if let Self::Postgres(connection) = self {
