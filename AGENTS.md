@@ -657,14 +657,20 @@ Decided, and not to be re-litigated:
   (`Origin::User`). `execute_unchecked` is the one place `connection.query` is
   called, and calls `connection.generated` for an object tab's query and a
   query tab's grid-edit apply run; the only other callers of
-  `connection.generated` are the status bar's Count (`Workspace::count_rows`)
-  and the reference arrow's one-row checks (`Workspace::show_references`). A
+  `connection.generated` are the status bar's Count (`Workspace::count_rows`),
+  the reference arrow's one-row checks (`Workspace::show_references`), and
+  `import_rows::run::send`, driven by `Workspace::import_step`, on the
+  import's own connection from `Connection::apart`. A
   statement run under `Origin::Generated` or `Origin::Internal` is wrapped in
   `EXEC sp_executesql` (`scoped`) behind `SESSION_OPTIONS` (`XACT_ABORT ON`,
   `QUOTED_IDENTIFIER ON`, `ANSI_NULLS ON`, `ANSI_WARNINGS ON`,
   `IMPLICIT_TRANSACTIONS OFF`, `ROWCOUNT 0`, `DATEFORMAT ymd`), scoped to that
   one `sp_executesql` call so a `SET` the user made themselves is exactly as
-  they left it once dbdelve's statement returns; `Origin::User` runs as typed,
+  they left it once dbdelve's statement returns. An import's lone `BEGIN
+  TRANSACTION`, `COMMIT` and `ROLLBACK` (`sql::is_transaction_bracket`) go out
+  bare instead: one opened or closed inside `sp_executesql` changes
+  `@@TRANCOUNT` across a module boundary, which the server reports as error
+  266. `Origin::User` runs as typed,
   under nothing but the login default. A preflight before the statement
   (`PREFLIGHT_SQL`, run under `SESSION_OPTIONS` for dbdelve's own statement
   and under the user's options for theirs, bar `USER_DESCRIBE_OPTIONS`'
@@ -785,6 +791,8 @@ Decided, and not to be re-litigated:
   not even pretend: a `USE` comes back as "Command not supported by SQL API:
   USE", which `live_a_use_is_refused_rather_than_quietly_forgotten` pins. The database, warehouse, role, timeout and `MULTI_STATEMENT_COUNT`
   are fields of the request and never SQL — hard rule 1.
+  So Import Rows offers no All or nothing there (`Engine::all_or_nothing`):
+  no transaction can span its chunks.
 - **Snowflake has no connection mutex**, alone among the six: there is no
   socket to serialise, so a catalog load does not queue behind a slow query,
   and `snowflake::Connection::at_once` runs a structure load's four statements
@@ -1023,6 +1031,8 @@ Decided, and not to be re-litigated:
 - **There are no transactions to bracket a batch with** (`transaction_start` is
   `None`). A multi-row edit applies in order, and when one fails the error says
   which row did and that the rows before it applied. Nothing is rolled back.
+  Import Rows offers no All or nothing either (`Engine::all_or_nothing`), so
+  each chunk's `insertMany` is kept as it lands.
 - **A missing field is not a null.** A document may lack a field another has, and
   the grid says so: a missing cell renders empty with no `NULL` label, a null
   renders `NULL`, and a snapshot keeps the difference.

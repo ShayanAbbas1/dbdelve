@@ -699,6 +699,17 @@ mod tests {
 
     #[test]
     #[ignore = "needs dbdelve_TURSO_PATH"]
+    fn live_an_import_round_trips_on_turso() {
+        let connection = live().expect("dbdelve_TURSO_PATH is set");
+        crate::import_rows::live_round_trip(
+            super::super::Connection::Turso(connection),
+            Engine::Turso,
+            "main",
+        );
+    }
+
+    #[test]
+    #[ignore = "needs dbdelve_TURSO_PATH"]
     fn live_catalog_structure_and_a_read_round_trip() {
         let connection = live().expect("dbdelve_TURSO_PATH is set");
         let catalog = connection.catalog().expect("the catalog loads");

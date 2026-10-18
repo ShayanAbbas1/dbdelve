@@ -277,11 +277,196 @@ pub(crate) fn send(
         .map(|result| result.rows_affected)
 }
 
+/// The live round trip every engine's `live_an_import_round_trips_on_*` runs:
+/// a failing chunk, a clean file, a skip, a cancel, and a session dropped
+/// mid-transaction, each counted back on `connection`.
+#[cfg(test)]
+pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &str) {
+    use std::path::Path;
+
+    use super::{CHUNK_BYTES, OnDuplicate, Options, TargetColumn, Transaction, chunks, prepare};
+    use crate::db::Fetch;
+
+    const TABLE: &str = "dbdelve_import_test";
+    const DUPLICATE: &str = "1,a\n2,b\n3,c\n3,dup\n5,e\n";
+    const CLEAN: &str = "1,a\n2,b\n3,c\n4,d\n5,e\n";
+    let document = engine.takes_new_fields();
+    let atomic = engine.all_or_nothing().is_ok();
+    let ran = |sql: &str| connection.query(sql, &CancelToken::default(), Fetch::default());
+    let collection = format!("db.getCollection(\"{TABLE}\")");
+    let (key, emptied, dropped, counted) = match document {
+        true => (
+            "_id",
+            format!("{collection}.deleteMany({{}})"),
+            format!("{collection}.drop()"),
+            format!("{collection}.countDocuments()"),
+        ),
+        false => (
+            "id",
+            format!("DELETE FROM {TABLE}"),
+            format!("DROP TABLE IF EXISTS {TABLE}"),
+            format!("SELECT COUNT(*) FROM {TABLE}"),
+        ),
+    };
+    let empty = || {
+        ran(&emptied).unwrap();
+    };
+    let count = || -> u64 {
+        let result = ran(&counted).unwrap();
+        result.rows[0].get(0).unwrap().parse().unwrap()
+    };
+    let column = |name: &str, data_type: &str| TargetColumn {
+        name: name.into(),
+        data_type: data_type.into(),
+        nullable: false,
+        has_default: false,
+        generated: false,
+    };
+    let targets = match document {
+        true => Vec::new(),
+        false => vec![column("id", "integer"), column("name", "varchar(50)")],
+    };
+    let plan = |rows: &str, transaction, on_duplicate| {
+        let bytes = format!("{key},name\n{rows}");
+        let mut options = Options::detected(Path::new("rows.csv"), bytes.as_bytes());
+        options.transaction = transaction;
+        options.on_duplicate = on_duplicate;
+        let checked = prepare(bytes.as_bytes(), &options, &targets, None, engine)
+            .unwrap()
+            .checked;
+        assert_eq!(checked.problems, []);
+        let mut plan = Plan::new(engine, schema.into(), TABLE.into(), checked, &options);
+        plan.chunks = chunks(&plan.checked.rows, 2, CHUNK_BYTES, !document);
+        plan
+    };
+    let import = |plan: &Plan, cancel_after_first: bool| {
+        let own = connection.apart().unwrap();
+        let cancel = CancelToken::default();
+        let mut run = Run::new(
+            plan.chunks.iter().map(|c| c.len()).collect(),
+            plan.begin.is_some(),
+        );
+        while let Some(step) = run.next() {
+            run.landed(
+                step,
+                send(
+                    &own,
+                    engine,
+                    &plan.sql(step).unwrap(),
+                    Mode::ReadWrite,
+                    &[],
+                    &cancel,
+                ),
+            );
+            if cancel_after_first && step == Step::Chunk(0) {
+                run.cancel();
+            }
+        }
+        run.outcome().cloned().unwrap()
+    };
+    let _ = ran(&dropped);
+    if !document {
+        ran(&format!(
+            "CREATE TABLE {TABLE} (id integer PRIMARY KEY, name varchar(50) NOT NULL)"
+        ))
+        .unwrap();
+    }
+
+    if atomic {
+        let failed = import(
+            &plan(DUPLICATE, Transaction::AllOrNothing, OnDuplicate::Stop),
+            false,
+        );
+        assert!(
+            matches!(
+                failed,
+                Outcome::Failed {
+                    chunk: Some(1),
+                    committed: 0,
+                    ..
+                }
+            ),
+            "{failed:?}"
+        );
+        assert_eq!(count(), 0);
+    }
+    let failed = import(
+        &plan(DUPLICATE, Transaction::CommitAsItGoes, OnDuplicate::Stop),
+        false,
+    );
+    let Outcome::Failed {
+        chunk: Some(1),
+        committed: 2,
+        message,
+    } = &failed
+    else {
+        panic!("{failed:?}");
+    };
+    match document {
+        // The ordered insertMany kept the row before the duplicate.
+        true => {
+            assert!(message.contains("other writes applied: 1"), "{message}");
+            assert_eq!(count(), 3);
+        }
+        false => assert_eq!(count(), 2),
+    }
+
+    empty();
+    let clean = plan(CLEAN, Transaction::AllOrNothing, OnDuplicate::Stop);
+    assert_eq!(
+        import(&clean, false),
+        Outcome::Imported {
+            rows: 5,
+            skipped: Some(0)
+        }
+    );
+    assert_eq!(count(), 5);
+
+    if engine.skips_duplicates() {
+        let again = import(
+            &plan(CLEAN, Transaction::AllOrNothing, OnDuplicate::Skip),
+            false,
+        );
+        assert_eq!(
+            again,
+            Outcome::Imported {
+                rows: 0,
+                skipped: Some(5)
+            }
+        );
+        assert_eq!(count(), 5);
+    }
+
+    empty();
+    if atomic {
+        assert_eq!(import(&clean, true), Outcome::Cancelled { committed: 0 });
+        assert_eq!(count(), 0);
+    }
+    let going = plan(CLEAN, Transaction::CommitAsItGoes, OnDuplicate::Stop);
+    assert_eq!(import(&going, true), Outcome::Cancelled { committed: 2 });
+    assert_eq!(count(), 2);
+
+    if atomic {
+        empty();
+        let own = connection.apart().unwrap();
+        let cancel = CancelToken::default();
+        for step in [Step::Begin, Step::Chunk(0)] {
+            let sql = clean.sql(step).unwrap();
+            send(&own, engine, &sql, Mode::ReadWrite, &[], &cancel).unwrap();
+        }
+        drop(own);
+        assert_eq!(count(), 0, "a dropped session's transaction is rolled back");
+    }
+
+    ran(&dropped).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::db::{ConnectionConfig, SslMode};
     use crate::import_rows::{Checked, CheckedRow};
 
     fn err(m: &str) -> Result<Option<u64>, DbError> {
@@ -485,6 +670,81 @@ mod tests {
         assert_eq!(
             admitted(Engine::Postgres, "ROLLBACK", Mode::ReadOnly, &[]),
             Ok(())
+        );
+    }
+
+    fn var(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
+    }
+
+    fn live(url: &str) -> Connection {
+        let mut config = ConnectionConfig::from_url(url).unwrap();
+        // The compose servers speak no TLS, as the driver tests say.
+        if config.engine() != Engine::SqlServer
+            && let Some(server) = config.server_mut()
+        {
+            server.sslmode = SslMode::Disable;
+        }
+        Connection::open(config).unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_postgres() {
+        let url = format!(
+            "postgresql://{}:{}@{}:{}/{}",
+            var("PGUSER"),
+            var("PGPASSWORD"),
+            var("PGHOST"),
+            var("PGPORT"),
+            var("PGDATABASE")
+        );
+        live_round_trip(live(&url), Engine::Postgres, "public");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_mysql() {
+        live_round_trip(
+            live(&var("dbdelve_MYSQL_URL")),
+            Engine::MySql,
+            "dbdelve_dev",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_mariadb() {
+        live_round_trip(
+            live(&var("dbdelve_MARIADB_URL")),
+            Engine::MariaDb,
+            "dbdelve_dev",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_sqlite() {
+        let sqlite = Connection::open(ConnectionConfig::Sqlite {
+            path: var("dbdelve_SQLITE_PATH"),
+            statement_timeout: 0,
+        });
+        live_round_trip(sqlite.unwrap(), Engine::Sqlite, "main");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_sql_server() {
+        live_round_trip(live(&var("dbdelve_MSSQL_URL")), Engine::SqlServer, "dbo");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_an_import_round_trips_on_mongodb() {
+        live_round_trip(
+            live(&var("dbdelve_MONGO_URL")),
+            Engine::MongoDb,
+            "dbdelve_dev",
         );
     }
 }
