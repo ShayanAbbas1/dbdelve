@@ -1142,7 +1142,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   connection in place of members.
 - **No connection is a state, not a prompt.** With no profiles and no form
   open, the window is the welcome surface (`Workspace::render_welcome`): New
-  project, New connection, and each project with an Add connection of its own.
+  project, New connection, each project with an Add connection of its own, and
+  a Theme row whose button opens the theme palette, so a first launch can
+  leave the opaque default before connecting anywhere.
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is

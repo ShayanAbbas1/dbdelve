@@ -545,6 +545,31 @@ impl Workspace {
                         }),
                     ))
             });
+        let theme_row = div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child("Theme"),
+            )
+            .child(
+                div()
+                    .text_size(px(layout::chrome(layout::TEXT_XS)))
+                    .text_color(t.text_faint)
+                    .child(ui::chord_hint("cycle_theme", overrides)),
+            )
+            .child(
+                button("welcome-theme", t.name, Tone::Quiet, Control::Compact, t)
+                    .border_1()
+                    .border_color(t.border)
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.select_theme(&SelectTheme, window, cx);
+                    })),
+            );
         let naming = self
             .project_name
             .as_ref()
@@ -732,7 +757,8 @@ impl Workspace {
                                 )
                                 .children(projects),
                         )
-                    }),
+                    })
+                    .child(theme_row),
             )
     }
 
