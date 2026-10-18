@@ -2,7 +2,7 @@
 //! means for the rest, and the sentence the import ends on.
 
 use super::Plan;
-use crate::db::{CancelToken, Connection, DbError, Engine};
+use crate::db::{self, CancelToken, Connection, DbError, Engine};
 use crate::sql::{self, Destructive, Mode, Stop};
 use crate::ui::group_thousands;
 
@@ -31,8 +31,10 @@ impl Plan {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Outcome {
     Imported {
+        /// The rows sent, every chunk having landed.
         rows: usize,
-        skipped: Option<u64>,
+        /// What the server said it wrote, when every chunk said.
+        affected: Option<u64>,
     },
     Cancelled {
         committed: usize,
@@ -56,19 +58,28 @@ impl Outcome {
         let target = format!("`{}.{}`", plan.schema, plan.table);
         let kept = |committed: usize| match committed {
             0 => "Nothing was imported.".to_string(),
-            1 => "1 row was committed before it.".into(),
-            n => format!("{} were committed before it.", rows(n)),
+            1 => "1 row was committed.".into(),
+            n => format!("{} were committed.", rows(n)),
         };
         match self {
             Self::Imported {
-                rows: n,
-                skipped: Some(skipped @ 1..),
-            } => format!(
-                "Imported {} into {target} ({} skipped as duplicates).",
-                rows(*n),
-                group_thousands(*skipped)
-            ),
-            Self::Imported { rows: n, .. } => format!("Imported {} into {target}.", rows(*n)),
+                rows: sent,
+                affected: Some(affected),
+            } if *affected != *sent as u64 => match plan.skip && *affected < *sent as u64 {
+                true => format!(
+                    "Imported {} into {target} ({} skipped as duplicates).",
+                    rows(*affected as usize),
+                    group_thousands(*sent as u64 - affected)
+                ),
+                // A trigger can take rows in, or drop them, without counting
+                // them, so a shortfall is no sign of duplicates.
+                false => format!(
+                    "Sent {} to {target}; the server reported {} written.",
+                    rows(*sent),
+                    rows(*affected as usize)
+                ),
+            },
+            Self::Imported { rows: sent, .. } => format!("Imported {} into {target}.", rows(*sent)),
             Self::Cancelled { committed: 0 } => "Cancelled: nothing was imported.".into(),
             Self::Cancelled { committed: 1 } => "Cancelled after 1 row was committed.".into(),
             Self::Cancelled { committed } => {
@@ -114,6 +125,8 @@ pub(crate) struct Run {
     begun: bool,
     /// Chunks that landed `Ok`, so also the next chunk to send.
     landed: usize,
+    /// Rows the chunk that failed or was cancelled wrote before it stopped.
+    partial: usize,
     /// `None` once any chunk could not say how many rows it wrote.
     affected: Option<u64>,
     cancelled: bool,
@@ -129,6 +142,7 @@ impl Run {
             atomic,
             begun: false,
             landed: 0,
+            partial: 0,
             affected: Some(0),
             cancelled: false,
             failure: None,
@@ -154,7 +168,7 @@ impl Run {
         }
     }
 
-    pub(crate) fn landed(&mut self, step: Step, result: Result<Option<u64>, DbError>) {
+    pub(crate) fn landed(&mut self, step: Step, result: Result<Option<u64>, Failure>) {
         match (step, result) {
             (Step::Begin, Ok(_)) => self.begun = true,
             (Step::Chunk(_), Ok(affected)) => {
@@ -173,11 +187,19 @@ impl Run {
                     },
                 });
             }
-            (Step::Begin | Step::Commit, Err(error)) => {
-                self.failure.get_or_insert((error.message, None));
+            (Step::Begin | Step::Commit, Err(failure)) => {
+                self.failure.get_or_insert((failure.error.message, None));
             }
-            (Step::Chunk(chunk), Err(error)) => {
-                self.failure.get_or_insert((error.message, Some(chunk)));
+            (Step::Chunk(chunk), Err(failure)) => {
+                if !self.atomic {
+                    self.partial = failure.applied as usize;
+                }
+                // Anything else that lands after a cancel is reported, since
+                // it is the chunk's own failure and may have partly applied.
+                if !(self.cancelled && failure.cancel) {
+                    self.failure
+                        .get_or_insert((failure.error.message, Some(chunk)));
+                }
             }
         }
         self.settle();
@@ -205,13 +227,9 @@ impl Run {
     }
 
     fn imported(&self) -> Outcome {
-        let total = self.inserted();
-        let skipped = self
-            .affected
-            .map(|affected| (total as u64).saturating_sub(affected));
         Outcome::Imported {
-            rows: total - skipped.unwrap_or(0) as usize,
-            skipped,
+            rows: self.inserted(),
+            affected: self.affected,
         }
     }
 
@@ -220,7 +238,7 @@ impl Run {
         if self.atomic {
             return;
         }
-        let committed = self.inserted();
+        let committed = self.inserted() + self.partial;
         self.outcome = if let Some((message, chunk)) = &self.failure {
             Some(Outcome::Failed {
                 message: message.clone(),
@@ -257,6 +275,26 @@ pub(crate) fn admitted(
     }
 }
 
+/// A submission that did not go through, and what its error says of it.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub(crate) error: DbError,
+    /// The user's Cancel landing, rather than anything the statement did.
+    pub(crate) cancel: bool,
+    /// The statement's own writes that stay applied.
+    pub(crate) applied: u64,
+}
+
+impl From<DbError> for Failure {
+    fn from(error: DbError) -> Self {
+        Self {
+            error,
+            cancel: false,
+            applied: 0,
+        }
+    }
+}
+
 /// One submission, on the import's own connection from [`Connection::apart`].
 pub(crate) fn send(
     connection: &Connection,
@@ -265,7 +303,7 @@ pub(crate) fn send(
     mode: Mode,
     confirmed: &[Destructive],
     cancel: &CancelToken,
-) -> Result<Option<u64>, DbError> {
+) -> Result<Option<u64>, Failure> {
     admitted(engine, sql, mode, confirmed).map_err(|message| DbError {
         message,
         position: None,
@@ -273,6 +311,11 @@ pub(crate) fn send(
     connection
         .generated(sql, cancel, None)
         .map(|result| result.rows_affected)
+        .map_err(|error| Failure {
+            cancel: db::is_cancel(engine, &error),
+            applied: db::applied(engine, &error),
+            error,
+        })
 }
 
 /// The live round trip every engine's `live_an_import_round_trips_on_*` runs:
@@ -394,20 +437,15 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
     );
     let Outcome::Failed {
         chunk: Some(1),
-        committed: 2,
+        committed,
         message,
     } = &failed
     else {
         panic!("{failed:?}");
     };
-    match document {
-        // The ordered insertMany kept the row before the duplicate.
-        true => {
-            assert!(message.contains("other writes applied: 1"), "{message}");
-            assert_eq!(count(), 3);
-        }
-        false => assert_eq!(count(), 2),
-    }
+    // The ordered insertMany kept the row before the duplicate.
+    assert_eq!(*committed, if document { 3 } else { 2 }, "{message}");
+    assert_eq!(count(), *committed as u64);
 
     empty();
     let clean = plan(CLEAN, Transaction::AllOrNothing, OnDuplicate::Stop);
@@ -415,7 +453,7 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
         import(&clean, false),
         Outcome::Imported {
             rows: 5,
-            skipped: Some(0)
+            affected: Some(5)
         }
     );
     assert_eq!(count(), 5);
@@ -428,8 +466,8 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
         assert_eq!(
             again,
             Outcome::Imported {
-                rows: 0,
-                skipped: Some(5)
+                rows: 5,
+                affected: Some(0)
             }
         );
         assert_eq!(count(), 5);
@@ -467,12 +505,23 @@ mod tests {
     use crate::db::{ConnectionConfig, SslMode};
     use crate::import_rows::{Checked, CheckedRow};
 
-    fn err(m: &str) -> Result<Option<u64>, DbError> {
-        Err(DbError {
-            message: m.into(),
+    fn failure(message: &str, cancel: bool, applied: u64) -> Result<Option<u64>, Failure> {
+        let error = DbError {
+            message: message.into(),
             position: None,
+        };
+        Err(Failure {
+            error,
+            cancel,
+            applied,
         })
     }
+
+    fn err(message: &str) -> Result<Option<u64>, Failure> {
+        failure(message, false, 0)
+    }
+
+    const CANCELLED: &str = "canceling statement due to user request";
 
     #[test]
     fn all_or_nothing_brackets_every_chunk_and_rolls_back_a_failure() {
@@ -518,10 +567,7 @@ mod tests {
         atomic.landed(Step::Begin, Ok(None));
         atomic.landed(Step::Chunk(0), Ok(Some(2)));
         atomic.cancel();
-        atomic.landed(
-            Step::Chunk(1),
-            err("canceling statement due to user request"),
-        );
+        atomic.landed(Step::Chunk(1), failure(CANCELLED, true, 0));
         assert_eq!(atomic.next(), Some(Step::Rollback));
         atomic.landed(Step::Rollback, Ok(None));
         assert_eq!(atomic.outcome(), Some(&Outcome::Cancelled { committed: 0 }));
@@ -532,19 +578,35 @@ mod tests {
         assert_eq!(going.next(), None);
         assert_eq!(going.outcome(), Some(&Outcome::Cancelled { committed: 2 }));
 
-        // An error in the chunk in flight may have applied part of it (an
-        // ordered insertMany), so it is reported, not read as the cancel.
+        let mut stopped = Run::new(vec![2, 2], false);
+        stopped.landed(Step::Chunk(0), Ok(Some(2)));
+        stopped.cancel();
+        stopped.landed(Step::Chunk(1), failure(CANCELLED, true, 0));
+        assert_eq!(stopped.next(), None);
+        assert_eq!(
+            stopped.outcome(),
+            Some(&Outcome::Cancelled { committed: 2 })
+        );
+
+        // Without a cancel, the cancel's words are someone else's stop.
+        let mut killed = Run::new(vec![2, 2], false);
+        killed.landed(Step::Chunk(0), Ok(Some(2)));
+        killed.landed(Step::Chunk(1), failure(CANCELLED, true, 0));
+        assert!(matches!(killed.outcome(), Some(Outcome::Failed { .. })));
+
+        // An error of the chunk's own in flight may have applied part of it
+        // (an ordered insertMany), so it is reported, not read as the cancel.
         let mut racing = Run::new(vec![2, 2], false);
         racing.landed(Step::Chunk(0), Ok(Some(2)));
         racing.cancel();
-        racing.landed(Step::Chunk(1), err("duplicate key"));
+        racing.landed(Step::Chunk(1), failure("duplicate key", false, 1));
         assert_eq!(racing.next(), None);
         assert_eq!(
             racing.outcome(),
             Some(&Outcome::Failed {
                 message: "duplicate key".into(),
                 chunk: Some(1),
-                committed: 2
+                committed: 3
             })
         );
 
@@ -558,30 +620,54 @@ mod tests {
             late.outcome(),
             Some(&Outcome::Imported {
                 rows: 2,
-                skipped: Some(0)
+                affected: Some(2)
             })
         );
     }
 
     #[test]
-    fn skipped_rows_are_counted_from_the_affected_rows() {
+    fn a_chunk_that_partly_applied_counts_what_it_kept_unless_rolled_back() {
+        let mut going = Run::new(vec![500, 500], false);
+        going.landed(Step::Chunk(0), failure("E11000", false, 299));
+        assert_eq!(
+            going.outcome(),
+            Some(&Outcome::Failed {
+                message: "E11000".into(),
+                chunk: Some(0),
+                committed: 299
+            })
+        );
+
+        let mut atomic = Run::new(vec![500], true);
+        atomic.landed(Step::Begin, Ok(None));
+        atomic.landed(Step::Chunk(0), failure("E11000", false, 299));
+        atomic.landed(Step::Rollback, Ok(None));
+        assert!(matches!(
+            atomic.outcome(),
+            Some(Outcome::Failed { committed: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn the_affected_rows_are_summed_and_unknown_once_any_chunk_says_nothing() {
         let mut run = Run::new(vec![2, 2], false);
         run.landed(Step::Chunk(0), Ok(Some(1)));
         run.landed(Step::Chunk(1), Ok(Some(2)));
         assert_eq!(
             run.outcome(),
             Some(&Outcome::Imported {
-                rows: 3,
-                skipped: Some(1)
+                rows: 4,
+                affected: Some(3)
             })
         );
-        let mut unknown = Run::new(vec![2], false);
-        unknown.landed(Step::Chunk(0), Ok(None));
+        let mut unknown = Run::new(vec![2, 2], false);
+        unknown.landed(Step::Chunk(0), Ok(Some(2)));
+        unknown.landed(Step::Chunk(1), Ok(None));
         assert_eq!(
             unknown.outcome(),
             Some(&Outcome::Imported {
-                rows: 2,
-                skipped: None
+                rows: 4,
+                affected: None
             })
         );
     }
@@ -617,14 +703,27 @@ mod tests {
         let atomic = users(Some("BEGIN"));
         let going = users(None);
         assert_eq!(atomic.lines(8), 4002..=4501);
-        let imported = |rows, skipped| Outcome::Imported { rows, skipped };
+        let skipping = Plan {
+            skip: true,
+            ..users(Some("BEGIN"))
+        };
+        let imported = |rows, affected| Outcome::Imported { rows, affected };
         assert_eq!(
             imported(12_345, None).summary(&atomic),
             "Imported 12,345 rows into `public.users`."
         );
         assert_eq!(
-            imported(12_308, Some(37)).summary(&atomic),
+            imported(12_345, Some(12_345)).summary(&skipping),
+            "Imported 12,345 rows into `public.users`."
+        );
+        assert_eq!(
+            imported(12_345, Some(12_308)).summary(&skipping),
             "Imported 12,308 rows into `public.users` (37 skipped as duplicates)."
+        );
+        // A view's INSTEAD OF trigger, or a BEFORE trigger returning NULL.
+        assert_eq!(
+            imported(500, Some(0)).summary(&atomic),
+            "Sent 500 rows to `public.users`; the server reported 0 rows written."
         );
         assert_eq!(
             imported(1, None).summary(&atomic),
@@ -649,7 +748,7 @@ mod tests {
         );
         assert_eq!(
             failed(Some(8), 4_000).summary(&going),
-            "boom\n\nThe failing statement covered lines 4,002–4,501. 4,000 rows were committed before it."
+            "boom\n\nThe failing statement covered lines 4,002–4,501. 4,000 rows were committed."
         );
         assert_eq!(
             failed(None, 0).summary(&atomic),

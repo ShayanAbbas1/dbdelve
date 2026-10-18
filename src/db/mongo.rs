@@ -1947,6 +1947,10 @@ impl Fetched {
     }
 }
 
+/// How [`write`]'s error says how many of the command's writes applied, for
+/// [`super::applied`] to read back.
+pub(super) const APPLIED: &str = " The statement's other writes applied: ";
+
 /// A write command's reply, or its first write error as the failure. The
 /// server answers `ok: 1` to a write command whose every write failed, so the
 /// reply alone says nothing.
@@ -1961,7 +1965,7 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
         let message = error.get_str("errmsg").unwrap_or("A write failed.");
         return Err(plain_error(match number(written.get("n")) {
             0 => message.to_string(),
-            n => format!("{message} The statement's other writes applied: {n}."),
+            n => format!("{message}{APPLIED}{n}."),
         }));
     }
     if let Ok(error) = written.get_document("writeConcernError") {

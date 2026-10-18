@@ -2126,6 +2126,20 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
     }
 }
 
+/// How many of a failed statement's own writes stay applied: the documents an
+/// ordered `insertMany` wrote ahead of the one that failed. Every other engine
+/// undoes the whole statement.
+pub fn applied(engine: Engine, error: &DbError) -> u64 {
+    match engine {
+        Engine::MongoDb => error
+            .message
+            .rsplit_once(mongo::APPLIED)
+            .and_then(|(_, n)| n.strip_suffix('.')?.parse().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// What a Cancel took beyond the statement it stopped, which the user has to
 /// be told even where the rows it had are kept: on SQL Server the error
 /// itself, which says the session was reset. Postgres cannot say whether a
@@ -2997,6 +3011,19 @@ mod tests {
             Engine::MariaDb,
             &error("Query execution was interrupted (max_statement_time exceeded)")
         ));
+    }
+
+    #[test]
+    fn a_partly_applied_insert_many_says_how_many_writes_it_kept() {
+        let error = |message: String| DbError {
+            message,
+            position: None,
+        };
+        let duplicate = "E11000 duplicate key error";
+        let partly = error(format!("{duplicate}{}299.", mongo::APPLIED));
+        assert_eq!(applied(Engine::MongoDb, &partly), 299);
+        assert_eq!(applied(Engine::MongoDb, &error(duplicate.into())), 0);
+        assert_eq!(applied(Engine::Postgres, &partly), 0);
     }
 
     #[test]
