@@ -218,11 +218,29 @@ fn shown(text: &str) -> String {
 }
 
 fn number(text: &str, decimal: Decimal) -> Result<Value, String> {
-    let trimmed = text.trim();
-    let cleaned = match decimal {
-        Decimal::Dot => trimmed.replace(',', ""),
-        Decimal::Comma => trimmed.replace('.', "").replace(',', "."),
+    let not = || format!("{} is not a number", shown(text));
+    let (point, group) = match decimal {
+        Decimal::Dot => ('.', ','),
+        Decimal::Comma => (',', '.'),
     };
+    let trimmed = text.trim();
+    let (sign, unsigned) = match trimmed.strip_prefix(['+', '-']) {
+        Some(rest) => (&trimmed[..1], rest),
+        None => ("", trimmed),
+    };
+    let (mantissa, exponent) =
+        unsigned.split_at(unsigned.find(['e', 'E']).unwrap_or(unsigned.len()));
+    let (whole, fraction) = match mantissa.split_once(point) {
+        Some((whole, fraction)) => (whole, format!(".{fraction}")),
+        None => (mantissa, String::new()),
+    };
+    // A separator groups thousands or it is not one: `1,5` under a dot decimal is a typo, not 15.
+    let mut groups = whole.split(group);
+    let lead = groups.next().unwrap_or_default();
+    if whole.contains(group) && !((1..=3).contains(&lead.len()) && groups.all(|g| g.len() == 3)) {
+        return Err(not());
+    }
+    let cleaned = format!("{sign}{}{fraction}{exponent}", whole.replace(group, ""));
     // The character check keeps `inf` and `nan` out; the finite check keeps `1e999`, which overflows to inf.
     let plain = cleaned
         .chars()
@@ -230,7 +248,7 @@ fn number(text: &str, decimal: Decimal) -> Result<Value, String> {
     if plain && cleaned.parse::<f64>().is_ok_and(f64::is_finite) {
         Ok(Value::Number(cleaned))
     } else {
-        Err(format!("{} is not a number", shown(text)))
+        Err(not())
     }
 }
 
@@ -608,6 +626,34 @@ mod tests {
             v(text("1.2.3", false), Rule::Number(Decimal::Dot), &opts()),
             Err("`1.2.3` is not a number".into())
         );
+        for (decimal, input) in [
+            (Decimal::Dot, "1,5"),
+            (Decimal::Dot, "1,2,3"),
+            (Decimal::Dot, ",123"),
+            (Decimal::Dot, "1234,567"),
+            (Decimal::Dot, "1.5,0"),
+            (Decimal::Comma, "1.5"),
+            (Decimal::Comma, "1.23,4"),
+            (Decimal::Comma, "1,2,3"),
+        ] {
+            assert_eq!(
+                v(text(input, false), Rule::Number(decimal), &opts()),
+                Err(format!("`{input}` is not a number")),
+                "{input}"
+            );
+        }
+        for (decimal, input, expected) in [
+            (Decimal::Dot, "1,234,567", "1234567"),
+            (Decimal::Dot, "-12,345.50", "-12345.50"),
+            (Decimal::Comma, "1.234.567,89", "1234567.89"),
+            (Decimal::Comma, "12345", "12345"),
+        ] {
+            assert_eq!(
+                v(text(input, false), Rule::Number(decimal), &opts()),
+                Ok(Some(Value::Number(expected.into()))),
+                "{input}"
+            );
+        }
         assert!(v(text("inf", false), Rule::Number(Decimal::Dot), &opts()).is_err());
         for huge in ["1e999", "-1e999"] {
             assert!(v(text(huge, false), Rule::Number(Decimal::Dot), &opts()).is_err());
