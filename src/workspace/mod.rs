@@ -142,6 +142,8 @@ pub(crate) struct Workspace {
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
     pub(crate) switcher_open: bool,
+    /// Whether the menu bar last set lists Import Rows.
+    menu_imports_rows: bool,
     /// The switcher's search field, there while the switcher is open.
     pub(crate) connection_search: Option<Entity<InputState>>,
     pub(crate) connection_search_needs_focus: bool,
@@ -295,6 +297,7 @@ impl Workspace {
             active: 0,
             form: None,
             switcher_open: false,
+            menu_imports_rows: false,
             connection_search: None,
             connection_search_needs_focus: false,
             search_selection: 0,
@@ -904,6 +907,16 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
+        let imports_rows = self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .active_object()
+                .is_some_and(|tab| tab.takes_inserts(profile.config.engine()))
+        });
+        if imports_rows != self.menu_imports_rows {
+            self.menu_imports_rows = imports_rows;
+            cx.set_menus(crate::app_menus(imports_rows));
+        }
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
         if !self.row_panel.on_screen.get() {

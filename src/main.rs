@@ -282,75 +282,7 @@ fn main() {
             // Edit menu -- dbdelve does not own cut, copy and paste, the focused
             // field does, and a menu claiming them would take them from it.
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![
-                Menu {
-                    name: "dbdelve".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Settings…", OpenSettings),
-                        MenuItem::separator(),
-                        MenuItem::action("Quit dbdelve", Quit),
-                    ],
-                },
-                Menu {
-                    name: "File".into(),
-                    disabled: false,
-                    items: [
-                        MenuItem::action("New Query", NewQuery),
-                        MenuItem::action("New Connection", NewConnection),
-                        MenuItem::action("New Project", NewProject),
-                    ]
-                    .into_iter()
-                    .chain({
-                        let sources = import::Source::ALL
-                            .into_iter()
-                            .filter(|source| source.found())
-                            .map(|source| {
-                                MenuItem::action(
-                                    format!("Import from {}…", source.label()),
-                                    ImportConnections { source },
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let separator = (!sources.is_empty()).then(MenuItem::separator);
-                        separator.into_iter().chain(sources)
-                    })
-                    .chain([
-                        MenuItem::separator(),
-                        MenuItem::action("Import Rows…", ImportRows),
-                        MenuItem::separator(),
-                        MenuItem::action("Save Query", SaveQuery),
-                        MenuItem::separator(),
-                        MenuItem::action("Close Tab", CloseTab),
-                    ])
-                    .collect(),
-                },
-                Menu {
-                    name: "Query".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Run", RunQuery),
-                        MenuItem::action("Cancel", CancelQuery),
-                    ],
-                },
-                Menu {
-                    name: "View".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                        MenuItem::action("Toggle Row Panel", ToggleRowPanel),
-                        MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
-                        MenuItem::action("Toggle Data / Structure", ToggleStructure),
-                        MenuItem::separator(),
-                        MenuItem::action("Zoom In", ZoomEditorIn),
-                        MenuItem::action("Zoom Out", ZoomEditorOut),
-                        MenuItem::action("Reset Zoom", ResetEditorZoom),
-                        MenuItem::separator(),
-                        MenuItem::action("Select Database…", SelectDatabase),
-                        MenuItem::action("Select Theme…", SelectTheme),
-                    ],
-                },
-            ]);
+            cx.set_menus(app_menus(false));
 
             // The platform titlebar is kept only for its window buttons on macOS:
             // a system bar in its own grey above dbdelve's chrome is the seam
@@ -409,4 +341,84 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// The menu bar. Import Rows is listed only while a table that takes rows is
+/// in front, so `Workspace` sets the bar again whenever that flips.
+pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "dbdelve".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit dbdelve", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            disabled: false,
+            items: [
+                MenuItem::action("New Query", NewQuery),
+                MenuItem::action("New Connection", NewConnection),
+                MenuItem::action("New Project", NewProject),
+            ]
+            .into_iter()
+            .chain({
+                let sources = import::Source::ALL
+                    .into_iter()
+                    .filter(|source| source.found())
+                    .map(|source| {
+                        MenuItem::action(
+                            format!("Import from {}…", source.label()),
+                            ImportConnections { source },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let separator = (!sources.is_empty()).then(MenuItem::separator);
+                separator.into_iter().chain(sources)
+            })
+            .chain(
+                [
+                    MenuItem::separator(),
+                    MenuItem::action("Import Rows…", ImportRows),
+                ]
+                .into_iter()
+                .filter(|_| imports_rows),
+            )
+            .chain([
+                MenuItem::separator(),
+                MenuItem::action("Save Query", SaveQuery),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+            ])
+            .collect(),
+        },
+        Menu {
+            name: "Query".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Run", RunQuery),
+                MenuItem::action("Cancel", CancelQuery),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Row Panel", ToggleRowPanel),
+                MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
+                MenuItem::action("Toggle Data / Structure", ToggleStructure),
+                MenuItem::separator(),
+                MenuItem::action("Zoom In", ZoomEditorIn),
+                MenuItem::action("Zoom Out", ZoomEditorOut),
+                MenuItem::action("Reset Zoom", ResetEditorZoom),
+                MenuItem::separator(),
+                MenuItem::action("Select Database…", SelectDatabase),
+                MenuItem::action("Select Theme…", SelectTheme),
+            ],
+        },
+    ]
 }
