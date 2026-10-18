@@ -780,7 +780,7 @@ impl Workspace {
                 };
                 Some(row_icon(t, path).into_any_element())
             },
-            |workspace, project| {
+            |workspace, project, _, _| {
                 if let Some(pending) = &mut workspace.pending_import {
                     pending.project = project;
                 }
@@ -860,7 +860,7 @@ impl Workspace {
         self.labelled_field(label, Input::new(input).w_full(), cx)
     }
 
-    fn labelled_field(
+    pub(crate) fn labelled_field(
         &self,
         label: &'static str,
         control: impl IntoElement,

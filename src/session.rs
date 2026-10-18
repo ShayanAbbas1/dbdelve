@@ -342,6 +342,28 @@ pub(crate) struct ImportDialog {
     pub(crate) checking: bool,
     pub(crate) phase: ImportPhase,
     pub(crate) error: Option<String>,
+    pub(crate) inputs: ImportInputs,
+    pub(crate) preview: Entity<TableState<crate::workspace::PreviewGrid>>,
+    pub(crate) sql: Entity<EditorState>,
+    /// Set when a check lands: the SQL view needs a window to take the new
+    /// statement, and a landing has none, so the next render writes it.
+    pub(crate) sql_stale: bool,
+    pub(crate) showing_sql: bool,
+    /// The first file row the preview shows.
+    pub(crate) preview_start: usize,
+    /// The problem the footer's arrows are on.
+    pub(crate) problem_at: usize,
+    /// The file column a jump or the "Map a column" link pointed at.
+    pub(crate) focused_mapping: Option<usize>,
+    pub(crate) mapping_scroll: gpui::ScrollHandle,
+}
+
+/// The import options typed rather than picked.
+pub(crate) struct ImportInputs {
+    pub(crate) delimiter: Entity<InputState>,
+    pub(crate) skip_lines: Entity<InputState>,
+    pub(crate) null_word: Entity<InputState>,
+    pub(crate) booleans: Entity<InputState>,
 }
 
 // At most one per session: boxing the run saves nothing worth an indirection.

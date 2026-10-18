@@ -10,9 +10,6 @@ mod explorer;
 mod export;
 mod filter;
 mod import;
-// The rest of the options, rules and preview are read by the dialog's controls,
-// which come next (Task 8); drop the allow then.
-#[allow(dead_code)]
 mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -95,7 +92,7 @@ use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
 use ui::{
     Control, Tone, button, button_label, dialog, group_thousands, human_bytes, icon_button,
     object_icon, one_line, relative_age, row_icon, row_icon_tinted, row_readout, section_label,
-    titlebar,
+    segment, titlebar,
 };
 use workspace::Workspace;
 

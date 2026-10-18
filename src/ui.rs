@@ -429,6 +429,35 @@ pub(crate) fn control(id: impl Into<gpui::ElementId>, tone: Tone, size: Control)
         .h(px(size.height()))
 }
 
+/// One choice of a segmented toggle, dressed as the preview's Data and
+/// Structure tabs so every either-or reads the same. The caller adds the click.
+pub(crate) fn segment(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    selected: bool,
+    t: Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(layout::chrome(24.)))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .whitespace_nowrap()
+        .map(|segment| {
+            if selected {
+                segment.bg(t.element_active).text_color(t.text)
+            } else {
+                segment
+                    .text_color(t.text_muted)
+                    .hover(|style| style.bg(t.element_hover))
+            }
+        })
+        .child(label)
+}
+
 /// The quietest thing on screen: small, uppercase, and dim enough that the
 /// names under it are what the eye lands on first.
 pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {

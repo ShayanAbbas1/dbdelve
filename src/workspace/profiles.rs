@@ -421,7 +421,7 @@ impl Workspace {
             groups,
             label,
             marker,
-            move |workspace, option| {
+            move |workspace, option, _, _| {
                 if let Some(form) = &mut workspace.form {
                     pick(form, option);
                 }
@@ -435,12 +435,12 @@ impl Workspace {
     /// import's project. `pick` makes the choice; `marker` is what is drawn
     /// before a label, if anything.
     pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         selected: T,
         groups: Vec<Vec<T>>,
         label: impl Fn(&T) -> gpui::SharedString + 'static,
         marker: impl Fn(&T) -> Option<AnyElement> + 'static,
-        pick: impl Fn(&mut Self, T) + 'static,
+        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *theme(cx);
@@ -495,9 +495,9 @@ impl Workspace {
                                         .child(label(&shown))
                                 })
                                 .checked(checked)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     _ = workspace.update(cx, |workspace, cx| {
-                                        pick(workspace, option.clone());
+                                        pick(workspace, option.clone(), window, cx);
                                         cx.notify();
                                     });
                                 }),

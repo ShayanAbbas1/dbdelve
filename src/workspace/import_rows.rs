@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 
 use gpui::PathPromptOptions;
 
+use super::import_dialog::{new_preview, show_preview, show_preview_row};
 use super::*;
-use crate::import_rows::{Options, Outcome, Plan, Run, Step, TargetColumn, prepare, send};
-use crate::session::{ImportDialog, ImportPhase};
+use crate::import_rows::{
+    Delimiter, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, prepare, send,
+};
+use crate::session::{ImportDialog, ImportInputs, ImportPhase};
 
 /// How long the options sit still before the file is read again, so a word
 /// typed into a field re-reads once rather than per keystroke.
@@ -133,7 +136,7 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read = read.await;
-            _ = workspace.update_in(cx, |workspace, _, cx| {
+            _ = workspace.update_in(cx, |workspace, window, cx| {
                 let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) else {
                     return;
                 };
@@ -146,6 +149,7 @@ impl Workspace {
                         return;
                     }
                 };
+                let engine = found.config.engine();
                 let session = &mut found.session;
                 let Some(object) = session.objects.iter().find(|object| object.id == tab) else {
                     return;
@@ -157,11 +161,13 @@ impl Workspace {
                 {
                     return;
                 }
+                let options = Options::detected(&path, &bytes);
                 session.import_rows = Some(ImportDialog {
                     tab,
                     schema: object.schema.clone(),
                     table: object.name.clone(),
-                    options: Options::detected(&path, &bytes),
+                    inputs: import_inputs(&profile, &options, window, cx),
+                    options,
                     path,
                     bytes: bytes.into(),
                     mappings: Vec::new(),
@@ -171,6 +177,18 @@ impl Workspace {
                     checking: false,
                     phase: ImportPhase::Editing,
                     error: None,
+                    preview: new_preview(window, cx),
+                    sql: cx.new(|cx| {
+                        EditorState::new(window, cx)
+                            .language(engine.syntax().highlighter())
+                            .soft_wrap(false)
+                    }),
+                    sql_stale: false,
+                    showing_sql: false,
+                    preview_start: 0,
+                    problem_at: 0,
+                    focused_mapping: None,
+                    mapping_scroll: gpui::ScrollHandle::new(),
                 });
                 workspace.recheck_import(&profile, cx);
             });
@@ -272,6 +290,8 @@ impl Workspace {
                         dialog.mappings = prepared.mappings.clone();
                         dialog.plan = Some(Arc::new(plan));
                         dialog.prepared = Some(Ok(Arc::new(prepared)));
+                        dialog.problem_at = 0;
+                        show_preview(dialog, cx);
                     }
                     Err(message) => {
                         dialog.prepared = Some(Err(message));
@@ -279,10 +299,128 @@ impl Workspace {
                     }
                 }
                 dialog.checking = false;
+                dialog.sql_stale = true;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Change `profile`'s dialog and read the file again under the change.
+    /// `edit` says whether it changed anything; nothing changes while the
+    /// import runs.
+    pub(crate) fn edit_import(
+        &mut self,
+        profile: &str,
+        edit: impl FnOnce(&mut ImportDialog) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.import_dialog_mut(profile) else {
+            return;
+        };
+        if matches!(dialog.phase, ImportPhase::Editing) && edit(dialog) {
+            self.recheck_import(profile, cx);
+        }
+    }
+
+    pub(crate) fn show_import_sql(&mut self, profile: &str, sql: bool, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.import_dialog_mut(profile) {
+            dialog.showing_sql = sql;
+            cx.notify();
+        }
+    }
+
+    /// Point at a file column's mapping and scroll it into view.
+    pub(crate) fn focus_import_mapping(
+        &mut self,
+        profile: &str,
+        column: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.import_dialog_mut(profile) {
+            dialog.focused_mapping = Some(column);
+            dialog.mapping_scroll.scroll_to_item(column);
+            cx.notify();
+        }
+    }
+
+    /// Show the dialog's problem `index` where it is: its row in the preview,
+    /// or the mapping of the file column it belongs to.
+    pub(crate) fn jump_to_problem(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
+            return;
+        };
+        let Some(dialog) = self.import_dialog_mut(&profile) else {
+            return;
+        };
+        let Some(Ok(prepared)) = &dialog.prepared else {
+            return;
+        };
+        let Some(problem) = prepared.checked.problems.get(index) else {
+            return;
+        };
+        let (row, column) = (problem.row, problem.column);
+        dialog.problem_at = index;
+        match (row, column) {
+            (Some(row), _) => {
+                dialog.showing_sql = false;
+                show_preview_row(dialog, row, cx);
+                cx.notify();
+            }
+            (None, Some(column)) => self.focus_import_mapping(&profile, column, cx),
+            (None, None) => cx.notify(),
+        }
+    }
+
+    /// Every statement the import would send, onto the clipboard. Written off
+    /// the main thread: it is the whole file again, as SQL.
+    pub(crate) fn copy_import_sql(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
+            return;
+        };
+        let Some(plan) = self
+            .import_dialog_mut(&profile)
+            .and_then(|dialog| dialog.plan.clone())
+        else {
+            return;
+        };
+        let script = cx.background_executor().spawn(async move { plan.script() });
+        cx.spawn(async move |workspace, cx| {
+            let script = script.await;
+            _ = workspace.update(cx, |workspace, cx| match script {
+                Ok(sql) => cx.write_to_clipboard(ClipboardItem::new_string(sql)),
+                Err(message) => {
+                    if let Some(dialog) = workspace.import_dialog_mut(&profile) {
+                        dialog.error = Some(message);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Write the newest check's first statement into the SQL view, which a
+    /// check landing without a window cannot.
+    pub(crate) fn sync_import_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.import_rows.as_mut())
+            .filter(|dialog| dialog.sql_stale)
+        else {
+            return;
+        };
+        dialog.sql_stale = false;
+        // A plan with no statement to show is a file whose problems the footer
+        // already names.
+        let sql = dialog
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.preview_sql().ok())
+            .unwrap_or_default();
+        dialog
+            .sql
+            .update(cx, |editor, cx| editor.set_value(sql, window, cx));
     }
 
     /// Run the plan on screen. Does nothing unless the last check found no
@@ -549,6 +687,70 @@ impl Workspace {
         }
         cx.notify();
     }
+}
+
+/// The typed options' fields, each writing its option back as it is typed.
+fn import_inputs(
+    profile: &str,
+    options: &Options,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> ImportInputs {
+    let inputs = ImportInputs {
+        delimiter: cx
+            .new(|cx| InputState::new(window, cx).validate(|text, _| text.chars().count() <= 1)),
+        skip_lines: cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("0")
+                .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
+        }),
+        null_word: cx.new(|cx| InputState::new(window, cx).placeholder("e.g. NULL or \\N")),
+        booleans: cx.new(|cx| InputState::new(window, cx).default_value(options.booleans.text())),
+    };
+    // `false` where the text is not an option yet: an emptied delimiter,
+    // spellings that do not parse. The last good one stays.
+    writes_option(profile, &inputs.delimiter, cx, |options, text| {
+        let Some(c) = text.chars().next() else {
+            return false;
+        };
+        options.delimiter = Delimiter::Custom(c);
+        true
+    });
+    writes_option(profile, &inputs.skip_lines, cx, |options, text| {
+        let Ok(lines) = (if text.is_empty() { Ok(0) } else { text.parse() }) else {
+            return false;
+        };
+        options.skip_lines = lines;
+        true
+    });
+    writes_option(profile, &inputs.null_word, cx, |options, text| {
+        options.null_word = text.to_string();
+        true
+    });
+    writes_option(profile, &inputs.booleans, cx, |options, text| {
+        let Ok(spellings) = Spellings::parse(text) else {
+            return false;
+        };
+        options.booleans = spellings;
+        true
+    });
+    inputs
+}
+
+fn writes_option(
+    profile: &str,
+    input: &Entity<InputState>,
+    cx: &mut Context<Workspace>,
+    write: fn(&mut Options, &str) -> bool,
+) {
+    let profile = profile.to_string();
+    cx.subscribe(input, move |workspace, input, event: &InputEvent, cx| {
+        if matches!(event, InputEvent::Change) {
+            let text = input.read(cx).value();
+            workspace.edit_import(&profile, |dialog| write(&mut dialog.options, &text), cx);
+        }
+    })
+    .detach();
 }
 
 /// Stop asking for more of the run, and stop the statement it has out on the
