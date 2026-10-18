@@ -670,12 +670,11 @@ Decided, and not to be re-litigated:
   TRANSACTION`, `COMMIT` and `ROLLBACK` (`sql::is_transaction_bracket`) go out
   bare instead: one opened or closed inside `sp_executesql` changes
   `@@TRANCOUNT` across a module boundary, which the server reports as error
-  266. `Origin::User` runs as typed,
-  under nothing but the login default. A preflight before the statement
-  (`PREFLIGHT_SQL`, run under `SESSION_OPTIONS` for dbdelve's own statement
-  and under the user's options for theirs, bar `USER_DESCRIBE_OPTIONS`'
-  `IMPLICIT_TRANSACTIONS OFF` and `ROWCOUNT 0`, so it compiles the statement
-  the way it will run) reads `@@TRANCOUNT`,
+  266. `Origin::User` runs as typed, under nothing but the login default. A
+  preflight before the statement (`PREFLIGHT_SQL`, run under `SESSION_OPTIONS`
+  for dbdelve's own statement and under the user's options for theirs, bar
+  `USER_DESCRIBE_OPTIONS`' `IMPLICIT_TRANSACTIONS OFF` and `ROWCOUNT 0`, so it
+  compiles the statement the way it will run) reads `@@TRANCOUNT`,
   and `transaction_outcome` reads it again after a failure: T-SQL has no
   nested transactions, so dbdelve issues its own `ROLLBACK` only when its own
   `BEGIN TRANSACTION` batch opened the transaction from a count of zero, never
