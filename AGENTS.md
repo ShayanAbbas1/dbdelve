@@ -73,16 +73,24 @@ require it, stop and raise it instead.
 
 2. **Generated SQL passes a whitelist gate, and there is one per path.**
    `sql::is_generated_write` is the single gate every statement the grid writes
-   passes first. It admits exactly three shapes:
+   passes first. It admits exactly four shapes:
 
    - a batch of `UPDATE`s, optionally bracketed by a `BEGIN`/`COMMIT` the gate
      can see closed;
-   - one `INSERT`, naming the columns it fills;
+   - one `INSERT`, naming the columns it fills, of one or more rows whose
+     values are only single-quoted literals (`N'…'` too), a bare `0x…` hex
+     literal or `NULL` (no subquery, function call or `SELECT` source),
+     optionally ending in exactly `ON CONFLICT DO NOTHING` or
+     `ON DUPLICATE KEY UPDATE c = c` (Import Rows' Skip);
    - one `DELETE` whose `WHERE` is a conjunction of equality predicates over
      distinct, unqualified columns against single-quoted literals (or a bare
      `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
      other operator, no subquery, no function call, no CTE beside it, no
-     `RETURNING`, no `LIMIT`, and nothing else in the submission.
+     `RETURNING`, no `LIMIT`, and nothing else in the submission;
+   - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
+     `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an
+     import's transaction, which spans submissions on a connection of the
+     import's own, and are never admitted beside anything else.
 
    Because it is a whitelist, `DROP` and `TRUNCATE` are refused structurally,
    anywhere in the tree, CTEs included (`sql::forbidden`), and so is every
@@ -98,7 +106,8 @@ require it, stop and raise it instead.
    (`sql::is_generated_write_on` and `sql::is_generated_select` dispatch on the
    engine): `mql::is_generated_write` admits `updateOne`s whose filter is
    exactly `{_id: <literal>}` and whose update is exactly a `$set` of literals,
-   one `insertOne` of a literal document, and one `deleteOne` by `_id`; and
+   one `insertOne` of a literal document, one `insertMany` of a non-empty
+   array of literal documents, and one `deleteOne` by `_id`; and
    `mql::browse::is_generated_read` admits only the preview's own
    `find(filter).sort().skip().limit()` (no `limit()` under no row limit) and the
    status bar's `countDocuments`,

@@ -2288,13 +2288,14 @@ fn operator_free(value: &Value) -> bool {
 /// out of the parse rather than trusted because `update_batch`, `insert_row`
 /// or `delete_row` wrote it: `sql::is_generated_write` for MongoDB.
 ///
-/// Exactly one of three shapes, on a collection of the connected database,
+/// Exactly one of four shapes, on a collection of the connected database,
 /// with no options and no cursor:
 ///
 /// - one or more `updateOne`s on one collection, each filter exactly
 ///   `{_id: <literal>}` and each update exactly `{$set: {…}}` over distinct
 ///   plain field names;
 /// - one `insertOne` of a non-empty document;
+/// - one `insertMany` of a non-empty array of non-empty documents;
 /// - one `deleteOne` whose filter is exactly `{_id: <literal>}`.
 ///
 /// Every value is a literal with no `$`-named field anywhere inside it, so no
@@ -2328,6 +2329,12 @@ pub(crate) fn is_generated_write(text: &str) -> bool {
         [(_, call)] if call.method == Method::InsertOne => {
             matches!(arguments(call)[..], [document @ Value::Document(fields)]
                 if !fields.is_empty() && distinct(fields) && operator_free(document))
+        }
+        [(_, call)] if call.method == Method::InsertMany => {
+            matches!(arguments(call)[..], [Value::Array(documents)]
+                if !documents.is_empty() && documents.iter().all(|document| matches!(document,
+                    Value::Document(fields)
+                        if !fields.is_empty() && distinct(fields) && operator_free(document))))
         }
         [(_, call)] if call.method == Method::DeleteOne => {
             matches!(arguments(call)[..], [filter] if names_by_id(filter))
@@ -4420,12 +4427,13 @@ mod tests {
     }
 
     #[test]
-    fn the_write_gate_admits_the_three_generated_shapes_and_nothing_else() {
+    fn the_write_gate_admits_the_four_generated_shapes_and_nothing_else() {
         for admitted in [
             r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}})"#,
             r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}}); db.getCollection("c").updateOne({_id: "x"}, {$set: {b: {c: [1]}}});"#,
             r#"db.c.updateOne({_id: ObjectId('65a4f1c0ffffffffffffffff')}, {$set: {a: null}})"#,
             r#"db.getCollection("c").insertOne({"a": 1, b: {c: 2}})"#,
+            "db.c.insertMany([{a: 1}])",
             r#"db.getCollection("c").deleteOne({_id: {a: 1}}) // why"#,
         ] {
             assert!(is_generated_write(admitted), "{admitted}");
@@ -4469,7 +4477,6 @@ mod tests {
             "db.c.insertOne({a: 1}); db.c.insertOne({a: 2})",
             "db.c.insertOne({})",
             "db.c.insertOne({a: 1}, {writeConcern: {w: 0}})",
-            "db.c.insertMany([{a: 1}])",
             "db.c.deleteOne({_id: 1}); db.c.deleteOne({_id: 2})",
             "db.c.deleteOne({_id: 1}); db.c.drop()",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.drop()",
@@ -4479,6 +4486,30 @@ mod tests {
             "db.runCommand({delete: 'c', deletes: [{q: {}, limit: 0}]})",
             "show dbs",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}) db.c.drop()",
+        ] {
+            assert!(!is_generated_write(refused), "{refused} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_admits_one_insert_many_of_literal_documents() {
+        assert!(is_generated_write(
+            r#"db.getCollection("c").insertMany([{"a": 1}, {"b": "x", "n": {"d": [1, 2]}}])"#
+        ));
+    }
+
+    #[test]
+    fn the_gate_refuses_an_insert_many_with_an_operator_or_anything_else() {
+        for refused in [
+            r#"db.getCollection("c").insertMany([{"$where": "1"}])"#,
+            r#"db.getCollection("c").insertMany([{"a": {"$gt": 1}}])"#,
+            r#"db.getCollection("c").insertMany([])"#,
+            r#"db.getCollection("c").insertMany([{}])"#,
+            r#"db.getCollection("c").insertMany([{"a": 1}], {ordered: false})"#,
+            r#"db.getCollection("c").insertMany([1])"#,
+            r#"db.getCollection("c").insertMany({"a": 1})"#,
+            r#"db.getCollection("c").insertMany([{"a": 1, "a": 2}])"#,
+            "db.getCollection(\"c\").insertMany([{\"a\": 1}]);\ndb.getCollection(\"c\").insertMany([{\"a\": 2}])",
         ] {
             assert!(!is_generated_write(refused), "{refused} passed the gate");
         }

@@ -619,8 +619,8 @@ pub fn delete_row(
 }
 
 /// Whether `sql` is a statement dbdelve could have written: one or more `UPDATE`s,
-/// a single `INSERT`, or a single `DELETE` naming one row, and nothing else at
-/// all.
+/// a single `INSERT` of literals, a single `DELETE` naming one row, or a lone
+/// transaction bracket, and nothing else at all.
 ///
 /// The one gate every dbdelve-generated statement passes before anything runs,
 /// and the code half of hard rule 1 — dbdelve never writes a `DROP` or a
@@ -640,6 +640,10 @@ pub fn delete_row(
 /// promising an `UPDATE` is how a whitelist quietly becomes a list of things
 /// nobody refused.
 pub fn is_generated_write(sql: &str) -> bool {
+    // An exact-text whitelist rather than a parse, so nothing can ride along.
+    if is_transaction_bracket(sql) {
+        return true;
+    }
     let Some(tree) = parse(sql) else {
         return false;
     };
@@ -670,8 +674,132 @@ pub fn is_generated_write(sql: &str) -> bool {
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
-    (kinds == ["insert"] || (!kinds.is_empty() && kinds.iter().all(|kind| *kind == "update")))
+    ((kinds == ["insert"] && literal_insert(statements[0], sql))
+        || (!kinds.is_empty() && kinds.iter().all(|kind| *kind == "update")))
         && !deletes_anything(root)
+}
+
+/// Whether `sql` is one lone `BEGIN`, `BEGIN TRANSACTION`, `COMMIT` or
+/// `ROLLBACK`, spelled as dbdelve writes it: the brackets of an import's
+/// transaction, which spans submissions on a connection of the import's own.
+/// Compared as text, so a bracket is never admitted beside anything else.
+pub(crate) fn is_transaction_bracket(sql: &str) -> bool {
+    let sql = sql.trim();
+    let sql = sql.strip_suffix(';').unwrap_or(sql).trim();
+    matches!(sql, "BEGIN" | "BEGIN TRANSACTION" | "COMMIT" | "ROLLBACK")
+}
+
+/// Whether `statement` is one `INSERT` naming its columns, of one or more rows
+/// of literals, ending in nothing or in Import Rows' fixed skip clause.
+///
+/// No subquery, function call, expression or `SELECT` source, because a value
+/// that computes something is a value dbdelve did not write. The skip clause is
+/// compared as text as well as read from the tree: `ON CONFLICT (a) DO NOTHING`
+/// and `ON DUPLICATE KEY UPDATE a = VALUES(a)` are real clauses nothing
+/// generates.
+fn literal_insert(statement: Node, sql: &str) -> bool {
+    // `RETURNING` hangs beside the insert, not under it.
+    let Some(insert) = statement
+        .named_child(0)
+        .filter(|_| statement.named_child_count() == 1)
+    else {
+        return false;
+    };
+    let mut cursor = insert.walk();
+    let children: Vec<_> = insert.named_children(&mut cursor).collect();
+    let [keyword, into, target, columns, values, rest @ ..] = children.as_slice() else {
+        return false;
+    };
+    let kinds = [keyword, into, target, columns, values].map(|node| node.kind());
+    if kinds
+        != [
+            "keyword_insert",
+            "keyword_into",
+            "object_reference",
+            "list",
+            "keyword_values",
+        ]
+        || !plain_columns(*columns, sql)
+    {
+        return false;
+    }
+
+    let rows = rest.iter().take_while(|node| node.kind() == "list").count();
+    let (rows, tail) = rest.split_at(rows);
+    let null = |node: &Node| {
+        node.kind() == "literal"
+            && sql
+                .get(node.byte_range())
+                .is_some_and(|text| text.eq_ignore_ascii_case("NULL"))
+    };
+    let literal_rows = rows.iter().all(|row| {
+        let mut cursor = row.walk();
+        let values: Vec<_> = row.named_children(&mut cursor).collect();
+        !values.is_empty()
+            && values
+                .iter()
+                .all(|value| literal_value(*value, sql) || null(value))
+    });
+    let Some(last) = rows.last() else {
+        return false;
+    };
+    let Some(text) = sql.get(last.end_byte()..insert.end_byte()) else {
+        return false;
+    };
+    let text = text.trim();
+    let tail_kinds: Vec<_> = tail.iter().map(|node| node.kind()).collect();
+    let skip = match tail_kinds.as_slice() {
+        [] => text.is_empty(),
+        [
+            "keyword_on",
+            "keyword_conflict",
+            "keyword_do",
+            "keyword_nothing",
+        ] => text == "ON CONFLICT DO NOTHING",
+        [
+            "keyword_on",
+            "keyword_duplicate",
+            "keyword_key",
+            "keyword_update",
+            "assignment_list",
+        ] => updates_itself(tail[4], sql)
+            .is_some_and(|column| text == format!("ON DUPLICATE KEY UPDATE {column} = {column}")),
+        _ => false,
+    };
+    literal_rows && skip
+}
+
+/// A column list whose every entry is a plain or quoted name. A `"…"` name is a
+/// `literal` to this grammar, so the quote character is what tells it from a
+/// string.
+fn plain_columns(list: Node, sql: &str) -> bool {
+    let mut cursor = list.walk();
+    let columns: Vec<_> = list.named_children(&mut cursor).collect();
+    !columns.is_empty()
+        && columns.iter().all(|column| {
+            let mut cursor = column.walk();
+            let named: Vec<_> = column.named_children(&mut cursor).collect();
+            column.kind() == "column"
+                && matches!(named.as_slice(), [name] if name.kind() == "identifier"
+                    || (name.kind() == "literal"
+                        && sql.get(name.byte_range()).is_some_and(|text| text.starts_with('"'))))
+        })
+}
+
+/// The text of `c` when `assignments` is exactly one `c = c`, the same plain or
+/// quoted name on both sides, which is MySQL's spelling of doing nothing.
+fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> {
+    let assignment = assignments
+        .named_child(0)
+        .filter(|_| assignments.named_child_count() == 1)?;
+    let left = assignment.child_by_field_name("left")?;
+    let right = assignment.child_by_field_name("right")?;
+    let text = sql.get(left.byte_range())?;
+    (assignment.named_child_count() == 2
+        && column_name(left, sql).is_some()
+        && column_name(right, sql).is_some()
+        && sql.get(right.byte_range()) == Some(text))
+    .then_some(text)
 }
 
 /// Whether `sql` is a `DELETE` whose `WHERE` names exactly `keys` — nothing
@@ -692,7 +820,8 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
 
 /// [`is_generated_write`] for the engine the statement is bound for. A
 /// MongoDB grid writes mongosh statements, so its gate is `mql`'s, which
-/// admits the same three shapes read out of its own parse.
+/// admits the same shapes read out of its own parse, less the transaction
+/// bracket and with `insertMany` for the multi-row insert.
 pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     match engine {
         Engine::MongoDb => crate::mql::is_generated_write(statement),
@@ -955,18 +1084,7 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
             equality_columns(*left, sql, columns) && equality_columns(*right, sql, columns)
         }
         "=" => {
-            let Some(value) = sql.get(right.byte_range()) else {
-                return false;
-            };
-            // A value is a single-quoted literal and nothing else. `"other"` is
-            // a `literal` to this grammar too, and matching a column against a
-            // column is not naming a row. `N'…'` is SQL Server's single-quoted
-            // literal, and `0x…` its binary one, which is never quoted.
-            let quoted = value.strip_prefix(['N', 'n']).unwrap_or(value);
-            let hex = value
-                .strip_prefix("0x")
-                .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
-            if right.kind() != "literal" || !(quoted.starts_with('\'') || hex) {
+            if !literal_value(*right, sql) {
                 return false;
             }
             match column_name(*left, sql) {
@@ -979,6 +1097,24 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
         }
         _ => false,
     }
+}
+
+/// A single-quoted literal and nothing else. `"other"` is a `literal` to this
+/// grammar too, and matching a column against a column is not naming a row.
+/// `N'…'` is SQL Server's single-quoted literal, and `0x…` its binary one,
+/// which is never quoted.
+///
+/// Not `NULL`: `WHERE id = NULL` matches no row, so only an insert admits it,
+/// and beside this rather than through it.
+fn literal_value(node: Node, sql: &str) -> bool {
+    let Some(value) = sql.get(node.byte_range()) else {
+        return false;
+    };
+    let quoted = value.strip_prefix(['N', 'n']).unwrap_or(value);
+    let hex = value
+        .strip_prefix("0x")
+        .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    node.kind() == "literal" && (quoted.starts_with('\'') || hex)
 }
 
 /// The unqualified column a predicate's left side names, unquoted.
@@ -3771,6 +3907,94 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_admits_a_multi_row_insert_of_literals() {
+        for sql in [
+            "INSERT INTO \"public\".\"t\" (\"a\", \"b\") VALUES ('1', NULL),\n('2', 'x')",
+            "INSERT INTO \"dbo\".\"t\" (\"a\", \"b\") VALUES (N'é', 0xAB),\n('2024-01-02T03:04:05.000', NULL)",
+            "INSERT INTO `d`.`t` (`a`) VALUES ('1') ON DUPLICATE KEY UPDATE `a` = `a`",
+            "INSERT INTO \"main\".\"t\" (\"a\") VALUES ('1') ON CONFLICT DO NOTHING",
+        ] {
+            assert!(is_generated_write(sql), "{sql} was refused");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_an_insert_whose_values_are_not_literals() {
+        for sql in [
+            "INSERT INTO t (a) VALUES ((SELECT 1))",
+            "INSERT INTO t (a) VALUES (now())",
+            "INSERT INTO t (a) SELECT '1'",
+            "INSERT INTO t (a) VALUES ('1' || '2')",
+            "INSERT INTO t (a) VALUES (b)",
+            "INSERT INTO t (a) VALUES (\"b\")",
+            "INSERT INTO t (a) VALUES (1)",
+            "INSERT INTO t VALUES ('1')",
+            "INSERT INTO t (a) VALUES ('1') RETURNING *",
+            "INSERT INTO t (a) DEFAULT VALUES",
+        ] {
+            assert!(!is_generated_write(sql), "{sql} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_conflict_clause_other_than_the_fixed_form() {
+        for tail in [
+            "ON CONFLICT (a) DO NOTHING",
+            "ON CONFLICT DO UPDATE SET a = '1'",
+            "ON DUPLICATE KEY UPDATE a = b",
+            "ON DUPLICATE KEY UPDATE a = '1'",
+            "ON DUPLICATE KEY UPDATE a = a, b = b",
+            "ON DUPLICATE KEY UPDATE a = VALUES(a)",
+        ] {
+            let sql = format!("INSERT INTO t (a) VALUES ('1') {tail}");
+            assert!(!is_generated_write(&sql), "{sql} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_admits_a_lone_transaction_bracket() {
+        for sql in [
+            "BEGIN",
+            "BEGIN;",
+            "BEGIN TRANSACTION",
+            "COMMIT",
+            "COMMIT;",
+            "ROLLBACK",
+            " ROLLBACK; ",
+        ] {
+            assert!(is_generated_write(sql), "{sql:?} was refused");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_bracket_beside_anything_else() {
+        for sql in [
+            "BEGIN; INSERT INTO t (a) VALUES ('1')",
+            "INSERT INTO t (a) VALUES ('1'); COMMIT",
+            "COMMIT; DROP TABLE t",
+            "ROLLBACK; COMMIT",
+            "BEGIN; COMMIT",
+            "begin",
+            "START TRANSACTION",
+            "ROLLBACK TO SAVEPOINT s",
+            "COMMIT AND CHAIN",
+            "BEGIN WORK",
+            "COMMIT;;",
+        ] {
+            assert!(!is_generated_write(sql), "{sql:?} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_still_refuses_a_delete_matching_null() {
+        // `= NULL` matches no row, and NULL is a value only an insert writes.
+        assert!(!is_generated_write("DELETE FROM t WHERE id = NULL"));
+        assert!(!is_generated_write(
+            "UPDATE t SET a = '1' WHERE id = '2'; DELETE FROM t WHERE id = NULL"
+        ));
+    }
+
+    #[test]
     fn the_gate_accepts_an_update_and_a_batch_of_updates() {
         assert!(is_generated_write("UPDATE t SET a = '1' WHERE id = '2'"));
         assert!(is_generated_write(
@@ -3814,7 +4038,7 @@ mod tests {
     fn the_gate_refuses_everything_that_is_not_a_write_dbdelve_writes() {
         // Hard rule 1 in code: DROP and TRUNCATE never leave dbdelve, whatever
         // the user asked for. SELECT is here because the gate is a whitelist --
-        // being harmless is not the test, being one of the three shapes dbdelve
+        // being harmless is not the test, being one of the shapes dbdelve
         // generates is. A keyed DELETE is no longer in this list because it is
         // one of those shapes; `delete_matches_key` is what asks whether the key
         // it names is the row's.
