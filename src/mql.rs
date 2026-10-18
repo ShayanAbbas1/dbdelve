@@ -26,6 +26,7 @@ use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
 use crate::db::ExplainMode;
+use crate::import_rows::Value as ImportValue;
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -2026,6 +2027,71 @@ pub(crate) fn insert_row(
         collection(table),
         spelled(&Value::Document(fields))
     ))
+}
+
+/// One `insertMany` of an import chunk. A `None` leaves the field out of its
+/// document, where a `Value::Null` writes a null.
+pub(crate) fn insert_many(
+    table: &str,
+    columns: &[&str],
+    rows: &[Vec<Option<&ImportValue>>],
+) -> Result<String, String> {
+    if let Some(field) = columns.iter().find(|field| !writable_field(field)) {
+        return Err(unwritable_field(field));
+    }
+    let documents: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let fields = columns
+                .iter()
+                .zip(row)
+                .filter_map(|(&field, value)| Some((field.to_owned(), imported(value.as_ref()?))))
+                .collect();
+            spelled(&Value::Document(fields))
+        })
+        .collect();
+    if documents.is_empty() {
+        return Err("There are no rows to insert.".into());
+    }
+    Ok(format!(
+        "{}.insertMany([{}])",
+        collection(table),
+        documents.join(",\n")
+    ))
+}
+
+fn imported(value: &ImportValue) -> Value {
+    match value {
+        ImportValue::Null => Value::Null,
+        ImportValue::Text(text) => Value::String(text.clone()),
+        ImportValue::Number(text) => whole_or_double(text),
+        ImportValue::Bool(b) => Value::Bool(*b),
+        ImportValue::Date { millis, .. } => Value::Date(*millis),
+        ImportValue::Json(json) => from_json(json),
+    }
+}
+
+fn whole_or_double(text: &str) -> Value {
+    match text.parse::<i64>() {
+        Ok(n) => i32::try_from(n).map_or(Value::Int64(n), Value::Int32),
+        Err(_) => Value::Double(text.parse().unwrap_or(f64::NAN)),
+    }
+}
+
+fn from_json(json: &serde_json::Value) -> Value {
+    use serde_json::Value as J;
+    match json {
+        J::Null => Value::Null,
+        J::Bool(b) => Value::Bool(*b),
+        J::Number(n) => whole_or_double(&n.to_string()),
+        J::String(text) => Value::String(text.clone()),
+        J::Array(items) => Value::Array(items.iter().map(from_json).collect()),
+        J::Object(map) => Value::Document(
+            map.iter()
+                .map(|(key, value)| (key.clone(), from_json(value)))
+                .collect(),
+        ),
+    }
 }
 
 /// One `deleteOne` naming the document by its key.
@@ -4605,5 +4671,33 @@ mod tests {
         }
         // Valid JavaScript, but not a statement DBDelve reads.
         assert!(format("db.c.find().count()").is_err());
+    }
+
+    #[test]
+    fn insert_many_types_each_value_and_leaves_absent_fields_out() {
+        use crate::import_rows::Value as V;
+        let (n, d, j, b) = (
+            V::Number("2.5".into()),
+            V::Date {
+                text: "2024-02-29".into(),
+                millis: 1_709_164_800_000,
+            },
+            V::Json(serde_json::json!({"k": [1]})),
+            V::Bool(true),
+        );
+        let s = insert_many(
+            "c",
+            &["n", "d", "j", "b"],
+            &[
+                vec![Some(&n), Some(&d), Some(&j), Some(&b)],
+                vec![None, None, None, Some(&V::Null)],
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            "db.getCollection(\"c\").insertMany([{\"n\": 2.5, \"d\": ISODate(\"2024-02-29T00:00:00.000Z\"), \"j\": {\"k\": [1]}, \"b\": true},\n{\"b\": null}])"
+        );
+        assert!(is_generated_write(&s));
     }
 }

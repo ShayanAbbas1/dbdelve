@@ -441,6 +441,73 @@ impl Engine {
         }
     }
 
+    /// How a boolean is spelled as an Import Rows value. MySQL reads `'true'`
+    /// into a `tinyint` as an error in strict mode, and SQL Server's `bit` and
+    /// SQLite's integers take `1` and `0` only.
+    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+    #[allow(dead_code)]
+    pub fn boolean_literal(self, value: bool) -> &'static str {
+        match (self, value) {
+            (Self::Postgres | Self::Snowflake | Self::MongoDb, true) => "true",
+            (Self::Postgres | Self::Snowflake | Self::MongoDb, false) => "false",
+            (Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso | Self::SqlServer, true) => {
+                "1"
+            }
+            (Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso | Self::SqlServer, false) => {
+                "0"
+            }
+        }
+    }
+
+    /// Whether an insert can be told to leave a row that collides with an
+    /// existing key alone. SQL Server and Snowflake have no such clause short
+    /// of `MERGE`, and MongoDB's `insertMany` would stop at the first collision.
+    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+    #[allow(dead_code)]
+    pub fn skips_duplicates(self) -> bool {
+        match self {
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso => true,
+            Self::SqlServer | Self::Snowflake | Self::MongoDb => false,
+        }
+    }
+
+    /// The statement that opens a transaction spanning an import's chunks, or
+    /// why there cannot be one.
+    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+    #[allow(dead_code)]
+    pub fn all_or_nothing(self) -> Result<&'static str, &'static str> {
+        match self {
+            Self::Postgres | Self::MySql | Self::MariaDb | Self::Sqlite | Self::Turso => {
+                Ok("BEGIN")
+            }
+            Self::SqlServer => Ok("BEGIN TRANSACTION"),
+            Self::Snowflake => Err(
+                "Snowflake runs each request on its own, so no transaction can span the chunks.",
+            ),
+            Self::MongoDb => Err(
+                "MongoDB has no transaction on a standalone server, so each chunk is kept as it goes.",
+            ),
+        }
+    }
+
+    /// Whether an import may map a column to a field the sample has not seen.
+    /// A collection has no fixed columns, and an unmapped field is left out
+    /// rather than written as null.
+    // Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+    #[allow(dead_code)]
+    pub fn takes_new_fields(self) -> bool {
+        match self {
+            Self::MongoDb => true,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer => false,
+        }
+    }
+
     /// Whether a preview page is ordered by the relation's key when nothing
     /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
     /// one that orders nothing lets a parallel plan repeat or skip rows from
@@ -2837,6 +2904,26 @@ pub(super) mod at_once {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_engine_answers_the_import_questions() {
+        use Engine::*;
+        for (engine, yes, skips, begin, new_fields) in [
+            (Postgres, "true", true, Ok("BEGIN"), false),
+            (MySql, "1", true, Ok("BEGIN"), false),
+            (MariaDb, "1", true, Ok("BEGIN"), false),
+            (Sqlite, "1", true, Ok("BEGIN"), false),
+            (Turso, "1", true, Ok("BEGIN"), false),
+            (SqlServer, "1", false, Ok("BEGIN TRANSACTION"), false),
+            (Snowflake, "true", false, Err(()), false),
+            (MongoDb, "true", false, Err(()), true),
+        ] {
+            assert_eq!(engine.boolean_literal(true), yes);
+            assert_eq!(engine.skips_duplicates(), skips);
+            assert_eq!(engine.all_or_nothing().map_err(|_| ()), begin);
+            assert_eq!(engine.takes_new_fields(), new_fields);
+        }
+    }
     use super::*;
 
     #[test]

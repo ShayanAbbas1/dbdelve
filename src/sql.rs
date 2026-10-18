@@ -31,6 +31,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{ColumnDefinition, Engine, ExplainMode};
+use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
@@ -538,6 +539,73 @@ pub fn insert_row(
         engine.qualified(schema, table),
         names.join(", "),
         values.join(", ")
+    ))
+}
+
+/// One multi-row `INSERT` for an import chunk. `columns` holds `(name,
+/// data_type)`, each row its values in that order; a `None` has no SQL
+/// spelling, so it is an error. Every value is quoted through `Engine`, which
+/// is what the write gate's literal check relies on.
+// Nothing calls it until the import dialog is wired in (Task 7); drop the allow then.
+#[allow(dead_code)]
+pub(crate) fn insert_rows(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, &str)],
+    rows: &[Vec<Option<&Value>>],
+    skip: bool,
+) -> Result<String, String> {
+    if engine == Engine::MongoDb {
+        let names: Vec<&str> = columns.iter().map(|&(name, _)| name).collect();
+        return crate::mql::insert_many(table, &names, rows);
+    }
+    let Some(&(first, _)) = columns.first() else {
+        return Err("There is nothing in this row to insert.".into());
+    };
+    if rows.is_empty() {
+        return Err("There are no rows to insert.".into());
+    }
+    let names: Vec<String> = columns
+        .iter()
+        .map(|&(name, _)| engine.quote_identifier(name))
+        .collect();
+    let mut tuples = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values = Vec::with_capacity(columns.len());
+        for (&(_, data_type), value) in columns.iter().zip(row) {
+            let value = value.ok_or("A value is missing from a row to insert.")?;
+            let new = match value {
+                Value::Null => NewValue::Null,
+                Value::Bool(b) => NewValue::Value(engine.boolean_literal(*b).into()),
+                Value::Json(json) => NewValue::Value(json.to_string().into()),
+                Value::Text(text) | Value::Number(text) | Value::Date { text, .. } => {
+                    NewValue::Value(text.clone().into())
+                }
+            };
+            values.push(literal(engine, &new, Some(data_type)));
+        }
+        tuples.push(format!("({})", values.join(", ")));
+    }
+    // ponytail: Stop and Skip only. Update-existing-row is deferred: Postgres cannot spell ON CONFLICT (pk) DO UPDATE under the pinned grammar, MySQL's matches any unique key, SQL Server and Snowflake would need MERGE.
+    let tail = match (skip, engine) {
+        (false, _) => String::new(),
+        (true, Engine::Postgres | Engine::Sqlite | Engine::Turso) => {
+            " ON CONFLICT DO NOTHING".into()
+        }
+        (true, Engine::MySql | Engine::MariaDb) => {
+            let first = engine.quote_identifier(first);
+            format!(" ON DUPLICATE KEY UPDATE {first} = {first}")
+        }
+        (true, Engine::Snowflake | Engine::SqlServer | Engine::MongoDb) => {
+            return Err("This engine cannot skip rows that already exist.".into());
+        }
+    };
+    Ok(format!(
+        "INSERT INTO {} ({}) VALUES {}{tail}",
+        engine.qualified(schema, table),
+        names.join(", "),
+        tuples.join(",\n")
     ))
 }
 
@@ -5925,6 +5993,139 @@ mod tests {
             (Engine::MongoDb, "db.a.insertOne({ x: 1 })"),
         ] {
             assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
+        }
+    }
+
+    #[test]
+    fn insert_rows_writes_one_multi_row_insert_in_each_engines_spelling() {
+        use crate::import_rows::Value;
+        let (one, two, it, yes, no) = (
+            Value::Number("1".into()),
+            Value::Number("2".into()),
+            Value::Text("it's".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        );
+        let cols = [("id", "integer"), ("note", "text"), ("ok", "boolean")];
+        assert_eq!(
+            insert_rows(
+                Engine::Postgres,
+                "public",
+                "t",
+                &cols,
+                &[
+                    vec![Some(&one), Some(&it), Some(&yes)],
+                    vec![Some(&two), Some(&Value::Null), Some(&no)]
+                ],
+                true
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"t\" (\"id\", \"note\", \"ok\") VALUES ('1', 'it''s', 'true'),\n('2', NULL, 'false') ON CONFLICT DO NOTHING"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::MySql,
+                "d",
+                "t",
+                &cols[..2],
+                &[vec![Some(&one), Some(&Value::Text("a\\b".into()))]],
+                true
+            )
+            .unwrap(),
+            "INSERT INTO `d`.`t` (`id`, `note`) VALUES ('1', 'a\\\\b') ON DUPLICATE KEY UPDATE `id` = `id`"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::SqlServer,
+                "dbo",
+                "t",
+                &[("note", "nvarchar(10)"), ("ok", "bit")],
+                &[vec![Some(&Value::Text("é".into())), Some(&yes)]],
+                false
+            )
+            .unwrap(),
+            "INSERT INTO \"dbo\".\"t\" (\"note\", \"ok\") VALUES (N'é', '1')"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::MongoDb,
+                "db",
+                "t",
+                &cols[..2],
+                &[
+                    vec![Some(&one), Some(&Value::Text("x".into()))],
+                    vec![Some(&two), None]
+                ],
+                false
+            )
+            .unwrap(),
+            "db.getCollection(\"t\").insertMany([{\"id\": 1, \"note\": \"x\"},\n{\"id\": 2}])"
+        );
+    }
+
+    #[test]
+    fn insert_rows_quotes_every_name() {
+        let v = crate::import_rows::Value::Text("x".into());
+        assert_eq!(
+            insert_rows(
+                Engine::Postgres,
+                "public",
+                "t",
+                &[("order", "text"), ("a\"b", "text")],
+                &[vec![Some(&v), Some(&v)]],
+                false
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"t\" (\"order\", \"a\"\"b\") VALUES ('x', 'x')"
+        );
+    }
+
+    #[test]
+    fn every_engines_import_statements_pass_the_write_gate_and_the_mode_check() {
+        let v = crate::import_rows::Value::Text("x".into());
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::Snowflake,
+            Engine::SqlServer,
+            Engine::MongoDb,
+        ] {
+            let statement = insert_rows(
+                engine,
+                "s",
+                "t",
+                &[("a", "text")],
+                &[vec![Some(&v)], vec![Some(&v)]],
+                engine.skips_duplicates(),
+            )
+            .unwrap();
+            assert!(
+                is_generated_write_on(engine, &statement),
+                "{engine:?}: {statement}"
+            );
+            assert_eq!(
+                gate(&classify(engine, &statement), Mode::ReadWrite, &[]),
+                None,
+                "{engine:?}: {statement}"
+            );
+            assert_eq!(
+                engine.skips_duplicates(),
+                statement.contains(" ON "),
+                "{engine:?}"
+            );
+            if let Ok(begin) = engine.all_or_nothing() {
+                for bracket in [begin, "COMMIT", "ROLLBACK"] {
+                    assert!(is_generated_write_on(engine, bracket));
+                    assert_eq!(
+                        gate(&classify(engine, bracket), Mode::ReadOnly, &[]),
+                        None,
+                        "{engine:?} {bracket}"
+                    );
+                }
+            }
         }
     }
 }

@@ -155,6 +155,7 @@ require it, stop and raise it instead.
    and has to spell it the way the server will read it. It holds no connection.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
+   `boolean_literal`, `skips_duplicates`, `all_or_nothing`, `takes_new_fields`,
    `fields`, `syntax`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
@@ -565,14 +566,14 @@ Decided, and not to be re-litigated:
   MariaDB unless a bullet names it. A profile stored before it existed says
   `mysql` and stays MySQL. The `live_` tests in `mysql.rs` run once per server
   (`on_mysql::`, `on_mariadb::`).
-- **Nine functions generate the SQL DBDelve runs, and every one quotes through `Engine`:**
+- **Ten functions generate the SQL DBDelve runs, and every one quotes through `Engine`:**
   `explorer::preview_sql`, `explorer::probe_sql` (the reference arrow's
   `SELECT 1 … LIMIT 1` per referencing relation), `explorer::count_sql` (the status bar's Count, a
   `COUNT(*)` -- `COUNT_BIG(*)` on SQL Server, whose `COUNT` is an `int` --
   under the tab's filter, run only when the user asks and through
   `sql::is_generated_select`, `sql::classify` and `sql::gate`, refused rather
   than prompted for when the gate would stop it), `sql::with_order_by`, `sql::update_row`,
-  `sql::insert_row`, `sql::delete_row`, `filter::sort_expression` and
+  `sql::insert_row`, `sql::insert_rows` (Import Rows' chunks), `sql::delete_row`, `filter::sort_expression` and
   `filter::filter_predicate`. `filter::sort_expression` is the one that gets
   forgotten, and forgetting it is silent: a double-quoted name is a _string
   literal_ in MySQL, so `ORDER BY "name"` sorts every row by the same constant
