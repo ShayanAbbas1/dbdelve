@@ -585,12 +585,13 @@ impl Theme {
     }
 
     /// Every theme dbdelve ships: every dark theme, then every light one. The
-    /// first is the default.
+    /// first is the default, and opaque: a blurred window reads as noise among
+    /// a desktop full of others, so glass is something to pick, not a start.
     fn built_in() -> [Self; 29] {
         [
-            Self::glass(),
-            Self::black(),
             Self::dark(),
+            Self::black(),
+            Self::glass(),
             Self::gruvbox_dark(),
             Self::gruvbox_dark().glassed("Gruvbox Dark Glass"),
             Self::catppuccin_mocha(),
@@ -896,7 +897,7 @@ impl Theme {
         })
     }
 
-    /// The vibrant theme, and the default: the window background is the blurred
+    /// The vibrant theme: the window background is the blurred
     /// desktop and every plane is a tint over it rather than a fill.
     ///
     /// Near-black where [`Theme::dark`] is deliberately grey, which reverses
@@ -2109,7 +2110,8 @@ mod tests {
 
     #[test]
     fn every_dark_theme_is_listed_before_every_light_one() {
-        assert_eq!(Theme::default().name, "DBDelve Dark Glass");
+        assert_eq!(Theme::default().name, "DBDelve Dark");
+        assert!(!Theme::default().is_glass);
         let first_light = Theme::all()
             .iter()
             .position(|t| t.appearance == Appearance::Light)
@@ -2124,8 +2126,7 @@ mod tests {
     #[test]
     fn a_theme_stored_under_its_pre_light_glass_name_is_still_restored() {
         // Asserted to exist by name too: an unknown name restores the default,
-        // which is what "DBDelve Glass" maps to, so restoring it alone proves
-        // nothing.
+        // so restoring it alone proves nothing.
         for (old, new) in RENAMED_THEMES {
             assert!(Theme::all().iter().any(|t| t.name == new), "{new}");
             assert_eq!(restored_theme(Some(old)).name, new);
