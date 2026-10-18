@@ -36,6 +36,22 @@ impl Encoding {
             Self::Utf16Le
         } else if bytes.starts_with(UTF16BE_BOM) {
             Self::Utf16Be
+        } else if bytes.contains(&0) {
+            // UTF-8 text never holds a zero byte, and UTF-16 without a BOM is
+            // full of them: in the high half of each ASCII character.
+            let at = |parity| {
+                bytes
+                    .iter()
+                    .skip(parity)
+                    .step_by(2)
+                    .filter(|&&b| b == 0)
+                    .count()
+            };
+            if at(1) >= at(0) {
+                Self::Utf16Le
+            } else {
+                Self::Utf16Be
+            }
         } else {
             Self::Utf8
         }
@@ -53,11 +69,30 @@ pub(crate) fn decode(bytes: &[u8], encoding: Encoding) -> Result<String, String>
     let stripped = bytes.len() - body.len();
     let invalid = |at: usize| format!("The file is not valid {label} at byte {}.", stripped + at);
 
-    let Some(encoding) = decoder else {
-        return std::str::from_utf8(body)
+    let text = match decoder {
+        None => std::str::from_utf8(body)
             .map(str::to_owned)
-            .map_err(|e| invalid(e.valid_up_to()));
+            .map_err(|e| invalid(e.valid_up_to()))?,
+        Some(decoder) => decode_with(decoder, body).map_err(invalid)?,
     };
+    // No text field holds a NUL, and one is the mark of a file read in the wrong encoding.
+    if let Some(at) = text.find('\0') {
+        let before = &text[..at];
+        let width = match encoding {
+            Encoding::Utf8 => before.len(),
+            Encoding::Utf16Le | Encoding::Utf16Be => before.encode_utf16().count() * 2,
+            Encoding::Windows1252 => before.chars().count(),
+        };
+        return Err(format!(
+            "The file holds a NUL character at byte {}.",
+            stripped + width
+        ));
+    }
+    Ok(text)
+}
+
+/// The decoded text, or the offset into `body` of the first malformed sequence.
+fn decode_with(encoding: &'static encoding_rs::Encoding, body: &[u8]) -> Result<String, usize> {
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut out = String::new();
     let mut offset = 0;
@@ -70,7 +105,7 @@ pub(crate) fn decode(bytes: &[u8], encoding: Encoding) -> Result<String, String>
             DecoderResult::InputEmpty => return Ok(out),
             DecoderResult::OutputFull => {}
             DecoderResult::Malformed(bad, after) => {
-                return Err(invalid(offset - bad as usize - after as usize));
+                return Err(offset - bad as usize - after as usize);
             }
         }
     }
@@ -279,9 +314,13 @@ fn read_delimited(text: &str, options: &Options) -> Result<Table, String> {
         (_, Delimiter::Pipe) => '|',
         (_, Delimiter::Custom(c)) => c,
     };
-    let mut records = records(body, delimiter, options.quote, options.skip_lines + 1)?
-        .into_iter()
-        .peekable();
+    let mut records = records(body, delimiter, options.quote, options.skip_lines + 1)?;
+    // A blank line at the end of the file is not a record, even where one
+    // column makes a blank line in the middle an empty value.
+    while records.last().is_some_and(Record::is_blank) {
+        records.pop();
+    }
+    let mut records = records.into_iter().peekable();
     let Some(first) = records.peek() else {
         return Err("The file is empty.".into());
     };
@@ -466,11 +505,18 @@ mod tests {
     use crate::db::Column;
 
     fn csv(text: &str) -> Table {
-        read(
-            text.as_bytes(),
-            &Options::detected(Path::new("f.csv"), text.as_bytes()),
-        )
-        .unwrap()
+        csv_bytes(text.as_bytes())
+    }
+
+    fn csv_bytes(bytes: &[u8]) -> Table {
+        read(bytes, &Options::detected(Path::new("f.csv"), bytes)).unwrap()
+    }
+
+    fn text(t: &str) -> Cell {
+        Cell::Text {
+            text: t.into(),
+            quoted: false,
+        }
     }
 
     fn pairs(fields: &[Field]) -> Vec<(&str, bool)> {
@@ -600,6 +646,38 @@ mod tests {
             }]
         );
         assert_eq!(csv("a\n1\n").rows.len(), 1);
+        assert_eq!(csv("a\n1\n\n").rows.len(), 1);
+        assert_eq!(csv("a\r\n1\r\n\r\n\r\n").rows.len(), 1);
+        assert_eq!(csv("a\n\n1\n\n").rows.len(), 2);
+    }
+
+    #[test]
+    fn utf_16_without_a_bom_is_sniffed_and_a_nul_is_refused() {
+        let le: Vec<u8> = "id\n1\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let be: Vec<u8> = "id\n1\n"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        assert_eq!(Encoding::sniff(&le), Encoding::Utf16Le);
+        assert_eq!(Encoding::sniff(&be), Encoding::Utf16Be);
+        assert_eq!(csv_bytes(&le).rows[0].cells, [text("1")]);
+        assert_eq!(
+            decode(&le, Encoding::Utf8).err().unwrap(),
+            "The file holds a NUL character at byte 1."
+        );
+        assert_eq!(
+            decode(b"\xEF\xBB\xBFa\0", Encoding::Utf8).err().unwrap(),
+            "The file holds a NUL character at byte 4."
+        );
+        assert_eq!(
+            decode(&[0xFF, 0xFE, b'a', 0, 0, 0], Encoding::Utf16Le)
+                .err()
+                .unwrap(),
+            "The file holds a NUL character at byte 4."
+        );
     }
 
     #[test]
