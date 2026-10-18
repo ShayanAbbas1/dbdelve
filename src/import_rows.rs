@@ -4,9 +4,15 @@
 
 use std::path::Path;
 
+mod mapping;
+mod plan;
 mod read;
 mod values;
 
+pub(crate) use mapping::*;
+// Nothing outside the module reads the plan until the dialog is wired in (Task 7).
+#[allow(unused_imports)]
+pub(crate) use plan::*;
 pub(crate) use read::*;
 pub(crate) use values::*;
 

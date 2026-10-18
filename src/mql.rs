@@ -2123,7 +2123,7 @@ pub(crate) fn writable_field(field: &str) -> bool {
     !field.is_empty() && !field.contains('.') && !field.starts_with('$')
 }
 
-fn unwritable_field(field: &str) -> String {
+pub(crate) fn unwritable_field(field: &str) -> String {
     format!(
         "`{field}` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator."
     )
