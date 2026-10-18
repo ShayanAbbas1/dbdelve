@@ -4198,7 +4198,7 @@ mod tests {
             Value::Text("\\'".into()),
             Value::Text("é /* -- */ ;".into()),
             Value::Text("0xAB".into()),
-            Value::Json(serde_json::json!({"a": "b'c"})),
+            Value::Json(serde_json::from_str(r#"{"a": "b'c"}"#).unwrap()),
         ];
         let types = [
             "text",
