@@ -2,9 +2,9 @@
 //! rewritten to ISO 8601, a number, or a boolean. Pure functions over a
 //! [`Cell`]; nothing here touches a database.
 
-use time::{Date, Month, OffsetDateTime, Time};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
-use super::{Cell, EmptyField, Options};
+use super::{Cell, EmptyField, Json, Options};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Order {
@@ -143,7 +143,7 @@ pub(crate) enum Value {
     Number(String),
     Bool(bool),
     Date { text: String, millis: i64 },
-    Json(serde_json::Value),
+    Json(Json),
 }
 
 impl Value {
@@ -158,15 +158,28 @@ impl Value {
 }
 
 /// `Ok(None)` is a cell the file does not have (a short row, a missing key).
-pub(crate) fn value(cell: &Cell, rule: &Rule, options: &Options) -> Result<Option<Value>, String> {
+/// `column` is the SQL type the value is spelled for, `None` for a document,
+/// which keeps JSON's own types and a date's instant.
+pub(crate) fn value(
+    cell: &Cell,
+    rule: &Rule,
+    options: &Options,
+    column: Option<&str>,
+) -> Result<Option<Value>, String> {
     match cell {
         Cell::Missing => Ok(None),
-        Cell::Json(json) => json_value(json, rule, options).map(Some),
-        Cell::Text { text, quoted } => text_value(text, *quoted, rule, options).map(Some),
+        Cell::Json(json) => json_value(json, rule, options, column).map(Some),
+        Cell::Text { text, quoted } => text_value(text, *quoted, rule, options, column).map(Some),
     }
 }
 
-fn text_value(text: &str, quoted: bool, rule: &Rule, options: &Options) -> Result<Value, String> {
+fn text_value(
+    text: &str,
+    quoted: bool,
+    rule: &Rule,
+    options: &Options,
+    column: Option<&str>,
+) -> Result<Value, String> {
     let exact = *rule == Rule::Exact;
     let mut text = text;
     if !quoted {
@@ -185,25 +198,66 @@ fn text_value(text: &str, quoted: bool, rule: &Rule, options: &Options) -> Resul
             });
         }
     }
-    typed(text, rule, options)
+    typed(text, rule, options, column)
 }
 
-fn json_value(json: &serde_json::Value, rule: &Rule, options: &Options) -> Result<Value, String> {
-    use serde_json::Value as J;
+/// A text column, where a boolean is the word, not the engine's `1`.
+fn textual(data_type: &str) -> bool {
+    let t = data_type.to_lowercase();
+    ["char", "text", "clob", "string", "json"]
+        .iter()
+        .any(|word| t.contains(word))
+}
+
+/// A column that keeps an instant rather than a wall clock, so a value's
+/// offset means something to it. MySQL's bare `timestamp` converts from the
+/// session's zone, so it reads an offset too; Postgres spells its own
+/// `timestamp` out as `… without time zone`, and Snowflake's are `TIMESTAMP_NTZ` and the like.
+fn zone_aware(data_type: &str) -> bool {
+    let t = data_type.to_lowercase();
+    [
+        "with time zone",
+        "offset",
+        "timestamptz",
+        "timetz",
+        "timestamp_tz",
+        "timestamp_ltz",
+    ]
+    .iter()
+    .any(|word| t.contains(word))
+        || t == "timestamp"
+        || t.starts_with("timestamp(")
+}
+
+fn json_value(
+    json: &Json,
+    rule: &Rule,
+    options: &Options,
+    column: Option<&str>,
+) -> Result<Value, String> {
     Ok(match (json, rule) {
-        (J::Null, _) => Value::Null,
-        (J::String(s), _) => return typed(s, rule, options),
-        (J::Bool(b), Rule::AsIs | Rule::Exact | Rule::Boolean) => Value::Bool(*b),
-        (J::Number(n), Rule::AsIs | Rule::Exact) => Value::Number(n.to_string()),
-        (J::Object(_) | J::Array(_), Rule::AsIs | Rule::Exact) => Value::Json(json.clone()),
-        (other, _) => return typed(&other.to_string(), rule, options),
+        (Json::Null, _) => Value::Null,
+        (Json::String(s), _) => return typed(s, rule, options, column),
+        (Json::Bool(b), Rule::AsIs | Rule::Exact) if column.is_some_and(textual) => {
+            Value::Text(b.to_string())
+        }
+        (Json::Bool(b), Rule::AsIs | Rule::Exact | Rule::Boolean) => Value::Bool(*b),
+        // JSON spells every number with a dot, whatever separator the rule was given.
+        (Json::Number(n), Rule::AsIs | Rule::Exact | Rule::Number(_)) => Value::Number(n.clone()),
+        (Json::Object(_) | Json::Array(_), Rule::AsIs | Rule::Exact) => Value::Json(json.clone()),
+        (other, _) => return typed(&other.to_string(), rule, options, column),
     })
 }
 
-fn typed(text: &str, rule: &Rule, options: &Options) -> Result<Value, String> {
+fn typed(
+    text: &str,
+    rule: &Rule,
+    options: &Options,
+    column: Option<&str>,
+) -> Result<Value, String> {
     match rule {
         Rule::AsIs | Rule::Exact => Ok(Value::Text(text.into())),
-        Rule::Date(format) => date(text, *format),
+        Rule::Date(format) => date(text, *format, column),
         Rule::Number(decimal) => number(text, *decimal),
         Rule::Boolean => boolean(text, &options.booleans),
     }
@@ -268,11 +322,32 @@ fn boolean(text: &str, spellings: &Spellings) -> Result<Value, String> {
     }
 }
 
-fn date(text: &str, format: DateFormat) -> Result<Value, String> {
+fn date(text: &str, format: DateFormat, column: Option<&str>) -> Result<Value, String> {
     let trimmed = text.trim();
+    let not = || format!("{} is not {}", shown(text), format.noun());
+    let zone_aware = column.map(zone_aware);
+    // A Unix time is an instant: a column that keeps one is told it is UTC,
+    // and one that keeps a wall clock gets UTC's.
+    let unix = |at: OffsetDateTime, fraction| match zone_aware {
+        Some(true) => format!("{}+00:00", stamp(at, true, fraction).replacen(' ', "T", 1)),
+        _ => stamp(at, true, fraction),
+    };
     let parsed = match format {
         DateFormat::Iso => {
-            crate::mql::iso_millis(trimmed).map(|(millis, _)| (trimmed.to_owned(), millis))
+            let (at, offset, _) = crate::mql::iso_parts(trimmed).ok_or_else(not)?;
+            let (millis, _) = crate::mql::iso_millis(trimmed).ok_or_else(not)?;
+            match (offset, zone_aware) {
+                (Some(offset), Some(false)) if !offset.is_utc() => {
+                    return Err(format!(
+                        "{} has a UTC offset, which a `{}` column has no place for",
+                        shown(text),
+                        column.unwrap_or_default()
+                    ));
+                }
+                // Sent bare, so a server that would read `Z` as "convert to my zone" cannot.
+                (Some(_), Some(false)) => Some((wall_clock(at), millis)),
+                _ => Some((trimmed.to_owned(), millis)),
+            }
         }
         DateFormat::Calendar {
             order,
@@ -283,10 +358,7 @@ fn date(text: &str, format: DateFormat) -> Result<Value, String> {
             .parse::<i64>()
             .ok()
             .and_then(|n| OffsetDateTime::from_unix_timestamp(n).ok())
-            // ponytail: written as a zone-less UTC wall clock, so a
-            // `timestamptz` column reads it in the session's zone; write an
-            // offset if that ever bites.
-            .map(|at| (stamp(at, true, false), at.unix_timestamp() * 1000)),
+            .map(|at| (unix(at, false), at.unix_timestamp() * 1000)),
         DateFormat::UnixMillis => trimmed
             .parse::<i64>()
             .ok()
@@ -294,12 +366,20 @@ fn date(text: &str, format: DateFormat) -> Result<Value, String> {
             .and_then(|nanos| OffsetDateTime::from_unix_timestamp_nanos(nanos).ok())
             .map(|at| {
                 let millis = at.unix_timestamp() * 1000 + i64::from(at.millisecond());
-                (stamp(at, true, true), millis)
+                (unix(at, true), millis)
             }),
     };
     parsed
         .map(|(text, millis)| Value::Date { text, millis })
-        .ok_or_else(|| format!("{} is not {}", shown(text), format.noun()))
+        .ok_or_else(not)
+}
+
+fn wall_clock(at: PrimitiveDateTime) -> String {
+    let mut out = stamp(at.assume_utc(), true, false);
+    if at.nanosecond() > 0 {
+        out.push_str(format!(".{:09}", at.nanosecond()).trim_end_matches('0'));
+    }
+    out
 }
 
 fn stamp(at: OffsetDateTime, with_time: bool, fraction: bool) -> String {
@@ -415,7 +495,7 @@ mod tests {
         Options::detected(Path::new("f.csv"), b"")
     }
     fn v(cell: Cell, rule: Rule, o: &Options) -> Result<Option<Value>, String> {
-        value(&cell, &rule, o)
+        value(&cell, &rule, o, None)
     }
 
     #[test]
@@ -495,7 +575,7 @@ mod tests {
             .map(|row| {
                 row.cells
                     .iter()
-                    .map(|cell| value(cell, &Rule::AsIs, &o).unwrap().unwrap())
+                    .map(|cell| value(cell, &Rule::AsIs, &o, Some("text")).unwrap().unwrap())
                     .collect()
             })
             .collect();
@@ -575,6 +655,101 @@ mod tests {
             panic!()
         };
         assert_eq!(millis, 1_709_164_800_000);
+    }
+
+    #[test]
+    fn a_date_keeps_its_instant_in_the_column_it_is_spelled_for() {
+        let at = |input: &str, format, column| {
+            value(&text(input, false), &Rule::Date(format), &opts(), column).map(|v| match v {
+                Some(Value::Date { text, .. }) => text,
+                other => panic!("{other:?}"),
+            })
+        };
+        let (iso, secs, millis) = (
+            DateFormat::Iso,
+            DateFormat::UnixSeconds,
+            DateFormat::UnixMillis,
+        );
+        let zoned = [
+            "timestamp with time zone",
+            "datetimeoffset(7)",
+            "timestamp",
+            "timestamp(6)",
+            "TIMESTAMP_TZ",
+        ];
+        for column in zoned {
+            assert_eq!(
+                at("1709211909", secs, Some(column)),
+                Ok("2024-02-29T13:05:09+00:00".into())
+            );
+            assert_eq!(
+                at("2024-02-29T13:05:09+02:00", iso, Some(column)),
+                Ok("2024-02-29T13:05:09+02:00".into())
+            );
+        }
+        assert_eq!(
+            at("1709211909123", millis, Some("timestamptz")),
+            Ok("2024-02-29T13:05:09.123+00:00".into())
+        );
+        let unzoned = [
+            "timestamp without time zone",
+            "datetime2(7)",
+            "datetime",
+            "TIMESTAMP_NTZ",
+            "date",
+        ];
+        for column in unzoned {
+            assert_eq!(
+                at("1709211909", secs, Some(column)),
+                Ok("2024-02-29 13:05:09".into())
+            );
+            assert_eq!(
+                at("2024-02-29T13:05:09+02:00", iso, Some(column)),
+                Err(format!(
+                    "`2024-02-29T13:05:09+02:00` has a UTC offset, which a `{column}` column has no place for"
+                ))
+            );
+            assert_eq!(
+                at("2024-02-29T13:05:09.25Z", iso, Some(column)),
+                Ok("2024-02-29 13:05:09.25".into())
+            );
+            assert_eq!(
+                at("2024-02-29T13:05:09+00:00", iso, Some(column)),
+                Ok("2024-02-29 13:05:09".into())
+            );
+            assert_eq!(
+                at("2024-02-29T13:05", iso, Some(column)),
+                Ok("2024-02-29T13:05".into())
+            );
+        }
+        assert_eq!(
+            at("2024-02-29T13:05:09+02:00", iso, None),
+            Ok("2024-02-29T13:05:09+02:00".into())
+        );
+    }
+
+    #[test]
+    fn a_json_boolean_lands_in_a_text_column_as_its_word() {
+        let o = opts();
+        let yes = Cell::Json(Json::Bool(true));
+        for column in ["text", "varchar(20)", "nvarchar(max)", "TEXT", "json"] {
+            for rule in [Rule::AsIs, Rule::Exact] {
+                assert_eq!(
+                    value(&yes, &rule, &o, Some(column)),
+                    Ok(Some(Value::Text("true".into())))
+                );
+            }
+        }
+        for column in [Some("boolean"), Some("tinyint(1)"), Some("bit"), None] {
+            assert_eq!(
+                value(&yes, &Rule::AsIs, &o, column),
+                Ok(Some(Value::Bool(true)))
+            );
+        }
+        assert_eq!(
+            value(&yes, &Rule::Boolean, &o, Some("text")),
+            Ok(Some(Value::Bool(true)))
+        );
     }
 
     #[test]
@@ -698,13 +873,11 @@ mod tests {
     #[test]
     fn json_values_keep_their_types() {
         let o = opts();
-        assert_eq!(
-            v(Cell::Json(serde_json::Value::Null), Rule::AsIs, &o),
-            Ok(Some(Value::Null))
-        );
+        let json = |text: &str| Cell::Json(serde_json::from_str(text).unwrap());
+        assert_eq!(v(json("null"), Rule::AsIs, &o), Ok(Some(Value::Null)));
         assert_eq!(
             v(
-                Cell::Json("NULL".into()),
+                json("\"NULL\""),
                 Rule::AsIs,
                 &Options {
                     null_word: "NULL".into(),
@@ -713,17 +886,25 @@ mod tests {
             ),
             Ok(Some(Value::Text("NULL".into())))
         );
+        for rule in [Rule::AsIs, Rule::Exact, Rule::Number(Decimal::Comma)] {
+            for n in [
+                "1.50",
+                "123456789012345678901234567890",
+                "0.12345678901234567890123",
+            ] {
+                assert_eq!(
+                    v(json(n), rule.clone(), &o),
+                    Ok(Some(Value::Number(n.into())))
+                );
+            }
+        }
+        assert_eq!(v(json("true"), Rule::AsIs, &o), Ok(Some(Value::Bool(true))));
         assert_eq!(
-            v(Cell::Json(serde_json::json!(1.5)), Rule::AsIs, &o),
-            Ok(Some(Value::Number("1.5".into())))
-        );
-        assert_eq!(
-            v(Cell::Json(true.into()), Rule::AsIs, &o),
-            Ok(Some(Value::Bool(true)))
-        );
-        assert_eq!(
-            v(Cell::Json(serde_json::json!({"a": 1})), Rule::AsIs, &o),
-            Ok(Some(Value::Json(serde_json::json!({"a": 1}))))
+            v(json(r#"{"a": 1.50}"#), Rule::AsIs, &o),
+            Ok(Some(Value::Json(Json::Object(vec![(
+                "a".into(),
+                Json::Number("1.50".into())
+            )]))))
         );
         assert_eq!(v(Cell::Missing, Rule::AsIs, &o), Ok(None));
     }

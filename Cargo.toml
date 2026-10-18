@@ -217,7 +217,12 @@ percent-encoding = "=2.3.2"
 nucleo-matcher = "=0.3.1"
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` lets Import Rows keep a JSON number's own text (`import_rows::Json`),
+# which `Value` reads through an f64. Already on in the graph through gpui; named
+# so it does not depend on that. Not `arbitrary_precision`: that feature unifies
+# into every serde_json user in the graph (bson, mysql_common, gpui's settings)
+# and changes how they read numbers.
+serde_json = { version = "1", features = ["raw_value"] }
 # VS Code theme files are JSONC: comments and trailing commas, which serde_json
 # refuses. dprint's parser, straight into a serde_json `Value`; its `serde`
 # feature adds only serde, already in the graph.

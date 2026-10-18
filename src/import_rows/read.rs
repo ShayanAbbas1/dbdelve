@@ -3,8 +3,12 @@
 
 use std::path::Path;
 
+use std::collections::HashMap;
+use std::fmt;
+
 use encoding_rs::{DecoderResult, UTF_16BE, UTF_16LE, WINDOWS_1252};
-use serde_json::Value;
+use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, Visitor};
+use serde_json::value::RawValue;
 
 use super::{Delimiter, Encoding, Format, Options, Problem};
 
@@ -250,10 +254,105 @@ pub(crate) fn sniff(text: &str, quote: char) -> char {
     best.0
 }
 
+/// A JSON value as the file wrote it. `serde_json::Value` would read every
+/// number through an `f64` or a 64-bit integer, turning
+/// `123456789012345678901234567890` into `1.2345678901234568e29` and `1.50`
+/// into `1.5`; this keeps a number's own text.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    /// In file order; a repeated key keeps its first place and its last value, as `serde_json` does.
+    Object(Vec<(String, Json)>),
+}
+
+impl<'de> Deserialize<'de> for Json {
+    // ponytail: each level re-parses its own raw text, so nesting d deep reads
+    // those bytes d times; a hand-rolled parser if deep files ever lag.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = <&RawValue>::deserialize(deserializer)?;
+        let text = raw.get();
+        let parsed = match text.as_bytes().first() {
+            Some(b'{') => serde_json::from_str::<Fields>(text).map(|f| Json::Object(f.0)),
+            Some(b'[') => serde_json::from_str(text).map(Json::Array),
+            Some(b'"') => serde_json::from_str(text).map(Json::String),
+            Some(b't') => Ok(Json::Bool(true)),
+            Some(b'f') => Ok(Json::Bool(false)),
+            Some(b'n') => Ok(Json::Null),
+            _ => Ok(Json::Number(text.to_owned())),
+        };
+        parsed.map_err(D::Error::custom)
+    }
+}
+
+struct Fields(Vec<(String, Json)>);
+
+impl<'de> Deserialize<'de> for Fields {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> Visitor<'de> for Entries {
+            type Value = Fields;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fields, A::Error> {
+                let mut fields: Vec<(String, Json)> = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Json>()? {
+                    match fields.iter_mut().find(|(k, _)| *k == key) {
+                        Some(field) => field.1 = value,
+                        None => fields.push((key, value)),
+                    }
+                }
+                Ok(Fields(fields))
+            }
+        }
+        deserializer.deserialize_map(Entries)
+    }
+}
+
+/// Compact JSON, numbers as the file spelled them.
+impl fmt::Display for Json {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let string = |f: &mut fmt::Formatter, s: &str| {
+            f.write_str(&serde_json::to_string(s).map_err(|_| fmt::Error)?)
+        };
+        match self {
+            Self::Null => f.write_str("null"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Number(n) => f.write_str(n),
+            Self::String(s) => string(f, s),
+            Self::Array(items) => {
+                f.write_str("[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                f.write_str("]")
+            }
+            Self::Object(fields) => {
+                f.write_str("{")?;
+                for (i, (key, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    string(f, key)?;
+                    write!(f, ":{value}")?;
+                }
+                f.write_str("}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Cell {
     Text { text: String, quoted: bool },
-    Json(Value),
+    Json(Json),
     Missing,
 }
 
@@ -391,9 +490,9 @@ fn read_delimited(text: &str, options: &Options) -> Result<Table, String> {
 fn read_json(text: &str) -> Result<Table, String> {
     let bad =
         |line: usize, column: usize| format!("Line {line}, column {column} is not valid JSON.");
-    let records: Vec<(usize, Value)> = match text.trim_start().chars().next() {
+    let records: Vec<(usize, Json)> = match text.trim_start().chars().next() {
         Some('[') => {
-            let values: Vec<Value> =
+            let values: Vec<Json> =
                 serde_json::from_str(text).map_err(|e| bad(e.line(), e.column()))?;
             let lines = element_lines(text);
             values
@@ -418,8 +517,8 @@ fn read_json(text: &str) -> Result<Table, String> {
 
     let mut columns: Vec<String> = Vec::new();
     for (_, value) in &records {
-        if let Value::Object(map) = value {
-            for key in map.keys() {
+        if let Json::Object(fields) = value {
+            for (key, _) in fields {
                 if !columns.contains(key) {
                     columns.push(key.clone());
                 }
@@ -435,11 +534,14 @@ fn read_json(text: &str) -> Result<Table, String> {
     };
     for (n, (line, value)) in records.into_iter().enumerate() {
         let cells = match value {
-            Value::Object(mut map) => table
-                .columns
-                .iter()
-                .map(|c| map.remove(c).map_or(Cell::Missing, Cell::Json))
-                .collect(),
+            Json::Object(fields) => {
+                let mut fields: HashMap<String, Json> = fields.into_iter().collect();
+                table
+                    .columns
+                    .iter()
+                    .map(|c| fields.remove(c).map_or(Cell::Missing, Cell::Json))
+                    .collect()
+            }
             _ => {
                 table.problems.push(Problem {
                     row: Some(table.rows.len()),
@@ -743,8 +845,11 @@ mod tests {
                 t.rows[1].cells,
                 [
                     Cell::Missing,
-                    Cell::Json(serde_json::Value::Null),
-                    Cell::Json(serde_json::json!({"d": [1]}))
+                    Cell::Json(Json::Null),
+                    Cell::Json(Json::Object(vec![(
+                        "d".into(),
+                        Json::Array(vec![Json::Number("1".into())])
+                    )]))
                 ]
             );
         }
@@ -755,6 +860,40 @@ mod tests {
         assert_eq!(
             lines.rows.iter().map(|r| r.line).collect::<Vec<_>>(),
             [1, 2]
+        );
+    }
+
+    #[test]
+    fn a_json_number_keeps_the_text_the_file_wrote() {
+        let text = r#"[{"a": 123456789012345678901234567890, "b": 0.12345678901234567890123, "c": 1.50, "d": {"e": [1.50, "x\"y"], "e": 2}, "f": 1e400}]"#;
+        let t = read(
+            text.as_bytes(),
+            &Options::detected(Path::new("f.json"), text.as_bytes()),
+        )
+        .unwrap();
+        let shown: Vec<String> = t.rows[0]
+            .cells
+            .iter()
+            .map(|c| match c {
+                Cell::Json(json) => json.to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "123456789012345678901234567890",
+                "0.12345678901234567890123",
+                "1.50",
+                "{\"e\":2}",
+                "1e400"
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<Json>(r#"{"k": [1.50, "x\"y", true, null]}"#)
+                .unwrap()
+                .to_string(),
+            r#"{"k":[1.50,"x\"y",true,null]}"#
         );
     }
 

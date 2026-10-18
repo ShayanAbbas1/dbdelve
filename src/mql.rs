@@ -26,7 +26,7 @@ use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
 use crate::db::ExplainMode;
-use crate::import_rows::Value as ImportValue;
+use crate::import_rows::{Json, Value as ImportValue};
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -1502,6 +1502,17 @@ const ISO_8601: &[BorrowedFormatItem] = format_description!(
 /// Milliseconds since 1970, and whether the text gives a time with no offset:
 /// UTC to `ISODate`, local time to JavaScript's `Date`.
 pub(crate) fn iso_millis(text: &str) -> Option<(i64, bool)> {
+    let (at, offset, timed) = iso_parts(text)?;
+    let nanos = at
+        .assume_offset(offset.unwrap_or(UtcOffset::UTC))
+        .unix_timestamp_nanos();
+    let millis = i64::try_from(nanos.div_euclid(1_000_000)).ok()?;
+    Some((millis, timed && offset.is_none()))
+}
+
+/// The wall clock an ISO-8601 text gives (midnight for a bare date), its
+/// offset if it gives one (`Z` being UTC), and whether it gives a time.
+pub(crate) fn iso_parts(text: &str) -> Option<(PrimitiveDateTime, Option<UtcOffset>, bool)> {
     let mut parsed = Parsed::new();
     if !parsed
         .parse_items(text.as_bytes(), ISO_8601)
@@ -1521,17 +1532,16 @@ pub(crate) fn iso_millis(text: &str) -> Option<(i64, bool)> {
         .ok()?,
         None => Time::MIDNIGHT,
     };
-    let zoneless =
-        parsed.hour_24().is_some() && parsed.offset_hour().is_none() && !text.ends_with(['Z', 'z']);
     let offset = match parsed.offset_hour() {
-        Some(_) => UtcOffset::try_from(parsed).ok()?,
-        None => UtcOffset::UTC,
+        Some(_) => Some(UtcOffset::try_from(parsed).ok()?),
+        None if text.ends_with(['Z', 'z']) => Some(UtcOffset::UTC),
+        None => None,
     };
-    let nanos = PrimitiveDateTime::new(date, time)
-        .assume_offset(offset)
-        .unix_timestamp_nanos();
-    let millis = i64::try_from(nanos.div_euclid(1_000_000)).ok()?;
-    Some((millis, zoneless))
+    Some((
+        PrimitiveDateTime::new(date, time),
+        offset,
+        parsed.hour_24().is_some(),
+    ))
 }
 
 const WRAPPERS: [&str; 13] = [
@@ -2045,11 +2055,14 @@ pub(crate) fn insert_many(
             let fields = columns
                 .iter()
                 .zip(row)
-                .filter_map(|(&field, value)| Some((field.to_owned(), imported(value.as_ref()?))))
-                .collect();
-            spelled(&Value::Document(fields))
+                .filter_map(|(&field, value)| {
+                    let value = imported(value.as_ref()?);
+                    Some(value.map(|value| (field.to_owned(), value)))
+                })
+                .collect::<Result<_, String>>()?;
+            Ok(spelled(&Value::Document(fields)))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     if documents.is_empty() {
         return Err("There are no rows to insert.".into());
     }
@@ -2060,43 +2073,69 @@ pub(crate) fn insert_many(
     ))
 }
 
-fn imported(value: &ImportValue) -> Value {
-    match value {
+/// The BSON an imported value becomes, or why none holds it exactly.
+pub(crate) fn imported(value: &ImportValue) -> Result<Value, String> {
+    Ok(match value {
         ImportValue::Null => Value::Null,
         ImportValue::Text(text) => Value::String(text.clone()),
-        ImportValue::Number(text) => whole_or_double(text),
+        ImportValue::Number(text) => exact_number(text)?,
         ImportValue::Bool(b) => Value::Bool(*b),
         ImportValue::Date { millis, .. } => Value::Date(*millis),
-        ImportValue::Json(json) => from_json(json),
+        ImportValue::Json(json) => from_json(json)?,
+    })
+}
+
+/// A whole number that fits keeps its width, then a double where the double
+/// is the number as written, then a Decimal128, unlike `number` above, which
+/// is mongosh's rule for typed text (`1.0` is an Int32). A number none of them
+/// holds exactly is refused rather than rounded.
+fn exact_number(text: &str) -> Result<Value, String> {
+    if let Ok(n) = text.parse::<i64>() {
+        return Ok(i32::try_from(n).map_or(Value::Int64(n), Value::Int32));
+    }
+    let double = text.parse::<f64>().ok().filter(|d| d.is_finite());
+    if let Some(d) = double.filter(|d| significand(text) == significand(&format!("{d:e}"))) {
+        return Ok(Value::Double(d));
+    }
+    if significand(text).1.len() > 34 {
+        return Err(format!(
+            "`{text}` has more significant digits than a Decimal128 holds (34)"
+        ));
+    }
+    Ok(Value::Decimal128(text.to_owned()))
+}
+
+/// A decimal text's sign, its digits without leading or trailing zeros, and
+/// where the point falls among them, so `1.50`, `15e-1` and `1.5e0` compare equal.
+fn significand(text: &str) -> (bool, String, i64) {
+    let negative = text.starts_with('-');
+    let body = text.trim_start_matches(['-', '+']);
+    let (mantissa, exponent) = body.split_once(['e', 'E']).unwrap_or((body, "0"));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    let point = whole.len() as i64 - (digits.len() - significant.len()) as i64
+        + exponent.parse::<i64>().unwrap_or(0);
+    match significant.trim_end_matches('0') {
+        "" => (negative, String::new(), 0),
+        digits => (negative, digits.to_owned(), point),
     }
 }
 
-// Whole numbers keep their width and anything else is a double, unlike
-// `number` above, which is mongosh's rule for typed text (`1.0` is an Int32).
-fn whole_or_double(text: &str) -> Value {
-    match text.parse::<i64>() {
-        Ok(n) => i32::try_from(n).map_or(Value::Int64(n), Value::Int32),
-        Err(_) => Value::Double(
-            text.parse()
-                .expect("value rules only produce finite numbers"),
+fn from_json(json: &Json) -> Result<Value, String> {
+    Ok(match json {
+        Json::Null => Value::Null,
+        Json::Bool(b) => Value::Bool(*b),
+        Json::Number(text) => exact_number(text)?,
+        Json::String(text) => Value::String(text.clone()),
+        Json::Array(items) => Value::Array(items.iter().map(from_json).collect::<Result<_, _>>()?),
+        Json::Object(fields) => Value::Document(
+            fields
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), from_json(value)?)))
+                .collect::<Result<_, String>>()?,
         ),
-    }
-}
-
-fn from_json(json: &serde_json::Value) -> Value {
-    use serde_json::Value as J;
-    match json {
-        J::Null => Value::Null,
-        J::Bool(b) => Value::Bool(*b),
-        J::Number(n) => whole_or_double(&n.to_string()),
-        J::String(text) => Value::String(text.clone()),
-        J::Array(items) => Value::Array(items.iter().map(from_json).collect()),
-        J::Object(map) => Value::Document(
-            map.iter()
-                .map(|(key, value)| (key.clone(), from_json(value)))
-                .collect(),
-        ),
-    }
+    })
 }
 
 /// One `deleteOne` naming the document by its key.
@@ -4679,6 +4718,33 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_number_is_stored_exactly_or_refused() {
+        use crate::import_rows::Value as V;
+        let number = |text: &str| imported(&V::Number(text.into()));
+        assert_eq!(number("7"), Ok(Value::Int32(7)));
+        assert_eq!(number("12345678901"), Ok(Value::Int64(12_345_678_901)));
+        for double in ["0.1", "1.50", "-2.5e3", "1e22", "-0.0"] {
+            assert!(matches!(number(double), Ok(Value::Double(_))), "{double}");
+        }
+        for decimal in [
+            "12345678901234567890",
+            "0.12345678901234567890123",
+            "123456789012345678901234567890",
+            "1e400",
+        ] {
+            assert_eq!(number(decimal), Ok(Value::Decimal128(decimal.into())));
+        }
+        assert!(number("1234567890123456789012345678901234567").is_err());
+        let json: Json = serde_json::from_str("[12345678901234567890]").unwrap();
+        assert_eq!(
+            imported(&V::Json(json)),
+            Ok(Value::Array(vec![Value::Decimal128(
+                "12345678901234567890".into()
+            )]))
+        );
+    }
+
+    #[test]
     fn insert_many_types_each_value_and_leaves_absent_fields_out() {
         use crate::import_rows::Value as V;
         let (n, d, j, b) = (
@@ -4687,7 +4753,7 @@ mod tests {
                 text: "2024-02-29".into(),
                 millis: 1_709_164_800_000,
             },
-            V::Json(serde_json::json!({"k": [1]})),
+            V::Json(serde_json::from_str(r#"{"k": [1]}"#).unwrap()),
             V::Bool(true),
         );
         let s = insert_many(

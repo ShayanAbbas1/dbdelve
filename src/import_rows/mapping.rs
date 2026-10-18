@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::{Cell, Format, Options, Problem, Rule, Table, Value};
+use super::{Cell, Format, Json, Options, Problem, Rule, Table, Value};
 use super::{DateFormat, Decimal};
 use crate::db::{Engine, Structure};
 use crate::mql;
@@ -187,12 +187,12 @@ pub(crate) struct Checked {
     pub(crate) problems: Vec<Problem>,
 }
 
-fn has_operator(json: &serde_json::Value) -> bool {
+fn has_operator(json: &Json) -> bool {
     match json {
-        serde_json::Value::Object(map) => map
+        Json::Object(fields) => fields
             .iter()
             .any(|(key, value)| key.starts_with('$') || has_operator(value)),
-        serde_json::Value::Array(items) => items.iter().any(has_operator),
+        Json::Array(items) => items.iter().any(has_operator),
         _ => false,
     }
 }
@@ -273,7 +273,8 @@ pub(crate) fn check(
         for (k, &source) in sources.iter().enumerate() {
             let name = &columns[k].0;
             let cell = file_row.cells.get(source).unwrap_or(&Cell::Missing);
-            let value = match super::value(cell, rules[k], options) {
+            let column = (!engine.takes_new_fields()).then_some(columns[k].1.as_str());
+            let value = match super::value(cell, rules[k], options, column) {
                 Err(message) => {
                     problems.push(problem(source, message));
                     None
@@ -289,6 +290,13 @@ pub(crate) fn check(
                     ));
                     None
                 }
+                Ok(Some(value)) if engine.takes_new_fields() => match mql::imported(&value) {
+                    Err(message) => {
+                        problems.push(problem(source, message));
+                        None
+                    }
+                    Ok(_) => Some(value),
+                },
                 Ok(None) => {
                     let required = matches!(mappings[source].target, Target::Column(i)
                         if !targets[i].nullable && !targets[i].has_default);
@@ -367,7 +375,7 @@ pub(crate) fn prepare(
                 .iter()
                 .find_map(|row| match row.cells.get(column)? {
                     Cell::Text { text, .. } if !text.is_empty() => Some(text.clone()),
-                    Cell::Json(json) if !json.is_null() => Some(json.to_string()),
+                    Cell::Json(json) if *json != Json::Null => Some(json.to_string()),
                     _ => None,
                 })
         })
@@ -651,6 +659,18 @@ mod tests {
         assert_eq!(
             prepared.checked.problems,
             [refused("a.b", 0), refused("$x", 1)]
+        );
+
+        let bytes = br#"[{"n": 1234567890123456789012345678901234567}]"#;
+        let prepared = prepare(bytes, &opts("a.json", bytes), &[], None, Engine::MongoDb).unwrap();
+        assert_eq!(
+            prepared.checked.problems,
+            [Problem {
+                row: Some(0),
+                line: Some(1),
+                column: Some(0),
+                message: "`1234567890123456789012345678901234567` has more significant digits than a Decimal128 holds (34)".into()
+            }]
         );
 
         let bytes = br#"[{"ok": {"$gt": 1}}]"#;
