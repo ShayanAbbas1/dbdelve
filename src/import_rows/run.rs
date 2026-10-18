@@ -173,8 +173,6 @@ impl Run {
                     },
                 });
             }
-            // A chunk the cancel itself stopped failed for no reason of its own.
-            (Step::Chunk(_), Err(_)) if self.cancelled && !self.atomic => {}
             (Step::Begin | Step::Commit, Err(error)) => {
                 self.failure.get_or_insert((error.message, None));
             }
@@ -533,6 +531,22 @@ mod tests {
         going.cancel();
         assert_eq!(going.next(), None);
         assert_eq!(going.outcome(), Some(&Outcome::Cancelled { committed: 2 }));
+
+        // An error in the chunk in flight may have applied part of it (an
+        // ordered insertMany), so it is reported, not read as the cancel.
+        let mut racing = Run::new(vec![2, 2], false);
+        racing.landed(Step::Chunk(0), Ok(Some(2)));
+        racing.cancel();
+        racing.landed(Step::Chunk(1), err("duplicate key"));
+        assert_eq!(racing.next(), None);
+        assert_eq!(
+            racing.outcome(),
+            Some(&Outcome::Failed {
+                message: "duplicate key".into(),
+                chunk: Some(1),
+                committed: 2
+            })
+        );
 
         let mut late = Run::new(vec![2], true);
         late.landed(Step::Begin, Ok(None));
