@@ -413,13 +413,9 @@ fn read_delimited(text: &str, options: &Options) -> Result<Table, String> {
         (_, Delimiter::Pipe) => '|',
         (_, Delimiter::Custom(c)) => c,
     };
-    let mut records = records(body, delimiter, options.quote, options.skip_lines + 1)?;
-    // A blank line at the end of the file is not a record, even where one
-    // column makes a blank line in the middle an empty value.
-    while records.last().is_some_and(Record::is_blank) {
-        records.pop();
-    }
-    let mut records = records.into_iter().peekable();
+    let mut records = records(body, delimiter, options.quote, options.skip_lines + 1)?
+        .into_iter()
+        .peekable();
     let Some(first) = records.peek() else {
         return Err("The file is empty.".into());
     };
@@ -454,6 +450,8 @@ fn read_delimited(text: &str, options: &Options) -> Result<Table, String> {
         delimiter: Some(delimiter),
     };
     for record in records {
+        // In a one-column file a blank line, even the last, is a record: it is
+        // how export writes a NULL there, so a trailing NULL must round-trip.
         if width > 1 && record.is_blank() {
             continue;
         }
@@ -748,9 +746,11 @@ mod tests {
             }]
         );
         assert_eq!(csv("a\n1\n").rows.len(), 1);
-        assert_eq!(csv("a\n1\n\n").rows.len(), 1);
-        assert_eq!(csv("a\r\n1\r\n\r\n\r\n").rows.len(), 1);
-        assert_eq!(csv("a\n\n1\n\n").rows.len(), 2);
+        let trailing = csv("a\n1\n\n");
+        assert_eq!(trailing.rows.len(), 2);
+        assert_eq!(trailing.rows[1].cells, one.rows[1].cells);
+        assert_eq!(csv("a,b\n1,2\n\n").rows.len(), 1);
+        assert_eq!(csv("a,b\r\n1,2\r\n\r\n\r\n").rows.len(), 1);
     }
 
     #[test]
