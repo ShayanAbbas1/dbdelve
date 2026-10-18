@@ -9,9 +9,9 @@
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
-    Entity, ExternalPaths, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window,
-    div, prelude::FluentBuilder, px,
+    Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
@@ -28,8 +28,8 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, ImportRows,
-        LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
+        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget,
+        NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
         SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit,
         SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
@@ -785,10 +785,6 @@ fn render_object(
     let controls = relation_controls(false, takes_inserts, cx).into_any_element();
     div()
         .size_full()
-        .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(t.element_hover))
-        .on_drop(cx.listener(|workspace, paths: &ExternalPaths, window, cx| {
-            workspace.import_dropped(paths, window, cx);
-        }))
         .flex()
         .flex_col()
         .child(render_filter_bar(
@@ -3333,13 +3329,6 @@ fn relation_controls(
             button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
                 |_, window, cx| {
                     window.dispatch_action(Box::new(NewRow), cx);
-                },
-            )
-        }))
-        .children(takes_inserts.then(|| {
-            button("import-rows", "Import…", Tone::Quiet, Control::Compact, t).on_click(
-                |_, window, cx| {
-                    window.dispatch_action(Box::new(ImportRows), cx);
                 },
             )
         }))

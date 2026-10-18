@@ -5,10 +5,9 @@
 //! profile in front: a check or a chunk lands whenever it lands, and the
 //! profile in front by then may be another one.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use gpui::{ExternalPaths, PathPromptOptions};
+use gpui::PathPromptOptions;
 
 use super::import_dialog::{new_preview, show_preview, show_preview_row};
 use super::*;
@@ -48,27 +47,6 @@ impl Workspace {
             .is_some()
         {
             self.import_rows(&ImportRows, window, cx);
-        }
-    }
-
-    pub(crate) fn import_dropped(
-        &mut self,
-        paths: &ExternalPaths,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(path) = paths.paths().first() else {
-            return;
-        };
-        if !importable(path) {
-            self.note(
-                "Only .csv, .tsv, .json, .jsonl and .ndjson files import as rows.".into(),
-                cx,
-            );
-            return;
-        }
-        if let Some(tab) = self.import_target(cx) {
-            self.open_import_file(tab, path.clone(), window, cx);
         }
     }
 
@@ -816,30 +794,5 @@ fn stop_import(dialog: &mut ImportDialog, cx: &mut Context<Workspace>) {
         cx.background_executor()
             .spawn(on_own_thread(move || connection.cancel(&cancel)))
             .detach();
-    }
-}
-
-pub(crate) fn importable(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["csv", "tsv", "json", "jsonl", "ndjson"]
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_csv_tsv_and_json_files_open_the_import() {
-        for yes in ["a.csv", "a.TSV", "a.json", "a.jsonl", "a.ndjson"] {
-            assert!(importable(Path::new(yes)), "{yes}");
-        }
-        for no in ["a.xlsx", "a", "a.sql"] {
-            assert!(!importable(Path::new(no)), "{no}");
-        }
     }
 }
