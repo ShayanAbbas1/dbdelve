@@ -99,6 +99,7 @@ pub enum Command {
     /// Open the "New row" form over the preview. Insertion needs no primary
     /// key, so this is offered where the grid refuses to edit.
     NewRow,
+    ImportRows,
     CloseObject(u64),
     /// Stage a `NULL`, the empty string or `DEFAULT` on the active cell. The
     /// rows are how the gestures stop being folklore; the cell menu dispatches
@@ -719,6 +720,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }
             if tab.takes_inserts(profile.config.engine()) {
                 items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+                items.push(Item::command(
+                    &format!("Import Rows into {}…", tab.name),
+                    "",
+                    icon::PLUS,
+                    Command::ImportRows,
+                ));
             }
             // Only on a row dbdelve can name by its primary key -- the same
             // condition that makes a cell of it editable.

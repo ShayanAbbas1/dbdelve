@@ -9,9 +9,9 @@
 
 use gpui::{
     Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, div,
-    prelude::FluentBuilder, px,
+    Entity, ExternalPaths, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window,
+    div, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
@@ -785,6 +785,10 @@ fn render_object(
     let controls = relation_controls(false, takes_inserts, cx).into_any_element();
     div()
         .size_full()
+        .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(t.element_hover))
+        .on_drop(cx.listener(|workspace, paths: &ExternalPaths, window, cx| {
+            workspace.import_dropped(paths, window, cx);
+        }))
         .flex()
         .flex_col()
         .child(render_filter_bar(

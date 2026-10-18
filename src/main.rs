@@ -317,6 +317,8 @@ fn main() {
                     })
                     .chain([
                         MenuItem::separator(),
+                        MenuItem::action("Import Rows…", ImportRows),
+                        MenuItem::separator(),
                         MenuItem::action("Save Query", SaveQuery),
                         MenuItem::separator(),
                         MenuItem::action("Close Tab", CloseTab),
