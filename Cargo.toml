@@ -236,6 +236,10 @@ time = { version = "=0.3.55", default-features = false, features = [
     "macros",
 ] }
 
+# Import Rows' UTF-16 and Windows-1252 files; std decodes only UTF-8. Already
+# in the graph; pinned to the locked version so naming it links no second copy.
+encoding_rs = "=0.8.35"
+
 # Classification only, for `sql::classify`: the mode check reads a typed
 # `Statement` so it cannot mistake one statement for another. tree-sitter-sequel
 # recovers `GRANT SELECT ON t TO u` as a `select` node, and a gate that reads a

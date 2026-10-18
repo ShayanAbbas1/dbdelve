@@ -10,6 +10,10 @@ mod explorer;
 mod export;
 mod filter;
 mod import;
+// Nothing calls it until the import dialog is wired in. Unlike `mql`, tests
+// leave some options unread, so the allow holds under `cfg(test)` too.
+#[allow(dead_code)]
+mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
 #[cfg_attr(not(test), allow(dead_code))]
 mod mql;

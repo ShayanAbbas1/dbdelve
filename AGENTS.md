@@ -249,6 +249,7 @@ futures-util = "=0.3.34"   # try_next over tiberius's result stream. dff = false
 
 mongodb = "=3.9.1"         # its own tokio runtime per connection. dff = false, rustls on ring
 time = "=0.3.55"           # ISO-8601 dates in mongosh statements. dff = false
+encoding_rs = "=0.8.35"    # Import Rows' UTF-16 and Windows-1252 files. Already in the graph
 
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer

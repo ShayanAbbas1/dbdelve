@@ -217,7 +217,7 @@ pub fn render_rows(
     }
 }
 
-fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String {
+pub(crate) fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String {
     let mut out = String::new();
     let separator = delimiter.to_string();
 

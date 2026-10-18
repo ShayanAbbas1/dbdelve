@@ -1789,6 +1789,7 @@ dependencies = [
  "aes 0.8.4",
  "base64 0.22.1",
  "cbc 0.1.2",
+ "encoding_rs",
  "futures-util",
  "geozero",
  "gpui-base",
