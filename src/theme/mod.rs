@@ -589,8 +589,8 @@ impl Theme {
     /// a desktop full of others, so glass is something to pick, not a start.
     fn built_in() -> [Self; 29] {
         [
-            Self::dark(),
             Self::black(),
+            Self::dark(),
             Self::glass(),
             Self::gruvbox_dark(),
             Self::gruvbox_dark().glassed("Gruvbox Dark Glass"),
@@ -2110,7 +2110,7 @@ mod tests {
 
     #[test]
     fn every_dark_theme_is_listed_before_every_light_one() {
-        assert_eq!(Theme::default().name, "DBDelve Dark");
+        assert_eq!(Theme::default().name, "DBDelve Black");
         assert!(!Theme::default().is_glass);
         let first_light = Theme::all()
             .iter()
