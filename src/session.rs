@@ -270,7 +270,8 @@ pub(crate) struct Session {
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
     pub(crate) insert_form: Option<InsertForm>,
-    /// The Import Rows dialog, over the object tab it imports into.
+    /// The Import Rows dialog, over the whole workspace while this profile is
+    /// in front. Tied to no tab: the table need not be open.
     pub(crate) import_rows: Option<ImportDialog>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
@@ -326,11 +327,12 @@ pub(crate) struct InsertField {
     pub(crate) touched: bool,
 }
 
-/// A file on its way into the table an object tab shows.
+/// A file on its way into a table.
 pub(crate) struct ImportDialog {
-    pub(crate) tab: u64,
     pub(crate) schema: String,
     pub(crate) table: String,
+    /// The table's columns, read for the dialog alone.
+    pub(crate) structure: StructureState,
     pub(crate) path: PathBuf,
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) options: import_rows::Options,

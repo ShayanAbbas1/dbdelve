@@ -295,23 +295,9 @@ impl Workspace {
         let t = *theme(cx);
         let profile = self.profile()?;
         let dialog = profile.session.import_rows.as_ref()?;
-        if Tab::Object(dialog.tab) != profile.session.active {
-            return None;
-        }
-        let structure = profile
-            .session
-            .objects
-            .iter()
-            .find(|tab| tab.id == dialog.tab)
-            .and_then(|tab| match &tab.body {
-                ObjectBody::Relation { structure, .. } => Some(structure),
-                ObjectBody::Structure { .. } | ObjectBody::Routine(_) => None,
-            });
         let engine = profile.config.engine();
-        let targets = Rc::new(match structure {
-            Some(StructureState::Loaded(structure)) => {
-                TargetColumn::from_structure(structure, engine)
-            }
+        let targets = Rc::new(match &dialog.structure {
+            StructureState::Loaded(structure) => TargetColumn::from_structure(structure, engine),
             _ => Vec::new(),
         });
         let editing = Editing {
@@ -323,7 +309,7 @@ impl Workspace {
         let body = self.import_body(
             &editing,
             &targets,
-            matches!(structure, Some(StructureState::Loading)),
+            matches!(dialog.structure, StructureState::Loading),
             cx,
         );
         let footer = match &dialog.phase {
@@ -1300,7 +1286,7 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
 fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = *theme(cx);
     let workspace = cx.entity().downgrade();
-    let tab = dialog.tab;
+    let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
     let name = dialog
         .path
         .file_name()
@@ -1344,7 +1330,7 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
             .disabled(running)
             .on_click(move |_, window, cx| {
                 _ = workspace.update(cx, |workspace, cx| {
-                    workspace.prompt_import_file(tab, window, cx);
+                    workspace.prompt_import_file(schema.clone(), table.clone(), window, cx);
                 });
             }),
         )

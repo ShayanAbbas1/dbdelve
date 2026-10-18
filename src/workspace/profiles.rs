@@ -863,7 +863,7 @@ impl Workspace {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;
         };
-        self.abandon_import(&id, None, cx);
+        self.abandon_import(&id, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1007,7 +1007,7 @@ impl Workspace {
         closing.sort_by_key(|id| Tab::Object(*id) == active);
         let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
         let profile_id = profile.id.clone();
-        self.abandon_import(&profile_id, None, cx);
+        self.abandon_import(&profile_id, cx);
         for id in closing {
             self.close_object(id, window, cx);
         }
@@ -1679,7 +1679,7 @@ impl Workspace {
         // nothing left to count and the number is what the note reports.
         let queries = store::saved_queries(&id).len();
 
-        self.abandon_import(&id, None, cx);
+        self.abandon_import(&id, cx);
 
         let removed = self.profiles.remove(index);
         if let Some(key) = identity_file(&removed.config)

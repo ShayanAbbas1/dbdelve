@@ -21,63 +21,50 @@ use crate::session::{ImportDialog, ImportInputs, ImportPhase};
 const RECHECK_DELAY: Duration = Duration::from_millis(150);
 
 impl Workspace {
+    /// The palette's and File menu's way in: into the table the object tab in
+    /// front shows.
     pub(crate) fn import_rows(
         &mut self,
         _: &ImportRows,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.import_target(cx) {
-            self.prompt_import_file(tab, window, cx);
+        let engine = self.engine();
+        let target = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| {
+                (
+                    tab.schema.clone(),
+                    tab.name.clone(),
+                    tab.takes_inserts(engine),
+                )
+            });
+        match target {
+            None => self.note("Open a table to import rows into.".into(), cx),
+            Some((_, _, false)) => self.note("This view takes no inserts.".into(), cx),
+            Some((schema, table, true)) => self.import_rows_into(schema, table, window, cx),
         }
     }
 
-    /// Open `relation`'s Data view and offer the file prompt over it, for the
-    /// explorer's menu, where the table need not be open yet.
+    /// Offer the file prompt for an import into `schema.table`, opening
+    /// nothing else: the dialog reads the table's columns itself. Silent
+    /// when a dialog is already open, which is in front of the user.
     pub(crate) fn import_rows_into(
         &mut self,
         schema: String,
-        relation: String,
-        kind: RelationKind,
+        table: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .open_relation_view(schema, relation, kind, false, window, cx)
-            .is_some()
-        {
-            self.import_rows(&ImportRows, window, cx);
-        }
-    }
-
-    /// The object tab in front, when an import may go into it, saying why
-    /// when it may not. Silent when that tab's dialog is already open.
-    pub(crate) fn import_target(&mut self, cx: &mut Context<Self>) -> Option<u64> {
-        if self
-            .profile()
-            .and_then(|profile| profile.session.active_object())
-            .is_some_and(|tab| matches!(tab.body, ObjectBody::Structure { .. }))
-        {
-            self.note("Switch to Data to import rows.".into(), cx);
-            return None;
-        }
         if !self.require(Mode::ReadWrite, cx) {
-            return None;
+            return;
         }
         self.clear_notice();
-        let engine = self.engine();
-        let session = &self.profile()?.session;
-        let Some(tab) = session.active_object() else {
-            self.note("Open a table to import rows into.".into(), cx);
-            return None;
+        let Some(profile) = self.profile() else {
+            return;
         };
-        if !tab.takes_inserts(engine) {
-            self.note("This view takes no inserts.".into(), cx);
-            return None;
-        }
-        let id = tab.id;
-        match &session.import_rows {
-            Some(dialog) if dialog.tab == id => None,
+        match &profile.session.import_rows {
             // A session holds one dialog, and replacing a running one would
             // drop its connection mid-import.
             Some(ImportDialog {
@@ -88,16 +75,18 @@ impl Workspace {
             }) => {
                 let message = format!("An import into `{schema}.{table}` is running.");
                 self.note(message, cx);
-                None
             }
-            _ => Some(id),
+            Some(_) => {}
+            None => self.prompt_import_file(schema, table, window, cx),
         }
     }
 
-    /// Ask for a file to import into `tab`. A dismissed picker does nothing.
+    /// Ask for a file to import into `schema.table`. A dismissed picker does
+    /// nothing.
     pub(crate) fn prompt_import_file(
         &mut self,
-        tab: u64,
+        schema: String,
+        table: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -112,41 +101,30 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let chosen = chosen.await;
-            _ = workspace.update_in(cx, |workspace, window, cx| {
-                // Tab ids count up per session, so the same id in another
-                // profile is another table.
-                if workspace
-                    .profile()
-                    .is_none_or(|active| active.id != profile)
-                {
-                    return;
-                }
-                match chosen {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.into_iter().next() {
-                            workspace.open_import_file(tab, path, window, cx);
-                        }
+            _ = workspace.update_in(cx, |workspace, window, cx| match chosen {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        workspace.open_import_file(profile, schema, table, path, window, cx);
                     }
-                    Ok(Err(error)) => workspace.note(error.to_string(), cx),
-                    Ok(Ok(None)) | Err(_) => {}
                 }
+                Ok(Err(error)) => workspace.note(error.to_string(), cx),
+                Ok(Ok(None)) | Err(_) => {}
             });
         })
         .detach();
     }
 
-    /// Read `path` and open the dialog on it over `tab`, in place of whatever
-    /// file the dialog held.
-    pub(crate) fn open_import_file(
+    /// Read `path` and open `profile`'s dialog on it, in place of whatever
+    /// file the dialog held, then read the table's columns for it.
+    fn open_import_file(
         &mut self,
-        tab: u64,
+        profile: String,
+        schema: String,
+        table: String,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
-            return;
-        };
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
         let read = cx.background_executor().spawn({
             let path = path.clone();
@@ -169,9 +147,6 @@ impl Workspace {
                 };
                 let engine = found.config.engine();
                 let session = &mut found.session;
-                let Some(object) = session.objects.iter().find(|object| object.id == tab) else {
-                    return;
-                };
                 if session
                     .import_rows
                     .as_ref()
@@ -181,9 +156,9 @@ impl Workspace {
                 }
                 let options = Options::detected(&path, &bytes);
                 session.import_rows = Some(ImportDialog {
-                    tab,
-                    schema: object.schema.clone(),
-                    table: object.name.clone(),
+                    schema,
+                    table,
+                    structure: StructureState::Loading,
                     inputs: import_inputs(&profile, &options, window, cx),
                     options,
                     path,
@@ -208,6 +183,51 @@ impl Workspace {
                     focused_mapping: None,
                     mapping_scroll: gpui::ScrollHandle::new(),
                 });
+                workspace.load_import_columns(&profile, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Read the columns of the table `profile`'s dialog imports into, with the
+    /// same catalog call a relation tab's structure makes, and check the file
+    /// against them once they land.
+    fn load_import_columns(&mut self, profile: &str, cx: &mut Context<Self>) {
+        let Some(found) = self.profiles.iter_mut().find(|found| found.id == profile) else {
+            return;
+        };
+        let connection = found.connection();
+        let Some(dialog) = found.session.import_rows.as_mut() else {
+            return;
+        };
+        let Some(connection) = connection else {
+            dialog.structure = StructureState::Failed("The connection is not open.".into());
+            cx.notify();
+            return;
+        };
+        let (schema, table, file) = (
+            dialog.schema.clone(),
+            dialog.table.clone(),
+            dialog.bytes.clone(),
+        );
+        let structure = cx
+            .background_executor()
+            .spawn(async move { connection.structure(&schema, &table) });
+        let profile = profile.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let structure = structure.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                // The file a dialog holds is its identity.
+                let Some(dialog) = workspace
+                    .import_dialog_mut(&profile)
+                    .filter(|dialog| Arc::ptr_eq(&dialog.bytes, &file))
+                else {
+                    return;
+                };
+                dialog.structure = match structure {
+                    Ok(structure) => StructureState::Loaded(structure),
+                    Err(error) => StructureState::Failed(error.message),
+                };
                 workspace.recheck_import(&profile, cx);
             });
         })
@@ -230,40 +250,24 @@ impl Workspace {
             return;
         };
         let engine = found.config.engine();
-        let session = &mut found.session;
-        let Some(dialog) = session.import_rows.as_mut() else {
+        let Some(dialog) = found.session.import_rows.as_mut() else {
             return;
         };
         dialog.checks += 1;
         dialog.checking = true;
         cx.notify();
-        let structure = session
-            .objects
-            .iter()
-            .find(|tab| tab.id == dialog.tab)
-            .and_then(|tab| match &tab.body {
-                ObjectBody::Relation { structure, .. } => Some(structure),
-                ObjectBody::Structure { .. } | ObjectBody::Routine(_) => None,
-            });
-        let targets = match structure {
-            Some(StructureState::Loaded(structure)) => {
-                TargetColumn::from_structure(structure, engine)
-            }
-            Some(StructureState::Failed(message)) => {
+        let targets = match &dialog.structure {
+            StructureState::Loaded(structure) => TargetColumn::from_structure(structure, engine),
+            StructureState::Failed(message) => {
                 dialog.prepared = Some(Err(message.clone()));
                 dialog.plan = None;
                 dialog.checking = false;
                 return;
             }
-            // `load_structure` checks again when the columns land.
-            Some(StructureState::Loading) | None => return,
+            // `load_import_columns` checks again when the columns land.
+            StructureState::Loading => return,
         };
-        let (check, tab, bytes, options) = (
-            dialog.checks,
-            dialog.tab,
-            dialog.bytes.clone(),
-            dialog.options.clone(),
-        );
+        let (check, bytes, options) = (dialog.checks, dialog.bytes.clone(), dialog.options.clone());
         let previous = match &dialog.prepared {
             Some(Ok(prepared)) => Some((prepared.columns.clone(), dialog.mappings.clone())),
             _ => None,
@@ -272,11 +276,11 @@ impl Workspace {
         let profile = profile.to_string();
         cx.spawn(async move |workspace, cx| {
             cx.background_executor().timer(RECHECK_DELAY).await;
-            // The file a dialog holds is its identity: a dialog reopened on
-            // the same tab counts its checks from zero again.
+            // The file a dialog holds is its identity: a dialog reopened
+            // counts its checks from zero again.
             let file = bytes.clone();
             let newest = |dialog: &&mut ImportDialog| {
-                dialog.tab == tab && dialog.checks == check && Arc::ptr_eq(&dialog.bytes, &file)
+                dialog.checks == check && Arc::ptr_eq(&dialog.bytes, &file)
             };
             let current = workspace.update(cx, |workspace, _| {
                 workspace
@@ -581,7 +585,7 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             let landed = sent.await;
             _ = workspace.update(cx, |workspace, cx| {
-                // Gone with its tab or profile, and its session with it, which
+                // Gone with its profile, and its session with it, which
                 // rolls back whatever transaction it held open.
                 let Some(dialog) = workspace.running_import(&profile, started) else {
                     return;
@@ -605,8 +609,8 @@ impl Workspace {
         }
     }
 
-    /// Escape's step: closes the dialog over the tab in front, except while it
-    /// runs, when only Cancel stops it.
+    /// Escape's step: closes the dialog, except while it runs, when only
+    /// Cancel stops it.
     pub(crate) fn close_import(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(profile) = self.profile_mut() else {
             return false;
@@ -615,9 +619,6 @@ impl Workspace {
         let Some(dialog) = &session.import_rows else {
             return false;
         };
-        if Tab::Object(dialog.tab) != session.active {
-            return false;
-        }
         if matches!(dialog.phase, ImportPhase::Editing) {
             session.import_rows = None;
             self.refocus_front();
@@ -626,22 +627,13 @@ impl Workspace {
         true
     }
 
-    /// Drop `profile`'s dialog, over `tab` or over any, stopping what it is
-    /// running. Dropping its session rolls back an open transaction.
-    pub(crate) fn abandon_import(
-        &mut self,
-        profile: &str,
-        tab: Option<u64>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Drop `profile`'s dialog, stopping what it is running. Dropping its
+    /// session rolls back an open transaction.
+    pub(crate) fn abandon_import(&mut self, profile: &str, cx: &mut Context<Self>) {
         let Some(found) = self.profiles.iter_mut().find(|found| found.id == profile) else {
             return;
         };
-        if let Some(mut dialog) = found
-            .session
-            .import_rows
-            .take_if(|dialog| tab.is_none_or(|tab| dialog.tab == tab))
-        {
+        if let Some(mut dialog) = found.session.import_rows.take() {
             stop_import(&mut dialog, cx);
             cx.notify();
         }
@@ -664,7 +656,7 @@ impl Workspace {
             return;
         };
         let summary = outcome.summary(plan);
-        let tab = dialog.tab;
+        let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
         let (changed, closes) = match outcome {
             Outcome::Imported { .. } => (true, true),
             Outcome::Cancelled { committed } => (committed > 0, true),
@@ -676,18 +668,26 @@ impl Workspace {
             dialog.phase = ImportPhase::Editing;
             dialog.error = Some(summary.clone());
         }
-        if changed && !in_front {
-            // Read again when it is next looked at, as after a reconnect.
-            if let Some(ObjectBody::Relation { stale, .. }) = session
-                .objects
-                .iter_mut()
-                .find(|object| object.id == tab)
-                .map(|object| &mut object.body)
-            {
-                *stale = true;
+        let mut shown = None;
+        if changed {
+            let active = session.active;
+            for object in &mut session.objects {
+                let ObjectBody::Relation { stale, .. } = &mut object.body else {
+                    continue;
+                };
+                if object.schema != schema || object.name != table {
+                    continue;
+                }
+                if in_front && active == Tab::Object(object.id) {
+                    shown = Some(object.id);
+                } else {
+                    // Read again when it is next looked at, as after a
+                    // reconnect.
+                    *stale = true;
+                }
             }
         }
-        if changed && in_front {
+        if let Some(tab) = shown {
             // Before the notice, which a refresh takes down.
             self.refresh_relation(tab, cx);
         }
