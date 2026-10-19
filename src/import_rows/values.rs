@@ -220,6 +220,9 @@ fn textual(data_type: &str) -> bool {
 /// `timestamp` out as `… without time zone`, and Snowflake's are `TIMESTAMP_NTZ` and the like.
 fn zone_aware(data_type: &str) -> bool {
     let t = data_type.to_lowercase();
+    if t.contains("without time zone") {
+        return false;
+    }
     [
         "with time zone",
         "offset",
@@ -719,6 +722,7 @@ mod tests {
         );
         let unzoned = [
             "timestamp without time zone",
+            "timestamp(3) without time zone",
             "datetime2(7)",
             "datetime",
             "TIMESTAMP_NTZ",
