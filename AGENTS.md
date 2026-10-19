@@ -232,9 +232,9 @@ Every direct dependency, because a list that omits some is a list nobody
 trusts. `Cargo.toml` carries the full reasoning; this is the shape of it.
 
 ```toml
-gpui = { package = "gpui-pre", version = "=0.3.5" }  # rolling republish of zed main
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5" }  # font-kit, x11, wayland
-gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql", "tree-sitter-javascript"] }  # each engine's highlighter
+gpui = { package = "gpui-pre", version = "=0.3.9" }  # rolling republish of zed main
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }  # font-kit, x11, wayland
+gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript"] }  # each engine's highlighter
 
 tree-sitter = "=0.26.13"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below
