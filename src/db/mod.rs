@@ -660,6 +660,21 @@ impl Engine {
         }
     }
 
+    /// Whether a date literal may carry a UTC offset. MariaDB refuses one even
+    /// into a `timestamp`, which it reads in the session's zone.
+    pub fn reads_literal_offsets(self) -> bool {
+        match self {
+            Self::MariaDb => false,
+            Self::Postgres
+            | Self::MySql
+            | Self::Sqlite
+            | Self::Turso
+            | Self::SqlServer
+            | Self::Snowflake
+            | Self::MongoDb => true,
+        }
+    }
+
     /// Whether a backslash in a single-quoted literal escapes the character
     /// after it. Snowflake reads it so unconditionally; MySQL and MariaDB unless
     /// `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know, so they

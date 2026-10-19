@@ -5,6 +5,7 @@
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use super::{Cell, EmptyField, Json, Options};
+use crate::db::Engine;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Order {
@@ -165,11 +166,14 @@ pub(crate) fn value(
     rule: &Rule,
     options: &Options,
     column: Option<&str>,
+    engine: Engine,
 ) -> Result<Option<Value>, String> {
     match cell {
         Cell::Missing => Ok(None),
-        Cell::Json(json) => json_value(json, rule, options, column).map(Some),
-        Cell::Text { text, quoted } => text_value(text, *quoted, rule, options, column).map(Some),
+        Cell::Json(json) => json_value(json, rule, options, column, engine).map(Some),
+        Cell::Text { text, quoted } => {
+            text_value(text, *quoted, rule, options, column, engine).map(Some)
+        }
     }
 }
 
@@ -179,6 +183,7 @@ fn text_value(
     rule: &Rule,
     options: &Options,
     column: Option<&str>,
+    engine: Engine,
 ) -> Result<Value, String> {
     let exact = *rule == Rule::Exact;
     let mut text = text;
@@ -198,7 +203,7 @@ fn text_value(
             });
         }
     }
-    typed(text, rule, options, column)
+    typed(text, rule, options, column, engine)
 }
 
 /// A text column, where a boolean is the word, not the engine's `1`.
@@ -234,10 +239,11 @@ fn json_value(
     rule: &Rule,
     options: &Options,
     column: Option<&str>,
+    engine: Engine,
 ) -> Result<Value, String> {
     Ok(match (json, rule) {
         (Json::Null, _) => Value::Null,
-        (Json::String(s), _) => return typed(s, rule, options, column),
+        (Json::String(s), _) => return typed(s, rule, options, column, engine),
         (Json::Bool(b), Rule::AsIs | Rule::Exact) if column.is_some_and(textual) => {
             Value::Text(b.to_string())
         }
@@ -245,7 +251,7 @@ fn json_value(
         // JSON spells every number with a dot, whatever separator the rule was given.
         (Json::Number(n), Rule::AsIs | Rule::Exact | Rule::Number(_)) => Value::Number(n.clone()),
         (Json::Object(_) | Json::Array(_), Rule::AsIs | Rule::Exact) => Value::Json(json.clone()),
-        (other, _) => return typed(&other.to_string(), rule, options, column),
+        (other, _) => return typed(&other.to_string(), rule, options, column, engine),
     })
 }
 
@@ -254,10 +260,11 @@ fn typed(
     rule: &Rule,
     options: &Options,
     column: Option<&str>,
+    engine: Engine,
 ) -> Result<Value, String> {
     match rule {
         Rule::AsIs | Rule::Exact => Ok(Value::Text(text.into())),
-        Rule::Date(format) => date(text, *format, column),
+        Rule::Date(format) => date(text, *format, column, engine),
         Rule::Number(decimal) => number(text, *decimal),
         Rule::Boolean => boolean(text, &options.booleans),
     }
@@ -322,10 +329,18 @@ fn boolean(text: &str, spellings: &Spellings) -> Result<Value, String> {
     }
 }
 
-fn date(text: &str, format: DateFormat, column: Option<&str>) -> Result<Value, String> {
+fn date(
+    text: &str,
+    format: DateFormat,
+    column: Option<&str>,
+    engine: Engine,
+) -> Result<Value, String> {
     let trimmed = text.trim();
     let not = || format!("{} is not {}", shown(text), format.noun());
-    let zone_aware = column.map(zone_aware);
+    // ponytail: MariaDB reads a `timestamp` literal in the session's zone and
+    // refuses an offset, so it gets UTC's wall clock, exact on a UTC server
+    // only. Reading `@@time_zone` on the import's session is the upgrade.
+    let zone_aware = column.map(|column| zone_aware(column) && engine.reads_literal_offsets());
     // A Unix time is an instant: a column that keeps one is told it is UTC,
     // and one that keeps a wall clock gets UTC's.
     let unix = |at: OffsetDateTime, fraction| match zone_aware {
@@ -495,7 +510,7 @@ mod tests {
         Options::detected(Path::new("f.csv"), b"")
     }
     fn v(cell: Cell, rule: Rule, o: &Options) -> Result<Option<Value>, String> {
-        value(&cell, &rule, o, None)
+        value(&cell, &rule, o, None, Engine::Postgres)
     }
 
     #[test]
@@ -575,7 +590,11 @@ mod tests {
             .map(|row| {
                 row.cells
                     .iter()
-                    .map(|cell| value(cell, &Rule::AsIs, &o, Some("text")).unwrap().unwrap())
+                    .map(|cell| {
+                        value(cell, &Rule::AsIs, &o, Some("text"), Engine::Postgres)
+                            .unwrap()
+                            .unwrap()
+                    })
                     .collect()
             })
             .collect();
@@ -660,7 +679,14 @@ mod tests {
     #[test]
     fn a_date_keeps_its_instant_in_the_column_it_is_spelled_for() {
         let at = |input: &str, format, column| {
-            value(&text(input, false), &Rule::Date(format), &opts(), column).map(|v| match v {
+            value(
+                &text(input, false),
+                &Rule::Date(format),
+                &opts(),
+                column,
+                Engine::Postgres,
+            )
+            .map(|v| match v {
                 Some(Value::Date { text, .. }) => text,
                 other => panic!("{other:?}"),
             })
@@ -729,25 +755,51 @@ mod tests {
     }
 
     #[test]
+    fn mariadb_takes_a_timestamp_as_utc_wall_clock_since_it_refuses_an_offset() {
+        let at = |input: &str, format| {
+            value(
+                &text(input, false),
+                &Rule::Date(format),
+                &opts(),
+                Some("timestamp"),
+                Engine::MariaDb,
+            )
+            .map(|v| match v {
+                Some(Value::Date { text, .. }) => text,
+                other => panic!("{other:?}"),
+            })
+        };
+        assert_eq!(
+            at("1709211909", DateFormat::UnixSeconds),
+            Ok("2024-02-29 13:05:09".into())
+        );
+        assert_eq!(
+            at("2024-02-29T13:05:09Z", DateFormat::Iso),
+            Ok("2024-02-29 13:05:09".into())
+        );
+        assert!(at("2024-02-29T13:05:09+02:00", DateFormat::Iso).is_err());
+    }
+
+    #[test]
     fn a_json_boolean_lands_in_a_text_column_as_its_word() {
         let o = opts();
         let yes = Cell::Json(Json::Bool(true));
         for column in ["text", "varchar(20)", "nvarchar(max)", "TEXT", "json"] {
             for rule in [Rule::AsIs, Rule::Exact] {
                 assert_eq!(
-                    value(&yes, &rule, &o, Some(column)),
+                    value(&yes, &rule, &o, Some(column), Engine::Postgres),
                     Ok(Some(Value::Text("true".into())))
                 );
             }
         }
         for column in [Some("boolean"), Some("tinyint(1)"), Some("bit"), None] {
             assert_eq!(
-                value(&yes, &Rule::AsIs, &o, column),
+                value(&yes, &Rule::AsIs, &o, column, Engine::Postgres),
                 Ok(Some(Value::Bool(true)))
             );
         }
         assert_eq!(
-            value(&yes, &Rule::Boolean, &o, Some("text")),
+            value(&yes, &Rule::Boolean, &o, Some("text"), Engine::Postgres),
             Ok(Some(Value::Bool(true)))
         );
     }

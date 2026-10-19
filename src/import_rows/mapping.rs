@@ -274,7 +274,7 @@ pub(crate) fn check(
             let name = &columns[k].0;
             let cell = file_row.cells.get(source).unwrap_or(&Cell::Missing);
             let column = (!engine.takes_new_fields()).then_some(columns[k].1.as_str());
-            let value = match super::value(cell, rules[k], options, column) {
+            let value = match super::value(cell, rules[k], options, column, engine) {
                 Err(message) => {
                     problems.push(problem(source, message));
                     None
