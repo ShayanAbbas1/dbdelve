@@ -182,6 +182,62 @@ disagree (transaction bracketing, filter operators, timeouts, cancellation),
 so a fourth engine's differences land in those same places rather than
 scattered through the UI layer.
 
+## Commit messages and PR titles
+
+PRs are squash-merged, so the PR title becomes the commit on `main`. Write it,
+and any commit you push, as `type(scope): summary`:
+
+```text
+feat(grid): hide or pin columns in the result grid
+fix(editor): put the appended statement's terminator before a trailing comment
+perf(grid): hold result rows packed, one buffer per row
+feat(turso): add Turso support
+chore(release): bump version to 0.3.8
+```
+
+**Type** — what kind of change it is:
+
+| Type       | Use for                                                       |
+| ---------- | ------------------------------------------------------------- |
+| `feat`     | Something a user can now do or see that they couldn't before  |
+| `fix`      | Behaviour that was wrong and now isn't                        |
+| `perf`     | Same behaviour, measurably faster or lighter (say by how much) |
+| `refactor` | Code moves or reshapes with no change in behaviour            |
+| `test`     | Tests only                                                    |
+| `docs`     | README, CONTRIBUTING, AGENTS.md, doc comments                 |
+| `ci`       | `.github/workflows/`                                          |
+| `chore`    | Everything else: dependency pins, version bumps, dev scripts  |
+
+**Scope** — the part of the app it touches. Use one of these:
+
+| Scope         | Covers                                                                  |
+| ------------- | ----------------------------------------------------------------------- |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `snowflake`, `turso` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
+| `ssh`         | SSH tunnels                                                             |
+| `connections` | Connection form, profiles, TLS                                          |
+| `explorer`    | The schema/object tree                                                  |
+| `editor`      | Query editor, SQL handling, completion                                  |
+| `grid`        | Result grid, row panel, structure grid, filters, sorting                |
+| `editing`     | Row edits and the write gate                                            |
+| `explain`     | The plan pane                                                           |
+| `tabs`        | Tabs, sessions, restore at startup                                      |
+| `palette`     | Command palette, actions, keybindings                                   |
+| `theme`       | Themes and theme import                                                 |
+| `import`      | Importing connections from other tools                                  |
+| `export`      | Exporting results                                                       |
+| `update`      | The in-app updater                                                      |
+| `release`     | Packaging and release scripts                                           |
+| `dev`         | `compose.yaml`, seeds and scripts under `dev/`                          |
+
+Change crosses two scopes? Name the one the user would notice. Truly
+app-wide? Leave the scope off: `refactor: split ui.rs`. If a new area doesn't
+fit any of these, add a row here in the same PR.
+
+The summary is lowercase, imperative, no trailing full stop, and says what
+changes for the user rather than which function moved — "keep the keyboard on
+the grid after going to a column", not "update focus handler".
+
 ## PR guidelines
 
 Keep PRs focused — one change, not a drive-by cleanup bundled in. Describe

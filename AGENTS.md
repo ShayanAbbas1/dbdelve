@@ -1494,3 +1494,5 @@ means building the shared throttled clock and moving both onto it.
 - Non-trivial logic leaves one runnable check behind: the smallest test that
   fails if the logic breaks. No fixture scaffolding.
 - Match surrounding code's naming, density and idiom.
+- Commit messages and PR titles are `type(scope): summary`; the types and
+  scopes are listed in `CONTRIBUTING.md`.
