@@ -424,7 +424,7 @@ impl Workspace {
         let order = sort_columns(engine, keys, &columns);
         results.update(cx, |table, cx| {
             table.delegate_mut().sort_in_memory(order);
-            // The inspector reads the library's selected row, and that index
+            // The inspector reads the selected row, and that index
             // now names whichever row the sort moved there.
             table.clear_selection(cx);
             cx.notify();

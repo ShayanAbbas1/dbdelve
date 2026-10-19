@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use gpui::{SharedString, relative};
 use gpui_component::{
-    Sizable,
+    FocusableExt, Sizable,
     checkbox::Checkbox,
     input::{self, Editor},
     table::{Column, DataTable, TableDelegate, TableState},
@@ -165,6 +165,7 @@ impl TableDelegate for PreviewGrid {
             )
             .width(px(VALUE_COLUMN_WIDTH))
             .min_width(px(60.))
+            .max_width(px(f32::MAX))
             .resizable(true),
         }
         .movable(false)
@@ -1262,6 +1263,7 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
             .text_size(px(layout::grid(layout::BODY_FONT_SIZE)))
             .child(
                 DataTable::new(&dialog.preview)
+                    .focus_ring(false)
                     .bordered(false)
                     .stripe(false)
                     .with_size(gpui_component::Size::Size(px(layout::grid(

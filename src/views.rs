@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, IconName, RopeExt, Sizable,
+    ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{self, Editor, EditorState, Input, InputState, Rope, Textarea, TextareaState},
@@ -1470,6 +1470,9 @@ fn render_results(
                 // The library's medium row, held in proportion to the grid's text.
                 .child(
                     DataTable::new(results)
+                        // The active cell's ring is where the keyboard is; a
+                        // second ring around the whole grid says nothing more.
+                        .focus_ring(false)
                         .bordered(false)
                         .stripe(false)
                         .with_size(gpui_component::Size::Size(px(layout::grid(
@@ -1721,8 +1724,8 @@ fn render_row_inspector(
 
     let (row_ix, rows, fields, active, row_editable, chips) = {
         let table = results.read(cx);
-        let row_ix = table.selected_row()?;
         let delegate = table.delegate();
+        let row_ix = delegate.selected_row()?;
         // What each editable field offers to stage besides typed text, gated
         // as the cell menu is; `None` for a field Edit mode leaves as text.
         let chips: Vec<Option<Vec<(&'static str, NewValue)>>> = (0..delegate.columns().len())
@@ -2404,6 +2407,7 @@ fn render_structure(
                 })
                 .child(
                     DataTable::new(grid)
+                        .focus_ring(false)
                         .bordered(false)
                         .stripe(false)
                         .with_size(gpui_component::Size::Size(px(layout::grid(

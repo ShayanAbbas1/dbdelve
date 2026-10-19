@@ -258,6 +258,7 @@ impl TableDelegate for StructureGrid {
         Column::new(name, name)
             .width(px(width))
             .min_width(px(80.))
+            .max_width(px(f32::MAX))
             .resizable(true)
             .movable(false)
             .p_0()

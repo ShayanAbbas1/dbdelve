@@ -83,6 +83,7 @@ pub struct GridSelection {
     active: Option<(usize, usize)>,
     rows: std::collections::BTreeSet<usize>,
     anchor: Option<usize>,
+    row: Option<usize>,
 }
 
 /// The columns a grid hides and pins, by name, carried from one result to
@@ -205,6 +206,11 @@ pub struct ResultGrid {
     /// it echoes back as `TableEvent::SelectRow`, which must not collapse the
     /// range or toggle the click just made the way a keyboard move does.
     pointer_row: Option<usize>,
+    /// The row the library last selected, until it clears its selection: what
+    /// the row panel shows. Kept here because the library reports its own only
+    /// while it is selecting rows, and `left`, `right`, `tab` and a header
+    /// click switch it to selecting a column, which keeps the row.
+    selected_row: Option<usize>,
     /// Where the pointer last went down on a reference arrow, for the popup it
     /// opens to hang from.
     reference_anchor: Option<Point<Pixels>>,
@@ -322,6 +328,9 @@ impl ResultGrid {
                 Column::new(index.to_string(), column.name.clone())
                     .width(px(MIN_COLUMN_WIDTH))
                     .min_width(px(MIN_COLUMN_WIDTH))
+                    // The library stops a drag at 1200px by default, and a
+                    // long value is worth dragging wider than that.
+                    .max_width(px(f32::MAX))
                     .resizable(true)
                     .movable(false)
                     // The cell padding is dbdelve's, applied in `render_td` and
@@ -359,6 +368,7 @@ impl ResultGrid {
             selected_rows: std::collections::BTreeSet::new(),
             row_selection_anchor: None,
             pointer_row: None,
+            selected_row: None,
             reference_anchor: None,
             mode,
             engine: db::Engine::default(),
@@ -938,6 +948,7 @@ impl ResultGrid {
             active: self.active,
             rows: self.selected_rows.clone(),
             anchor: self.row_selection_anchor,
+            row: self.selected_row,
         }
     }
 
@@ -949,13 +960,15 @@ impl ResultGrid {
         let fits = selection.active.is_none_or(|(row, col)| {
             row < rows && col < columns && self.position_of(col).is_some()
         }) && selection.rows.iter().all(|row| *row < rows)
-            && selection.anchor.is_none_or(|row| row < rows);
+            && selection.anchor.is_none_or(|row| row < rows)
+            && selection.row.is_none_or(|row| row < rows);
         if !fits || (selection.active.is_none() && selection.rows.is_empty()) {
             return false;
         }
         self.active = selection.active;
         self.selected_rows = selection.rows;
         self.row_selection_anchor = selection.anchor;
+        self.selected_row = selection.row;
         true
     }
 
@@ -1264,6 +1277,11 @@ impl ResultGrid {
         (right + offset_x > Pixels::ZERO && left + offset_x < was).then_some(col)
     }
 
+    /// The row the row panel shows.
+    pub fn selected_row(&self) -> Option<usize> {
+        self.selected_row
+    }
+
     /// The cell `Enter` acts on, if the user has reached one. `None` on a
     /// result set nobody has touched yet, and on every new one.
     pub fn active(&self) -> Option<(usize, usize)> {
@@ -1343,6 +1361,7 @@ impl ResultGrid {
     /// while the ring itself moved on. Not for the echo of a pointer
     /// selection, which has already chosen the rows.
     pub fn select_row(&mut self, row: usize) {
+        self.selected_row = Some(row);
         if self.pointer_row.take() != Some(row) {
             self.click_row(row, false, false);
         }
@@ -2921,6 +2940,12 @@ pub(crate) fn new_grid(
                     return;
                 };
                 table.delegate_mut().select_col(col);
+                cx.notify();
+            });
+        }
+        TableEvent::ClearSelection => {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().selected_row = None;
                 cx.notify();
             });
         }
@@ -4914,6 +4939,17 @@ mod tests {
         grid.select_row(2);
         assert_eq!(grid.selected_row_indices(), vec![2]);
         assert_eq!(grid.row_selection_anchor, Some(2));
+    }
+
+    #[test]
+    fn a_column_step_keeps_the_row_panels_row() {
+        // The library stops reporting its selected row once `right` switches
+        // it to selecting a column, and the row panel closed on every other
+        // arrow press while it read that.
+        let mut grid = four_row_grid();
+        grid.select_row(2);
+        grid.select_col(1);
+        assert_eq!(grid.selected_row(), Some(2));
     }
 
     #[test]
