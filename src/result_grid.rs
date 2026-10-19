@@ -2615,10 +2615,6 @@ impl ResultGrid {
                     grid.focus = Some(handle);
                     grid.pointer_row = Some(row_ix);
                     table.set_selected_row(row_ix, cx);
-                    // set_selected_row consumes the event; the row beneath
-                    // still needs its own right click to record where the
-                    // context menu opens.
-                    cx.propagate();
                 }),
             )
             // A plain cell click must establish the anchor before Shift is
@@ -2868,9 +2864,6 @@ fn click_row(
     } else {
         table.clear_selection(cx);
     }
-    // set_selected_row consumes the event; the cell still needs mouse-down
-    // for its click and double-click handlers.
-    cx.propagate();
 }
 
 pub(crate) fn new_grid(

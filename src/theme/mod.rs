@@ -690,129 +690,114 @@ impl Theme {
     /// and `Workspace::new` sets it again from disk before the first frame.
     pub fn apply_to_components(self, cx: &mut gpui::App) {
         let fonts = fonts(cx).clone();
-        let component = gpui_component::Theme::global_mut(cx);
-        component.shadow = false;
-        component.radius = gpui::px(layout::RADIUS_CONTROL);
-        component.radius_lg = gpui::px(layout::RADIUS_LARGE);
-        // `Root` feeds this to `window.set_rem_size`, so it is the unit for
-        // every `rems()` dimension inside gpui-component -- not just a text
-        // size. dbdelve's own tree never reads it: every `text_size` here is an
-        // absolute `layout::TEXT_*`. The library's 16 at the default chrome
-        // size, so the widgets it draws for us keep the proportions they were
-        // designed at -- the completion popup in particular hardcodes
-        // `text_xs()`, which at 13 resolved to a 9.75px row -- and scaled with
-        // the chrome size, so its fields and menus grow with the labels beside
-        // them.
-        component.font_size = gpui::px(layout::chrome(16.0));
-        component.mono_font_size = gpui::px(layout::TEXT_MD);
-        component.font_family = fonts.chrome;
-        // Kept on the editor's family so that whatever inside gpui-component
-        // reads the mono slot renders in the face dbdelve is already using for
-        // code, rather than in a third one nobody picked.
-        component.mono_font_family = fonts.editor;
+        gpui_component::Theme::update(cx, |component| {
+            component.shadow = false;
+            component.radius = gpui::px(layout::RADIUS_CONTROL);
+            component.radius_lg = gpui::px(layout::RADIUS_LARGE);
+            // `Root` feeds this to `window.set_rem_size`, so it is the unit for
+            // every `rems()` dimension inside gpui-component -- not just a text
+            // size. dbdelve's own tree never reads it: every `text_size` here is an
+            // absolute `layout::TEXT_*`. The library's 16 at the default chrome
+            // size, so the widgets it draws for us keep the proportions they were
+            // designed at -- the completion popup in particular hardcodes
+            // `text_xs()`, which at 13 resolved to a 9.75px row -- and scaled with
+            // the chrome size, so its fields and menus grow with the labels beside
+            // them.
+            component.font_size = gpui::px(layout::chrome(16.0));
+            component.mono_font_size = gpui::px(layout::TEXT_MD);
+            component.font_family = fonts.chrome;
+            // Kept on the editor's family so that whatever inside gpui-component
+            // reads the mono slot renders in the face dbdelve is already using for
+            // code, rather than in a third one nobody picked.
+            component.mono_font_family = fonts.editor;
 
-        // The one plane painted below dbdelve's own tree, by `Root`. It is the
-        // frost, so removing a `bg` from a chrome element uncovers glass rather
-        // than a hole.
-        component.colors.background = self.frost().into();
-        component.colors.foreground = self.text.into();
-        component.colors.input = self.border.into();
-        component.colors.border = self.border.into();
-        component.colors.caret = self.cursor.into();
-        component.colors.selection = self.selection.into();
-        component.colors.ring = self.accent.into();
-        // Only the completion popup reads this, for the matched prefix of a
-        // suggestion. Left at the library default it is a blue belonging to no
-        // palette dbdelve ships.
-        component.colors.blue = self.accent.into();
-        component.colors.muted = self.surface.into();
-        component.colors.muted_foreground = self.text_muted.into();
-        component.colors.popover = self.overlay.into();
-        component.colors.popover_foreground = self.text.into();
-        // Both button variants are the same neutral: a dbdelve button is a grey
-        // that steps visibly brighter under the pointer, never a colour.
-        // Colour is reserved for state (selection, danger), not for controls.
-        let control_hover = self.element_active.flatten(self.control);
-        let control_active = self.element_active.flatten(control_hover);
-        component.colors.primary = self.control.into();
-        component.colors.primary_foreground = self.text.into();
-        component.colors.primary_hover = control_hover.into();
-        component.colors.primary_active = control_active.into();
-        // What a `Button::primary()` actually paints from in 0.6.4. Left unset
-        // it stays on the library's own near-black, which is a black slab in
-        // the light theme.
-        component.colors.button_primary = self.control.into();
-        component.colors.button_primary_foreground = self.text.into();
-        component.colors.button_primary_hover = control_hover.into();
-        component.colors.button_primary_active = control_active.into();
-        component.colors.secondary = self.control.into();
-        component.colors.secondary_foreground = self.text.into();
-        component.colors.secondary_hover = control_hover.into();
-        component.colors.secondary_active = control_active.into();
-        // One highlight for everything that lights up under the pointer, so a
-        // ghost button, a menu item and dbdelve's own chips agree: the library
-        // washes all of them with `accent` (a ghost button at half strength on
-        // dark themes), and dbdelve's own hovers are `element_hover`, so this
-        // is the gray wash and never the blue of a selection. The completion
-        // popup's selected row and a right-click menu's highlighted item take
-        // it too; `selection` stays what a selected row in the tree and the
-        // grid wears.
-        component.colors.accent = self.element_active.into();
-        component.colors.accent_foreground = self.text.into();
-        component.colors.danger = self.danger.into();
-        component.colors.danger_foreground = self.on_accent.into();
-        component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
-        component.colors.danger_active = self.element_active.flatten(self.danger).into();
-        // Same split as `button_primary`: left unset, a `Button::danger()` is
-        // the library's pale tint with `on_accent` ink, unreadable on either
-        // polarity.
-        component.colors.button_danger = component.colors.danger;
-        component.colors.button_danger_foreground = component.colors.danger_foreground;
-        component.colors.button_danger_hover = component.colors.danger_hover;
-        component.colors.button_danger_active = component.colors.danger_active;
-        component.colors.success = self.success.into();
-        component.colors.success_foreground = self.on_accent.into();
-        component.colors.success_hover = self.element_hover.flatten(self.success).into();
-        component.colors.success_active = self.element_active.flatten(self.success).into();
-        component.colors.list = self.surface.into();
-        component.colors.list_even = self.surface.into();
-        component.colors.list_head = self.surface.into();
-        component.colors.list_hover = self.element_hover.into();
-        component.colors.list_active = self.selection.into();
-        component.colors.list_active_border = self.accent.into();
-        component.colors.scrollbar = self.panel.into();
-        component.colors.scrollbar_thumb = self.border_strong.into();
-        component.colors.scrollbar_thumb_hover = self.element_active.into();
-        // The results pane already paints `data_glass` behind the grid, and a
-        // second tint over it would only stack toward opaque.
-        component.colors.table = TRANSPARENT.into();
-        component.colors.table_active = self.selection.into();
-        component.colors.table_active_border = self.accent.into();
-        component.colors.table_even = self.element_hover.into();
-        component.colors.table_head = self.panel_glass().into();
-        component.colors.table_head_foreground = self.text_muted.into();
-        component.colors.table_hover = self.element_hover.into();
-        // The hairline carries the rows. Stripes are off on glass: a 5% wash
-        // over every other row is exactly the transmission the plane is there
-        // to give up, and two rows of haze read as one flat slab.
-        component.colors.table_row_border = self.border.into();
-        component.highlight_theme = self.highlight_theme();
-
-        // 0.6.4 split every colour in two: `colors`, which is what a theme is
-        // written in, and `tokens`, a `Background`-valued copy of it that the
-        // library now actually paints from — `Root`'s base plane included. Only
-        // `Theme::change` rebuilds the copy, so mutating through `global_mut`
-        // leaves all 161 token reads on the library's light defaults, and the
-        // window comes back opaque white whatever `colors.background` says.
-        component.tokens = (&component.colors).into();
-
-        // 0.6.4 keeps a second theme global, the Base projection, and that is
-        // the one the input, the editor, the scrollbars and the text views read
-        // from. Mutating through `global_mut` alone leaves it on the library's
-        // light defaults: the editor pane comes back as an opaque fill, because
-        // `editor_background` falls through to `input_background`, which is
-        // `background` for any theme the Base does not believe is dark.
-        gpui_component::Theme::sync_base(cx);
+            // The one plane painted below dbdelve's own tree, by `Root`. It is the
+            // frost, so removing a `bg` from a chrome element uncovers glass rather
+            // than a hole.
+            component.colors.background = self.frost().into();
+            component.colors.foreground = self.text.into();
+            component.colors.input = self.border.into();
+            component.colors.border = self.border.into();
+            component.colors.caret = self.cursor.into();
+            component.colors.selection = self.selection.into();
+            component.colors.ring = self.accent.into();
+            // Only the completion popup reads this, for the matched prefix of a
+            // suggestion. Left at the library default it is a blue belonging to no
+            // palette dbdelve ships.
+            component.colors.blue = self.accent.into();
+            component.colors.muted = self.surface.into();
+            component.colors.muted_foreground = self.text_muted.into();
+            component.colors.popover = self.overlay.into();
+            component.colors.popover_foreground = self.text.into();
+            // Both button variants are the same neutral: a dbdelve button is a grey
+            // that steps visibly brighter under the pointer, never a colour.
+            // Colour is reserved for state (selection, danger), not for controls.
+            let control_hover = self.element_active.flatten(self.control);
+            let control_active = self.element_active.flatten(control_hover);
+            component.colors.primary = self.control.into();
+            component.colors.primary_foreground = self.text.into();
+            component.colors.primary_hover = control_hover.into();
+            component.colors.primary_active = control_active.into();
+            // What a `Button::primary()` actually paints from in 0.6.4. Left unset
+            // it stays on the library's own near-black, which is a black slab in
+            // the light theme.
+            component.colors.button_primary = self.control.into();
+            component.colors.button_primary_foreground = self.text.into();
+            component.colors.button_primary_hover = control_hover.into();
+            component.colors.button_primary_active = control_active.into();
+            component.colors.secondary = self.control.into();
+            component.colors.secondary_foreground = self.text.into();
+            component.colors.secondary_hover = control_hover.into();
+            component.colors.secondary_active = control_active.into();
+            // One highlight for everything that lights up under the pointer, so a
+            // ghost button, a menu item and dbdelve's own chips agree: the library
+            // washes all of them with `accent` (a ghost button at half strength on
+            // dark themes), and dbdelve's own hovers are `element_hover`, so this
+            // is the gray wash and never the blue of a selection. The completion
+            // popup's selected row and a right-click menu's highlighted item take
+            // it too; `selection` stays what a selected row in the tree and the
+            // grid wears.
+            component.colors.accent = self.element_active.into();
+            component.colors.accent_foreground = self.text.into();
+            component.colors.danger = self.danger.into();
+            component.colors.danger_foreground = self.on_accent.into();
+            component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
+            component.colors.danger_active = self.element_active.flatten(self.danger).into();
+            // Same split as `button_primary`: left unset, a `Button::danger()` is
+            // the library's pale tint with `on_accent` ink, unreadable on either
+            // polarity.
+            component.colors.button_danger = component.colors.danger;
+            component.colors.button_danger_foreground = component.colors.danger_foreground;
+            component.colors.button_danger_hover = component.colors.danger_hover;
+            component.colors.button_danger_active = component.colors.danger_active;
+            component.colors.success = self.success.into();
+            component.colors.success_foreground = self.on_accent.into();
+            component.colors.success_hover = self.element_hover.flatten(self.success).into();
+            component.colors.success_active = self.element_active.flatten(self.success).into();
+            component.colors.list = self.surface.into();
+            component.colors.list_even = self.surface.into();
+            component.colors.list_head = self.surface.into();
+            component.colors.list_hover = self.element_hover.into();
+            component.colors.list_active = self.selection.into();
+            component.colors.list_active_border = self.accent.into();
+            component.colors.scrollbar = self.panel.into();
+            component.colors.scrollbar_thumb = self.border_strong.into();
+            component.colors.scrollbar_thumb_hover = self.element_active.into();
+            // The results pane already paints `data_glass` behind the grid, and a
+            // second tint over it would only stack toward opaque.
+            component.colors.table = TRANSPARENT.into();
+            component.colors.table_active = self.selection.into();
+            component.colors.table_active_border = self.accent.into();
+            component.colors.table_even = self.element_hover.into();
+            component.colors.table_head = self.panel_glass().into();
+            component.colors.table_head_foreground = self.text_muted.into();
+            component.colors.table_hover = self.element_hover.into();
+            // The hairline carries the rows. Stripes are off on glass: a 5% wash
+            // over every other row is exactly the transmission the plane is there
+            // to give up, and two rows of haze read as one flat slab.
+            component.colors.table_row_border = self.border.into();
+            component.highlight_theme = self.highlight_theme();
+        });
     }
 
     /// Built through serde because `ThemeStyle`'s fields are private and it has
