@@ -738,7 +738,7 @@ impl Theme {
             component.colors.primary_foreground = self.text.into();
             component.colors.primary_hover = control_hover.into();
             component.colors.primary_active = control_active.into();
-            // What a `Button::primary()` actually paints from in 0.6.4. Left unset
+            // What a `Button::primary()` actually paints from in 0.8. Left unset
             // it stays on the library's own near-black, which is a black slab in
             // the light theme.
             component.colors.button_primary = self.control.into();
@@ -870,10 +870,11 @@ impl Theme {
                 editor_active_line: Some(self.element_hover.into()),
                 editor_line_number: Some(self.text_faint.into()),
                 editor_active_line_number: Some(self.text_muted.into()),
-                // 0.6.4 paints the gutter opaquely from `editor_background`
-                // when this is unset, which is the fill the note above exists
-                // to refuse. Named transparent so the refusal survives a bump
-                // that changes what the fallback is.
+                // 0.8 paints the gutter from `editor_background` when this is
+                // unset, which is transparent above, but 0.6.4 painted it
+                // opaquely, the fill the note above exists to refuse. Named
+                // transparent so the refusal survives a bump that changes
+                // what the fallback is.
                 editor_gutter_background: Some(TRANSPARENT.into()),
                 // Whitespace marks are scaffolding, not text: the same faint
                 // tone the line numbers get, one step behind `text_muted`,

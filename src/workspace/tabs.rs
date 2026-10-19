@@ -652,8 +652,8 @@ impl Workspace {
         else {
             return;
         };
-        // Through the mode trait: 0.6.4 made the inherent method `pub(crate)`,
-        // and this is the only public way left to offer the menu an action.
+        // Through the mode trait: gpui-base 0.8 keeps the inherent method
+        // `pub(crate)`, and this is the only public way to offer the menu an action.
         let accepted = editor.update(cx, |editor, cx| {
             EditorMode::handle_context_menu_action(
                 editor,

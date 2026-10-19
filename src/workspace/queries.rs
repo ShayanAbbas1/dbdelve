@@ -2462,7 +2462,7 @@ impl Workspace {
                 return;
             };
             // ponytail: only the active cursor's lines are toggled, and any
-            // other cursors are dropped -- gpui-base 0.6.4 exposes no way to
+            // other cursors are dropped -- gpui-base 0.8 exposes no way to
             // read them all. Undo reselects the whole lines, not the caret, for
             // the same lack of API.
             //

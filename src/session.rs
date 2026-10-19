@@ -852,7 +852,7 @@ impl Session {
 pub(crate) enum Focus {
     Buffer(Entity<EditorState>),
     /// A single-line field — the save-name prompt. Not an [`EditorState`]:
-    /// 0.6.4 splits the code editor off from the plain input.
+    /// gpui-component 0.8 splits the code editor off from the plain input.
     Field(Entity<InputState>),
     Grid(Entity<TableState<ResultGrid>>),
     /// The window itself, for a surface with nothing in it to type into. Not a
