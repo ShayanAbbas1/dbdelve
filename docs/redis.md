@@ -124,6 +124,13 @@ On an opened key:
 | set | member: `SADD` the new, then `SREM` the old | `SADD` | `SREM` |
 | sorted set | score: `ZADD XX CH`; member: `ZADD NX` the new, then `ZREM` the old | `ZADD NX` | `ZREM` |
 
+A list item is named by its index, which names whatever sits there now, so a
+list write first checks the item: `WATCH key`, then `LPOS key value COUNT 0
+MAXLEN n`, which lists where the value read sits among the first `n = index +
+1` items and must end at the index, then the `LSET` (and `LREM`) in a
+`MULTI`. A list changed since it was read, before or during the write, is an
+error, and nothing is written.
+
 Renaming a member onto one the set already holds is an error, and the old
 member stays. So is a new score for a member that is gone. Deleting what is
 already gone is not: the end state is the one asked for.
@@ -154,9 +161,6 @@ failure says which one failed and how many ran before it.
   with streams.
 - **Binary keys and values are not editable.** A name or value that is not
   UTF-8 is shown in redis-cli's quoted spelling and has no edit.
-- **`LSET` acts on the index as it is now.** A list changed by someone else
-  between the read and the edit has the new value written to whatever sits at
-  that position.
 - A hash field and a list index are where a value is, so they are not editable.
 - Numeric-looking values sort as text in the keys grid.
 - Key names are not completed, only command names.

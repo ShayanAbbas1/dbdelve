@@ -324,6 +324,7 @@ impl Connection {
             run
         };
         let mut multi = false;
+        let mut watching = false;
         let mut step = || {
             let mut result = QueryResult::default();
             for (at, command) in commands.iter().enumerate() {
@@ -338,6 +339,11 @@ impl Connection {
                     if let Some(live) = session.as_mut() {
                         live.multi = open;
                     }
+                }
+                match command.name().as_str() {
+                    "WATCH" if outcome.is_ok() => watching = true,
+                    "UNWATCH" | "EXEC" | "DISCARD" => watching = false,
+                    _ => {}
                 }
                 result = outcome.map_err(|error| match at {
                     0 => error,
@@ -377,6 +383,16 @@ impl Connection {
                 }
             };
             error.message = format!("{} {note}", error.message);
+        } else if outcome.is_err() && watching && generated && session.is_some() {
+            // DBDelve's own `WATCH`, which would void the user's next `EXEC`.
+            if self
+                .send(&mut session, |client| {
+                    client.req_command(&::redis::cmd("UNWATCH"))
+                })
+                .is_err()
+            {
+                *session = None;
+            }
         }
         *lock(&self.running) = Running {
             run,
@@ -1002,7 +1018,8 @@ fn edit_target(command: &Command, result: &QueryResult, database: &str) -> Optio
                 &[0],
             ),
             ("HSCAN", ["field", "value"]) => (edit::HASH, key()?, &["field", "value"], &[0]),
-            ("LRANGE", ["index", "value"]) => (edit::LIST, key()?, &["index", "value"], &[0]),
+            // The value too, since the index alone names whatever sits there.
+            ("LRANGE", ["index", "value"]) => (edit::LIST, key()?, &["index", "value"], &[0, 1]),
             ("SSCAN", ["member"]) => (edit::SET, key()?, &["member"], &[0]),
             ("ZSCAN", ["member", "score"]) => (edit::ZSET, key()?, &["member", "score"], &[0, 1]),
             ("GET", ["value"]) => (edit::STRING, key()?, &["value"], &[0]),
@@ -1021,8 +1038,9 @@ fn edit_target(command: &Command, result: &QueryResult, database: &str) -> Optio
 
 /// A generated write's reply that says it changed nothing, as the error it
 /// is: the name a rename or a new row wanted was taken, the key an expiry or
-/// a new value was for is gone, as is the member a new score was for, or a
-/// command inside the transaction failed. A delete of what is already gone
+/// a new value was for is gone, as is the member a new score was for, the
+/// list item a write was for is no longer the one read, a watched key changed
+/// before the `EXEC`, or a command inside the transaction failed. A delete of what is already gone
 /// is not one: the key, field or member is gone, as was asked.
 fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
     let word = |at: usize| {
@@ -1064,6 +1082,24 @@ fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
         ),
         ("EXPIRE", Value::Int(0)) => {
             format!("{} no longer exists, so it has no TTL to set.", word(1))
+        }
+        ("LPOS", Value::Array(found)) if flag(5, b"MAXLEN") => {
+            let last = std::str::from_utf8(command.words.get(6).map_or(&[][..], Vec::as_slice))
+                .ok()
+                .and_then(|length| length.parse::<i64>().ok())
+                .map(|length| Value::Int(length - 1));
+            match found.last() == last.as_ref() {
+                true => return Ok(()),
+                false => format!(
+                    "{} changed since it was read, so nothing was written: re-run to refresh.",
+                    word(1)
+                ),
+            }
+        }
+        ("EXEC", Value::Nil) => {
+            "A key changed while the edit was being written, so none of it was: re-run to \
+             refresh."
+                .into()
         }
         ("EXEC", Value::Array(replies)) => match replies.iter().find_map(|reply| match reply {
             Value::ServerError(error) => Some(server_message(error)),
@@ -1781,7 +1817,7 @@ mod tests {
         let edit = edit.unwrap();
         assert_eq!(
             (edit.schema.as_str(), edit.keys.as_slice()),
-            ("list", &[0][..])
+            ("list", &[0, 1][..])
         );
         assert_eq!(
             tags,
@@ -1863,6 +1899,12 @@ mod tests {
         assert!(!refused("SADD s m", Value::SimpleString("QUEUED".into())));
         let failed = ::redis::parse_redis_value(b"-ERR index out of range\r\n").unwrap();
         assert!(refused("EXEC", Value::Array(vec![failed, Value::Int(1)])));
+        assert!(refused("EXEC", Value::Nil));
+        let lpos = "LPOS l v COUNT 0 MAXLEN 3";
+        let at = |found: &[i64]| Value::Array(found.iter().copied().map(Value::Int).collect());
+        assert!(!refused(lpos, at(&[0, 2])));
+        assert!(refused(lpos, at(&[0, 1])));
+        assert!(refused(lpos, at(&[])));
         assert!(!refused(
             "EXEC",
             Value::Array(vec![Value::Okay, Value::Int(1)])
@@ -2808,6 +2850,47 @@ mod tests {
         let binary = editing(&connection, &read("live:open:bin", "string"));
         assert!(!binary.editable(0, 0));
         clean(&connection, "live:open:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_list_item_changed_since_it_was_read_is_not_written() {
+        let connection = scratch("live:shift:");
+        let other = scratch("live:shift:");
+        let read = redis_cmd::browse::read("live:shift:l", "list", 100).unwrap();
+        let listed = || cells(&ran(&connection, "LRANGE live:shift:l 0 -1"));
+        ran(&connection, "RPUSH live:shift:l a b c");
+        let list = editing(&connection, &read);
+        let deleted = deletion(&list, 1);
+        let mut list = editing(&connection, &read);
+        assert!(list.set_pending(1, 1, staged("B")));
+        let edited = edits(&list);
+
+        ran(&other, "LPUSH live:shift:l z");
+        let before = listed();
+        for text in [&deleted, &edited] {
+            let error = applied(&connection, text).unwrap_err();
+            assert!(error.message.contains("changed"), "{}", error.message);
+        }
+        assert_eq!(listed(), before);
+
+        // The failed runs left no WATCH behind to fail the next one.
+        ran(&other, "LPUSH live:shift:l y");
+        let list = editing(&connection, &read);
+        applied(&connection, &deletion(&list, 0)).unwrap();
+        let mut list = editing(&connection, &read);
+        assert!(list.set_pending(2, 1, staged("B")));
+        applied(&connection, &edits(&list)).unwrap();
+        assert_eq!(
+            listed(),
+            [
+                some(&["0", "z"]),
+                some(&["1", "a"]),
+                some(&["2", "B"]),
+                some(&["3", "c"])
+            ]
+        );
+        clean(&connection, "live:shift:");
     }
 
     #[test]

@@ -11,7 +11,8 @@
 //! Nothing here clobbers what it did not read: a new key is `SET … NX`, a new
 //! field `HSETNX`, a new member `SADD` or `ZADD NX`, a rename `RENAMENX`, a
 //! string's new value `SET … XX … GET` (so a key deleted or retyped since is
-//! not written), and the connection turns the reply that says nothing
+//! not written), a list item's write checked against the item read
+//! ([`checked`]), and the connection turns the reply that says nothing
 //! happened into an error.
 
 use std::hash::{BuildHasher, RandomState};
@@ -109,12 +110,13 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                 held("field")?,
                 typed("value")?
             )),
-            LIST => lines.push(format!(
-                "LSET {} {} {}",
-                key_word(&row.table)?,
-                held("index")?,
-                typed("value")?
-            )),
+            LIST => {
+                let key = key_word(&row.table)?;
+                let index = held("index")?;
+                lines.extend(checked(&key, &index, &held("value")?)?);
+                lines.push(format!("LSET {key} {index} {}", typed("value")?));
+                lines.push("EXEC".into());
+            }
             SET => {
                 let key = key_word(&row.table)?;
                 lines.extend([
@@ -249,7 +251,7 @@ pub(crate) fn insert_row(
 /// The command a deleted row is: the key itself on the keys grid and on a
 /// string's, else the field, item or member it names. A list item is named
 /// by its index, which `LREM` cannot take, so it is set to a word nothing
-/// else holds and that word removed, in one `MULTI`.
+/// else holds and that word removed, in one `MULTI` that [`checked`] opens.
 pub(crate) fn delete_row(
     schema: &str,
     table: &str,
@@ -265,14 +267,15 @@ pub(crate) fn delete_row(
         HASH => format!("HDEL {} {}", key_word(table)?, held("field")?),
         LIST => {
             let key = key_word(table)?;
+            let index = held("index")?;
             let sentinel = sentinel();
-            [
-                "MULTI".to_string(),
-                format!("LSET {key} {} {sentinel}", held("index")?),
+            let mut lines = checked(&key, &index, &held("value")?)?.to_vec();
+            lines.extend([
+                format!("LSET {key} {index} {sentinel}"),
                 format!("LREM {key} 1 {sentinel}"),
                 "EXEC".to_string(),
-            ]
-            .join("\n")
+            ]);
+            lines.join("\n")
         }
         SET => format!("SREM {} {}", key_word(table)?, held("member")?),
         ZSET => format!("ZREM {} {}", key_word(table)?, held("member")?),
@@ -282,6 +285,23 @@ pub(crate) fn delete_row(
             format!("UNLINK {}", held("key")?)
         }
     })
+}
+
+/// The start of a write to the list item at `index`, which names whatever
+/// sits there now: the key watched, so a change before the `EXEC` voids it,
+/// and the server asked where the item read is among the first `index + 1`,
+/// which the connection takes for an error unless `index` is the last.
+fn checked(key: &str, index: &str, value: &str) -> Result<[String; 3], String> {
+    let length = index
+        .parse::<u64>()
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| format!("{index} is not a list index."))?;
+    Ok([
+        format!("WATCH {key}"),
+        format!("LPOS {key} {value} COUNT 0 MAXLEN {length}"),
+        "MULTI".to_string(),
+    ])
 }
 
 /// One edit, new row or deleted row, as the gate reads it back.
@@ -303,14 +323,16 @@ enum Unit {
 /// Exactly one of three shapes, each command spelled as this module spells
 /// it, one to a line, with no comment or blank line between:
 ///
-/// - one or more edits: `SET k v XX KEEPTTL GET`, `EXPIRE k n` with `n` above zero
-///   (zero would delete the key), `PERSIST k`, `RENAMENX k new`, `HSET k f v`,
-///   `LSET k i v`, `ZADD k XX CH score m`, and on one key an `SADD` then an
-///   `SREM`, or a `ZADD k NX score m` then a `ZREM`;
+/// - one or more edits: `SET k v XX KEEPTTL GET`, `EXPIRE k n` with `n`
+///   above zero (zero would delete the key), `PERSIST k`, `RENAMENX k new`,
+///   `HSET k f v`, `ZADD k XX CH score m`, on one key an `SADD` then an
+///   `SREM`, or a `ZADD k NX score m` then a `ZREM`, and an `LSET k i v`
+///   in the `MULTI` its [`checked`] opens;
 /// - one new row: `SET k v NX` (with `EX n`), `HSETNX k f v`, `RPUSH k v`,
 ///   `SADD k m` or `ZADD k NX score m`;
-/// - one deleted row: `UNLINK k`, `HDEL k f`, `SREM k m`, `ZREM k m`, or the
-///   `MULTI` of an `LSET` to a sentinel and the `LREM` of that sentinel.
+/// - one deleted row: `UNLINK k`, `HDEL k f`, `SREM k m`, `ZREM k m`, or an
+///   `LSET` to a sentinel and the `LREM` of that sentinel in the `MULTI`
+///   [`checked`] opens.
 pub(crate) fn is_generated_write(text: &str) -> bool {
     match units(text).as_deref() {
         Some([Unit::Insert | Unit::Delete(_) | Unit::Unlink]) => true,
@@ -371,13 +393,29 @@ fn unit<'a, 'b>(lines: &'b Lines<'a>) -> Option<(Unit, &'b Lines<'a>)> {
             (Unit::Edit, after)
         }
         [
+            [b"WATCH", key],
+            [b"LPOS", read, _, b"COUNT", b"0", b"MAXLEN", length],
             [b"MULTI"],
-            [b"LSET", key, index, word],
-            [b"LREM", same, b"1", removed],
+            [b"LSET", set, index, _],
             [b"EXEC"],
             after @ ..,
-        ] if key == same && word == removed && whole(index) && sentinel_word(word) => {
-            (Unit::Delete(&["index"]), after)
+        ] if [read, set].iter().all(|same| same == &key) && last(index, length) => {
+            (Unit::Edit, after)
+        }
+        [
+            [b"WATCH", key],
+            [b"LPOS", read, _, b"COUNT", b"0", b"MAXLEN", length],
+            [b"MULTI"],
+            [b"LSET", set, index, word],
+            [b"LREM", removed, b"1", sentinel],
+            [b"EXEC"],
+            after @ ..,
+        ] if [read, set, removed].iter().all(|same| same == &key)
+            && last(index, length)
+            && word == sentinel
+            && sentinel_word(word) =>
+        {
+            (Unit::Delete(&["index", "value"]), after)
         }
         [first, after @ ..] => (single(first)?, after),
         [] => return None,
@@ -393,7 +431,6 @@ fn single(words: &[&[u8]]) -> Option<Unit> {
         | [b"HSET", _, _, _]
         | [b"ZADD", _, b"XX", b"CH", _, _] => Edit,
         [b"EXPIRE", _, seconds] if positive(seconds) => Edit,
-        [b"LSET", _, index, _] if whole(index) => Edit,
         [b"SET", _, _, b"NX"]
         | [b"HSETNX", _, _, _]
         | [b"RPUSH", _, _]
@@ -429,6 +466,17 @@ fn positive(word: &[u8]) -> bool {
 fn whole(word: &[u8]) -> bool {
     std::str::from_utf8(word)
         .is_ok_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Whether `index` is the last of the first `length` items.
+fn last(index: &[u8], length: &[u8]) -> bool {
+    let number = |word: &[u8]| {
+        std::str::from_utf8(word)
+            .ok()
+            .filter(|_| whole(word))
+            .and_then(|digits| digits.parse::<u64>().ok())
+    };
+    number(index).is_some_and(|index| number(length).and_then(|n| n.checked_sub(1)) == Some(index))
 }
 
 fn sentinel_word(word: &[u8]) -> bool {
@@ -696,7 +744,7 @@ mod tests {
                 LIST,
                 "\"a list\"",
                 &[("value", value("v"))],
-                &[("index", "2")],
+                &[("index", "2"), ("value", "u")],
                 &[("index", INTEGER), ("value", STRING)],
             ),
             row(
@@ -732,7 +780,11 @@ mod tests {
             admitted(&update_batch(&rows).unwrap()),
             [
                 "HSET user:1 name \"Ada L.\"",
+                "WATCH \"a list\"",
+                "LPOS \"a list\" u COUNT 0 MAXLEN 3",
+                "MULTI",
                 "LSET \"a list\" 2 v",
+                "EXEC",
                 "SADD tags \"in memory\"",
                 "SREM tags fast",
                 "ZADD board XX CH 99.5 ada",
@@ -886,25 +938,30 @@ mod tests {
             assert!(!delete_matches_key(&text, &["other"]), "{text}");
         }
 
-        let list = delete(LIST, "l", &[("index", "3")], &[("index", INTEGER)]);
+        let item = [("index", "3"), ("value", "a b")];
+        let tags = [("index", INTEGER), ("value", STRING)];
+        let list = delete(LIST, "l", &item, &tags);
         let commands = words(admitted(&list));
-        assert_eq!(commands.len(), 4);
+        let lines: Vec<&str> = list.lines().collect();
         assert_eq!(
-            commands[1][..3],
+            lines[..3],
+            ["WATCH l", "LPOS l \"a b\" COUNT 0 MAXLEN 4", "MULTI"]
+        );
+        assert_eq!(lines[5], "EXEC");
+        assert_eq!(
+            commands[3][..3],
             [b"LSET".to_vec(), b"l".to_vec(), b"3".to_vec()]
         );
-        assert_eq!(commands[1][3], commands[2][3]);
-        assert!(delete_matches_key(&list, &["index"]));
+        assert_eq!(commands[3][3], commands[4][3]);
+        assert!(delete_matches_key(&list, &["value", "index"]));
         // A second delete writes a sentinel of its own.
-        assert_ne!(
-            list,
-            delete(LIST, "l", &[("index", "3")], &[("index", INTEGER)])
-        );
+        assert_ne!(list, delete(LIST, "l", &item, &tags));
     }
 
     #[test]
     fn the_gate_admits_nothing_but_the_shapes_it_names() {
         let sentinel = sentinel();
+        let checked = "WATCH l\nLPOS l a COUNT 0 MAXLEN 2\nMULTI\n";
         for text in [
             "",
             "FLUSHDB",
@@ -927,6 +984,15 @@ mod tests {
             "SET k v NX EX 0",
             "HSET h f v g w",
             "LSET l x v",
+            "LSET l 1 v",
+            "MULTI\nLSET l 1 v\nEXEC",
+            "WATCH l\nLPOS l a COUNT 0 MAXLEN 1\nMULTI\nLSET l 1 v\nEXEC",
+            "WATCH l\nLPOS m a COUNT 0 MAXLEN 2\nMULTI\nLSET l 1 v\nEXEC",
+            "WATCH l\nLPOS l a COUNT 0 MAXLEN 2\nMULTI\nLSET m 1 v\nEXEC",
+            "WATCH l\nLPOS l a COUNT 1 MAXLEN 2\nMULTI\nLSET l 1 v\nEXEC",
+            "WATCH l\nLPOS l a COUNT 0 MAXLEN 2\nMULTI\nLSET l 1 v",
+            "WATCH l\nLPOS l a COUNT 0 MAXLEN 2\nLSET l 1 v",
+            "LPOS l a COUNT 0 MAXLEN 2\nMULTI\nLSET l 1 v\nEXEC",
             "MULTI\nSREM s a\nSADD s b\nEXEC",
             "SADD s b\nSREM t a",
             "SREM s a\nSADD s b",
@@ -934,15 +1000,19 @@ mod tests {
             "ZADD z NX 1 b\nZREM y a",
             "ZADD z XX 1 m",
             "SADD s b\nFLUSHDB",
-            "MULTI\nLSET l 1 x\nLREM l 1 x\nEXEC",
-            &format!("MULTI\nLSET l 1 {sentinel}\nLREM l 0 {sentinel}\nEXEC"),
-            &format!("MULTI\nLSET l 1 {sentinel}\nLREM m 1 {sentinel}\nEXEC"),
-            &format!("MULTI\nLSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC\nUNLINK l"),
+            &format!("MULTI\nLSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC"),
+            &format!("{checked}LSET l 1 x\nLREM l 1 x\nEXEC"),
+            &format!("{checked}LSET l 1 {sentinel}\nLREM l 0 {sentinel}\nEXEC"),
+            &format!("{checked}LSET l 1 {sentinel}\nLREM m 1 {sentinel}\nEXEC"),
+            &format!("{checked}LSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC\nUNLINK l"),
         ] {
             assert!(!is_generated_write(text), "{text}");
         }
         assert!(is_generated_write(&format!(
-            "MULTI\nLSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC"
+            "{checked}LSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC"
+        )));
+        assert!(is_generated_write(&format!(
+            "{checked}LSET l 1 v\nEXEC\nHSET h f v"
         )));
         assert!(is_generated_write(
             "SET a 1 XX KEEPTTL GET\nPERSIST b\nZADD z XX CH 1 m"

@@ -128,7 +128,8 @@ require it, stop and raise it instead.
    only what the grid's edits, new rows and deleted rows write
    (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … XX KEEPTTL GET` and `SET … NX`, `UNLINK`,
    `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
-   `ZREM`, and a `MULTI`/`EXEC` bracket around a list item's deletion), each
+   `ZREM`, and a list item's write: `WATCH`, an `LPOS` that checks the item
+   still is the one read, and a `MULTI`/`EXEC` bracket), each
    written again from its parts and compared with the text.
    `redis_cmd::browse::is_generated_read` admits only the keys grid's
    `SCAN 0 [MATCH p] [TYPE t] COUNT n` and `DBSIZE`. A key opened as a grid
@@ -1113,8 +1114,10 @@ Decided, and not to be re-litigated:
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
   field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
   (nil on a key gone since), and the connection turns the reply that
-  says nothing happened into an error. `LSET` is the exception: it writes
-  whatever sits at that index now.
+  says nothing happened into an error. A list item, named by its index,
+  is checked first: `WATCH`, an `LPOS … COUNT 0 MAXLEN n` that must end at
+  the index, then the write in a `MULTI`, where a nil `EXEC` is an error. A
+  generated run that fails `UNWATCH`es, or closes the session.
 - **Cancel kills the session.** The connection's `CLIENT ID` is killed from a
   side connection and the next command redials, so an open `MULTI` or `WATCH`
   goes with it.
