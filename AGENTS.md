@@ -1145,10 +1145,12 @@ already set up on the machine.
   so `Client::connect`'s handshake checks the real name. **MySQL's
   `OptsBuilder::ip_or_hostname` is both the dial target and the name its own
   domain check runs against** (`mysql::base_options`), so through a tunnel it
-  can only ever check the tunnel's own address. That is exactly why MySQL is
-  the one engine that refuses `sslmode=verify-full` through a tunnel outright
+  can only ever check the tunnel's own address. That is exactly why MySQL
+  refuses `sslmode=verify-full` through a tunnel outright
   (`unverifiable_through_a_tunnel`) rather than silently checking the wrong
-  name, and why `base_options` sets `prefer_socket(false)` when dialling
+  name, as Redis (`Connection::open`) and MongoDB
+  (`unreachable_through_a_tunnel`, which refuses `verify-ca` too, since its
+  driver checks the name there as well) do for the same reason, and why `base_options` sets `prefer_socket(false)` when dialling
   through a tunnel: a loopback host would otherwise have the driver ask the
   server for its Unix socket path and
   reconnect to *that* path on this machine, past the tunnel entirely. Nowhere
