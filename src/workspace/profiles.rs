@@ -6,7 +6,7 @@
 use super::*;
 use gpui_component::menu::PopupMenuItem;
 
-use crate::connection_form::{ConnectionTest, duplicate_profile_name};
+use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
 use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
@@ -712,7 +712,7 @@ impl Workspace {
             .then(|| form.project_name.read(cx).value().to_string());
         let project =
             projects::chosen_project(typed.as_deref(), form.project.as_deref(), &self.projects);
-        let ((name, config), project) = match form
+        let ((name, mut config), project) = match form
             .config(cx)
             .and_then(|profile| project.map(|project| (profile, project)))
         {
@@ -725,6 +725,11 @@ impl Workspace {
                 return;
             }
         };
+        if let Some(editing) = editing.as_deref()
+            && let Some(profile) = self.profiles.iter().find(|profile| profile.id == editing)
+        {
+            keep_schema(&mut config, &profile.config);
+        }
 
         if let Some(running) = editing.as_deref().and_then(|id| {
             self.profiles

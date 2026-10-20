@@ -67,9 +67,6 @@ pub(crate) struct ConnectionForm {
     /// The profile's login database, which the form does not show and keeps
     /// as it was.
     pub(crate) login_database: Option<String>,
-    /// The active schema, picked in the titlebar rather than here, with the
-    /// engine and database it was picked on. See [`keep_schema`].
-    pub(crate) schema: Option<(Engine, Option<String>, String)>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -268,13 +265,6 @@ impl ConnectionForm {
             options,
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
-            schema: config.and_then(|config| {
-                Some((
-                    config.engine(),
-                    config.database_name(),
-                    config.schema()?.to_string(),
-                ))
-            }),
             statement_timeout,
             error: None,
             test: None,
@@ -347,7 +337,7 @@ impl ConnectionForm {
             path if path.is_empty() => Err("Database file is required.".to_string()),
             path => Ok(path),
         };
-        let mut config = match self.engine {
+        let config = match self.engine {
             Engine::Sqlite => ConnectionConfig::Sqlite {
                 path: file()?,
                 statement_timeout,
@@ -378,7 +368,6 @@ impl ConnectionForm {
             // neither configured takes any connection.
             Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
         };
-        keep_schema(&mut config, self.schema.as_ref());
 
         Ok((name, config))
     }
@@ -491,16 +480,17 @@ impl ConnectionForm {
     }
 }
 
-/// `picked` back on `config`, only while it is on the engine and database the
-/// schema was picked on: schemas belong to one database. The database is
-/// compared as the engine spells it, so `analytics` is still Snowflake's
-/// `ANALYTICS`.
-fn keep_schema(config: &mut ConnectionConfig, picked: Option<&(Engine, Option<String>, String)>) {
-    if let Some((engine, database, schema)) = picked
-        && config.engine() == *engine
-        && config.database_name() == *database
+/// The active schema `current` holds, picked in the titlebar rather than the
+/// form, onto `config`, only while it is on the same engine and database:
+/// schemas belong to one database. Read from the profile at save time, so one
+/// picked while the form was open stays. The database is compared as the
+/// engine spells it, so `analytics` is still Snowflake's `ANALYTICS`.
+pub(crate) fn keep_schema(config: &mut ConnectionConfig, current: &ConnectionConfig) {
+    if let Some(schema) = current.schema()
+        && config.engine() == current.engine()
+        && config.database_name() == current.database_name()
     {
-        config.set_schema(Some(schema.clone()));
+        config.set_schema(Some(schema.to_string()));
     }
 }
 
@@ -657,12 +647,9 @@ mod tests {
             })
         };
         let kept = |picked_on: &ConnectionConfig, mut saved: ConnectionConfig| {
-            let picked = (
-                picked_on.engine(),
-                picked_on.database_name(),
-                "sales".to_string(),
-            );
-            keep_schema(&mut saved, Some(&picked));
+            let mut current = picked_on.clone();
+            current.set_schema(Some("sales".into()));
+            keep_schema(&mut saved, &current);
             saved.schema().map(str::to_string)
         };
         let sales = Some("sales".to_string());
