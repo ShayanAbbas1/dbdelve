@@ -221,6 +221,11 @@ impl Connection {
             .arg("ID")
             .query::<i64>(&mut client)
             .ok();
+        // Browsing then leaves keys' LRU/LFU, which eviction goes by, untouched; 7.2+.
+        let _ = ::redis::cmd("CLIENT")
+            .arg("NO-TOUCH")
+            .arg("ON")
+            .query::<()>(&mut client);
         let timeout = (server.statement_timeout > 0)
             .then(|| Duration::from_secs(u64::from(server.statement_timeout)));
         client
@@ -2129,6 +2134,16 @@ mod tests {
         assert!(is_cancel(Engine::Redis, &error), "{}", error.message);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(cells(&ran(&connection, "PING")), [some(&["PONG"])]);
+        let info = ran(&connection, "CLIENT INFO");
+        let flags = info
+            .columns
+            .iter()
+            .position(|column| column.name == "flags");
+        let flags = info.rows[0].get(flags.unwrap()).unwrap();
+        assert!(
+            flags.contains('T'),
+            "the redialled session touches keys: {flags}"
+        );
         // Nothing out: a cancel then stops nothing and costs nothing.
         connection.cancel().unwrap();
         assert_eq!(cells(&ran(&connection, "PING")), [some(&["PONG"])]);
