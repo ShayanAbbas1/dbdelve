@@ -513,25 +513,43 @@ fn connection_string(server: &ServerConfig) -> String {
     parts.join(" ")
 }
 
-/// `schema` first and `public` after it, as `search_path` takes a list.
-fn search_path(schema: &str) -> String {
-    let first = Engine::Postgres.quote_identifier(schema);
-    match schema {
-        "public" => first,
-        _ => format!("{first},public"),
-    }
+/// `schema` ahead of the session's default `search_path`, as the role,
+/// database or server set it, so `"$user"` and extension schemas stay on it.
+/// `reset_val` is that default however many switches came before. Sets nothing
+/// inside a transaction block, where the block's first statement has already
+/// moved `statement_timestamp` past its start: a ROLLBACK would undo the set.
+fn set_search_path_sql(schema: &str) -> String {
+    // An `E''` literal reads the same whatever `standard_conforming_strings` is.
+    let first = Engine::Postgres
+        .quote_identifier(schema)
+        .replace('\\', r"\\")
+        .replace('\'', "''");
+    format!(
+        "SELECT pg_catalog.set_config('search_path', \
+         pg_catalog.concat_ws(', ', E'{first}', NULLIF(reset_val, '')), false) \
+         FROM pg_catalog.pg_settings WHERE name = 'search_path' \
+         AND pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp()"
+    )
 }
 
 /// A `SET` after connecting rather than a startup option: PgBouncer and other
 /// poolers refuse a connection that sends `options` at all.
 fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
-    let set = format!("SET search_path TO {}", search_path(schema));
+    let set = set_search_path_sql(schema);
     let Client { client, driver } = client;
-    driver
+    let messages = driver
         .block_on(client.simple_query(&set))
         .and_then(|done| done)
-        .map(drop)
-        .map_err(|error| query_error(&error, &set))
+        .map_err(|error| query_error(&error, &set))?;
+    match messages
+        .iter()
+        .any(|message| matches!(message, SimpleQueryMessage::Row(_)))
+    {
+        true => Ok(()),
+        false => Err(plain_error(
+            "A transaction is open on this connection, so the schema was not switched.".into(),
+        )),
+    }
 }
 
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
@@ -774,6 +792,7 @@ impl Connection {
     pub fn alongside(&self) -> Result<Self, DbError> {
         Ok(Self {
             side: self.side.clone(),
+            server: self.server.clone(),
             ..Self::connect(&self.server(), self.tunnel.clone())?
         })
     }
@@ -1815,12 +1834,10 @@ mod tests {
     }
 
     #[test]
-    fn the_active_schema_leads_the_search_path_quoted_and_public_only_once() {
-        assert_eq!(search_path("public"), r#""public""#);
-        assert_eq!(search_path("Sales"), r#""Sales",public"#);
-        assert_eq!(
-            search_path(r#"My "Odd" \Schema"#),
-            r#""My ""Odd"" \Schema",public"#
+    fn the_active_schema_is_quoted_then_escaped_into_the_literal() {
+        assert!(set_search_path_sql("Sales").contains(r#"E'"Sales"'"#));
+        assert!(
+            set_search_path_sql(r#"it's "odd" \here"#).contains(r#"E'"it''s ""odd"" \\here"'"#)
         );
     }
 
@@ -1842,7 +1859,7 @@ mod tests {
         .expect("connection should open");
         assert_eq!(
             shown(&connection).as_deref(),
-            Some(r#""odd ""schema"" \here",public"#)
+            Some(r#""odd ""schema"" \here","$user",public"#)
         );
 
         // Recorded out of the order they apply in: the last recorded wins.
@@ -1850,11 +1867,76 @@ mod tests {
         connection.set_schema(Some("Other"));
         connection.apply_schema().expect("the schema should set");
         connection.apply_schema().expect("the schema should set");
-        assert_eq!(shown(&connection).as_deref(), Some(r#""Other",public"#));
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""Other","$user",public"#)
+        );
         let fresh = connection
             .alongside()
             .expect("a second session should open");
-        assert_eq!(shown(&fresh).as_deref(), Some(r#""Other",public"#));
+        assert_eq!(shown(&fresh).as_deref(), Some(r#""Other","$user",public"#));
+        connection.set_schema(Some("Third"));
+        let later = fresh.alongside().expect("a third session should open");
+        assert_eq!(shown(&later).as_deref(), Some(r#""Third","$user",public"#));
+
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("the transaction should open");
+        assert!(connection.apply_schema().is_err());
+        connection
+            .query("ROLLBACK", Fetch::default())
+            .expect("the transaction should close");
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""Other","$user",public"#)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_active_schema_keeps_the_roles_own_search_path_after_it() {
+        let admin = Connection::open(&live_config()).expect("connection should open");
+        let role = format!("dbdelve_schema_tail_{}", std::process::id());
+        let run = |sql: &str| {
+            admin
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+        };
+        run(&format!("DROP ROLE IF EXISTS {role}"));
+        run(&format!("CREATE ROLE {role} LOGIN PASSWORD 'tail'"));
+        run(&format!(
+            r#"ALTER ROLE {role} SET search_path = "$user", public, extra"#
+        ));
+        let opened = Connection::open(&ServerConfig {
+            user: role.clone(),
+            password: "tail".into(),
+            schema: Some("sales".into()),
+            ..live_config()
+        });
+        let shown = opened.map(|connection| {
+            connection.set_schema(Some("Other"));
+            let first = connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                .map(str::to_string);
+            connection.apply_schema().expect("the schema should set");
+            let second = connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                .map(str::to_string);
+            (first, second)
+        });
+        run(&format!("DROP ROLE {role}"));
+        let (first, second) = shown.expect("the role should connect");
+        assert_eq!(first.as_deref(), Some(r#""sales", "$user", public, extra"#));
+        assert_eq!(
+            second.as_deref(),
+            Some(r#""Other", "$user", public, extra"#)
+        );
     }
 
     #[test]
