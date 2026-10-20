@@ -567,6 +567,25 @@ impl Session {
     }
 
     /// The query buffer in front, or `None` when an object tab is.
+    /// Put away the new-row form and the review a closed tab had open. A
+    /// query tab's id is handed to the next buffer, which would find them.
+    pub(crate) fn forget(&mut self, tab: Tab) {
+        if self
+            .insert_form
+            .as_ref()
+            .is_some_and(|form| form.tab == tab)
+        {
+            self.insert_form = None;
+        }
+        if self
+            .apply_review
+            .as_ref()
+            .is_some_and(|review| review.tab == tab)
+        {
+            self.apply_review = None;
+        }
+    }
+
     pub(crate) fn active_query_tab(&self) -> Option<&QueryTab> {
         match self.active {
             Tab::Query(id) => self.query_tab(id),

@@ -638,6 +638,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
 
+    // A query's rows that are written back to, where the engine adds and
+    // deletes them there as well as on a relation's.
+    if session.active_query_tab().is_some() && profile.config.engine().edits_query_rows() {
+        if session
+            .active_results()
+            .is_some_and(|results| results.read(cx).delegate().insert_target().is_some())
+        {
+            items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+        }
+        if workspace.has_nameable_row(cx) {
+            items.push(Item::command(
+                "Delete row…",
+                "",
+                icon::DELETE,
+                Command::DeleteRow,
+            ));
+        }
+    }
+
     if let Some(tab) = session.active_object() {
         if matches!(tab.body, ObjectBody::Structure { .. }) {
             items.push(Item::command(

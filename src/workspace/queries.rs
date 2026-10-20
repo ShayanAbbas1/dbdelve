@@ -1348,6 +1348,7 @@ impl Workspace {
         let in_front = (profile.session.active == Tab::Query(id))
             .then(|| profile.session.fallback(Tab::Query(id)));
         profile.session.queries.remove(position);
+        profile.session.forget(Tab::Query(id));
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
             self.front_after_close(fallback, window, cx);
@@ -1573,6 +1574,7 @@ impl Workspace {
             // leave `cmd+w` looking like it had done nothing.
             if let Some(open) = was_open {
                 profile.session.queries.retain(|tab| tab.id != open);
+                profile.session.forget(Tab::Query(open));
                 // With the tab, as in `close_buffer`: a snapshot with no
                 // tab left to come back to is rows the next buffer to be
                 // handed this id would show as its own.

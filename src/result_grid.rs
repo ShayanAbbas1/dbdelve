@@ -81,6 +81,10 @@ type ReferenceMenu = Rc<Vec<(usize, SharedString)>>;
 /// one-row `DELETE` needs and nothing else.
 pub type RowKey = (String, String, Vec<(String, String)>);
 
+/// A grid's schema and table, and the columns a new row of it fills as
+/// column/type pairs — what the New row form is built from.
+pub type InsertTarget = (String, String, Vec<(String, String)>);
+
 /// A grid's selection, apart from the grid it was made in.
 pub struct GridSelection {
     active: Option<(usize, usize)>,
@@ -1532,6 +1536,25 @@ impl ResultGrid {
             edit.table.clone(),
             self.key_values(edit, row)?,
         ))
+    }
+
+    /// What a new row of this grid's own is written into: where its rows are
+    /// written back to, and each column that names, typed as the first row's
+    /// cell is. `None` where its rows are written back nowhere.
+    pub fn insert_target(&self) -> Option<InsertTarget> {
+        let edit = self.result.edit.as_ref()?;
+        let columns = edit
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(col, name)| {
+                Some((
+                    name.clone()?,
+                    self.cell_type(0, col).unwrap_or_default().to_string(),
+                ))
+            })
+            .collect();
+        Some((edit.schema.clone(), edit.table.clone(), columns))
     }
 
     /// Open an input on a cell. `false` when the cell is not editable, and

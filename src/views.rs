@@ -312,7 +312,11 @@ fn render_query_surface(
             tab.row_panel_editing,
             &tab.row_panel_split,
             row_panel,
-            None,
+            profile
+                .session
+                .insert_form
+                .as_ref()
+                .filter(|form| form.tab == Tab::Query(tab.id)),
             &scope,
             cx,
         ),

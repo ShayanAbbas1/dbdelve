@@ -31,49 +31,65 @@ impl Workspace {
             return;
         }
         self.clear_notice();
+        let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
         };
-        let Tab::Object(id) = profile.session.active else {
-            return;
-        };
+        let active = profile.session.active;
         // A form already open for this tab is focused rather than reset, so
         // pressing New row (or its shortcut) again does not silently wipe a
         // half-filled row.
         if let Some(form) = &profile.session.insert_form
-            && form.tab == Tab::Object(id)
+            && form.tab == active
         {
             if let Some(field) = form.fields.first() {
                 field.input.focus_handle(cx).focus(window, cx);
             }
             return;
         }
-        let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
-            return;
+        let (schema, table, columns) = match active {
+            Tab::Object(id) => {
+                let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
+                    return;
+                };
+                let structure = match &tab.body {
+                    ObjectBody::Relation { structure, .. } => structure,
+                    ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
+                };
+                if !tab.takes_inserts(engine) {
+                    self.note("This view takes no inserts.".into(), cx);
+                    return;
+                }
+                // The columns are the form: without them there is nothing to
+                // draw, and guessing at them would be inventing a table.
+                let StructureState::Loaded(structure) = structure else {
+                    self.note(
+                        "DBDelve has not read this relation's columns yet.".into(),
+                        cx,
+                    );
+                    return;
+                };
+                let columns: Vec<(String, String)> = structure
+                    .columns
+                    .iter()
+                    .map(|column| (column.name.clone(), column.data_type.clone()))
+                    .collect();
+                (tab.schema.clone(), tab.name.clone(), columns)
+            }
+            // The grid's own columns, where its rows are written back to.
+            Tab::Query(_) if engine.edits_query_rows() => {
+                let target = profile
+                    .session
+                    .active_results()
+                    .and_then(|results| results.read(cx).delegate().insert_target());
+                let Some(target) = target else {
+                    self.note("These rows take no new row.".into(), cx);
+                    return;
+                };
+                target
+            }
+            Tab::Query(_) => return,
         };
-        let structure = match &tab.body {
-            ObjectBody::Relation { structure, .. } => structure,
-            ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
-        };
-        if !tab.takes_inserts(self.engine()) {
-            self.note("This view takes no inserts.".into(), cx);
-            return;
-        }
-        // The columns are the form: without them there is nothing to draw, and
-        // guessing at them would be inventing a table.
-        let StructureState::Loaded(structure) = structure else {
-            self.note(
-                "DBDelve has not read this relation's columns yet.".into(),
-                cx,
-            );
-            return;
-        };
-        let (schema, table) = (tab.schema.clone(), tab.name.clone());
-        let columns: Vec<(String, String)> = structure
-            .columns
-            .iter()
-            .map(|column| (column.name.clone(), column.data_type.clone()))
-            .collect();
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
             let input = cx.new(|cx| InputState::new(window, cx));
@@ -96,7 +112,7 @@ impl Workspace {
 
         if let Some(profile) = self.profile_mut() {
             profile.session.insert_form = Some(InsertForm {
-                tab: Tab::Object(id),
+                tab: active,
                 schema,
                 table,
                 fields,
@@ -1152,9 +1168,10 @@ impl Workspace {
         }
         // Browsing surfaces only. A query tab's grid is a view of the user's own
         // statement, and a delete there would be dbdelve writing into a buffer to
-        // destroy rows.
+        // destroy rows -- bar an engine whose opened rows are a query tab, where
+        // the delete is reviewed as a relation's is and the buffer is left be.
         let tab = profile.session.active;
-        if !matches!(tab, Tab::Object(_)) {
+        if !matches!(tab, Tab::Object(_)) && !engine.edits_query_rows() {
             self.note(
                 "Deleting a row is offered on a table's rows, not on a query's results.".into(),
                 cx,
@@ -1699,12 +1716,26 @@ impl Workspace {
             return;
         };
         let (tab, sql) = (review.tab, review.sql.clone());
-        let Tab::Object(id) = tab else {
-            return;
-        };
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
-        self.execute_and_then(sql, tab, Some(Refresh::Relation(id)), false, None, cx);
+        let refresh = match tab {
+            Tab::Object(id) => Refresh::Relation(id),
+            Tab::Query(id) => match profile
+                .session
+                .query_tab(id)
+                .and_then(|query| query.last_query.clone())
+            {
+                Some(statement) => Refresh::Statement(statement),
+                None => {
+                    self.note(
+                        "dbdelve does not know which statement produced these rows.".into(),
+                        cx,
+                    );
+                    return;
+                }
+            },
+        };
+        self.execute_and_then(sql, tab, Some(refresh), false, None, cx);
     }
 
     /// Put the batch away, leaving the edits pending: reading a statement and

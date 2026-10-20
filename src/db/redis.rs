@@ -2676,6 +2676,14 @@ mod tests {
             one(&connection, "HGET live:open:h f").as_deref(),
             Some("one")
         );
+        // What its query tab's New row form is built from.
+        let (schema, table, columns) = hash.insert_target().unwrap();
+        assert_eq!(
+            (schema.as_str(), table.as_str()),
+            (edit::HASH, "live:open:h")
+        );
+        let names: Vec<&str> = columns.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["field", "value"]);
         let field = |name| {
             insertion(
                 edit::HASH,

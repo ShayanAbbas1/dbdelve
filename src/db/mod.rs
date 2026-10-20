@@ -967,6 +967,25 @@ impl Engine {
         }
     }
 
+    /// Whether a query tab's grid takes a new row and a deleted one, as a
+    /// relation's preview does, each shown for review before it runs and
+    /// never written into the buffer. Redis opens a key as a query tab of its
+    /// own, its contents having no relation to open, and that is where its
+    /// fields, items and members are added and taken out.
+    pub fn edits_query_rows(self) -> bool {
+        match self {
+            Self::Redis => true,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => false,
+        }
+    }
+
     /// Whether `column`, part of what names a grid's row, can be edited all
     /// the same. Elsewhere a key column says which row an edit lands on and is
     /// never what it changes. On Redis a key's name, a set's member, a sorted
