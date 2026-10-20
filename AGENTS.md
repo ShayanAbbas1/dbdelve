@@ -1,7 +1,7 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, Snowflake, SQL Server and MongoDB.
+speaking Postgres, MySQL, MariaDB, SQLite, Snowflake, SQL Server, MongoDB and Redis.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -124,6 +124,24 @@ require it, stop and raise it instead.
    (`$where`, `$function`, `$accumulator`). Both read the tree-sitter parse, not
    the builder's word, for the reason above.
 
+   Redis has its own pair too. `redis_cmd::edit::is_generated_write` admits
+   only what the grid's edits, new rows and deleted rows write
+   (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … KEEPTTL` and `SET … NX`, `UNLINK`,
+   `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
+   `ZREM`, and a `MULTI`/`EXEC` bracket around a two-command edit), each
+   written again from its parts and compared with the text.
+   `redis_cmd::browse::is_generated_read` admits only the keys grid's
+   `SCAN 0 [MATCH p] [TYPE t] COUNT n` and `DBSIZE`. A key opened as a grid
+   runs through `classify` and `gate` like any typed read. A user's own
+   command is never one of these: `redis_cmd::classify` reads it by name and
+   subcommand from the `READS`, `WRITES` and `DROPS` tables, and a name in none
+   is `Unreadable`. The server has no read-only hold (`holds_read_only` is
+   false), so the tables are the Read-only boundary and must stay closed to
+   anything unlisted. `redis_cmd::refusal` is a separate list: the commands
+   that would take the session out from under DBDelve (`SELECT`, the
+   subscribe family, `MONITOR`, `SYNC`, `HELLO`, `RESET`, `QUIT`,
+   `CLIENT REPLY`) are never sent, in any mode.
+
    **The `DELETE`'s shape is verified from the parse tree, not trusted because
    `sql::delete_row` produced it.** A gate that trusts its caller is a comment;
    the check lives in the gate rather than the generator precisely so the two
@@ -152,7 +170,7 @@ require it, stop and raise it instead.
    there: no trait, no plugin surface. A UI that knows which engine it is
    talking to grows an engine-shaped special case in every view, and those are
    the special cases nobody ever removes. An enum rather than a trait for the
-   same reason in miniature: six arms the compiler makes every match
+   same reason in miniature: an arm per engine the compiler makes every match
    enumerate, instead of an open extension point.
 
    The one thing that crosses out is `db::Engine`, because DBDelve writes SQL
@@ -160,7 +178,7 @@ require it, stop and raise it instead.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
    `boolean_literal`, `skips_duplicates`, `all_or_nothing`, `takes_new_fields`,
-   `fields`, `syntax`, and `filter::Operator::on` for the filter dropdown) and never
+   `fields`, `syntax`, `edits_query_rows`, `takes_imports`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
@@ -293,6 +311,15 @@ crate is a one-off snapshot nobody republishes, and gpui-component depends on
 `gpui-pre` under the name `gpui`, so taking it keeps one copy of the framework
 in the graph.
 
+Where the Redis code lives: `src/redis_cmd.rs` splits a buffer into commands
+by redis-cli's rules, refuses the session-breaking ones and classifies the
+rest; `src/redis_cmd/browse.rs` writes the keys grid's preview, count, filter
+and the read a key opens with, and holds the read gate;
+`src/redis_cmd/edit.rs` writes the commands an edit becomes and holds the
+write gate; `src/db/redis.rs` is the driver, its catalog and its rendering of
+replies. The editor's command names (`redis_cmd::names`) come from the same
+classify tables.
+
 Where the MongoDB code lives: `src/mql.rs` parses and classifies mongosh
 statements, formats them and splices a sort into one; `src/mql/browse.rs`
 writes the object tab's preview, count and filter and holds the read gate;
@@ -391,10 +418,11 @@ postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev   # MariaDB
 mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
+redis://dbdelve:dbdelve@127.0.0.1:56379/0
 ```
 
 The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
-`DBDELVE_MARIADB_PORT` and `DBDELVE_MSSQL_PORT`. The SQL Server image is
+`DBDELVE_MARIADB_PORT`, `DBDELVE_MSSQL_PORT` and `DBDELVE_REDIS_PORT`. The SQL Server image is
 `linux/amd64` only, so on Apple silicon it runs under emulation and takes a
 while to come up.
 Pick the engine in the form's Engine dropdown first; it decides which fields exist.
@@ -453,7 +481,7 @@ cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tes
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MARIADB_URL`,
-`dbdelve_MSSQL_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
+`dbdelve_MSSQL_URL`, `dbdelve_REDIS_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
 lowercase prefix is what they read; the last points `live_ssh_*` at the
 config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
 string); the `tests` job in `ci.yml` has the values
@@ -1067,6 +1095,29 @@ Decided, and not to be re-litigated:
   naming it, rather than rewriting the options. The form does not show it and
   saves it as it was.
 
+- **Redis is a command language of its own, classified by table.** As with
+  MongoDB, `holds_read_only` is false and `redis_cmd::classify` is the only
+  Read-only boundary; it fails closed on any name it does not list. There is
+  no `EXPLAIN`, no transaction to bracket a batch with (`transaction_start` is
+  `None`: a batch applies in order and a failure says which command failed and
+  how many ran), no Import Rows (`Engine::takes_imports` is false: a new key
+  names its own value, not a row under a file's columns) and no server-side
+  sort or count under a filter (`SCAN` has neither).
+- **The keys grid is one `keys` relation and a key opens as a query tab.**
+  Its contents have no relation to open, so a new row and a deleted row on
+  that tab are offered through `Engine::edits_query_rows`, shown in the review
+  dialog and never written into the buffer. Each cell carries a tag for how
+  its text stands for the bytes behind it, and only whole text is written
+  back: a value cut for display, a non-UTF-8 key or value, JSON and streams
+  are read-only.
+- **Edits never clobber what they did not read.** A new key is `SET … NX`, a
+  field `HSETNX`, a rename `RENAMENX`, and the connection turns the reply that
+  says nothing happened into an error. `LSET` is the exception: it writes
+  whatever sits at that index now.
+- **Cancel kills the session.** The connection's `CLIENT ID` is killed from a
+  side connection and the next command redials, so an open `MULTI` or `WATCH`
+  goes with it.
+
 ### SSH tunnels
 
 `src/db/ssh.rs` opens a local port forward over the *system* `ssh` binary,
@@ -1389,6 +1440,10 @@ wants completed and the text the grammar returns an `ERROR` node for. And **it
 must offer nothing inside a string literal or a comment**, which a token scan
 cannot do by itself and is the one place accepting a row rewrites data rather
 than a query.
+
+A Redis buffer offers command names only, in the first word of a line, from
+`redis_cmd::names` (the classify tables, less the refused commands), tagged
+read, write or destructive; key names are not offered.
 
 A MongoDB buffer (`Engine::syntax`) is read by `mql::completing` instead, a
 scan of the same kind: collections and database methods after `db.`, the

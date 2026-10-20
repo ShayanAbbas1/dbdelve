@@ -34,7 +34,7 @@ docker compose up -d
 cargo run
 ```
 
-`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server and MongoDB dev databases (see
+`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB and Redis dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
 `dev/ssh/.generated/` (gitignored). With nothing configured, DBDelve opens the
@@ -45,11 +45,17 @@ postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+redis://dbdelve:dbdelve@127.0.0.1:56379/0
 ```
 
 The MongoDB service is `mongo` in `compose.yaml`, on port 57017; its seed is
 `dev/mongo/init/001-dbdelve-demo.js`, which `mongod` runs only on an empty data
 volume. After editing it, `docker compose down -v` to apply it.
+
+The Redis service is `redis` in `compose.yaml` (the `redis:8` image, which ships
+JSON and Search), on port 56379, moved with `DBDELVE_REDIS_PORT`. Its ACL user
+and seed are in `dev/redis/`; nothing is persisted, so every start seeds afresh
+and the healthcheck passes only once the seed finished.
 
 SQLite has no server to start — build the file once and point the form at its
 absolute path:
@@ -83,6 +89,7 @@ export PGPASSWORD=dbdelve
 export dbdelve_MYSQL_URL=mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 export dbdelve_MARIADB_URL=mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 export dbdelve_MONGO_URL=mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+export dbdelve_REDIS_URL=redis://dbdelve:dbdelve@127.0.0.1:56379/0
 export dbdelve_SQLITE_PATH=$(pwd)/dev/dbdelve_dev.db
 
 cargo test -- --include-ignored
@@ -99,6 +106,9 @@ run them alone with:
 ```sh
 cargo test db::mongo -- --include-ignored
 ```
+
+The Redis live tests are in `src/db/redis.rs` and read `dbdelve_REDIS_URL`;
+run them alone with `cargo test db::redis -- --include-ignored`.
 
 The SSH tunnel's own tests (`live_ssh_*`, in `ssh.rs` and each engine module)
 need the dev bastions `docker compose up` already started, plus the config
@@ -212,7 +222,7 @@ chore(release): bump version to 0.3.8
 
 | Scope         | Covers                                                                  |
 | ------------- | ----------------------------------------------------------------------- |
-| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `snowflake`, `turso` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso` | One engine's module in `src/db/` (MySQL covers MariaDB) |
 | `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
 | `ssh`         | SSH tunnels                                                             |
 | `connections` | Connection form, profiles, TLS                                          |

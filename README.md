@@ -51,6 +51,10 @@ How these were measured, and the full results, are in [BENCHMARKS.md](BENCHMARKS
   `db.accounts.find({ status: "active" })`. Browse, filter, sort, edit by `_id`,
   Explain and Format Query work as on the SQL engines. There are no
   transactions, so a batch of edits applies in order.
+- **Redis:** supported (and Valkey, KeyDB, Dragonfly), with redis-cli commands
+  in the editor. Browse a database's keys, open any key as a grid and edit
+  strings, hashes, lists, sets and sorted sets in place. Read-only works by
+  classifying every command. See [docs/redis.md](docs/redis.md).
 
 Support for other database engines is planned, and more will be added over
 time.
