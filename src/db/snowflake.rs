@@ -65,9 +65,10 @@ pub struct SnowflakeConfig {
 /// Whether `name` can be written without quotes, which the server then folds
 /// to upper case.
 fn bare(name: &str) -> bool {
-    name.chars()
-        .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
-        && !name.starts_with(|first: char| first.is_ascii_digit())
+    name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
 }
 
 /// `name`, as the catalog stores it, spelled to reach it from a request field:
@@ -1642,6 +1643,8 @@ mod tests {
         assert_eq!(schema("PUBLIC"), "PUBLIC");
         // Folded to `SALES` were it sent bare.
         assert_eq!(schema("sales"), r#""sales""#);
+        assert_eq!(schema("$STAGE"), r#""$STAGE""#);
+        assert_eq!(schema("_STAGE"), "_STAGE");
         assert_eq!(schema(r#"My "Odd" Schema"#), r#""My ""Odd"" Schema""#);
     }
 
@@ -2325,6 +2328,9 @@ mod tests {
         // Neither could have been created without quotes, so neither was folded.
         assert_eq!(named("my-db").stored_database(), "my-db");
         assert_eq!(named("1st").stored_database(), "1st");
+        assert_eq!(named("$db").stored_database(), "$db");
+        assert_eq!(named("").stored_database(), "");
+        assert_eq!(named("_raw").stored_database(), "_RAW");
     }
 
     /// The labels of the rows a filter bar's predicate keeps, out of four rows
