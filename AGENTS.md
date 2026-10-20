@@ -131,8 +131,8 @@ require it, stop and raise it instead.
    `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
    `ZREM`, a list item's write: `WATCH`, an `LPOS` that checks the item
    still is the one read, and a `MULTI`/`EXEC` bracket, and a collection's
-   JSON edit: `WATCH`, an `ECHO` of the JSON read, the preview's bounded read
-   of the key, and a `MULTI`/`EXEC` of writes of the key's own type), each
+   JSON edit: `WATCH`, an `ECHO` of the JSON read, a bounded read
+   of the key (`HSCAN`/`SSCAN`, `LRANGE 0 100`, `ZSCAN`), and a `MULTI`/`EXEC` of writes of the key's own type), each
    written again from its parts and compared with the text.
    `redis_cmd::browse::is_generated_read` admits only the keys grid's
    `SCAN 0 [MATCH p] [TYPE t] COUNT 1000`, with `TYPE` before `MATCH` too,
@@ -1129,7 +1129,7 @@ Decided, and not to be re-litigated:
   the index, then the write in a `MULTI`, where a nil `EXEC` is an error. A
   collection's JSON edit is diffed against the JSON shown (`PendingRow::held`)
   into the commands an opened key's grid writes, after a `WATCH`, an `ECHO`
-  of that JSON and the preview's bounded read, which the connection compares
+  of that JSON and a bounded read (`HSCAN`/`SSCAN`, `LRANGE 0 100`, `ZSCAN`), which the connection compares
   with the `ECHO`: a different value, a cursor not `0`, or more entries is an
   error before the `MULTI`. A generated run that fails `UNWATCH`es, or closes
   the session.

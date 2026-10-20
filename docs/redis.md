@@ -140,7 +140,7 @@ instead), and JSON that changes nothing, which is no edit. A list edit that
 adds or removes items is refused too: open the key to insert or remove them.
 
 The write never lands over a change made since the read: `WATCH key`, then
-`ECHO` of the JSON shown and the preview's bounded read again (`HSCAN`,
+`ECHO` of the JSON shown and a bounded read of the key, not the preview's own (`HSCAN`,
 `SSCAN` or `ZSCAN key 0 COUNT 100`, `LRANGE key 0 100`), which must find
 exactly that JSON's entries, with the cursor back at `0` and nothing more. A
 key changed, grown, retyped or deleted is an error and nothing is written; a
