@@ -1006,11 +1006,19 @@ impl Workspace {
         let Some(server) = profile.config.server() else {
             return;
         };
-        if already_on(
-            &server.database,
-            profile.databases.current.as_deref(),
-            &name,
-        ) {
+        // As the profile would store it: Redis lists `db3` and stores `3`.
+        let mut asked = profile.config.clone();
+        asked.set_database(name.clone());
+        let unmoved = asked
+            .server()
+            .is_some_and(|asked| asked.database == server.database);
+        if unmoved
+            || already_on(
+                &server.database,
+                profile.databases.current.as_deref(),
+                &name,
+            )
+        {
             return;
         }
         let session = &profile.session;
