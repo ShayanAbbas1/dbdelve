@@ -89,6 +89,13 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         (true, Some(SslMode::Disable)) => {
             return Err("Connection URL is rediss:// but sets sslmode=disable.".into());
         }
+        (true, Some(SslMode::Prefer)) => {
+            return Err(
+                "Connection URL is rediss:// but sets sslmode=prefer, which can fall back to \
+                 plaintext."
+                    .into(),
+            );
+        }
         (_, Some(mode)) => mode,
         (true, None) => SslMode::VerifyFull,
         (false, None) => SslMode::Disable,
@@ -160,6 +167,9 @@ struct Running {
     /// Cancel was asked for, which also stops a run before its next round
     /// trip: the next page of a `SCAN`, the next command of several.
     asked: bool,
+    /// Which run this is, counted up across the connection's life, so a Cancel
+    /// aimed at one cannot land on the next that reuses its session.
+    run: u64,
 }
 
 impl Connection {
@@ -220,13 +230,13 @@ impl Connection {
     /// dials a new one. A Lua script or a `DEBUG SLEEP` holds the whole
     /// server, so the kill waits behind it like everything else.
     pub fn cancel(&self) -> Result<(), DbError> {
-        let id = {
+        let (id, run) = {
             let mut running = lock(&self.running);
             if !running.out {
                 return Ok(());
             }
             running.asked = true;
-            running.id
+            (running.id, running.run)
         };
         let Some(id) = id else {
             return Ok(());
@@ -236,7 +246,11 @@ impl Connection {
         // idle session to it, and the next command reports that. Closing the
         // gap needs the kill sent under the session's own lock, which the
         // running command holds.
-        if !lock(&self.running).out {
+        let still_out = {
+            let running = lock(&self.running);
+            running.out && running.run == run
+        };
+        if !still_out {
             return Ok(());
         }
         ::redis::cmd("CLIENT")
@@ -264,36 +278,64 @@ impl Connection {
         let mut session = lock(&self.session);
         fetch.hold()?;
         let started = Instant::now();
-        *lock(&self.running) = Running {
-            out: true,
-            ..Running::default()
+        let run = {
+            let mut running = lock(&self.running);
+            let run = running.run + 1;
+            *running = Running {
+                out: true,
+                run,
+                ..Running::default()
+            };
+            run
         };
-        let mut run = || {
+        let mut multi = false;
+        let mut step = || {
             let mut result = QueryResult::default();
             for (at, command) in commands.iter().enumerate() {
-                result =
-                    self.command(&mut session, command, fetch.limit)
-                        .map_err(|error| match at {
-                            0 => error,
-                            ran => DbError {
-                                message: format!(
-                                    "Command {} of {} failed after {} had run: {}",
-                                    ran + 1,
-                                    commands.len(),
-                                    match ran {
-                                        1 => "the first".to_string(),
-                                        ran => format!("the first {ran}"),
-                                    },
-                                    error.message
-                                ),
-                                ..error
+                let outcome = self.command(&mut session, command, fetch.limit);
+                match command.name().as_str() {
+                    "MULTI" if outcome.is_ok() => multi = true,
+                    "EXEC" | "DISCARD" => multi = false,
+                    _ => {}
+                }
+                result = outcome.map_err(|error| match at {
+                    0 => error,
+                    ran => DbError {
+                        message: format!(
+                            "Command {} of {} failed after {} had run: {}",
+                            ran + 1,
+                            commands.len(),
+                            match ran {
+                                1 => "the first".to_string(),
+                                ran => format!("the first {ran}"),
                             },
-                        })?;
+                            error.message
+                        ),
+                        ..error
+                    },
+                })?;
             }
             Ok(result)
         };
-        let outcome = run();
-        *lock(&self.running) = Running::default();
+        let mut outcome: Result<QueryResult, DbError> = step();
+        // The `MULTI` this run opened would answer the next command with
+        // QUEUED, though the editor's text no longer shows it open.
+        if let (Err(error), true, true) = (&mut outcome, multi, session.is_some()) {
+            let note = match self.send(&mut session, |client| {
+                client.req_command(&::redis::cmd("DISCARD"))
+            }) {
+                Ok(_) => "The MULTI it opened was discarded.",
+                Err(_) => {
+                    *session = None;
+                    "The session was closed to drop the MULTI it opened."
+                }
+            };
+            error.message = format!("{} {note}", error.message);
+        }
+        *lock(&self.running) = Running {
+            run,
+            ..Running::default()
+        };
         let mut result = outcome?;
         result.elapsed = started.elapsed();
         Ok(result)
@@ -311,8 +353,8 @@ impl Connection {
             _ => None,
         };
         let request = |words: &[Vec<u8>]| {
-            let mut request = ::redis::cmd(&command.name());
-            for word in &words[1..] {
+            let mut request = ::redis::Cmd::new();
+            for word in words {
                 request.arg(word.as_slice());
             }
             request
@@ -324,15 +366,15 @@ impl Connection {
         let (Some(at), Some((mut cursor, mut page))) = (cursor_at, scanned(&reply)) else {
             return rendered(command, reply, limit);
         };
-        let shape = Scanned::of(&command.name());
+        let shape = Scanned::of(command);
         let mut rows = Vec::new();
         loop {
             shape.rows(self, session, &page, &mut rows)?;
             if cursor == b"0" {
-                return Ok(table(shape.columns(), rows, limit, None));
+                return table(shape.columns(), rows, limit, None);
             }
             if limit.is_some_and(|limit| rows.len() >= limit) {
-                return Ok(table(shape.columns(), rows, limit, Some(Stopped::AtLimit)));
+                return table(shape.columns(), rows, limit, Some(Stopped::AtLimit));
             }
             let mut words = command.words.clone();
             words[at] = cursor;
@@ -498,9 +540,7 @@ fn connect(
                 .get_connection_with_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECONDS))
         };
         match open(ProtocolVersion::RESP3) {
-            Err(error) if error.kind() == ErrorKind::RESP3NotSupported => {
-                open(ProtocolVersion::RESP2)
-            }
+            Err(error) if refused_hello(&error) => open(ProtocolVersion::RESP2),
             other => other,
         }
     };
@@ -522,6 +562,13 @@ fn connect(
     })
 }
 
+/// Whether the server turned `HELLO 3` down, as one from before Redis 6 does
+/// (unknown command), one that has the command but not the protocol does
+/// (`NOPROTO`), and a proxy may with a plain `ERR`.
+fn refused_hello(error: &RedisError) -> bool {
+    error.kind() == ErrorKind::RESP3NotSupported || matches!(error.code(), Some("NOPROTO" | "ERR"))
+}
+
 /// Whether `host:port` answers a `PING` in the clear, which is how `prefer`
 /// learns that TLS is not on offer. Redis listens for TLS or plaintext on a
 /// port, never both, and a plaintext one sent a TLS handshake waits for the
@@ -530,21 +577,19 @@ fn connect(
 /// refuses it at once.
 fn speaks_plaintext(host: &str, port: u16) -> bool {
     let timeout = Duration::from_secs(CONNECT_TIMEOUT_SECONDS);
-    let Some(address) = (host, port)
+    let answers = |address: SocketAddr| {
+        let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
+            return false;
+        };
+        let mut first = [0];
+        stream.set_read_timeout(Some(timeout)).is_ok()
+            && stream.write_all(b"PING\r\n").is_ok()
+            && stream.read_exact(&mut first).is_ok()
+            && matches!(first[0], b'+' | b'-')
+    };
+    (host, port)
         .to_socket_addrs()
-        .ok()
-        .and_then(|mut addresses| addresses.next())
-    else {
-        return false;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
-        return false;
-    };
-    let mut first = [0];
-    stream.set_read_timeout(Some(timeout)).is_ok()
-        && stream.write_all(b"PING\r\n").is_ok()
-        && stream.read_exact(&mut first).is_ok()
-        && matches!(first[0], b'+' | b'-')
+        .is_ok_and(|mut addresses| addresses.any(answers))
 }
 
 /// The client for one attempt. `require` (and `prefer`'s TLS attempt) checks
@@ -563,6 +608,11 @@ fn client(
         Some(mode) => ConnectionAddr::TcpTls {
             host: host.to_string(),
             port,
+            // redis-rs offers no ClientConfig of our own (its TlsConnParams
+            // are crate-private), so `require` takes its insecure path: any
+            // certificate is accepted, handshake signatures go unchecked
+            // (which weakens nothing, as the peer is unauthenticated anyway)
+            // and SNI is not sent.
             insecure: !mode.checks_certificate(),
             tls_params: None,
         },
@@ -573,7 +623,9 @@ fn client(
     if !server.user.is_empty() {
         login = login.set_username(&server.user);
     }
-    if !server.password.is_empty() {
+    // A user with no password is still logged in as that user: sending no
+    // credentials at all would leave the session on `default`.
+    if !server.password.is_empty() || !server.user.is_empty() {
         login = login.set_password(&server.password);
     }
     let info = address
@@ -667,6 +719,8 @@ enum Scanned {
     Keys,
     /// `HSCAN`: field, value, field, value.
     Fields,
+    /// `HSCAN … NOVALUES`: fields.
+    FieldNames,
     /// `SSCAN`: members.
     Members,
     /// `ZSCAN`: member, score, member, score.
@@ -674,11 +728,14 @@ enum Scanned {
 }
 
 impl Scanned {
-    fn of(name: &str) -> Self {
-        match name {
+    fn of(command: &Command) -> Self {
+        let flagged = |flag: &[u8]| scan_flag(&command.words, flag);
+        match command.name().as_str() {
             "SCAN" => Self::Keys,
+            "HSCAN" if flagged(b"NOVALUES") => Self::FieldNames,
             "HSCAN" => Self::Fields,
             "SSCAN" => Self::Members,
+            _ if flagged(b"NOSCORES") => Self::Members,
             _ => Self::Scores,
         }
     }
@@ -687,6 +744,7 @@ impl Scanned {
         match self {
             Self::Keys => &["key", "type", "ttl", "value"],
             Self::Fields => &["field", "value"],
+            Self::FieldNames => &["field"],
             Self::Members => &["member"],
             Self::Scores => &["member", "score"],
         }
@@ -700,14 +758,19 @@ impl Scanned {
         rows: &mut Vec<Vec<Cell>>,
     ) -> Result<(), DbError> {
         match self {
-            Self::Members => rows.extend(page.iter().map(|member| vec![cell(member)])),
+            Self::Members | Self::FieldNames => {
+                rows.extend(page.iter().map(|member| vec![cell(member)]));
+            }
             Self::Fields | Self::Scores => rows.extend(
                 page.chunks(2)
                     .map(|pair| pair.iter().map(cell).collect::<Vec<_>>()),
             ),
             Self::Keys if page.is_empty() => {}
             Self::Keys => {
+                // Per-command errors stay in the replies: a user allowed to SCAN
+                // but not to TYPE or TTL still sees the keys, with those cells NULL.
                 let mut pipe = ::redis::pipe();
+                pipe.ignore_errors();
                 for key in page {
                     let key = bytes(key).unwrap_or_default();
                     pipe.cmd("TYPE").arg(key).cmd("TTL").arg(key);
@@ -716,7 +779,7 @@ impl Scanned {
                     connection.send(session, |client| pipe.query(client))?;
                 let kinds: Vec<Option<String>> = described
                     .chunks(2)
-                    .map(|pair| pair.first().and_then(text))
+                    .map(|pair| pair.first().and_then(answer))
                     .collect();
                 // ponytail: a string's whole value is read, up to Redis's
                 // 512 MB a key, for every key on the page. Read a prefix with
@@ -738,7 +801,7 @@ impl Scanned {
                         .into_iter(),
                 };
                 for ((key, described), read) in page.iter().zip(described.chunks(2)).zip(read) {
-                    let ttl = described.get(1).and_then(text).filter(|ttl| ttl != "-1");
+                    let ttl = described.get(1).and_then(answer).filter(|ttl| ttl != "-1");
                     let value = read.and_then(|(_, counted)| {
                         let reply = replies.next()?;
                         match (counted, &reply) {
@@ -751,7 +814,7 @@ impl Scanned {
                     });
                     rows.push(vec![
                         cell(key),
-                        described.first().and_then(text),
+                        described.first().and_then(answer),
                         ttl,
                         value,
                     ]);
@@ -760,6 +823,22 @@ impl Scanned {
         }
         Ok(())
     }
+}
+
+/// Whether a `*SCAN` of a key (`HSCAN key cursor …`) carries `flag` among its
+/// options, which are looked at as `MATCH pattern` and `COUNT n` pairs so a
+/// pattern that spells the flag is not taken for it.
+fn scan_flag(words: &[Vec<u8>], flag: &[u8]) -> bool {
+    let mut options = words.iter().skip(3);
+    while let Some(option) = options.next() {
+        if option.eq_ignore_ascii_case(flag) {
+            return true;
+        }
+        if option.eq_ignore_ascii_case(b"MATCH") || option.eq_ignore_ascii_case(b"COUNT") {
+            options.next();
+        }
+    }
+    false
 }
 
 /// The command whose reply the keys grid shows as a key of `kind`'s value,
@@ -791,10 +870,7 @@ fn rendered(command: &Command, reply: Value, limit: Option<usize>) -> Result<Que
         (Value::Int(count), true) => u64::try_from(*count).ok(),
         _ => None,
     };
-    let scores = command
-        .words
-        .iter()
-        .any(|word| word.eq_ignore_ascii_case(b"WITHSCORES"))
+    let scores = (name.starts_with('Z') && has_option(command, b"WITHSCORES"))
         || matches!(
             name.as_str(),
             "ZPOPMIN" | "ZPOPMAX" | "BZPOPMIN" | "BZPOPMAX"
@@ -812,18 +888,41 @@ fn rendered(command: &Command, reply: Value, limit: Option<usize>) -> Result<Que
         (Value::Array(items), _, _) if scores => {
             paired(items).map(|rows| named(&["member", "score"], rows))
         }
-        (Value::Array(items), "HGETALL" | "HRANDFIELD", _)
-        | (Value::Array(items), "CONFIG", "GET") => {
+        (Value::Array(items), "HRANDFIELD", _) if has_option(command, b"WITHVALUES") => {
+            paired(items).map(|rows| named(&["field", "value"], rows))
+        }
+        (Value::Array(items), "HGETALL", _) | (Value::Array(items), "CONFIG", "GET") => {
             paired(items).map(|rows| named(&["field", "value"], rows))
         }
         _ => None,
     };
     let mut result = match shaped {
-        Some((columns, rows)) => table(&columns, rows, limit, None),
-        None => generic(reply, limit),
+        Some((columns, rows)) => table(&columns, rows, limit, None)?,
+        None => generic(reply, limit)?,
     };
     result.rows_affected = affected;
     Ok(result)
+}
+
+/// Whether `flag` is among the words that follow the key. A key can be named
+/// like an option, so the name and the key are not looked at, nor the keys
+/// that `numkeys` counts in `ZUNION`, `ZINTER` and `ZDIFF`.
+fn has_option(command: &Command, flag: &[u8]) -> bool {
+    let keys = match command.name().as_str() {
+        "ZUNION" | "ZINTER" | "ZDIFF" => command
+            .words
+            .get(1)
+            .and_then(|count| std::str::from_utf8(count).ok()?.parse::<usize>().ok())
+            .map(|count| count + 1),
+        _ => Some(1),
+    };
+    keys.is_some_and(|keys| {
+        command
+            .words
+            .iter()
+            .skip(keys + 1)
+            .any(|word| word.eq_ignore_ascii_case(flag))
+    })
 }
 
 fn table<C: AsRef<str>>(
@@ -831,7 +930,7 @@ fn table<C: AsRef<str>>(
     rows: Vec<Vec<Cell>>,
     limit: Option<usize>,
     stopped: Option<Stopped>,
-) -> QueryResult {
+) -> Result<QueryResult, DbError> {
     let total = rows.len();
     let kept = limit.map_or(total, |limit| limit.min(total));
     let mut builder = RowBuilder::default();
@@ -839,15 +938,15 @@ fn table<C: AsRef<str>>(
     let rows: Vec<Row> = rows
         .into_iter()
         .take(kept)
-        .filter_map(|row| {
+        .map(|row| {
             for value in &row {
                 bytes += value.as_ref().map_or(0, String::len);
                 builder.push(value.as_deref());
             }
-            builder.finish().ok()
+            builder.finish()
         })
-        .collect();
-    QueryResult {
+        .collect::<Result<_, _>>()?;
+    Ok(QueryResult {
         columns: columns
             .iter()
             .map(|name| Column {
@@ -860,13 +959,13 @@ fn table<C: AsRef<str>>(
         capped_from: (kept < total && stopped.is_none()).then_some(total),
         stopped,
         ..QueryResult::default()
-    }
+    })
 }
 
 /// A reply read by its own shape: a map as fields and values, an array of
 /// maps as one row each under the union of their keys, any other array one
 /// row per element, and anything else one value.
-fn generic(reply: Value, limit: Option<usize>) -> QueryResult {
+fn generic(reply: Value, limit: Option<usize>) -> Result<QueryResult, DbError> {
     match reply {
         Value::Map(pairs) => table(
             &["field", "value"],
@@ -1044,6 +1143,14 @@ fn union(records: Vec<Vec<(String, Cell)>>) -> Grid {
     (columns, rows)
 }
 
+/// [`text`] of a reply the server did not refuse.
+fn answer(value: &Value) -> Option<String> {
+    match value {
+        Value::ServerError(_) => None,
+        value => text(value),
+    }
+}
+
 /// The text of a scalar reply, `None` for nil and for anything nested.
 fn text(value: &Value) -> Option<String> {
     Some(match value {
@@ -1124,10 +1231,6 @@ const COUNTS: &[&str] = &[
     "ZREMRANGEBYRANK",
     "ZREMRANGEBYSCORE",
     "ZREMRANGEBYLEX",
-    "LPUSH",
-    "RPUSH",
-    "LPUSHX",
-    "RPUSHX",
     "LREM",
     "XDEL",
     "XACK",
@@ -1177,6 +1280,7 @@ mod tests {
 
         for refused in [
             "rediss://h/0?sslmode=disable",
+            "rediss://h/0?sslmode=prefer",
             "redis://h/zero",
             "redis://h/0?protocol=resp3",
             "redis://h/0#insecure",
@@ -1328,6 +1432,79 @@ mod tests {
         let result = rendered(&command("LRANGE l 0 -1"), reply, Some(2)).unwrap();
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.capped_from, Some(5));
+    }
+
+    #[test]
+    fn a_push_replies_the_lists_length_which_is_not_a_count_of_rows_changed() {
+        for line in ["LPUSH l a b", "RPUSH l a", "LPUSHX l a", "RPUSHX l a"] {
+            let result = rendered(&command(line), Value::Int(5), None).unwrap();
+            assert_eq!(result.rows_affected, None, "{line}");
+        }
+        let deleted = rendered(&command("DEL a b"), Value::Int(2), None).unwrap();
+        assert_eq!(deleted.rows_affected, Some(2));
+    }
+
+    #[test]
+    fn a_key_named_like_an_option_is_not_the_option() {
+        let members = Value::Array(vec![bulk("a"), bulk("b")]);
+        let (columns, rows) = grid("SMEMBERS WITHSCORES", members.clone());
+        assert_eq!(columns, ["value"]);
+        assert_eq!(rows.len(), 2);
+        let (columns, _) = grid("ZRANGE WITHSCORES 0 -1", members.clone());
+        assert_eq!(columns, ["value"]);
+        let (columns, _) = grid("ZUNION 1 WITHSCORES", members.clone());
+        assert_eq!(columns, ["value"]);
+        let (columns, _) = grid("ZUNION 1 WITHSCORES WITHSCORES", members.clone());
+        assert_eq!(columns, ["member", "score"]);
+        let (columns, _) = grid("ZRANGE z 0 -1 WITHSCORES", members);
+        assert_eq!(columns, ["member", "score"]);
+    }
+
+    #[test]
+    fn hrandfield_pairs_only_with_its_values() {
+        let fields = Value::Array(vec![bulk("a"), bulk("b")]);
+        let (columns, rows) = grid("HRANDFIELD h 2", fields.clone());
+        assert_eq!(columns, ["value"]);
+        assert_eq!(rows.len(), 2);
+        let (columns, rows) = grid("HRANDFIELD h 1 WITHVALUES", fields);
+        assert_eq!(columns, ["field", "value"]);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn a_scan_without_values_or_scores_lists_only_what_it_names() {
+        let columns = |line: &str| Scanned::of(&command(line)).columns().to_vec();
+        assert_eq!(columns("HSCAN h 0"), ["field", "value"]);
+        assert_eq!(columns("HSCAN h 0 NOVALUES"), ["field"]);
+        assert_eq!(
+            columns("HSCAN h 0 MATCH NOVALUES COUNT 5"),
+            ["field", "value"]
+        );
+        assert_eq!(columns("ZSCAN z 0"), ["member", "score"]);
+        assert_eq!(columns("ZSCAN z 0 COUNT 5 NOSCORES"), ["member"]);
+    }
+
+    #[test]
+    fn hello_is_refused_by_an_old_server_a_protocol_it_lacks_or_a_proxy() {
+        let refusal = |reply: &str| {
+            let Value::ServerError(error) =
+                ::redis::parse_redis_value(format!("-{reply}\r\n").as_bytes()).unwrap()
+            else {
+                panic!("{reply}");
+            };
+            refused_hello(&RedisError::from(error))
+        };
+        assert!(refusal(
+            "ERR unknown command `HELLO`, with args beginning with:"
+        ));
+        assert!(refusal(
+            "NOPROTO sorry, this protocol version is not supported"
+        ));
+        assert!(refusal(
+            "ERR Unknown subcommand or wrong number of arguments"
+        ));
+        assert!(!refusal("WRONGPASS invalid username-password pair"));
+        assert!(!refusal("NOPERM no permissions"));
     }
 
     fn live_config() -> ServerConfig {
@@ -1752,6 +1929,74 @@ mod tests {
             [some(&["OK"]), some(&["2"])]
         );
         assert_eq!(ran(&connection, "DEL live:multi").rows_affected, Some(1));
+    }
+
+    fn with_user(admin: &Connection, name: &str, rules: &str) -> ServerConfig {
+        ran(admin, &format!("ACL DELUSER {name}"));
+        ran(admin, &format!("ACL SETUSER {name} {rules}"));
+        ServerConfig {
+            user: name.into(),
+            password: "pw".into(),
+            ..live_config()
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_user_with_no_password_logs_in_as_that_user() {
+        let admin = live();
+        let server = ServerConfig {
+            password: String::new(),
+            ..with_user(
+                &admin,
+                "live_nopass",
+                "on nopass ~* +@read +acl|whoami +select",
+            )
+        };
+        let whoami = Connection::open(&server)
+            .and_then(|connection| connection.query("ACL WHOAMI", Fetch::default()));
+        ran(&admin, "ACL DELUSER live_nopass");
+        let whoami = whoami.expect("a nopass user should log in");
+        assert_eq!(cells(&whoami), [some(&["live_nopass"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_scan_still_lists_keys_a_user_may_not_describe() {
+        let admin = live();
+        let server = with_user(&admin, "live_scanonly", "on >pw ~* +scan +select");
+        let connection = Connection::open(&server);
+        let keys = connection.and_then(|connection| {
+            connection.query("SCAN 0 MATCH item:1* COUNT 1000", Fetch::default())
+        });
+        ran(&admin, "ACL DELUSER live_scanonly");
+        let keys = cells(&keys.expect("the scan should succeed"));
+        assert_eq!(keys.len(), 111);
+        assert!(
+            keys.iter()
+                .all(|row| row[0].is_some() && row[1..].iter().all(Option::is_none))
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_run_that_fails_inside_a_multi_does_not_leave_it_open() {
+        let connection = live();
+        let error = connection
+            .query("MULTI\nSET onlyone\nEXEC", Fetch::default())
+            .unwrap_err();
+        assert!(error.message.contains("discarded"), "{}", error.message);
+        assert_eq!(cells(&ran(&connection, "GET counter")), [some(&["42"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_command_name_is_sent_as_typed() {
+        let connection = live();
+        let error = connection
+            .query("frobnicate a", Fetch::default())
+            .unwrap_err();
+        assert!(error.message.contains("'frobnicate'"), "{}", error.message);
     }
 
     #[test]
