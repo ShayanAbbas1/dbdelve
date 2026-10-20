@@ -10,8 +10,9 @@
 //! and one page, and the page is rarely what was asked for, so the cursor is
 //! followed (as `redis-cli --scan` does) by sending the same command again
 //! with each cursor the server hands back, until it hands back `0` or the
-//! rows reach the limit. A `SCAN`'s keys are shown with their type and TTL,
-//! read in one pipelined round trip per page. That reshaping is the only one.
+//! rows reach the limit. A `SCAN`'s keys are shown with their type, TTL and
+//! value (a string's or JSON document's own, a collection's size), read in two
+//! pipelined round trips per page. That reshaping is the only one.
 //!
 //! The session is dropped whenever a command does not come back whole -- a
 //! Cancel, which kills it on the server, a statement timeout, a broken socket
@@ -641,7 +642,7 @@ impl Scanned {
 
     fn columns(&self) -> &'static [&'static str] {
         match self {
-            Self::Keys => &["key", "type", "ttl"],
+            Self::Keys => &["key", "type", "ttl", "value"],
             Self::Fields => &["field", "value"],
             Self::Members => &["member"],
             Self::Scores => &["member", "score"],
@@ -670,14 +671,68 @@ impl Scanned {
                 }
                 let described: Vec<Value> =
                     connection.send(session, |client| pipe.query(client))?;
-                for (key, described) in page.iter().zip(described.chunks(2)) {
+                let kinds: Vec<Option<String>> = described
+                    .chunks(2)
+                    .map(|pair| pair.first().and_then(text))
+                    .collect();
+                // ponytail: a string's whole value is read, up to Redis's
+                // 512 MB a key, for every key on the page. Read a prefix with
+                // GETRANGE if pages of large strings drag.
+                let mut values = ::redis::pipe();
+                values.ignore_errors();
+                let mut read = Vec::new();
+                for (key, kind) in page.iter().zip(&kinds) {
+                    let summary = kind.as_deref().and_then(summary);
+                    if let Some((command, _)) = summary {
+                        values.cmd(command).arg(bytes(key).unwrap_or_default());
+                    }
+                    read.push(summary);
+                }
+                let mut replies: std::vec::IntoIter<Value> = match values.is_empty() {
+                    true => Vec::new().into_iter(),
+                    false => connection
+                        .send(session, |client| values.query::<Vec<Value>>(client))?
+                        .into_iter(),
+                };
+                for ((key, described), read) in page.iter().zip(described.chunks(2)).zip(read) {
                     let ttl = described.get(1).and_then(text).filter(|ttl| ttl != "-1");
-                    rows.push(vec![cell(key), described.first().and_then(text), ttl]);
+                    let value = read.and_then(|(_, counted)| {
+                        let reply = replies.next()?;
+                        match (counted, &reply) {
+                            (_, Value::ServerError(_)) => None,
+                            (Some([one, many]), Value::Int(size)) => {
+                                Some(format!("{size} {}", if *size == 1 { one } else { many }))
+                            }
+                            _ => cell(&reply),
+                        }
+                    });
+                    rows.push(vec![
+                        cell(key),
+                        described.first().and_then(text),
+                        ttl,
+                        value,
+                    ]);
                 }
             }
         }
         Ok(())
     }
+}
+
+/// The command whose reply the keys grid shows as a key of `kind`'s value,
+/// and for a collection the nouns its size is counted in. `None` for a type
+/// with no read here, whose value is left NULL.
+fn summary(kind: &str) -> Option<(&'static str, Option<[&'static str; 2]>)> {
+    Some(match kind {
+        "string" => ("GET", None),
+        "ReJSON-RL" => ("JSON.GET", None),
+        "hash" => ("HLEN", Some(["field", "fields"])),
+        "list" => ("LLEN", Some(["item", "items"])),
+        "set" => ("SCARD", Some(["member", "members"])),
+        "zset" => ("ZCARD", Some(["member", "members"])),
+        "stream" => ("XLEN", Some(["entry", "entries"])),
+        _ => return None,
+    })
 }
 
 /// `reply` as a grid: by the command's shape where it has one worth reading,
@@ -710,6 +765,7 @@ fn rendered(command: &Command, reply: Value, limit: Option<usize>) -> Result<Que
         }
         (_, "CLIENT", "LIST" | "INFO") => text(&reply).map(|list| client_rows(&list)),
         (Value::Array(entries), "XRANGE" | "XREVRANGE", _) => stream_rows(entries),
+        (Value::Array(items), "LRANGE", _) => listed(command, items),
         (Value::Array(items), _, _) if scores => {
             paired(items).map(|rows| named(&["member", "score"], rows))
         }
@@ -802,6 +858,21 @@ fn generic(reply: Value, limit: Option<usize>) -> QueryResult {
         ),
         scalar => table(&["value"], vec![vec![cell(&scalar)]], limit, None),
     }
+}
+
+/// `LRANGE`'s items under the index each holds in the list, which is what
+/// names one to `LSET`. `None` from a negative start, which counts from an end
+/// the reply does not say the position of.
+fn listed(command: &Command, items: &[Value]) -> Option<Grid> {
+    let start = std::str::from_utf8(command.words.get(2)?)
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let rows = (start..)
+        .zip(items)
+        .map(|(index, item)| vec![Some(index.to_string()), cell(item)])
+        .collect();
+    Some((vec!["index".into(), "value".into()], rows))
 }
 
 /// `member, score` or `field, value` rows, from RESP3's array of pairs or
@@ -1275,8 +1346,13 @@ mod tests {
         assert_eq!(hash.columns[0].name, "field");
         assert!(cells(&hash).contains(&some(&["name", "Ada Lovelace"])));
         assert_eq!(
-            cells(&ran(&connection, "LRANGE queue:emails 0 -1")),
-            [some(&["welcome"]), some(&["reminder"]), some(&["receipt"])]
+            cells(&ran(&connection, "LRANGE queue:emails 1 -1")),
+            [some(&["1", "reminder"]), some(&["2", "receipt"])]
+        );
+        // From the end, where no index is known.
+        assert_eq!(
+            cells(&ran(&connection, "LRANGE queue:emails -1 -1")),
+            [some(&["receipt"])]
         );
         assert_eq!(ran(&connection, "SMEMBERS tags:redis").rows.len(), 3);
         assert_eq!(
@@ -1321,7 +1397,7 @@ mod tests {
         let connection = live();
         let keys = ran(&connection, "SCAN 0 MATCH item:* COUNT 10");
         let names: Vec<&str> = keys.columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["key", "type", "ttl"]);
+        assert_eq!(names, ["key", "type", "ttl", "value"]);
         assert_eq!(keys.rows.len(), 200);
         assert_eq!(keys.stopped, None);
         assert!(
