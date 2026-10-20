@@ -242,7 +242,8 @@ fn refusal(command: &Command) -> Option<String> {
     let name = command.name();
     let why = match name.as_str() {
         "SELECT" => "the database is the profile's, picked from the database list",
-        "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "MONITOR" | "SYNC" | "PSYNC" => {
+        "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
+        | "SUNSUBSCRIBE" | "MONITOR" | "SYNC" | "PSYNC" => {
             "it turns the session into a stream of messages with no end, which no result can hold"
         }
         "HELLO" | "RESET" | "QUIT" => "it resets or ends the session DBDelve holds open",
@@ -318,13 +319,14 @@ fn kind(command: &Command) -> Option<Kind> {
     Some(match (name.as_str(), sub.as_str()) {
         ("CONFIG", "GET" | "HELP") => Read,
         ("CONFIG", "SET" | "REWRITE" | "RESETSTAT") => Drop,
+        ("CLIENT", "PAUSE") => Drop,
         ("CLIENT", "LIST" | "INFO" | "ID" | "GETNAME" | "GETREDIR" | "TRACKINGINFO" | "HELP") => {
             Read
         }
         (
             "CLIENT",
-            "KILL" | "PAUSE" | "UNPAUSE" | "SETNAME" | "SETINFO" | "NO-EVICT" | "NO-TOUCH"
-            | "TRACKING" | "CACHING" | "UNBLOCK",
+            "KILL" | "UNPAUSE" | "SETNAME" | "SETINFO" | "NO-EVICT" | "NO-TOUCH" | "TRACKING"
+            | "CACHING" | "UNBLOCK",
         ) => Write,
         ("SCRIPT", "EXISTS" | "HELP") => Read,
         ("SCRIPT", "LOAD" | "KILL") => Write,
@@ -365,15 +367,17 @@ fn kind(command: &Command) -> Option<Kind> {
             | "COUNT-FAILURE-REPORTS"
             | "HELP",
         ) => Read,
-        ("CLUSTER", "RESET" | "FLUSHSLOTS") => Drop,
         (
             "CLUSTER",
-            "ADDSLOTS" | "ADDSLOTSRANGE" | "BUMPEPOCH" | "DELSLOTS" | "DELSLOTSRANGE" | "FAILOVER"
-            | "FORGET" | "MEET" | "REPLICATE" | "SAVECONFIG" | "SET-CONFIG-EPOCH" | "SETSLOT",
+            "RESET" | "FLUSHSLOTS" | "FAILOVER" | "DELSLOTS" | "DELSLOTSRANGE" | "SETSLOT",
+        ) => Drop,
+        (
+            "CLUSTER",
+            "ADDSLOTS" | "ADDSLOTSRANGE" | "BUMPEPOCH" | "FORGET" | "MEET" | "REPLICATE"
+            | "SAVECONFIG" | "SET-CONFIG-EPOCH",
         ) => Write,
         ("MODULE", "LIST" | "HELP") => Read,
-        ("MODULE", "LOAD" | "LOADEX") => Write,
-        ("MODULE", "UNLOAD") => Drop,
+        ("MODULE", "LOAD" | "LOADEX" | "UNLOAD") => Drop,
         ("FT.CURSOR", "READ") => Read,
         ("FT.CURSOR", "DEL") => Write,
         ("JSON.DEBUG", "MEMORY" | "HELP") => Read,
@@ -500,9 +504,6 @@ const READS: &[&str] = &[
     "PUBSUB",
     "WAIT",
     "WAITAOF",
-    "UNSUBSCRIBE",
-    "PUNSUBSCRIBE",
-    "SUNSUBSCRIBE",
     // Modules: JSON, Search, time series, probabilistic, vector sets.
     "JSON.GET",
     "JSON.MGET",
@@ -872,6 +873,9 @@ mod tests {
             "SUBSCRIBE news",
             "PSUBSCRIBE n*",
             "SSUBSCRIBE s",
+            "UNSUBSCRIBE",
+            "PUNSUBSCRIBE n*",
+            "SUNSUBSCRIBE s",
             "MONITOR",
             "SYNC",
             "PSYNC ? -1",
@@ -926,6 +930,11 @@ mod tests {
             ("SWAPDB 0 1", &drop),
             ("SHUTDOWN NOSAVE", &drop),
             ("DEBUG SLEEP 1", &drop),
+            ("MODULE LOAD /m.so", &drop),
+            ("CLIENT PAUSE 1000", &drop),
+            ("CLUSTER FAILOVER FORCE", &drop),
+            ("CLUSTER DELSLOTS 1", &drop),
+            ("CLUSTER SETSLOT 1 STABLE", &drop),
             ("GET a\nSET b 1", &write),
             ("GET a\nFLUSHDB\nSET b 1", &drop),
             ("# nothing at all", &read),
