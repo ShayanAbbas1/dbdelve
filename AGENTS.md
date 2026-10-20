@@ -234,7 +234,7 @@ trusts. `Cargo.toml` carries the full reasoning; this is the shape of it.
 ```toml
 gpui = { package = "gpui-pre", version = "=0.3.9" }  # rolling republish of zed main
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }  # font-kit, x11, wayland
-gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript"] }  # each engine's highlighter
+gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript", "tree-sitter-bash"] }  # each engine's highlighter
 
 tree-sitter = "=0.26.13"        # statement boundaries; the library keeps its tree private
 tree-sitter-sequel = "=0.3.11"  # the SQL grammar. A CORRECTNESS pin -- see below
@@ -267,6 +267,7 @@ futures-util = "=0.3.34"   # try_next over tiberius's result stream. dff = false
 
 mongodb = "=3.9.1"         # its own tokio runtime per connection. dff = false, rustls on ring
 time = "=0.3.55"           # ISO-8601 dates in mongosh statements. dff = false
+redis = "=1.7.1"           # redis-rs, blocking. dff = false, tls-rustls on ring
 encoding_rs = "=0.8.35"    # Import Rows' UTF-16 and Windows-1252 files. Already in the graph
 
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started

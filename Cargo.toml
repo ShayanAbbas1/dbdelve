@@ -15,7 +15,7 @@ publish = false
 # taking it here is what keeps one copy of the framework in the graph.
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript"] }
+gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript", "tree-sitter-bash"] }
 
 # gpui-component keeps its parse tree private, so we run our own parser to find
 # statement boundaries. Versions match what gpui-component pulls, to avoid
@@ -204,6 +204,20 @@ mongodb = { version = "=3.9.1", default-features = false, features = [
     "compat-3-0-0",
     "rustls-tls",
     "dns-resolver",
+] }
+# Redis, and what speaks its protocol (Valkey, KeyDB, Dragonfly). redis-rs's
+# blocking client, the sibling of `mysql` above rather than of the drivers
+# that own a runtime: `aio` and every `*-comp` feature stay off, so no tokio.
+#
+# `default-features = false` drops the typed command helpers (`acl`,
+# `streams`, `geospatial`, `script`) and `num-bigint`: every command goes out
+# as the words the user typed, and a big number renders from its own digits.
+# `tls-rustls` is rustls 0.23 with its default features off, so on the `ring`
+# provider already linked and the platform trust store the Postgres path reads;
+# `tls-rustls-insecure` is what `require` and `verify-ca` are spelled with.
+redis = { version = "=1.7.1", default-features = false, features = [
+    "tls-rustls",
+    "tls-rustls-insecure",
 ] }
 # A MongoDB profile's user, password and database, escaped into the connection
 # string the driver reads its options from. Already in the graph through `url`;
