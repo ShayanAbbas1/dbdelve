@@ -1112,8 +1112,10 @@ Decided, and not to be re-litigated:
   dialog and never written into the buffer. Each cell carries a tag for how
   its text stands for the bytes behind it, and only whole text is written
   back: a value cut for display, a non-UTF-8 key or value, JSON, streams and
-  a collection's preview (its first 100 entries as JSON, read with a bounded
-  `HSCAN`/`LRANGE`/`SSCAN`/`ZRANGE` beside its size) are read-only.
+  a collection's preview (its first 100 entries read with a bounded
+  `HSCAN`/`LRANGE`/`SSCAN`/`ZRANGE` beside its size, shown as JSON when that is
+  all of it and at most 200 characters, `GLANCE`, else as the size) are
+  read-only.
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
   field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
   (nil on a key gone since), and the connection turns the reply that

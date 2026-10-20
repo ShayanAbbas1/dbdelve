@@ -51,6 +51,11 @@ pub(super) const CANCELLED: &str = "Cancelled.";
 /// inspector shows of a value.
 const SHOWN: usize = crate::result_grid::FIELD_DISPLAY_LIMIT;
 
+/// The most characters of a collection's JSON the keys grid shows, past which
+/// it shows the size: what a column can show readably, so longer JSON would
+/// only be cut off by the column anyway.
+const GLANCE: usize = 200;
+
 /// How many databases a server has when it will not say: Redis's default.
 const DEFAULT_DATABASES: u32 = 16;
 
@@ -984,8 +989,8 @@ impl Scanned {
 /// inspector shows a value and marked `…` past that, and so is a document;
 /// either is tagged [`edit::TRUNCATED`] then, which no edit writes back, so
 /// the cut is never written over the value it was cut from. A collection is
-/// its size, and its first entries where they were `sampled`
-/// ([`previewed`]).
+/// its JSON where `sampled` read all of it and that fits in [`GLANCE`]
+/// characters, else its size.
 fn shown_value(
     command: &str,
     counted: Option<[&str; 2]>,
@@ -997,10 +1002,12 @@ fn shown_value(
         (_, Value::ServerError(_), _) => (None, edit::SUMMARY),
         (Some([one, many]), Value::Int(size), _) => {
             let noun = if *size == 1 { one } else { many };
-            let shown = match sampled.and_then(|sampled| entries(command, sampled)) {
-                Some((entries, brackets)) => previewed(&entries, brackets, *size, noun),
-                None => format!("{size} {noun}"),
-            };
+            let whole = sampled
+                .and_then(|sampled| entries(command, sampled))
+                .filter(|(entries, _)| usize::try_from(*size) == Ok(entries.len()))
+                .map(|(entries, [open, close])| format!("{open}{}{close}", entries.join(",")))
+                .filter(|json| json.chars().count() <= GLANCE);
+            let shown = whole.unwrap_or_else(|| format!("{size} {noun}"));
             (Some(shown), edit::SUMMARY)
         }
         (_, Value::BulkString(prefix), Some(Value::Int(length))) => {
@@ -1284,36 +1291,6 @@ fn score(value: &Value) -> String {
         }
         None => json(value).to_string(),
     }
-}
-
-/// A collection's preview: its entries as JSON, whole where they are all
-/// `size` of it and fit in [`SHOWN`] characters; else as many whole entries
-/// as fit after the size and before a `…` (`1000 fields · {"a":"1",…}`), or as
-/// much of the first as fits, cut between characters. The size leads so a
-/// narrow column still shows it.
-fn previewed(entries: &[String], [open, close]: [char; 2], size: i64, noun: &str) -> String {
-    let whole = format!("{open}{}{close}", entries.join(","));
-    if usize::try_from(size) == Ok(entries.len()) && whole.chars().count() <= SHOWN {
-        return whole;
-    }
-    let head = format!("{size} {noun} · {open}");
-    let tail = format!("…{close}");
-    let room = SHOWN.saturating_sub(head.chars().count() + tail.chars().count());
-    let mut body = String::new();
-    let mut used = 0;
-    for entry in entries {
-        let length = entry.chars().count() + 1;
-        if used + length > room {
-            if body.is_empty() {
-                body = entry.chars().take(room).collect();
-            }
-            break;
-        }
-        body.push_str(entry);
-        body.push(',');
-        used += length;
-    }
-    format!("{head}{body}{tail}")
 }
 
 /// A string's first [`SHOWN`] bytes, of `length` in all, marked `…` when that
@@ -2050,7 +2027,7 @@ mod tests {
     }
 
     #[test]
-    fn a_collection_is_previewed_as_its_first_entries_in_json() {
+    fn a_collection_is_shown_whole_only_when_it_reads_at_a_glance() {
         let array = |items: &[Value]| Value::Array(items.to_vec());
         let scan = |items: &[Value]| array(&[bulk("0"), array(items)]);
         let preview = |counted_by, size: i64, sampled: Value| {
@@ -2062,28 +2039,22 @@ mod tests {
             })
             .unwrap()
             .1;
-            shown_value(counted_by, counted, &Value::Int(size), None, Some(&sampled))
+            shown_value(counted_by, counted, &Value::Int(size), None, Some(&sampled)).0
         };
         let hash = scan(&[bulk("name"), bulk("Grace"), bulk("plan"), bulk("free")]);
         assert_eq!(
-            preview("HLEN", 2, hash.clone()),
-            (
-                Some(r#"{"name":"Grace","plan":"free"}"#.into()),
-                edit::SUMMARY
-            )
+            preview("HLEN", 2, hash.clone()).as_deref(),
+            Some(r#"{"name":"Grace","plan":"free"}"#)
         );
-        // Entries read short of the size are cut, and say the size.
+        // A read short of the size is only the size.
+        assert_eq!(preview("HLEN", 1000, hash).as_deref(), Some("1000 fields"));
         assert_eq!(
-            preview("HLEN", 1000, hash).0.as_deref(),
-            Some(r#"1000 fields · {"name":"Grace","plan":"free",…}"#)
-        );
-        assert_eq!(
-            preview("LLEN", 1, array(&[bulk("a")])).0.as_deref(),
+            preview("LLEN", 1, array(&[bulk("a")])).as_deref(),
             Some(r#"["a"]"#)
         );
         assert_eq!(
-            preview("SCARD", 3, scan(&[bulk("a")])).0.as_deref(),
-            Some(r#"3 members · ["a",…]"#)
+            preview("SCARD", 3, scan(&[bulk("a")])).as_deref(),
+            Some("3 members")
         );
         // Kept in the order read, which is by score, nested (RESP3) or flat.
         let nested = array(&[
@@ -2093,49 +2064,38 @@ mod tests {
         let flat = array(&[bulk("low"), bulk("1"), bulk("high"), bulk("2.5")]);
         for sampled in [nested, flat] {
             assert_eq!(
-                preview("ZCARD", 2, sampled).0.as_deref(),
+                preview("ZCARD", 2, sampled).as_deref(),
                 Some(r#"{"low":1,"high":2.5}"#)
             );
         }
         assert_eq!(
-            preview("ZCARD", 1, array(&[bulk("a"), bulk("-inf")]))
-                .0
-                .as_deref(),
+            preview("ZCARD", 1, array(&[bulk("a"), bulk("-inf")])).as_deref(),
             Some(r#"{"a":"-inf"}"#)
         );
         // Bytes that are not UTF-8 are their quoted spelling, never replaced.
         assert_eq!(
-            preview("LLEN", 1, array(&[Value::BulkString(b"\xff".to_vec())]))
-                .0
-                .as_deref(),
+            preview("LLEN", 1, array(&[Value::BulkString(b"\xff".to_vec())])).as_deref(),
             Some(r#"["\"\\xff\""]"#)
         );
-        // Whole entries that do not fit are cut after the last that does...
-        let items: Vec<Value> = (0..PREVIEWED).map(|_| bulk(&"x".repeat(98))).collect();
-        let (cut, _) = preview("LLEN", 100, array(&items));
-        let cut = cut.unwrap();
-        assert!(cut.chars().count() <= SHOWN, "{}", cut.len());
-        assert!(
-            cut.starts_with(r#"100 items · ["x"#) && cut.ends_with(r#"x",…]"#),
-            "{cut}"
+        // 200 characters show; 201 are only the size.
+        let item = |length: usize| array(&[bulk(&"x".repeat(length - 4))]);
+        for length in [199, GLANCE] {
+            assert_eq!(
+                preview("LLEN", 1, item(length)).unwrap().chars().count(),
+                length
+            );
+        }
+        assert_eq!(
+            preview("LLEN", 1, item(GLANCE + 1)).as_deref(),
+            Some("1 item")
         );
-        // ...and one too long for the cell on its own between characters.
-        let wide = bulk(&format!("a{}", "é".repeat(SHOWN)));
-        let (cut, _) = preview("LLEN", 1, array(&[wide]));
-        let cut = cut.unwrap();
-        assert!(
-            cut.starts_with("1 item · [\"aé") && cut.ends_with("é…]"),
-            "{cut}"
-        );
-        assert!(cut.chars().count() <= SHOWN);
         // A sample that failed leaves the size.
         assert_eq!(
             preview(
                 "HLEN",
                 3,
                 ::redis::parse_redis_value(b"-NOPERM no\r\n").unwrap()
-            )
-            .0,
+            ),
             Some("3 fields".into())
         );
     }
@@ -2533,7 +2493,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
-    fn live_the_keys_grid_previews_a_collections_first_entries_and_reads_no_more() {
+    fn live_the_keys_grid_counts_a_big_collection_and_reads_no_more_of_it() {
         let connection = Connection::open(&ServerConfig {
             database: "5".into(),
             ..live_config()
@@ -2576,26 +2536,10 @@ mod tests {
                 .and_then(|row| row[3].clone())
                 .unwrap_or_else(|| panic!("{key} has a value"))
         };
-        let hash = value("live:preview:hash");
-        assert!(hash.starts_with(r#"1000 fields · {"field:"#), "{hash}");
-        assert!(hash.ends_with(",…}"), "{hash}");
-        let list = value("live:preview:list");
-        assert!(
-            list.starts_with(r#"1000 items · ["item 1","item 2","#),
-            "{list}"
-        );
-        assert!(list.ends_with(",…]"), "{list}");
-        let set = value("live:preview:set");
-        assert!(
-            set.starts_with("1000 members · [") && set.ends_with(",…]"),
-            "{set}"
-        );
-        let zset = value("live:preview:zset");
-        assert!(
-            zset.starts_with(r#"1000 members · {"member:1000":1,"member:999":2,"#),
-            "{zset}"
-        );
-        assert!(zset.ends_with(",…}"), "{zset}");
+        assert_eq!(value("live:preview:hash"), "1000 fields");
+        assert_eq!(value("live:preview:list"), "1000 items");
+        assert_eq!(value("live:preview:set"), "1000 members");
+        assert_eq!(value("live:preview:zset"), "1000 members");
         assert_eq!(
             value("live:preview:small"),
             r#"{"name":"Grace Hopper","email":"grace@example.test","plan":"free"}"#

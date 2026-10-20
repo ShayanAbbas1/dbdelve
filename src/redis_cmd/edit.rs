@@ -33,9 +33,9 @@ pub(crate) const TRUNCATED: &str = "truncated";
 /// A whole JSON document, as the keys grid shows one.
 pub(crate) const JSON: &str = "json";
 /// What the keys grid shows for a key it does not hold the value of: a
-/// collection's first entries and size, or nothing for a type it has no read
-/// for. A preview that happens to be all of a collection is still one: its
-/// JSON is not what an edit would write back.
+/// collection's size or small enough to show whole, or nothing for a type it
+/// has no read for. A collection shown whole is still a preview: its JSON is
+/// not what an edit would write back.
 pub(crate) const SUMMARY: &str = "summary";
 
 const TAGS: [&str; 7] = [STRING, BYTES, INTEGER, DOUBLE, TRUNCATED, JSON, SUMMARY];

@@ -74,16 +74,15 @@ Each database lists one relation, `keys`, with `key`, `type`, `ttl` and
 shown in the tab. The value is the start of a string's or JSON document's own,
 or a stream's size (`5 entries`).
 
-A hash, list, set or sorted set shows its first 100 entries as compact JSON,
-read beside its size in the same round trip: `HSCAN key 0 COUNT 100` (one
-page, its cursor not followed), `LRANGE key 0 99`, `SSCAN key 0 COUNT 100` or
+A hash, list, set or sorted set is read beside its size in the same round
+trip, at most its first 100 entries: `HSCAN key 0 COUNT 100` (one page, its
+cursor not followed), `LRANGE key 0 99`, `SSCAN key 0 COUNT 100` or
 `ZRANGE key 0 99 WITHSCORES`, so the read is bounded however big the key is.
-A hash and a sorted set are an object (`{"name":"Ada","plan":"pro"}`,
-`{"linus":72,"ada":100}` in score order), a list and a set an array. When
-those entries are not all of it, or do not fit in 4,000 characters, the size
-leads, so a narrow column still shows it, and the JSON is cut after the last
-entry that fits: `1000 fields · {"field:1":"value 1","field:2":"value 2",…}`.
-A collection shown whole is plain JSON, with no size.
+When those entries are all of it and their compact JSON is at most 200
+characters, about what a column shows readably, the value is that JSON: a hash
+and a sorted set are an object (`{"name":"Ada","plan":"pro"}`,
+`{"linus":72,"ada":100}` in score order), a list and a set an array. Otherwise
+it is the size alone: `1000 fields`, `12 items`, `3 members`.
 
 - The filter bar narrows by `key` (written as a `MATCH` glob, with the value's
   glob characters escaped) and by `type`. Only one pattern and one type can be
@@ -174,7 +173,7 @@ failure says which one failed and how many ran before it.
 
 ## Known limits
 
-- **A collection's preview is read-only,** whole or cut: open the key to edit
+- **A collection's preview is read-only,** JSON or size: open the key to edit
   its entries.
 - **Cut values are read-only.** A string or document longer than the grid
   holds (4,000 bytes of a string, 4,000 characters of a document) is shown
