@@ -736,7 +736,8 @@ impl Workspace {
             if engine.opened_column().is_none() {
                 return;
             }
-            // The new query tab's limit, and a bound even where it has none.
+            // The new query tab's limit, and a bound even where it has none:
+            // the tab is given it too.
             let rows = self
                 .settings
                 .row_limit
@@ -747,7 +748,7 @@ impl Workspace {
                 })
             });
             match opened {
-                Some(statement) => self.run_in_new_query(statement, window, cx),
+                Some(statement) => self.run_in_new_query(statement, rows, window, cx),
                 None => self.note("There is no read for this row's type.".into(), cx),
             }
             return;

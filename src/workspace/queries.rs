@@ -1476,6 +1476,7 @@ impl Workspace {
     pub(crate) fn run_in_new_query(
         &mut self,
         statement: String,
+        at_most: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1491,6 +1492,13 @@ impl Workspace {
         else {
             return;
         };
+        // An unlimited tab would let a Redis scan follow its cursor to the end.
+        if let Some(tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id.unwrap_or_default()))
+        {
+            tab.row_limit.get_or_insert(at_most);
+        }
         editor.update(cx, |editor, cx| {
             editor.set_value(statement, window, cx);
             editor.set_cursor_position(Position::new(0, 0), window, cx);
