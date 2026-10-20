@@ -331,7 +331,7 @@ impl Connection {
                 let outcome = self.command(&mut session, command, fetch.limit, generated);
                 let open = match command.name().as_str() {
                     "MULTI" if outcome.is_ok() => Some(true),
-                    "EXEC" | "DISCARD" => Some(false),
+                    "EXEC" | "DISCARD" if session.is_some() => Some(false),
                     _ => None,
                 };
                 if let Some(open) = open {
@@ -459,8 +459,9 @@ impl Connection {
     }
 
     /// One round trip on the session, dialled first if the last one was lost,
-    /// and not sent at all once Cancel was asked for. A command that does not
-    /// come back whole takes the session with it.
+    /// and not sent at all once Cancel was asked for, which closes the session
+    /// as a kill would. A command that does not come back whole takes the
+    /// session with it.
     fn send<T>(
         &self,
         session: &mut Option<Session>,
@@ -473,6 +474,9 @@ impl Connection {
         {
             let mut running = lock(&self.running);
             if running.asked {
+                // The command skipped may have been the `EXEC` or `DISCARD`
+                // closing a `MULTI`, which would then queue the next run's.
+                *session = None;
                 return Err(plain_error(CANCELLED.into()));
             }
             running.id = live.id;
@@ -3019,6 +3023,30 @@ mod tests {
             Some("4")
         );
         clean(&connection, "live:multi:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_cancel_that_skips_an_exec_closes_the_session_and_its_multi() {
+        let connection = scratch("live:skipped:");
+        ran(&connection, "MULTI");
+        ran(&connection, "SET live:skipped:a 1");
+        // A Cancel landing between a run's commands, as its next send sees it.
+        lock(&connection.running).asked = true;
+        let exec = redis_cmd::parse("EXEC").unwrap().remove(0);
+        let error = connection
+            .command(&mut lock(&connection.session), &exec, None, false)
+            .unwrap_err();
+        assert_eq!(error.message, CANCELLED);
+        *lock(&connection.running) = Running::default();
+
+        let edited = applied(&connection, "HSET live:skipped:h f 1").unwrap();
+        assert_ne!(cells(&edited), [some(&["QUEUED"])]);
+        assert_eq!(
+            one(&connection, "EXISTS live:skipped:a live:skipped:h").as_deref(),
+            Some("1")
+        );
+        clean(&connection, "live:skipped:");
     }
 
     #[test]
