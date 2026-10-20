@@ -37,7 +37,11 @@ cargo run
 `docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB and Redis dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
-`dev/ssh/.generated/` (gitignored). With nothing configured, DBDelve opens the
+`dev/ssh/.generated/` (gitignored). `compose.yaml` pins the project name to
+`dbdelve`, so `docker compose up` from a git worktree recreates the main
+checkout's stack with the `./dev` mounts and the bastion key taken from that
+worktree; after removing the worktree, run `docker compose up -d --wait` and
+`dev/ssh/setup.sh` from the main checkout again. With nothing configured, DBDelve opens the
 connection form; the repository-owned databases accept:
 
 ```text
