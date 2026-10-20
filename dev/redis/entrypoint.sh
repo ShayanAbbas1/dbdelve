@@ -19,4 +19,4 @@ rm -f "$MARKER"
 ) &
 
 exec docker-entrypoint.sh redis-server --save '' --appendonly no \
-    --user dbdelve on '>dbdelve' '~*' '&*' '+@all'
+    --user default off --user dbdelve on '>dbdelve' '~*' '&*' '+@all'
