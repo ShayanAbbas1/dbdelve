@@ -11,8 +11,9 @@
 //! followed (as `redis-cli --scan` does) by sending the same command again
 //! with each cursor the server hands back, until it hands back `0` or the
 //! rows reach the limit. A `SCAN`'s keys are shown with their type, TTL and
-//! value (a string's or JSON document's own, a collection's size), read in two
-//! pipelined round trips per page. That reshaping is the only one.
+//! value (the start of a string's or JSON document's own, a collection's
+//! size), read in two pipelined round trips per page for the keys the limit
+//! keeps. That reshaping is the only one.
 //!
 //! The session is dropped whenever a command does not come back whole -- a
 //! Cancel, which kills it on the server, a statement timeout, a broken socket
@@ -45,6 +46,10 @@ const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 /// What a Cancel's error says, which is how `is_cancel` knows it.
 pub(super) const CANCELLED: &str = "Cancelled.";
+
+/// How much of a string or a document the keys grid holds: what the row
+/// inspector shows of a value.
+const SHOWN: usize = crate::result_grid::FIELD_DISPLAY_LIMIT;
 
 /// How many databases a server has when it will not say: Redis's default.
 const DEFAULT_DATABASES: u32 = 16;
@@ -369,7 +374,7 @@ impl Connection {
         let shape = Scanned::of(command);
         let mut rows = Vec::new();
         loop {
-            shape.rows(self, session, &page, &mut rows)?;
+            shape.rows(self, session, &page, limit, &mut rows)?;
             if cursor == b"0" {
                 return table(shape.columns(), rows, limit, None);
             }
@@ -755,6 +760,7 @@ impl Scanned {
         connection: &Connection,
         session: &mut Option<Session>,
         page: &[Value],
+        limit: Option<usize>,
         rows: &mut Vec<Vec<Cell>>,
     ) -> Result<(), DbError> {
         match self {
@@ -765,8 +771,16 @@ impl Scanned {
                 page.chunks(2)
                     .map(|pair| pair.iter().map(cell).collect::<Vec<_>>()),
             ),
-            Self::Keys if page.is_empty() => {}
             Self::Keys => {
+                let room = limit.map_or(page.len(), |limit| limit.saturating_sub(rows.len()));
+                let (page, past) = page.split_at(room.min(page.len()));
+                // A key past the limit is not shown, only counted toward the
+                // total a capped result reports, so nothing is read about it.
+                let counted = past.iter().map(|_| Vec::new());
+                if page.is_empty() {
+                    rows.extend(counted);
+                    return Ok(());
+                }
                 // Per-command errors stay in the replies: a user allowed to SCAN
                 // but not to TYPE or TTL still sees the keys, with those cells NULL.
                 let mut pipe = ::redis::pipe();
@@ -781,16 +795,24 @@ impl Scanned {
                     .chunks(2)
                     .map(|pair| pair.first().and_then(answer))
                     .collect();
-                // ponytail: a string's whole value is read, up to Redis's
-                // 512 MB a key, for every key on the page. Read a prefix with
-                // GETRANGE if pages of large strings drag.
+                // A string or a document is shown as far as the row inspector
+                // shows a value and marked `…` past that, so an edit of one
+                // has to read the whole value first or it writes back the cut.
                 let mut values = ::redis::pipe();
                 values.ignore_errors();
                 let mut read = Vec::new();
                 for (key, kind) in page.iter().zip(&kinds) {
                     let summary = kind.as_deref().and_then(summary);
-                    if let Some((command, _)) = summary {
-                        values.cmd(command).arg(bytes(key).unwrap_or_default());
+                    let key = bytes(key).unwrap_or_default();
+                    match summary {
+                        Some(("GETRANGE", _)) => {
+                            values.cmd("STRLEN").arg(key);
+                            values.cmd("GETRANGE").arg(key).arg(0).arg(SHOWN - 1);
+                        }
+                        Some((command, _)) => {
+                            values.cmd(command).arg(key);
+                        }
+                        None => {}
                     }
                     read.push(summary);
                 }
@@ -802,14 +824,28 @@ impl Scanned {
                 };
                 for ((key, described), read) in page.iter().zip(described.chunks(2)).zip(read) {
                     let ttl = described.get(1).and_then(answer).filter(|ttl| ttl != "-1");
-                    let value = read.and_then(|(_, counted)| {
+                    let value = read.and_then(|(command, counted)| {
+                        let length = match command {
+                            "GETRANGE" => replies.next(),
+                            _ => None,
+                        };
                         let reply = replies.next()?;
-                        match (counted, &reply) {
-                            (_, Value::ServerError(_)) => None,
-                            (Some([one, many]), Value::Int(size)) => {
+                        match (counted, &reply, length) {
+                            (_, Value::ServerError(_), _) => None,
+                            (Some([one, many]), Value::Int(size), _) => {
                                 Some(format!("{size} {}", if *size == 1 { one } else { many }))
                             }
-                            _ => cell(&reply),
+                            (_, Value::BulkString(prefix), Some(Value::Int(length))) => {
+                                Some(prefixed(prefix, length))
+                            }
+                            // ponytail: a document has no ranged read, so the
+                            // server still sends the whole of it and the cut
+                            // is only what the grid keeps. `JSON.DEBUG MEMORY`
+                            // first could skip large ones, a round trip a page.
+                            _ => cell(&reply).map(|value| match value.char_indices().nth(SHOWN) {
+                                Some((end, _)) => format!("{}…", &value[..end]),
+                                None => value,
+                            }),
                         }
                     });
                     rows.push(vec![
@@ -819,6 +855,7 @@ impl Scanned {
                         value,
                     ]);
                 }
+                rows.extend(counted);
             }
         }
         Ok(())
@@ -846,7 +883,7 @@ fn scan_flag(words: &[Vec<u8>], flag: &[u8]) -> bool {
 /// with no read here, whose value is left NULL.
 fn summary(kind: &str) -> Option<(&'static str, Option<[&'static str; 2]>)> {
     Some(match kind {
-        "string" => ("GET", None),
+        "string" => ("GETRANGE", None),
         "ReJSON-RL" => ("JSON.GET", None),
         "hash" => ("HLEN", Some(["field", "fields"])),
         "list" => ("LLEN", Some(["item", "items"])),
@@ -855,6 +892,20 @@ fn summary(kind: &str) -> Option<(&'static str, Option<[&'static str; 2]>)> {
         "stream" => ("XLEN", Some(["entry", "entries"])),
         _ => return None,
     })
+}
+
+/// A string's first [`SHOWN`] bytes, of `length` in all, marked `…` when that
+/// is not all of it. A character the cut runs through is dropped rather than
+/// turning the whole prefix into escaped bytes.
+fn prefixed(prefix: &[u8], length: i64) -> String {
+    if usize::try_from(length).is_ok_and(|length| length <= prefix.len()) {
+        return shown(prefix);
+    }
+    let whole = match std::str::from_utf8(prefix) {
+        Err(error) if error.error_len().is_none() => &prefix[..error.valid_up_to()],
+        _ => prefix,
+    };
+    format!("{}…", shown(whole))
 }
 
 /// `reply` as a grid: by the command's shape where it has one worth reading,
@@ -1759,6 +1810,64 @@ mod tests {
         assert_eq!(capped.rows.len(), 10);
         // One page held them all, so it says how many there were.
         assert_eq!(capped.capped_from, Some(214));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_keys_grid_reads_only_the_keys_it_keeps() {
+        let connection = live();
+        // This session's own count, which no other test's commands move.
+        let commands = |connection: &Connection| -> u64 {
+            let info = ran(connection, "CLIENT INFO");
+            let at = info
+                .columns
+                .iter()
+                .position(|column| column.name == "tot-cmds")
+                .expect("CLIENT INFO says tot-cmds");
+            info.rows[0].get(at).unwrap().parse().unwrap()
+        };
+        let before = commands(&connection);
+        let capped = preview(&connection, &[], Some(10));
+        assert_eq!(capped.capped_from, Some(214));
+        // The SCAN, a TYPE and a TTL for each of the 10 and at most two value
+        // reads each, and the second CLIENT INFO; not the 214 keys' worth.
+        let sent = commands(&connection) - before;
+        assert!(sent <= 1 + 10 * 4 + 1, "{sent} commands");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_keys_grid_shows_the_start_of_a_long_value_marked_as_cut() {
+        // A database of its own, so the seeded one keeps its size.
+        let connection = Connection::open(&ServerConfig {
+            database: "3".into(),
+            ..live_config()
+        })
+        .unwrap();
+        ran(&connection, "FLUSHDB");
+        // Two-byte characters after one byte: the cut lands mid-character.
+        let long = format!("a{}", "é".repeat(SHOWN));
+        ran(&connection, &format!("SET long {long}"));
+        ran(&connection, "SET short é");
+        let document = format!(r#"{{"s":"{}"}}"#, "x".repeat(SHOWN));
+        ran(
+            &connection,
+            &format!("JSON.SET doc $ {}", redis_cmd::quoted(&document)),
+        );
+        let text = preview_sql(Engine::Redis, "db3", KEYS, "", None, 0);
+        let all = ran(&connection, &text);
+        let value = |key: &str| {
+            cells(&all)
+                .into_iter()
+                .find(|row| row[0].as_deref() == Some(key))
+                .and_then(|row| row[3].clone())
+                .unwrap_or_else(|| panic!("{key} has a value"))
+        };
+        assert_eq!(value("long"), format!("a{}…", "é".repeat((SHOWN - 1) / 2)));
+        assert_eq!(value("short"), "é");
+        assert_eq!(value("doc").chars().count(), SHOWN + 1);
+        assert!(value("doc").starts_with(r#"{"s":"xxx"#) && value("doc").ends_with("x…"));
+        ran(&connection, "FLUSHDB");
     }
 
     #[test]

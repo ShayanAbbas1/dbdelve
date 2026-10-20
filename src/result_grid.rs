@@ -39,7 +39,7 @@ const CLIP_SCAN_LIMIT: usize = 16 * CELL_DISPLAY_LIMIT;
 /// "the value" has to stop somewhere, because a multi-megabyte document laid
 /// out as wrapped text stalls the frame it is laid out in. `cmd+c` on the cell
 /// still copies all of it. Raise this if a real value gets cut.
-const FIELD_DISPLAY_LIMIT: usize = 4_000;
+pub(crate) const FIELD_DISPLAY_LIMIT: usize = 4_000;
 
 /// How much of a row's name the cell menu's Open entry spells out.
 const OPEN_LABEL_CHARS: usize = 40;
