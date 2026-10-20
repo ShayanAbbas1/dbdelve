@@ -1,0 +1,33 @@
+# The development keyspace: one of every type, keys with a TTL, namespaced
+# keys, a binary value and a key whose name needs quoting. Read by redis-cli,
+# one command a line; the TTLs are a year, so nothing expires mid-test.
+FLUSHALL
+
+SET greeting "hello world"
+SET counter 42
+SET bin:blob "\x00\xff\xfebinary\x01"
+SET "key with spaces and \"quotes\"" weird
+SET session:abc token-abc EX 31536000
+
+HSET user:1 name "Ada Lovelace" email ada@example.test plan pro
+HSET user:2 name "Grace Hopper" email grace@example.test plan free
+HSET user:3 name "Linus Torvalds" email linus@example.test plan free
+HSET cache:page html "<p>hi</p>" etag abc123
+EXPIRE cache:page 31536000
+
+RPUSH queue:emails welcome reminder receipt
+SADD tags:redis fast "in memory" key-value
+ZADD leaderboard 100 ada 85.5 grace 72 linus
+
+XADD events:signup 1700000000000-0 user 1 plan pro
+XADD events:signup 1700000001000-0 user 2 plan free
+XADD events:signup 1700000002000-0 user 3 plan free referrer ada
+
+JSON.SET doc:1 $ "{\"name\":\"Ada\",\"langs\":[\"en\",\"fr\"],\"active\":true}"
+
+# Enough keys that a SCAN takes more than one page to walk.
+EVAL "for i = 1, 200 do redis.call('SET', 'item:' .. i, i) end" 0
+
+SELECT 1
+SET other:key "in db 1"
+HSET other:hash a 1 b 2
