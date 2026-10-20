@@ -126,6 +126,9 @@ pub(crate) fn is_generated_read(text: &str) -> bool {
         ["MATCH", pattern, "TYPE", kind] => {
             format!("{} TYPE {}", raw_filter(pattern), quoted(kind))
         }
+        ["TYPE", kind, "MATCH", pattern] => {
+            format!("TYPE {} {}", quoted(kind), raw_filter(pattern))
+        }
         _ => return false,
     };
     preview(&options) == text
@@ -212,6 +215,11 @@ mod tests {
                 &filter_predicate("type", Operator::Equals, "zset").unwrap(),
             ),
             raw_filter("x COUNT 1\nFLUSHDB"),
+            joined(
+                Conjunction::And,
+                &filter_predicate("type", Operator::Equals, "hash").unwrap(),
+                &raw_filter("user:*"),
+            ),
         ];
         for filter in &filters {
             assert!(is_generated_read(&preview(filter)), "{filter}");
@@ -222,7 +230,7 @@ mod tests {
         let refused = [
             joined(Conjunction::Or, &raw_filter("a*"), &raw_filter("b*")),
             joined(Conjunction::And, &raw_filter("a*"), &raw_filter("b*")),
-            format!("TYPE hash {}", raw_filter("a*")),
+            format!("TYPE hash TYPE zset {}", raw_filter("a*")),
             "MATCH a* COUNT 5".to_string(),
         ];
         for filter in &refused {
