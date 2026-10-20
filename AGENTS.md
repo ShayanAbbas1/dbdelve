@@ -1119,7 +1119,8 @@ Decided, and not to be re-litigated:
   only when that is all of it and at most 200 characters (`GLANCE`), tagged
   `hash json` and so on so an edit can diff it, else as its size. JSON with a
   byte that is not UTF-8 or an infinite score shows tagged `summary`, and is
-  read-only.
+  read-only. `Engine::new_row_omits` leaves the keys grid's `type` out of New
+  row, since a new key is a string.
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
   field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
   (nil on a key gone since), and the connection turns the reply that

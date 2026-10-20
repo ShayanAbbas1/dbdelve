@@ -2253,6 +2253,7 @@ mod tests {
             .0,
             Some("3 fields".into())
         );
+        assert!(Engine::Redis.new_row_omits("type") && !Engine::Redis.new_row_omits("ttl"));
     }
 
     #[test]

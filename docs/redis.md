@@ -124,7 +124,8 @@ On the keys grid:
   to a key deleted since it was read (an error) or now holding another type
   (`WRONGTYPE`).
 - A hash, list, set or sorted set shown as JSON is edited as JSON (see below).
-- New row is `SET key value NX`, with `EX` when a ttl is given.
+- New row is `SET key value NX`, with `EX` when a ttl is given. Its form has
+  no `type`: a new key is a string.
 - Delete row is `UNLINK`.
 
 A collection's JSON is diffed against the JSON shown, and each difference

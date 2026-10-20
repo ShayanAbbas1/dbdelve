@@ -72,6 +72,7 @@ impl Workspace {
                 let columns: Vec<(String, String)> = structure
                     .columns
                     .iter()
+                    .filter(|column| !engine.new_row_omits(&column.name))
                     .map(|column| (column.name.clone(), column.data_type.clone()))
                     .collect();
                 (tab.schema.clone(), tab.name.clone(), columns)

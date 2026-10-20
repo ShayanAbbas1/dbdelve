@@ -448,6 +448,23 @@ impl Engine {
         }
     }
 
+    /// Whether New row's form leaves `column` out because no value of it is
+    /// one a new row can take: a Redis key's type, which is whatever command
+    /// made the key, and a new key is a `SET`.
+    pub fn new_row_omits(self, column: &str) -> bool {
+        match self {
+            Self::Redis => column == "type",
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => false,
+        }
+    }
+
     /// Whether New row may insert into a relation of `kind`. A SQL view can
     /// take an insert (an updatable view, or a trigger behind it), so the
     /// server is left to say; a MongoDB view never does.
