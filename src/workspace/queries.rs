@@ -917,7 +917,12 @@ impl Workspace {
         {
             return;
         }
-        queue.showing = index;
+        let switched = std::mem::replace(&mut queue.showing, index) != index;
+        // The form was built from the rows it was opened over, which can be
+        // another table's.
+        if switched && let Some(profile) = self.profile_mut() {
+            profile.session.insert_form.take_if(|form| form.tab == tab);
+        }
         cx.notify();
     }
 
