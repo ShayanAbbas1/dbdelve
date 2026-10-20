@@ -1134,14 +1134,22 @@ impl Workspace {
         if profile.config.schema() == Some(name.as_str()) {
             return;
         }
+        // A connect in flight was handed the config before this, and the
+        // reconnect that would hand it the new one can be refused.
+        if matches!(profile.state, ProfileState::Connecting) {
+            self.note(
+                "The connection is still opening, so the schema was not switched.".into(),
+                cx,
+            );
+            return;
+        }
         // A `SET` inside the user's transaction is undone by their ROLLBACK,
         // which would leave the titlebar naming a schema the session left.
         // Snowflake's rides on each request instead, out of a ROLLBACK's reach.
+        // The session checks again once a statement still running lets go.
         if profile.in_transaction && profile.config.engine() == Engine::Postgres {
             self.note(
-                "A transaction is open on this connection, so the schema was not switched. \
-                 Commit or roll it back first."
-                    .into(),
+                "A transaction is open on this connection, so the schema was not switched.".into(),
                 cx,
             );
             return;
@@ -1152,15 +1160,9 @@ impl Workspace {
         let previous = profile.config.schema().map(str::to_string);
         profile.config.set_schema(Some(name.clone()));
         let (id, generation) = (profile.id.clone(), profile.generation);
-        let connecting = matches!(profile.state, ProfileState::Connecting);
         let connection = profile.connection();
         self.remember_profiles(cx);
         cx.notify();
-        // A connect in flight was handed the config before this; one not
-        // started yet reads it when it is.
-        if connecting {
-            self.reconnect(self.active, cx);
-        }
         let Some(connection) = connection else {
             return;
         };
