@@ -566,7 +566,6 @@ impl Session {
         self.queries.iter_mut().find(|tab| tab.id == id)
     }
 
-    /// The query buffer in front, or `None` when an object tab is.
     /// Put away the new-row form and the review a closed tab had open. A
     /// query tab's id is handed to the next buffer, which would find them.
     pub(crate) fn forget(&mut self, tab: Tab) {
@@ -586,6 +585,7 @@ impl Session {
         }
     }
 
+    /// The query buffer in front, or `None` when an object tab is.
     pub(crate) fn active_query_tab(&self) -> Option<&QueryTab> {
         match self.active {
             Tab::Query(id) => self.query_tab(id),
