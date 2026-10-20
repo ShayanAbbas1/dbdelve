@@ -10,7 +10,8 @@
 //! the next, an open transaction included, and the API refuses a `USE` outright
 //! ("Command not supported by SQL API: USE") rather than running one it would
 //! then forget. That is the engine's behaviour and dbdelve does not paper over
-//! it: names are qualified, or resolve against the profile's database.
+//! it: names are qualified, or resolve against the profile's database and
+//! active schema, which ride on every request as fields instead.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -22,9 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::{
-    CancelToken, Cancelling, Catalog, Column, DbError, Engine, Fetch, ForeignKey, NamedDefinition,
-    QueryResult, RelationKind, Row, Stopped, Structure, assemble_catalog, assemble_structure,
-    plain_error, terminated,
+    CancelToken, Cancelling, Catalog, Column, Databases, DbError, Engine, Fetch, ForeignKey,
+    NamedDefinition, QueryResult, RelationKind, Row, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_structure, plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -56,6 +57,17 @@ pub struct SnowflakeConfig {
     /// Seconds, or 0 for the account's own limit. Sent as a field of each
     /// request, never as SQL.
     pub statement_timeout: u32,
+    /// The schema unqualified names in the user's statements resolve in, as
+    /// the catalog stores its name. None leaves the server to pick.
+    pub schema: Option<String>,
+}
+
+/// Whether `name` can be written without quotes, which the server then folds
+/// to upper case.
+fn bare(name: &str) -> bool {
+    name.chars()
+        .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
+        && !name.starts_with(|first: char| first.is_ascii_digit())
 }
 
 /// The domain an account's own host is under, when the profile names no other.
@@ -111,18 +123,30 @@ impl SnowflakeConfig {
     /// `analytics` and `ANALYTICS` are one database there, and would be two
     /// here without the same folding. A name that could not be written bare
     /// was necessarily created quoted, and is taken as it is.
-    fn stored_database(&self) -> String {
-        let bare = self
-            .database
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
-            && !self
-                .database
-                .starts_with(|first: char| first.is_ascii_digit());
-        match bare {
+    ///
+    /// One written quoted, as [`Self::set_database`] writes a name that only
+    /// quotes reach, is the name inside the quotes.
+    pub(super) fn stored_database(&self) -> String {
+        match bare(&self.database) {
             true => self.database.to_ascii_uppercase(),
-            false => self.database.clone(),
+            false => Engine::Snowflake.unquote_identifier(&self.database),
         }
+    }
+
+    /// Move onto `name`, as `SHOW DATABASES` lists it. A name already in force
+    /// keeps the spelling it was typed in. Otherwise it is written bare where
+    /// that folds back to it, so the form shows `ANALYTICS` and not
+    /// `"ANALYTICS"`, and quoted where only quotes reach it. Schemas belong to
+    /// one database, so the active one doesn't carry over.
+    pub fn set_database(&mut self, name: String) {
+        if self.stored_database() == name {
+            return;
+        }
+        self.database = match bare(&name) && name == name.to_ascii_uppercase() {
+            true => name,
+            false => Engine::Snowflake.quote_identifier(&name),
+        };
+        self.schema = None;
     }
 
     /// The host requests go to. The derived name is the service's documented
@@ -414,7 +438,10 @@ fn render(value: &str, row_type: &RowType) -> String {
 ///
 /// Everything here is a field of the request and none of it is SQL: the
 /// statement goes out exactly as it was written (hard rule 1).
-fn request_body(config: &SnowflakeConfig, sql: &str) -> Value {
+///
+/// `schema` is quoted because it is the catalog's stored name, which a bare
+/// field would fold to upper case.
+fn request_body(config: &SnowflakeConfig, sql: &str, schema: Option<&str>) -> Value {
     let mut body = json!({
         "statement": sql,
         "database": config.database,
@@ -430,6 +457,9 @@ fn request_body(config: &SnowflakeConfig, sql: &str) -> Value {
     }
     if config.statement_timeout > 0 {
         body["timeout"] = json!(config.statement_timeout);
+    }
+    if let Some(schema) = schema {
+        body["schema"] = json!(Engine::Snowflake.quote_identifier(schema));
     }
     body
 }
@@ -573,6 +603,9 @@ fn rows_affected(body: &Value) -> Option<u64> {
 pub struct Connection {
     config: Arc<SnowflakeConfig>,
     agent: ureq::Agent,
+    /// The active schema, shared between clones so a switch on one reaches
+    /// every tab's statements from then on.
+    schema: Arc<Mutex<Option<String>>>,
 }
 
 /// Takes a handle back out of its run's list however `query` leaves.
@@ -611,11 +644,31 @@ impl Connection {
         let connection = Self {
             config: Arc::new(config.clone()),
             agent,
+            schema: Arc::new(Mutex::new(config.schema.clone())),
         };
         // Connecting is the connection test. This needs no warehouse, so it
         // proves the key, the account and the network without starting one.
         connection.query("SELECT CURRENT_VERSION()")?;
         Ok(connection)
+    }
+
+    /// The user's statements resolve in `schema` from here on. dbdelve's own
+    /// are qualified and never sent one.
+    pub fn set_schema(&self, schema: &str) {
+        *self
+            .schema
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(schema.to_string());
+    }
+
+    /// `SHOW` rather than `INFORMATION_SCHEMA`, which would need a warehouse.
+    /// No session means no current database to ask the server for: it is the
+    /// one every request names.
+    pub fn databases(&self) -> Result<Databases, DbError> {
+        Ok(Databases {
+            current: Some(self.config.stored_database()),
+            ..assemble_databases(&self.internal_query("SHOW DATABASES")?)?
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -733,19 +786,30 @@ impl Connection {
     /// and the handle is what Cancel needs from the first moment. Measured at
     /// 885ms against 315ms for three `SELECT 1`s, and that is the price of the
     /// button working on the statement that needs it.
+    ///
+    /// Outside the active schema, so one dropped since it was picked fails the
+    /// user's statements in the server's words rather than the connect, and
+    /// another can still be picked from the catalog.
     pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.query_with(sql, &CancelToken::default(), Fetch::default())
+        let cancel = CancelToken::default();
+        self.submit(sql, Cancellable::Yes(&cancel), Fetch::default(), None)
     }
 
-    /// The same, stoppable by a [`Connection::cancel`] given `cancel`, keeping
-    /// what `fetch` asks for of its rows; see [`super::Connection::query`].
+    /// The same in the active schema, stoppable by a [`Connection::cancel`]
+    /// given `cancel`, keeping what `fetch` asks for of its rows; see
+    /// [`super::Connection::query`].
     pub fn query_with(
         &self,
         sql: &str,
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::Yes(cancel), fetch)
+        let schema = self
+            .schema
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.submit(sql, Cancellable::Yes(cancel), fetch, schema.as_deref())
     }
 
     /// The same, for a statement dbdelve wrote and the user cannot see.
@@ -755,7 +819,7 @@ impl Connection {
     /// buys. A structure load is four of these, so it is most of a second each
     /// time a relation is opened.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::No, Fetch::default())
+        self.submit(sql, Cancellable::No, Fetch::default(), None)
     }
 
     fn submit(
@@ -763,10 +827,11 @@ impl Connection {
         sql: &str,
         cancellable: Cancellable,
         fetch: Fetch,
+        schema: Option<&str>,
     ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
         let host = self.config.host();
-        let body = request_body(&self.config, sql);
+        let body = request_body(&self.config, sql, schema);
 
         // A synchronous submit answers with the result itself, and only hands
         // back a handle when the statement outlives the API's own 45-second
@@ -1525,7 +1590,7 @@ mod tests {
         // Odd spacing, a trailing comment and no semicolon: none of it is
         // dbdelve's to tidy.
         let sql = "select  1 -- one\n  ,2";
-        assert_eq!(request_body(&config("k"), sql)["statement"], sql);
+        assert_eq!(request_body(&config("k"), sql, None)["statement"], sql);
     }
 
     #[test]
@@ -1533,7 +1598,7 @@ mod tests {
         let mut config = config("k");
         config.database = "ANALYTICS".into();
         config.warehouse = Some(String::new());
-        let blank = request_body(&config, "select 1");
+        let blank = request_body(&config, "select 1", None);
         assert_eq!(blank["database"], "ANALYTICS");
         assert_eq!(blank["parameters"]["MULTI_STATEMENT_COUNT"], "0");
         for absent in ["warehouse", "role", "timeout"] {
@@ -1543,10 +1608,62 @@ mod tests {
         config.warehouse = Some("COMPUTE_WH".into());
         config.role = Some("ANALYST".into());
         config.statement_timeout = 30;
-        let filled = request_body(&config, "select 1");
+        let filled = request_body(&config, "select 1", None);
         assert_eq!(filled["warehouse"], "COMPUTE_WH");
         assert_eq!(filled["role"], "ANALYST");
         assert_eq!(filled["timeout"], 30);
+        assert!(filled.get("schema").is_none(), "no schema was asked for");
+    }
+
+    #[test]
+    fn an_active_schema_is_sent_quoted_as_the_catalog_stores_it() {
+        let schema = |name| request_body(&config("k"), "select 1", Some(name))["schema"].clone();
+        assert_eq!(schema("PUBLIC"), r#""PUBLIC""#);
+        // Folded to `SALES` were it sent bare.
+        assert_eq!(schema("sales"), r#""sales""#);
+        assert_eq!(schema(r#"My "Odd" Schema"#), r#""My ""Odd"" Schema""#);
+    }
+
+    #[test]
+    fn a_picked_database_is_written_bare_only_where_that_folds_back_to_it() {
+        let moved = |from: &str, to: &str| {
+            let mut config = SnowflakeConfig {
+                database: from.into(),
+                schema: Some("STAGING".into()),
+                ..Default::default()
+            };
+            config.set_database(to.into());
+            (
+                config.database.clone(),
+                config.stored_database(),
+                config.schema,
+            )
+        };
+        assert_eq!(
+            moved("ANALYTICS", "SNOWFLAKE_SAMPLE_DATA"),
+            (
+                "SNOWFLAKE_SAMPLE_DATA".into(),
+                "SNOWFLAKE_SAMPLE_DATA".into(),
+                None
+            )
+        );
+        assert_eq!(
+            moved("ANALYTICS", "analytics"),
+            (r#""analytics""#.into(), "analytics".into(), None)
+        );
+        assert_eq!(
+            moved("ANALYTICS", r#"my "db""#),
+            (r#""my ""db""""#.into(), r#"my "db""#.into(), None)
+        );
+        // Already there: the typed spelling stays, and so does the schema.
+        assert_eq!(
+            moved("analytics", "ANALYTICS"),
+            (
+                "analytics".into(),
+                "ANALYTICS".into(),
+                Some("STAGING".into())
+            )
+        );
     }
 
     #[test]
@@ -1687,6 +1804,7 @@ mod tests {
             warehouse: optional("WAREHOUSE"),
             role: optional("ROLE"),
             statement_timeout: 0,
+            schema: None,
         }
     }
 
@@ -1789,6 +1907,27 @@ mod tests {
             .expect_err("stopped");
         println!("{error}");
         assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_the_databases_are_listed_and_a_schema_scopes_the_users_statements() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let databases = connection.databases().expect("listed");
+        println!("{databases:?}");
+        assert!(databases.names.contains(&"SNOWFLAKE".to_string()));
+        let current = databases.current.expect("the profile's own");
+        assert!(databases.names.contains(&current), "{current}");
+
+        connection.set_schema("INFORMATION_SCHEMA");
+        let shown = connection
+            .query_with(
+                "SELECT CURRENT_SCHEMA()",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("runs");
+        assert_eq!(shown.rows[0].get(0), Some("INFORMATION_SCHEMA"));
     }
 
     #[test]
@@ -2326,6 +2465,29 @@ mod tests {
                 .is_some_and(|value| value.starts_with("Bearer ey"))
         );
         assert_eq!(mock.hits("GET", &format!("/{handle}")), 1);
+    }
+
+    #[test]
+    fn a_schema_set_on_one_clone_scopes_every_users_statement_and_nothing_of_dbdelves() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        mock.answer(sql, "query");
+        let connection = connected(&mock);
+        connection.clone().set_schema("Sales EU");
+        connection
+            .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+
+        let requests = mock.requests();
+        let sent = |statement: &str| {
+            requests
+                .iter()
+                .find(|request| request.body["statement"] == statement)
+                .map(|request| request.body["schema"].clone())
+                .expect("submitted")
+        };
+        assert_eq!(sent(sql), r#""Sales EU""#);
+        assert_eq!(sent("SELECT CURRENT_VERSION()"), Value::Null);
     }
 
     #[test]

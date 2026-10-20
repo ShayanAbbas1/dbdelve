@@ -87,14 +87,10 @@ impl Profile {
     }
 
     /// The schema unqualified names resolve in first, where the engine has
-    /// one to pick: `public` until one is picked, which is where the server's
-    /// default `search_path` lands them.
+    /// one to pick: its default until one is picked.
     pub(crate) fn active_schema(&self) -> Option<&str> {
-        let server = self.config.server()?;
-        self.config
-            .engine()
-            .has_active_schema()
-            .then(|| server.schema.as_deref().unwrap_or("public"))
+        let default = self.config.engine().default_schema()?;
+        Some(self.config.schema().unwrap_or(default))
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {
@@ -168,7 +164,7 @@ impl Profile {
             srv: mongo.map(|mongo| mongo.srv),
             options: mongo.map(|mongo| mongo.options.clone()),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
-            schema: server.and_then(|server| server.schema.clone()),
+            schema: self.config.schema().map(str::to_string),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.

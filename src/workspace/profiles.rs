@@ -144,6 +144,7 @@ impl Workspace {
                 warehouse: stored.warehouse,
                 role: stored.role,
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                schema: stored.schema,
             }),
         };
         let stored_queries = stored_buffers(
@@ -1005,22 +1006,14 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let Some(server) = profile.config.server() else {
+        let Some(configured) = profile.config.database() else {
             return;
         };
         // As the profile would store it: Redis lists `db3` and stores `3`.
         let mut asked = profile.config.clone();
         asked.set_database(name.clone());
-        let unmoved = asked
-            .server()
-            .is_some_and(|asked| asked.database == server.database);
-        if unmoved
-            || already_on(
-                &server.database,
-                profile.databases.current.as_deref(),
-                &name,
-            )
-        {
+        let unmoved = asked.database() == Some(configured);
+        if unmoved || already_on(configured, profile.databases.current.as_deref(), &name) {
             return;
         }
         let session = &profile.session;
@@ -1139,10 +1132,7 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let Some(server) = profile.config.server_mut() else {
-            return;
-        };
-        server.schema = Some(name.clone());
+        profile.config.set_schema(name.clone());
         let (id, generation) = (profile.id.clone(), profile.generation);
         let connecting = matches!(profile.state, ProfileState::Connecting);
         let connection = profile.connection();

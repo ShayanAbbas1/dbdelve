@@ -268,7 +268,9 @@ impl ConnectionForm {
             options,
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
-            schema: server.and_then(|server| server.schema.clone()),
+            schema: config
+                .and_then(ConnectionConfig::schema)
+                .map(str::to_string),
             statement_timeout,
             error: None,
             test: None,
@@ -425,6 +427,7 @@ impl ConnectionForm {
             warehouse: optional(&self.warehouse),
             role: optional(&self.role),
             statement_timeout: self.statement_timeout(cx)?,
+            schema: self.schema.clone(),
         })
     }
 
@@ -481,7 +484,7 @@ impl ConnectionForm {
             schema: self
                 .schema
                 .clone()
-                .filter(|_| self.engine.has_active_schema()),
+                .filter(|_| self.engine.default_schema().is_some()),
         })
     }
 }

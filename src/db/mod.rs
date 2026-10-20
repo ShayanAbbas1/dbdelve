@@ -757,13 +757,19 @@ impl Engine {
                 | Self::SqlServer
                 | Self::MongoDb
                 | Self::Redis
+                | Self::Snowflake
         )
     }
 
-    /// Whether a profile picks the schema unqualified names resolve in. MySQL's
-    /// database is its schema, and SQL Server's default schema is the login's.
-    pub fn has_active_schema(self) -> bool {
-        self == Self::Postgres
+    /// Where a profile picks the schema unqualified names resolve in, the one
+    /// they resolve in until it does. None where it can't: MySQL's database is
+    /// its schema, and SQL Server's default schema is the login's.
+    pub fn default_schema(self) -> Option<&'static str> {
+        match self {
+            Self::Postgres => Some("public"),
+            Self::Snowflake => Some("PUBLIC"),
+            _ => None,
+        }
     }
 
     /// A database the server keeps for itself, listed after the user's own.
@@ -775,6 +781,9 @@ impl Engine {
             }
             Self::SqlServer => &["master", "tempdb", "model", "msdb"],
             Self::MongoDb => &["admin", "local", "config"],
+            // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA`
+            // is a share too, but one people query.
+            Self::Snowflake => &["SNOWFLAKE"],
             _ => &[],
         };
         system.contains(&name)
@@ -1262,8 +1271,8 @@ pub struct ServerConfig {
     /// directly. None is the ordinary direct connection.
     pub ssh: Option<SshTunnel>,
     /// The schema unqualified names resolve in first, where
-    /// [`Engine::has_active_schema`]. None leaves the server's `search_path`
-    /// alone.
+    /// [`Engine::default_schema`] has one. None leaves the server's
+    /// `search_path` alone.
     pub schema: Option<String>,
 }
 
@@ -1357,25 +1366,53 @@ impl ConnectionConfig {
                 server.database = name
             }
             Self::MongoDb(mongo) => mongo.set_database(name),
+            Self::Snowflake(account) => account.set_database(name),
             // Listed as `db3`, stored as the number a URL's path holds.
             Self::Redis(server) => {
                 server.database = name.strip_prefix("db").unwrap_or(&name).to_string();
             }
-            Self::Sqlite { .. } | Self::Turso { .. } | Self::Snowflake(_) => {}
+            Self::Sqlite { .. } | Self::Turso { .. } => {}
+        }
+    }
+
+    /// The database as the profile holds it, which may be blank.
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            Self::Snowflake(account) => Some(&account.database),
+            _ => self.server().map(|server| server.database.as_str()),
         }
     }
 
     /// The database the profile is on, spelled as [`Connection::databases`]
     /// lists it. None where a blank one leaves the server to pick.
     pub fn database_name(&self) -> Option<String> {
-        let database = self.server()?.database.as_str();
+        let database = self.database()?;
         match self {
+            Self::Snowflake(account) => Some(account.stored_database()),
             Self::Postgres(_) if database.is_empty() => Some("postgres".into()),
             Self::Redis(_) => Some(format!(
                 "db{}",
                 if database.is_empty() { "0" } else { database }
             )),
             _ => Some(database.to_string()).filter(|name| !name.is_empty()),
+        }
+    }
+
+    /// The schema picked as the active one, where [`Engine::default_schema`]
+    /// has one. None until one is picked.
+    pub fn schema(&self) -> Option<&str> {
+        match self {
+            Self::Postgres(server) => server.schema.as_deref(),
+            Self::Snowflake(account) => account.schema.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_schema(&mut self, schema: String) {
+        match self {
+            Self::Postgres(server) => server.schema = Some(schema),
+            Self::Snowflake(account) => account.schema = Some(schema),
+            _ => {}
         }
     }
 
@@ -1788,7 +1825,8 @@ impl Connection {
             Self::SqlServer(connection) => connection.databases(),
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
-            Self::Sqlite(_) | Self::Turso(_) | Self::Snowflake(_) => Ok(Databases::default()),
+            Self::Snowflake(connection) => connection.databases(),
+            Self::Sqlite(_) | Self::Turso(_) => Ok(Databases::default()),
         }?;
         databases.system_last(engine);
         Ok(databases)
@@ -1796,10 +1834,14 @@ impl Connection {
 
     /// Make `schema` the first place unqualified names resolve, on every
     /// session this connection has open and every one it opens later. A
-    /// no-op where [`Engine::has_active_schema`] is false.
+    /// no-op where [`Engine::default_schema`] has none.
     pub fn set_schema(&self, schema: &str) -> Result<(), DbError> {
         match self {
             Self::Postgres(connection) => connection.set_schema(schema),
+            Self::Snowflake(connection) => {
+                connection.set_schema(schema);
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -3312,6 +3354,13 @@ mod tests {
             listed(Engine::Postgres, &["app", "postgres", "zeta"]),
             ["app", "postgres", "zeta"]
         );
+        assert_eq!(
+            listed(
+                Engine::Snowflake,
+                &["ANALYTICS", "SNOWFLAKE", "SNOWFLAKE_SAMPLE_DATA"]
+            ),
+            ["ANALYTICS", "SNOWFLAKE_SAMPLE_DATA", "SNOWFLAKE"]
+        );
         assert!(Engine::MariaDb.is_system_database("performance_schema"));
         assert!(!Engine::Postgres.is_system_database("mysql"));
         assert!(!Engine::Redis.is_system_database("db0"));
@@ -4006,6 +4055,26 @@ mod tests {
             ConnectionConfig::Snowflake(account).endpoint(),
             "myorg.privatelink.example"
         );
+    }
+
+    #[test]
+    fn a_snowflake_profile_picks_its_schema_and_drops_it_with_the_database() {
+        let mut config = ConnectionConfig::Snowflake(SnowflakeConfig {
+            database: "analytics".into(),
+            ..Default::default()
+        });
+        assert_eq!(config.database_name().as_deref(), Some("ANALYTICS"));
+        assert_eq!(config.schema(), None);
+
+        config.set_schema("Staging".into());
+        assert_eq!(config.schema(), Some("Staging"));
+        config.set_database("ANALYTICS".into());
+        assert_eq!(config.schema(), Some("Staging"), "the same database");
+
+        config.set_database("lower".into());
+        assert_eq!(config.database(), Some(r#""lower""#));
+        assert_eq!(config.database_name().as_deref(), Some("lower"));
+        assert_eq!(config.schema(), None);
     }
 
     #[test]
