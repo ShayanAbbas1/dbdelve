@@ -38,7 +38,7 @@ use crate::{
     Workspace,
     db::{Catalog, RelationKind, Syntax},
     mql::{self, Completing},
-    sql,
+    redis_cmd, sql,
 };
 
 /// What is known about one relation's columns.
@@ -435,9 +435,18 @@ impl SchemaCompletions {
         let word = word_before(sql, offset);
         match self.syntax {
             Syntax::Sql => {}
-            // ponytail: command names arrive with phase 4 of the Redis engine;
-            // until then nothing is offered rather than SQL's keywords.
-            Syntax::Redis => return (Vec::new(), wanted),
+            Syntax::Redis => {
+                let (word, candidates) = redis_candidates(sql, offset);
+                let ranked = rank(
+                    candidates,
+                    &sql[word.clone()],
+                    &mut self.matcher.borrow_mut(),
+                )
+                .into_iter()
+                .map(|candidate| (word.clone(), candidate))
+                .collect();
+                return (ranked, wanted);
+            }
             Syntax::Mongo => {
                 let candidates = self.mongo_candidates(sql, word.clone(), &mut wanted);
                 let ranked = rank(
@@ -590,6 +599,26 @@ fn rank(candidates: Vec<Candidate>, prefix: &str, matcher: &mut Matcher) -> Vec<
 
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+/// The command name being typed, when the caret is in the first word of its
+/// line, and every name to rank against it. A name may hold a dot
+/// (`FT.CREATE`), which `word_before` would cut at.
+fn redis_candidates(text: &str, offset: usize) -> (Range<usize>, Vec<Candidate>) {
+    let line = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let typed = &text[line..offset];
+    let start = line + typed.len() - typed.trim_start().len();
+    let word = start..offset;
+    let first_word = !text[word.clone()].contains(char::is_whitespace);
+    if !first_word || text[word.clone()].starts_with('#') || word.is_empty() {
+        return (word, Vec::new());
+    }
+    let candidates = redis_cmd::names()
+        .map(|(name, tag)| {
+            Candidate::new(name, tag.map(String::from), CompletionItemKind::FUNCTION)
+        })
+        .collect();
+    (word, candidates)
 }
 
 /// The identifier being typed, as a range ending at the cursor. Empty when the
@@ -1187,6 +1216,33 @@ mod tests {
         );
         // No collection named, still operators.
         assert!(mongo_labels("db.runCommand({ $or| })").contains(&"$or".to_string()));
+    }
+
+    fn redis_labels(text: &str) -> Vec<String> {
+        let offset = text.find('|').expect("the test must mark the caret");
+        let text = text.replace('|', "");
+        let mut completions = detached(
+            Catalog {
+                schemas: Vec::new(),
+            },
+            &[],
+        );
+        completions.syntax = Syntax::Redis;
+        completions
+            .items(&text, offset)
+            .0
+            .into_iter()
+            .map(|(_, candidate)| candidate.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_redis_buffer_offers_command_names_in_a_lines_first_word_only() {
+        assert!(redis_labels("hge|").contains(&"HGETALL".to_string()));
+        assert!(redis_labels("GET a\n  ft.cre|").contains(&"FT.CREATE".to_string()));
+        assert!(redis_labels("GET ke|").is_empty());
+        assert!(redis_labels("# ge|").is_empty());
+        assert!(redis_labels("|").is_empty());
     }
 
     #[test]

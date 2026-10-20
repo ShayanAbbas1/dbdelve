@@ -329,6 +329,24 @@ pub(crate) fn leaves(text: &str) -> Leaves {
     leaves
 }
 
+/// Every command name the editor offers, with how much it may do. A name that
+/// only has subcommands (`CONFIG`) has no kind of its own, and a refused one
+/// is left out.
+pub(crate) fn names() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
+    let tagged = |names: &'static [&'static str], tag| names.iter().map(move |n| (*n, Some(tag)));
+    tagged(READS, "read")
+        .chain(tagged(WRITES, "write"))
+        .chain(tagged(DROPS, "destructive"))
+        .chain(SUBCOMMANDED.iter().map(|name| (*name, None)))
+        .filter(|(name, _)| {
+            let command = Command {
+                span: 0..0,
+                words: vec![name.as_bytes().to_vec()],
+            };
+            refusal(&command).is_none()
+        })
+}
+
 fn kind(command: &Command) -> Option<Kind> {
     let name = command.name();
     let sub = command.subcommand();
@@ -398,17 +416,30 @@ fn kind(command: &Command) -> Option<Kind> {
         ("FT.CURSOR", "READ") => Read,
         ("FT.CURSOR", "DEL") => Write,
         ("JSON.DEBUG", "MEMORY" | "HELP") => Read,
-        (
-            "CONFIG" | "CLIENT" | "SCRIPT" | "FUNCTION" | "MEMORY" | "SLOWLOG" | "LATENCY" | "ACL"
-            | "CLUSTER" | "MODULE" | "FT.CURSOR" | "JSON.DEBUG",
-            _,
-        ) => return None,
+        (name, _) if SUBCOMMANDED.contains(&name) => return None,
         (name, _) if READS.contains(&name) => Read,
         (name, _) if WRITES.contains(&name) => Write,
         (name, _) if DROPS.contains(&name) => Drop,
         _ => return None,
     })
 }
+
+/// Commands whose subcommand decides what they do, so `kind` has no answer
+/// for an unknown one.
+const SUBCOMMANDED: &[&str] = &[
+    "CONFIG",
+    "CLIENT",
+    "SCRIPT",
+    "FUNCTION",
+    "MEMORY",
+    "SLOWLOG",
+    "LATENCY",
+    "ACL",
+    "CLUSTER",
+    "MODULE",
+    "FT.CURSOR",
+    "JSON.DEBUG",
+];
 
 /// Commands that only read, whatever follows their name: those the server's
 /// command table flags `readonly`, and the server and connection commands
@@ -961,6 +992,19 @@ mod tests {
         ] {
             assert_eq!(&classify(text), verdict, "{text}");
         }
+    }
+
+    #[test]
+    fn the_offered_names_are_the_tables_less_what_is_refused() {
+        let offered: Vec<_> = names().collect();
+        assert!(offered.contains(&("GET", Some("read"))));
+        assert!(offered.contains(&("FLUSHALL", Some("destructive"))));
+        assert!(offered.contains(&("CONFIG", None)));
+        assert!(
+            offered
+                .iter()
+                .all(|(name, _)| !matches!(*name, "SUBSCRIBE" | "HELLO"))
+        );
     }
 
     #[test]
