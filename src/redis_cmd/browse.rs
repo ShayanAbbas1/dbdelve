@@ -26,8 +26,8 @@ pub(crate) fn preview(filter: &str) -> String {
 
 /// The status bar's Count. `DBSIZE` counts the whole keyspace and nothing
 /// counts a pattern's keys but walking them, which is what the preview already
-/// did, so under a filter there is no count to run: the empty text is one the
-/// gate refuses.
+/// did, so under a filter there is no count to run: the empty text, which
+/// Count reads as that and the gate refuses.
 pub(crate) fn count(filter: &str) -> String {
     match filter.trim() {
         "" => "DBSIZE".into(),

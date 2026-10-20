@@ -341,6 +341,15 @@ impl Workspace {
             return;
         }
         let sql = explorer::count_sql(engine, &schema, &relation, filter);
+        if sql.is_empty() {
+            self.note(
+                "The server has no count for this filter: only reading every row it matches \
+                 would give one."
+                    .into(),
+                cx,
+            );
+            return;
+        }
         if !sql::is_generated_select(engine, &sql)
             || sql::gate(&sql::classify(engine, &sql), mode, &confirmed).is_some()
         {
