@@ -1460,7 +1460,7 @@ impl Workspace {
         };
         let (id, editor) = (tab.id, tab.editor.clone());
         let text = editor.read(cx).value().to_string();
-        let appended = appended_statement(&text, &sql);
+        let appended = appended_statement(self.engine(), &text, &sql);
         let line = appended.lines().count().saturating_sub(sql.lines().count()) as u32;
         editor.update(cx, |editor, cx| {
             editor.set_value(appended, window, cx);

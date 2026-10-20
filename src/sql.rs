@@ -1897,10 +1897,14 @@ pub(crate) fn remember_statement(history: &mut Vec<String>, sql: &str) {
 /// `UPDATE` appended to it becomes one statement, and the next `cmd+enter`
 /// would send both as one. dbdelve is writing here because the user asked it to,
 /// so the boundary of what they wrote has to survive the ask.
-pub(crate) fn appended_statement(buffer: &str, statement: &str) -> String {
+pub(crate) fn appended_statement(engine: Engine, buffer: &str, statement: &str) -> String {
     let text = buffer.trim_end();
     if text.is_empty() {
         return statement.to_string();
+    }
+    // A Redis command ends with its line, and a `;` would join its last word.
+    if engine == Engine::Redis {
+        return format!("{text}\n\n{statement}");
     }
 
     format!("{}\n\n{statement}", terminated(text))
@@ -5119,7 +5123,7 @@ mod tests {
             ("SELECT 2", "SELECT 1"),
             ("SELECT 2;\n", "SELECT\n  1"),
         ] {
-            let appended = appended_statement(buffer, recalled);
+            let appended = appended_statement(Engine::Postgres, buffer, recalled);
             let line = appended.lines().count() - recalled.lines().count();
 
             assert_eq!(
@@ -5135,15 +5139,22 @@ mod tests {
         // Without the semicolon, "SELECT 1" and "UPDATE ..." would read back
         // as a single statement, and cmd+enter would send both at once.
         assert_eq!(
-            appended_statement("SELECT 1", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
     }
 
     #[test]
+    fn a_redis_buffer_takes_its_appended_command_on_a_line_of_its_own() {
+        let appended = appended_statement(Engine::Redis, "GET a  \n", "SET a 1 KEEPTTL");
+        assert_eq!(appended, "GET a\n\nSET a 1 KEEPTTL");
+        assert_eq!(crate::redis_cmd::parse(&appended).unwrap().len(), 2);
+    }
+
+    #[test]
     fn an_already_terminated_buffer_keeps_a_single_semicolon() {
         assert_eq!(
-            appended_statement("SELECT 1;", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1;", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
     }
@@ -5207,7 +5218,7 @@ mod tests {
             ("SELECT 'a;'", "SELECT 'a;';"),
             ("SELECT 1;;", "SELECT 1;;"),
         ] {
-            let appended = appended_statement(buffer, "UPDATE t SET a = 1");
+            let appended = appended_statement(Engine::Postgres, buffer, "UPDATE t SET a = 1");
 
             assert_eq!(appended, format!("{expected}\n\nUPDATE t SET a = 1"));
             assert_eq!(
@@ -5221,7 +5232,7 @@ mod tests {
     #[test]
     fn an_empty_buffer_yields_just_the_statement() {
         assert_eq!(
-            appended_statement("", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "", "UPDATE t SET a = 1"),
             "UPDATE t SET a = 1"
         );
     }
@@ -5229,7 +5240,7 @@ mod tests {
     #[test]
     fn trailing_whitespace_in_the_buffer_does_not_ragged_the_join() {
         assert_eq!(
-            appended_statement("SELECT 1\n\n  ", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1\n\n  ", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
     }

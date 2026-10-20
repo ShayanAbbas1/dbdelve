@@ -1677,7 +1677,7 @@ impl Workspace {
         };
 
         let text = editor.read(cx).value().to_string();
-        let appended = appended_statement(&text, &batch);
+        let appended = appended_statement(self.engine(), &text, &batch);
         editor.update(cx, |editor, cx| editor.set_value(appended, window, cx));
         self.execute_and_then(
             batch,
