@@ -2354,7 +2354,7 @@ mod tests {
     fn live_a_keys_glob_metacharacters_match_only_themselves() {
         // A database of its own, so the seeded one keeps its size.
         let connection = Connection::open(&ServerConfig {
-            database: "2".into(),
+            database: "6".into(),
             ..live_config()
         })
         .unwrap();
@@ -2366,7 +2366,7 @@ mod tests {
         ran(&connection, &set("oddZZkeyQ1x"));
         let preview = |bars: &[FilterBar]| {
             let filter = derived_filter(Engine::Redis, bars, &[]);
-            let text = preview_sql(Engine::Redis, "db2", KEYS, &filter, None, 0);
+            let text = preview_sql(Engine::Redis, "db6", KEYS, &filter, None, 0);
             assert!(is_generated_select(Engine::Redis, &text), "{text}");
             keys(&ran(&connection, &text))
         };
