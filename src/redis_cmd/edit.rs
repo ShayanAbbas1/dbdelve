@@ -213,6 +213,39 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+/// A JSON object read only for its names, which `serde_json::Value` would
+/// collapse to the last of any name given twice. Holds the first such name.
+struct Names(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for Names {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Names;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Names, A::Error> {
+                let mut seen = BTreeSet::new();
+                let mut twice = None;
+                while let Some(name) = map.next_key::<String>()? {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    if !seen.insert(name.clone()) {
+                        twice.get_or_insert(name);
+                    }
+                }
+                Ok(Names(twice))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
 /// A small collection as the keys grid shows it whole, read from its JSON or
 /// from the server's reply, to compare and to diff.
 #[derive(Debug, PartialEq)]
@@ -230,6 +263,14 @@ impl Collection {
         use serde_json::Value as Json;
         let json: Json =
             serde_json::from_str(text).map_err(|error| format!("This is not JSON: {error}."))?;
+        if matches!(kind, HASH | ZSET)
+            && json.is_object()
+            && let Ok(Names(Some(name))) = serde_json::from_str(text)
+        {
+            return Err(format!(
+                "A name can be given only once, and {name} is twice."
+            ));
+        }
         let string = |value: &Json, what: &str| match value {
             Json::String(text) => Ok(text.clone()),
             other => Err(format!(
@@ -841,6 +882,18 @@ fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::sql::{Mode, Stop, gate};
+
+    #[test]
+    fn a_hash_or_sorted_set_json_naming_one_entry_twice_is_refused() {
+        for (kind, text) in [
+            (HASH, r#"{"a":"1","b":"2","a":"3"}"#),
+            (ZSET, r#"{"a":1,"b":2,"a":3}"#),
+        ] {
+            let error = Collection::parse(kind, text).unwrap_err();
+            assert!(error.contains("a is twice"), "{kind}: {error}");
+        }
+        assert!(Collection::parse(HASH, r#"{"a":"1","b":"2"}"#).is_ok());
+    }
 
     fn row(
         schema: &str,
