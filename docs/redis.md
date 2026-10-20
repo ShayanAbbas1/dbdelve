@@ -119,8 +119,11 @@ On an opened key:
 | string | `SET ... KEEPTTL` | | `UNLINK` |
 | hash | value: `HSET` | `HSETNX` | `HDEL` |
 | list | value: `LSET` | `RPUSH` | `LSET` to a marker, then `LREM` |
-| set | member: `SREM` + `SADD` in a `MULTI` | `SADD` | `SREM` |
-| sorted set | score: `ZADD XX`; member: `ZREM` + `ZADD` in a `MULTI` | `ZADD NX` | `ZREM` |
+| set | member: `SADD` the new, then `SREM` the old | `SADD` | `SREM` |
+| sorted set | score: `ZADD XX`; member: `ZADD NX` the new, then `ZREM` the old | `ZADD NX` | `ZREM` |
+
+Renaming a member onto one the set already holds is an error, and the old
+member stays.
 
 A batch is not wrapped in a transaction: the commands apply in order, and a
 failure says which one failed and how many ran before it.
@@ -150,9 +153,7 @@ failure says which one failed and how many ran before it.
   UTF-8 is shown in redis-cli's quoted spelling and has no edit.
 - **`LSET` acts on the index as it is now.** A list changed by someone else
   between the read and the edit has the new value written to whatever sits at
-  that position. Likewise, renaming a set member onto an existing one merges
-  them, and renaming a sorted set member onto an existing one overwrites its
-  score.
+  that position.
 - A hash field and a list index are where a value is, so they are not editable.
 - Numeric-looking values sort as text in the keys grid.
 - Key names are not completed, only command names.

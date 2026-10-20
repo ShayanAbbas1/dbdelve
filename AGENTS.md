@@ -128,7 +128,7 @@ require it, stop and raise it instead.
    only what the grid's edits, new rows and deleted rows write
    (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … KEEPTTL` and `SET … NX`, `UNLINK`,
    `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
-   `ZREM`, and a `MULTI`/`EXEC` bracket around a two-command edit), each
+   `ZREM`, and a `MULTI`/`EXEC` bracket around a list item's deletion), each
    written again from its parts and compared with the text.
    `redis_cmd::browse::is_generated_read` admits only the keys grid's
    `SCAN 0 [MATCH p] [TYPE t] COUNT n` and `DBSIZE`. A key opened as a grid

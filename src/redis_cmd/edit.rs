@@ -74,8 +74,8 @@ fn columns(schema: &str) -> &'static [&'static str] {
 }
 
 /// Each pending row as the commands that write it, in the order the rows
-/// were edited. A set member or a zset member renamed is a `MULTI` of its
-/// removal and its addition, so neither lands without the other.
+/// were edited. A set member or a zset member renamed is the new one added,
+/// never over one already there, and only then the old one removed.
 pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
         return Err("There are no edits to apply.".into());
@@ -116,10 +116,8 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
             SET => {
                 let key = key_word(&row.table)?;
                 lines.extend([
-                    "MULTI".to_string(),
-                    format!("SREM {key} {}", held("member")?),
                     format!("SADD {key} {}", typed("member")?),
-                    "EXEC".to_string(),
+                    format!("SREM {key} {}", held("member")?),
                 ]);
             }
             ZSET => {
@@ -131,10 +129,8 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                 match set("member") {
                     None => lines.push(format!("ZADD {key} XX {score} {}", held("member")?)),
                     Some(_) => lines.extend([
-                        "MULTI".to_string(),
+                        format!("ZADD {key} NX {score} {}", typed("member")?),
                         format!("ZREM {key} {}", held("member")?),
-                        format!("ZADD {key} {score} {}", typed("member")?),
-                        "EXEC".to_string(),
                     ]),
                 }
             }
@@ -307,8 +303,8 @@ enum Unit {
 ///
 /// - one or more edits: `SET k v KEEPTTL`, `EXPIRE k n` with `n` above zero
 ///   (zero would delete the key), `PERSIST k`, `RENAMENX k new`, `HSET k f v`,
-///   `LSET k i v`, `ZADD k XX score m`, and the `MULTI` of a `SREM` and an
-///   `SADD`, or of a `ZREM` and a `ZADD`, on one key;
+///   `LSET k i v`, `ZADD k XX score m`, and on one key an `SADD` then an
+///   `SREM`, or a `ZADD k NX score m` then a `ZREM`;
 /// - one new row: `SET k v NX` (with `EX n`), `HSETNX k f v`, `RPUSH k v`,
 ///   `SADD k m` or `ZADD k NX score m`;
 /// - one deleted row: `UNLINK k`, `HDEL k f`, `SREM k m`, `ZREM k m`, or the
@@ -350,24 +346,40 @@ fn units(text: &str) -> Option<Vec<Unit>> {
         .iter()
         .map(|command| command.words.iter().map(Vec::as_slice).collect())
         .collect();
+    let lines: Vec<&[&[u8]]> = words.iter().map(Vec::as_slice).collect();
     let mut units = Vec::new();
-    let mut rest = words.as_slice();
-    while let [first, after @ ..] = rest {
-        if first.as_slice() == [b"MULTI".as_slice()] {
-            let [body, second, end, after @ ..] = after else {
-                return None;
-            };
-            if end.as_slice() != [b"EXEC".as_slice()] {
-                return None;
-            }
-            units.push(transaction(body, second)?);
-            rest = after;
-        } else {
-            units.push(single(first)?);
-            rest = after;
-        }
+    let mut rest = lines.as_slice();
+    while !rest.is_empty() {
+        let (unit, after) = unit(rest)?;
+        units.push(unit);
+        rest = after;
     }
     Some(units)
+}
+
+type Lines<'a> = [&'a [&'a [u8]]];
+
+/// The unit `lines` starts with, and the lines after it.
+fn unit<'a, 'b>(lines: &'b Lines<'a>) -> Option<(Unit, &'b Lines<'a>)> {
+    Some(match lines {
+        [[b"SADD", key, _], [b"SREM", same, _], after @ ..]
+        | [[b"ZADD", key, b"NX", _, _], [b"ZREM", same, _], after @ ..]
+            if key == same =>
+        {
+            (Unit::Edit, after)
+        }
+        [
+            [b"MULTI"],
+            [b"LSET", key, index, word],
+            [b"LREM", same, b"1", removed],
+            [b"EXEC"],
+            after @ ..,
+        ] if key == same && word == removed && whole(index) && sentinel_word(word) => {
+            (Unit::Delete(&["index"]), after)
+        }
+        [first, after @ ..] => (single(first)?, after),
+        [] => return None,
+    })
 }
 
 fn single(words: &[&[u8]]) -> Option<Unit> {
@@ -392,19 +404,6 @@ fn single(words: &[&[u8]]) -> Option<Unit> {
         [b"ZREM", _, _] => Delete(&["member", "score"]),
         _ => return None,
     })
-}
-
-fn transaction(first: &[&[u8]], second: &[&[u8]]) -> Option<Unit> {
-    match (first, second) {
-        ([b"SREM", key, _], [b"SADD", same, _]) if key == same => Some(Unit::Edit),
-        ([b"ZREM", key, _], [b"ZADD", same, _, _]) if key == same => Some(Unit::Edit),
-        ([b"LSET", key, index, word], [b"LREM", same, b"1", removed])
-            if key == same && word == removed && whole(index) && sentinel_word(word) =>
-        {
-            Some(Unit::Delete(&["index"]))
-        }
-        _ => None,
-    }
 }
 
 /// A command as this module writes it: each word bare where it can be and
@@ -732,15 +731,11 @@ mod tests {
             [
                 "HSET user:1 name \"Ada L.\"",
                 "LSET \"a list\" 2 v",
-                "MULTI",
-                "SREM tags fast",
                 "SADD tags \"in memory\"",
-                "EXEC",
+                "SREM tags fast",
                 "ZADD board XX 99.5 ada",
-                "MULTI",
+                "ZADD board NX 100 grace",
                 "ZREM board ada",
-                "ZADD board 100 grace",
-                "EXEC",
                 "SET greeting hi KEEPTTL",
             ]
             .join("\n")
@@ -928,9 +923,12 @@ mod tests {
             "SET k v NX EX 0",
             "HSET h f v g w",
             "LSET l x v",
-            "MULTI\nSREM s a\nSADD t b\nEXEC",
-            "MULTI\nSREM s a\nSADD s b",
-            "MULTI\nSREM s a\nFLUSHDB\nEXEC",
+            "MULTI\nSREM s a\nSADD s b\nEXEC",
+            "SADD s b\nSREM t a",
+            "SREM s a\nSADD s b",
+            "ZADD z 1 b\nZREM z a",
+            "ZADD z NX 1 b\nZREM y a",
+            "SADD s b\nFLUSHDB",
             "MULTI\nLSET l 1 x\nLREM l 1 x\nEXEC",
             &format!("MULTI\nLSET l 1 {sentinel}\nLREM l 0 {sentinel}\nEXEC"),
             &format!("MULTI\nLSET l 1 {sentinel}\nLREM m 1 {sentinel}\nEXEC"),

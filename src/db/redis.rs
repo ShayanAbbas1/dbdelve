@@ -2799,6 +2799,36 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_renaming_a_member_onto_one_already_there_is_refused() {
+        let connection = scratch("live:rename:");
+        let read = |key: &str, kind: &str| redis_cmd::browse::read(key, kind, 100).unwrap();
+        let refused = |text: &str| {
+            let error = applied(&connection, text).unwrap_err();
+            assert!(error.message.contains("already"), "{}", error.message);
+        };
+
+        ran(&connection, "SADD live:rename:s a b");
+        let mut set = editing(&connection, &read("live:rename:s", "set"));
+        assert!(set.set_pending(row_of(&set, "a"), 0, staged("b")));
+        refused(&edits(&set));
+        assert_eq!(
+            one(&connection, "SCARD live:rename:s").as_deref(),
+            Some("2")
+        );
+
+        ran(&connection, "ZADD live:rename:z 1 a 2 b");
+        let mut zset = editing(&connection, &read("live:rename:z", "zset"));
+        assert!(zset.set_pending(row_of(&zset, "a"), 0, staged("b")));
+        refused(&edits(&zset));
+        assert_eq!(
+            cells(&ran(&connection, "ZRANGE live:rename:z 0 -1 WITHSCORES")),
+            [some(&["a", "1"]), some(&["b", "2"])]
+        );
+        clean(&connection, "live:rename:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_an_edit_is_refused_while_a_query_tab_holds_the_session_in_a_multi() {
         let connection = scratch("live:multi:");
         ran(&connection, "HSET live:multi:h f 1");
