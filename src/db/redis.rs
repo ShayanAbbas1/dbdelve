@@ -2759,6 +2759,74 @@ mod tests {
         clean(&connection, prefix);
     }
 
+    /// The keys grid as the workspace builds it from the preview, asked
+    /// which value cells take an edit: the connection's tags alone do not say
+    /// whether the grid lets one through.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_keys_grid_edits_a_value_shown_whole_and_no_other() {
+        use crate::result_grid::ResultGrid;
+        use crate::sql::Mode;
+        let connection = Connection::open(&ServerConfig {
+            database: "5".into(),
+            ..live_config()
+        })
+        .unwrap();
+        let prefix = "live:editable:";
+        clean(&connection, prefix);
+        for seed in [
+            "HSET live:editable:hash name Ada plan pro",
+            "HSET live:editable:hash1 name Ada",
+            "RPUSH live:editable:list a b",
+            "RPUSH live:editable:list1 a",
+            "SADD live:editable:set a b",
+            "SADD live:editable:set1 a",
+            "ZADD live:editable:zset 1 a 2 b",
+            "ZADD live:editable:zset1 1 a",
+            "SET live:editable:string hello",
+            r#"JSON.SET live:editable:doc $ "{\"a\":1}""#,
+        ] {
+            ran(&connection, seed);
+        }
+        ran(
+            &connection,
+            &format!("SET live:editable:long {}", "x".repeat(SHOWN + 1)),
+        );
+        ran(
+            &connection,
+            &format!("HSET live:editable:wide f {}", "v".repeat(GLANCE)),
+        );
+        let text = preview_sql(Engine::Redis, "db5", KEYS, "MATCH live:editable:*", None, 0);
+        let grid =
+            ResultGrid::new(ran(&connection, &text), Mode::ReadWrite).with_engine(Engine::Redis);
+        let editable = |key: &str| {
+            let row = (0..grid.result().rows.len())
+                .find(|&row| grid.cell(row, 0) == Some(key))
+                .unwrap_or_else(|| panic!("{key} is listed"));
+            (grid.cell(row, 3).map(str::to_string), grid.editable(row, 3))
+        };
+        for key in ["hash", "list", "set", "zset", "string"] {
+            for key in [format!("{prefix}{key}"), format!("{prefix}{key}1")] {
+                if key.ends_with("string1") {
+                    continue;
+                }
+                let (value, editable) = editable(&key);
+                assert!(editable, "{key}: {value:?}");
+            }
+        }
+        assert_eq!(
+            editable("live:editable:hash1"),
+            (Some(r#"{"name":"Ada"}"#.into()), true)
+        );
+        for key in ["doc", "long", "wide"] {
+            let key = format!("{prefix}{key}");
+            let (value, editable) = editable(&key);
+            assert!(!editable, "{key}: {value:?}");
+        }
+        assert_eq!(editable("live:editable:wide").0.as_deref(), Some("1 field"));
+        clean(&connection, prefix);
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_the_filter_bar_narrows_by_glob_and_type() {
