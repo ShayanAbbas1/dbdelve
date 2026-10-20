@@ -705,9 +705,11 @@ impl Session {
     }
 
     /// What a new row of the rows in front of the active query tab is
-    /// inserted into, a queue's earlier result included.
+    /// inserted into, a queue's earlier result included. Nothing while the
+    /// tab shows its plan, which stands in for those rows.
     pub(crate) fn query_insert_target(&self, cx: &App) -> Option<InsertTarget> {
-        self.active_query_tab()?
+        self.active_query_tab()
+            .filter(|tab| !tab.showing_plan)?
             .shown()
             .1
             .read(cx)
@@ -796,11 +798,13 @@ impl Session {
         self.queries
             .iter()
             .flat_map(|tab| {
-                std::iter::once(&tab.results).chain(
-                    tab.queue
-                        .iter()
-                        .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
-                )
+                std::iter::once(&tab.results)
+                    .chain(tab.lent.iter().map(|(grid, _)| grid))
+                    .chain(
+                        tab.queue
+                            .iter()
+                            .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
+                    )
             })
             .chain(self.objects.iter().filter_map(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
@@ -1134,6 +1138,11 @@ pub(crate) struct QueryTab {
     /// always were -- the slot being run or shown right now -- and the
     /// statements already finished are in `queue.done`.
     pub(crate) queue: Option<Queue>,
+    /// The slot's own grid and state, set aside while one of the queue's
+    /// earlier results stands in as the slot: an edit applied to that result
+    /// runs, and its rows are read again, on the profile's own connection,
+    /// which is the session its statement ran on.
+    pub(crate) lent: Option<(Entity<TableState<ResultGrid>>, QueryState)>,
     /// How many queued results this tab was written with, until it is
     /// hydrated and `queue` holds them. Taken by `hydrate_tab`, so a tab the
     /// user never looks at still reports what is on disk and keeps the prune
@@ -1365,6 +1374,80 @@ impl<G: Clone> Queue<G> {
     }
 }
 
+/// `QueryTab::lend`, over the fields it touches so it is checkable without
+/// a window. A result already in the slot is not lent again, and an existing
+/// loan is kept, since a second would set the borrowed result aside as the
+/// slot's own.
+fn lend_slot<G: Clone + PartialEq>(
+    queue: Option<&Queue<G>>,
+    index: usize,
+    (results, query): (&mut G, &mut QueryState),
+    lent: &mut Option<(G, QueryState)>,
+) {
+    if lent.is_some() {
+        return;
+    }
+    let Some(finished) = queue.and_then(|queue| queue.done.get(index)) else {
+        return;
+    };
+    if finished.grid == *results {
+        return;
+    }
+    let grid = std::mem::replace(results, finished.grid.clone());
+    let state = std::mem::replace(query, finished.state.clone());
+    *lent = Some((grid, state));
+}
+
+/// `QueryTab::give_back`. The lent result keeps the state its run ended in,
+/// unless the run was abandoned (still `Running`, or idled by
+/// `drop_stale_run`), which says nothing about it.
+fn give_slot_back<G: PartialEq>(
+    queue: Option<&mut Queue<G>>,
+    (results, query): (&mut G, &mut QueryState),
+    lent: &mut Option<(G, QueryState)>,
+) {
+    let Some((grid, state)) = lent.take() else {
+        return;
+    };
+    let borrowed = std::mem::replace(results, grid);
+    let left = std::mem::replace(query, state);
+    if matches!(left, QueryState::Running { .. } | QueryState::Idle) {
+        return;
+    }
+    if let Some(finished) = queue.and_then(|queue| {
+        queue
+            .done
+            .iter_mut()
+            .find(|finished| finished.grid == borrowed)
+    }) {
+        finished.state = left;
+    }
+}
+
+/// `QueryTab::apply_refresh`: on a queue's earlier result, that result read
+/// again in its own place; otherwise the statement behind the slot. `None`
+/// where dbdelve cannot say which statement produced the rows, as for a
+/// batch's set after its first, which has none of its own to ask again.
+fn apply_refresh<G: Clone + PartialEq>(
+    queue: Option<&Queue<G>>,
+    slot: &G,
+    last_query: Option<&String>,
+) -> Option<Refresh> {
+    let earlier = queue.and_then(|queue| {
+        let finished = queue.done.get(queue.showing)?;
+        (finished.grid != *slot).then_some((queue, finished))
+    });
+    match earlier {
+        Some((queue, finished)) => {
+            (queue.lane(finished.start) == Some(queue.showing)).then(|| Refresh::Earlier {
+                index: queue.showing,
+                sql: finished.sql.clone(),
+            })
+        }
+        None => last_query.cloned().map(Refresh::Statement),
+    }
+}
+
 const QUERY_LABEL_LIMIT: usize = 32;
 
 /// A statement as a switcher chip reads it: whitespace collapsed, clipped to
@@ -1430,9 +1513,43 @@ impl QueryTab {
             .as_ref()
             .and_then(|queue| queue.done.get(queue.showing))
         {
-            Some(finished) => (&finished.state, &finished.grid),
+            Some(finished) => (self.state_of(finished), &finished.grid),
             None => (&self.query, &self.results),
         }
+    }
+
+    /// A queue's result as its chip reads it: the slot's live state for the
+    /// result whose grid is the slot, which a run on it (an edit applied
+    /// there, a refresh, a sort) is writing, and its own for the rest.
+    pub(crate) fn state_of<'a>(&'a self, finished: &'a Finished) -> &'a QueryState {
+        match finished.grid == self.results {
+            true => &self.query,
+            false => &finished.state,
+        }
+    }
+
+    /// Make the queue's result at `index` the slot, for a run on its rows.
+    pub(crate) fn lend(&mut self, index: usize) {
+        lend_slot(
+            self.queue.as_ref(),
+            index,
+            (&mut self.results, &mut self.query),
+            &mut self.lent,
+        );
+    }
+
+    /// Put the slot back once the run on a lent result has ended.
+    pub(crate) fn give_back(&mut self) {
+        give_slot_back(
+            self.queue.as_mut(),
+            (&mut self.results, &mut self.query),
+            &mut self.lent,
+        );
+    }
+
+    /// What runs after an edit applied to the rows on screen.
+    pub(crate) fn apply_refresh(&self) -> Option<Refresh> {
+        apply_refresh(self.queue.as_ref(), &self.results, self.last_query.as_ref())
     }
 
     /// Read one stored buffer back off disk.
@@ -1481,6 +1598,7 @@ impl QueryTab {
             // window its grids need; it is never part way through, since
             // nothing of a run in flight is kept.
             queue: None,
+            lent: None,
             queued_results: stored.queued_results,
             sorting: sorting.on(engine),
             row_limit,
@@ -1907,17 +2025,16 @@ pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
 pub(crate) enum Refresh {
     /// The query tab's stashed `SELECT`.
     Statement(String),
-    /// A queue's earlier result, `sql` re-run in its own entry. The batch ran
-    /// in the tab's slot, which is the last result's grid, so `slot` is asked
-    /// again first to put that one back.
-    Queued {
-        slot: Option<String>,
-        index: usize,
-        sql: String,
-    },
-    /// `Queued`'s second step, carried by the slot's own statement. That run
+    /// A queue's earlier result, `index` in `done`, which the batch runs in:
+    /// it is lent the slot as the batch starts, and `sql`, its own statement,
+    /// reads it again there. On the profile's own connection rather than one
+    /// of its own, which would see neither the session's settings and
+    /// temporary tables nor a transaction the batch wrote into, and in its
+    /// own grid, so the last result is never blanked for it.
+    Earlier { index: usize, sql: String },
+    /// `Earlier`'s re-read, which gives the slot back once it lands. That run
     /// is the user's statement and not dbdelve's, so it keeps the row limit.
-    Lane { index: usize, sql: String },
+    Return,
     /// A relation tab, refreshed the way its own controls refresh it — so it
     /// picks up whatever sort and row limit the tab is now set to.
     Relation(u64),
@@ -2376,6 +2493,97 @@ mod tests {
         // A set past the last reserved grid is counted, not shown.
         let (extra, dropped) = queue.land_sets(5, 60, vec![QueryResult::default(); 1]);
         assert_eq!((extra.len(), dropped), (0, 1));
+    }
+
+    fn finished_queue(showing: usize) -> Queue<usize> {
+        let complete = QueryState::Complete {
+            rows: 1,
+            bytes: 1,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: None,
+        };
+        // A batch at 0 that answered with two sets, then a statement at 40,
+        // whose grid is the slot's.
+        let entry = |sql: &str, start: usize, grid: usize| Finished {
+            sql: sql.into(),
+            start,
+            state: complete.clone(),
+            grid,
+        };
+        Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done: vec![
+                entry("SELECT 0", 0, 10),
+                entry("Result 2", 0, 11),
+                entry("SELECT 40", 40, 12),
+            ],
+            showing,
+            awaiting: false,
+            spare: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_edit_on_an_earlier_result_reads_that_result_again() {
+        let last = Some("SELECT 40".to_string());
+        assert!(matches!(
+            apply_refresh(Some(&finished_queue(0)), &12, last.as_ref()),
+            Some(Refresh::Earlier { index: 0, sql }) if sql == "SELECT 0"
+        ));
+        // A batch's later set has no statement of its own to ask again, and
+        // the slot's is not it.
+        assert!(apply_refresh(Some(&finished_queue(1)), &12, last.as_ref()).is_none());
+        assert!(matches!(
+            apply_refresh(Some(&finished_queue(2)), &12, last.as_ref()),
+            Some(Refresh::Statement(sql)) if sql == "SELECT 40"
+        ));
+        assert!(matches!(
+            apply_refresh(None::<&Queue<usize>>, &12, last.as_ref()),
+            Some(Refresh::Statement(_))
+        ));
+        assert!(apply_refresh(Some(&finished_queue(2)), &12, None).is_none());
+    }
+
+    #[test]
+    fn a_lent_slot_comes_back_with_the_result_keeping_how_its_run_ended() {
+        let failed = || {
+            QueryState::Failed(DbError {
+                message: "denied".into(),
+                position: None,
+            })
+        };
+        let mut queue = Some(finished_queue(0));
+        let (mut results, mut query, mut lent) = (12, QueryState::Idle, None);
+        lend_slot(queue.as_ref(), 0, (&mut results, &mut query), &mut lent);
+        assert_eq!(results, 10);
+        assert!(matches!(query, QueryState::Complete { .. }));
+        // A second loan would lose the slot's own grid.
+        lend_slot(queue.as_ref(), 1, (&mut results, &mut query), &mut lent);
+        assert_eq!(results, 10);
+
+        query = failed();
+        give_slot_back(queue.as_mut(), (&mut results, &mut query), &mut lent);
+        assert_eq!(results, 12);
+        assert!(matches!(query, QueryState::Idle));
+        assert!(matches!(
+            queue.as_ref().unwrap().done[0].state,
+            QueryState::Failed(_)
+        ));
+        assert!(lent.is_none());
+
+        // An abandoned run leaves the result's state as it was.
+        lend_slot(queue.as_ref(), 1, (&mut results, &mut query), &mut lent);
+        query = QueryState::Idle;
+        give_slot_back(queue.as_mut(), (&mut results, &mut query), &mut lent);
+        assert!(matches!(
+            queue.as_ref().unwrap().done[1].state,
+            QueryState::Complete { .. }
+        ));
+
+        // The slot's own result is never lent to itself.
+        lend_slot(queue.as_ref(), 2, (&mut results, &mut query), &mut lent);
+        assert!(lent.is_none());
     }
 
     #[test]

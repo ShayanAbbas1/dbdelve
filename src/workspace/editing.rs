@@ -1682,7 +1682,7 @@ impl Workspace {
             return;
         };
         let (id, editor) = (tab.id, tab.editor.clone());
-        let Some(select) = tab.last_query.clone() else {
+        let Some(refresh) = tab.apply_refresh() else {
             self.note(
                 "dbdelve does not know which statement produced these rows.".into(),
                 cx,
@@ -1693,14 +1693,7 @@ impl Workspace {
         let text = editor.read(cx).value().to_string();
         let appended = appended_statement(self.engine(), &text, &batch);
         editor.update(cx, |editor, cx| editor.set_value(appended, window, cx));
-        self.execute_and_then(
-            batch,
-            Tab::Query(id),
-            Some(Refresh::Statement(select)),
-            false,
-            None,
-            cx,
-        );
+        self.execute_and_then(batch, Tab::Query(id), Some(refresh), false, None, cx);
     }
 
     /// Run the batch a relation tab is showing. The modal stays up until it
@@ -1713,42 +1706,17 @@ impl Workspace {
             return;
         };
         let (tab, sql) = (review.tab, review.sql.clone());
-        let engine = profile.config.engine();
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
         let refresh = match tab {
             Tab::Object(id) => Refresh::Relation(id),
-            Tab::Query(id) => match profile.session.query_tab(id).map(|query| {
-                // A queue's earlier result on screen, as against the slot.
-                let earlier = query.queue.as_ref().and_then(|queue| {
-                    let finished = queue.done.get(queue.showing)?;
-                    (finished.grid != query.results).then(|| {
-                        // The batch blanks the slot, which is the last result's
-                        // grid. Its own statement puts it back -- not
-                        // `last_query`, which a result without columns leaves
-                        // naming an earlier one -- and only where it held rows
-                        // and asking again writes nothing.
-                        let slot = queue
-                            .done
-                            .iter()
-                            .find(|slot| slot.grid == query.results)
-                            .filter(|slot| {
-                                !slot.grid.read(cx).delegate().result().columns.is_empty()
-                                    && sql::rerunnable(engine, &slot.sql)
-                            })
-                            .map(|slot| slot.sql.clone());
-                        Refresh::Queued {
-                            slot,
-                            index: queue.showing,
-                            sql: finished.sql.clone(),
-                        }
-                    })
-                });
-                (earlier, query.last_query.clone())
-            }) {
-                Some((Some(queued), _)) => queued,
-                Some((None, Some(statement))) => Refresh::Statement(statement),
-                Some((None, None)) | None => {
+            Tab::Query(id) => match profile
+                .session
+                .query_tab(id)
+                .and_then(QueryTab::apply_refresh)
+            {
+                Some(refresh) => refresh,
+                None => {
                     self.note(
                         "dbdelve does not know which statement produced these rows.".into(),
                         cx,

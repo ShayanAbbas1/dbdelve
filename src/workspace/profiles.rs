@@ -1085,6 +1085,8 @@ impl Workspace {
                 tab.query = QueryState::Idle;
             }
             tab.queue = None;
+            // The slot just replaced is the one a loan would give back.
+            tab.lent = None;
             tab.queued_results = 0;
             tab.last_query = None;
             tab.sent_from = None;

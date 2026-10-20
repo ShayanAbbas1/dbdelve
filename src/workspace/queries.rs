@@ -919,9 +919,14 @@ impl Workspace {
         }
         let switched = std::mem::replace(&mut queue.showing, index) != index;
         // The form was built from the rows it was opened over, which can be
-        // another table's.
+        // another table's, and a review's batch is refreshed by whichever
+        // result is on screen when it runs.
         if switched && let Some(profile) = self.profile_mut() {
             profile.session.insert_form.take_if(|form| form.tab == tab);
+            profile
+                .session
+                .apply_review
+                .take_if(|review| review.tab == tab);
         }
         cx.notify();
     }
@@ -1721,7 +1726,7 @@ impl Workspace {
             _ => None,
         };
         let explaining = explain.or(typed);
-        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
+        let Some((state, _)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
         // Guarded here rather than in each caller: every path that runs SQL
@@ -1740,6 +1745,17 @@ impl Workspace {
             if let Some(lane) = lane {
                 self.land_lane(tab, lane, Vec::new(), cx);
             }
+            return;
+        };
+        // Lent only now the run is certain to start, so nothing refused above
+        // leaves it lent.
+        if let (Tab::Query(query), None, Some(Refresh::Earlier { index, .. })) =
+            (tab, &lane, &refresh)
+            && let Some(query) = profile.session.query_tab_mut(query)
+        {
+            query.lend(*index);
+        }
+        let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref()) else {
             return;
         };
         // A lane's own, so a Cancel on its chip stops it and not the others.
@@ -1890,12 +1906,12 @@ impl Workspace {
         }
         // Everything an object tab runs is dbdelve's, and a query tab runs
         // dbdelve's statement only when an edit is applied from its grid, the
-        // one run that carries a refresh -- bar a `Lane`, which the user's own
-        // statement carries.
+        // one run that carries a refresh -- bar a `Return`, which the user's
+        // own statement carries.
         let generated = matches!(tab, Tab::Object(_))
             || refresh
                 .as_ref()
-                .is_some_and(|refresh| !matches!(refresh, Refresh::Lane { .. }));
+                .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
         if !generated && let Some(profile) = self.issued_to(&id, generation) {
@@ -2279,8 +2295,11 @@ impl Workspace {
                         // an apply re-runs.
                         // A lane's is set once the last of the queue lands,
                         // since the order they finish in is not the buffer's.
+                        // A re-read of an earlier result is that result's,
+                        // not the slot's.
                         if produced_grid
                             && lane.is_none()
+                            && !matches!(refresh, Some(Refresh::Return))
                             && let Some(statement) = statement
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
@@ -2323,49 +2342,38 @@ impl Workspace {
                     cx.notify();
 
                     let had_refresh = refresh.is_some();
+                    // The lent result's chain ends with its re-read, or with
+                    // the batch when that failed, whose error is the result's.
+                    let ends_loan = match &refresh {
+                        Some(Refresh::Return) => true,
+                        Some(Refresh::Earlier { .. }) => !succeeded,
+                        _ => false,
+                    };
+                    if ends_loan {
+                        workspace.give_back(&id, generation, tab);
+                    }
                     if succeeded && let Some(refresh) = refresh {
                         match refresh {
                             Refresh::Statement(sql) => workspace.execute_sql(sql, tab, cx),
-                            Refresh::Queued {
-                                slot: Some(slot),
-                                index,
-                                sql,
-                            } => workspace.execute_and_then(
-                                slot,
-                                tab,
-                                Some(Refresh::Lane { index, sql }),
-                                false,
-                                None,
-                                cx,
-                            ),
-                            Refresh::Queued {
-                                slot: None,
-                                index,
-                                sql,
-                            }
-                            | Refresh::Lane { index, sql } => {
-                                let note = if !workspace.rerun_queued(tab, index, sql, cx) {
-                                    Some(
-                                        "The change was applied, but these rows could not be \
-                                         read again. Run the statement to see it.",
-                                    )
-                                } else if workspace
-                                    .profile()
-                                    .is_some_and(|profile| profile.in_transaction)
+                            Refresh::Earlier { sql, .. } => {
+                                workspace.execute_and_then(
+                                    sql,
+                                    tab,
+                                    Some(Refresh::Return),
+                                    false,
+                                    None,
+                                    cx,
+                                );
+                                // Parked by the gate or refused, the re-read
+                                // is not coming back to end the loan.
+                                if !workspace
+                                    .issued_to(&id, generation)
+                                    .is_some_and(|profile| profile.session.running(tab))
                                 {
-                                    // A lane reads on a connection of its own.
-                                    Some(
-                                        "The change is in your open transaction. These rows \
-                                         are read on another connection, so they show it \
-                                         once you commit.",
-                                    )
-                                } else {
-                                    None
-                                };
-                                if let Some(note) = note {
-                                    workspace.note(note.into(), cx);
+                                    workspace.give_back(&id, generation, tab);
                                 }
                             }
+                            Refresh::Return => {}
                             Refresh::Relation(id) => workspace.refresh_relation(id, cx),
                         }
                     }
@@ -2401,6 +2409,9 @@ impl Workspace {
     /// Only while the tab is still running the lane's own run (`run`): one
     /// let go of by an earlier lane may have started another since, whose
     /// statements can start where this one's did.
+    ///
+    /// A queue's earlier result lent the slot for the run gets it back, its
+    /// own state left as it was: an abandoned run says nothing about it.
     pub(crate) fn drop_stale_run(
         &mut self,
         id: &str,
@@ -2467,6 +2478,23 @@ impl Workspace {
                     table.refresh(cx);
                 }
             });
+        }
+        if let Tab::Query(query) = tab
+            && let Some(query) = profile.session.query_tab_mut(query)
+        {
+            query.give_back();
+        }
+    }
+
+    /// End a queue's earlier result's loan of the slot on the profile the run
+    /// was issued to.
+    fn give_back(&mut self, id: &str, generation: u64, tab: Tab) {
+        if let Tab::Query(query) = tab
+            && let Some(query) = self
+                .issued_to(id, generation)
+                .and_then(|profile| profile.session.query_tab_mut(query))
+        {
+            query.give_back();
         }
     }
 

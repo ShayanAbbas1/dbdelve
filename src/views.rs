@@ -1614,7 +1614,7 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
                 tab.id,
                 index,
                 &query_label(&finished.sql),
-                &finished.state,
+                tab.state_of(finished),
                 index == queue.showing,
                 cx,
             )
@@ -3205,10 +3205,9 @@ fn render_query_toolbar(
     // Only over rows read from one table with its key: what the grid
     // writes its edits back to is what the new row is inserted into. Named,
     // since a queue's results can each be a different table.
-    let new_row = session
-        .active_query_tab()
-        .filter(|tab| !tab.showing_plan && !session.naming)
-        .and_then(|_| session.query_insert_target(cx))
+    let new_row = (!session.naming)
+        .then(|| session.query_insert_target(cx))
+        .flatten()
         .map(|(_, table, _)| {
             let label = format!("New row in {table}");
             button("new-row", label, Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
