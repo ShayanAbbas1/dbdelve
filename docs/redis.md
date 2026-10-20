@@ -108,7 +108,9 @@ On the keys grid:
 - `key` becomes `RENAMENX`, and a name already taken is an error rather than an
   overwrite.
 - `ttl` becomes `EXPIRE`, or `PERSIST` when emptied.
-- A string `value` becomes `SET key value KEEPTTL`.
+- A string `value` becomes `SET key value XX KEEPTTL GET`, which writes nothing
+  to a key deleted since it was read (an error) or now holding another type
+  (`WRONGTYPE`).
 - New row is `SET key value NX`, with `EX` when a ttl is given.
 - Delete row is `UNLINK`.
 
@@ -116,7 +118,7 @@ On an opened key:
 
 | Type | Edit | New row | Delete row |
 | --- | --- | --- | --- |
-| string | `SET ... KEEPTTL` | | `UNLINK` |
+| string | `SET ... XX KEEPTTL GET` | | `UNLINK` |
 | hash | value: `HSET` | `HSETNX` | `HDEL` |
 | list | value: `LSET` | `RPUSH` | `LSET` to a marker, then `LREM` |
 | set | member: `SADD` the new, then `SREM` the old | `SADD` | `SREM` |

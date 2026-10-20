@@ -9,8 +9,10 @@
 //! bytes behind it, and only text that is the whole of them is written back.
 //!
 //! Nothing here clobbers what it did not read: a new key is `SET … NX`, a new
-//! field `HSETNX`, a new member `SADD` or `ZADD NX`, a rename `RENAMENX`, and
-//! the connection turns the reply that says nothing happened into an error.
+//! field `HSETNX`, a new member `SADD` or `ZADD NX`, a rename `RENAMENX`, a
+//! string's new value `SET … XX … GET` (so a key deleted or retyped since is
+//! not written), and the connection turns the reply that says nothing
+//! happened into an error.
 
 use std::hash::{BuildHasher, RandomState};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -135,7 +137,7 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                 }
             }
             STRING => lines.push(format!(
-                "SET {} {} KEEPTTL",
+                "SET {} {} XX KEEPTTL GET",
                 key_word(&row.table)?,
                 typed("value")?
             )),
@@ -143,7 +145,7 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                 keyspace(&row.table)?;
                 let key = held("key")?;
                 if set("value").is_some() {
-                    lines.push(format!("SET {key} {} KEEPTTL", typed("value")?));
+                    lines.push(format!("SET {key} {} XX KEEPTTL GET", typed("value")?));
                 }
                 match set("ttl") {
                     None => {}
@@ -301,7 +303,7 @@ enum Unit {
 /// Exactly one of three shapes, each command spelled as this module spells
 /// it, one to a line, with no comment or blank line between:
 ///
-/// - one or more edits: `SET k v KEEPTTL`, `EXPIRE k n` with `n` above zero
+/// - one or more edits: `SET k v XX KEEPTTL GET`, `EXPIRE k n` with `n` above zero
 ///   (zero would delete the key), `PERSIST k`, `RENAMENX k new`, `HSET k f v`,
 ///   `LSET k i v`, `ZADD k XX score m`, and on one key an `SADD` then an
 ///   `SREM`, or a `ZADD k NX score m` then a `ZREM`;
@@ -385,7 +387,7 @@ fn unit<'a, 'b>(lines: &'b Lines<'a>) -> Option<(Unit, &'b Lines<'a>)> {
 fn single(words: &[&[u8]]) -> Option<Unit> {
     use Unit::*;
     Some(match words {
-        [b"SET", _, _, b"KEEPTTL"]
+        [b"SET", _, _, b"XX", b"KEEPTTL", b"GET"]
         | [b"PERSIST", _]
         | [b"RENAMENX", _, _]
         | [b"HSET", _, _, _]
@@ -592,7 +594,7 @@ mod tests {
         let batch = update_batch(&[edited]).unwrap();
         assert_eq!(
             admitted(&batch),
-            "SET user:1 \"a\\nb é\" KEEPTTL\nEXPIRE user:1 60\nRENAMENX user:1 \"user:2 \\\"new\\\"\""
+            "SET user:1 \"a\\nb é\" XX KEEPTTL GET\nEXPIRE user:1 60\nRENAMENX user:1 \"user:2 \\\"new\\\"\""
         );
         assert_eq!(words(&batch)[0][2], "a\nb é".as_bytes());
         assert_eq!(words(&batch)[2][2], b"user:2 \"new\"");
@@ -736,7 +738,7 @@ mod tests {
                 "ZADD board XX 99.5 ada",
                 "ZADD board NX 100 grace",
                 "ZREM board ada",
-                "SET greeting hi KEEPTTL",
+                "SET greeting hi XX KEEPTTL GET",
             ]
             .join("\n")
         );
@@ -908,17 +910,19 @@ mod tests {
             "FLUSHDB",
             "DEL k",
             "SET k v",
-            "set k v KEEPTTL",
-            "SET k v KEEPTTL\nFLUSHDB",
-            "SET k v KEEPTTL\n",
-            "# note\nSET k v KEEPTTL",
-            "SET \"k\" v KEEPTTL",
+            "SET k v KEEPTTL",
+            "SET k v KEEPTTL XX GET",
+            "set k v XX KEEPTTL GET",
+            "SET k v XX KEEPTTL GET\nFLUSHDB",
+            "SET k v XX KEEPTTL GET\n",
+            "# note\nSET k v XX KEEPTTL GET",
+            "SET \"k\" v XX KEEPTTL GET",
             "EXPIRE k 0",
             "EXPIRE k -1",
             "EXPIRE k +5",
             "UNLINK a b",
             "UNLINK a\nUNLINK b",
-            "SET k v KEEPTTL\nUNLINK k",
+            "SET k v XX KEEPTTL GET\nUNLINK k",
             "SET k v NX\nSET j v NX",
             "SET k v NX EX 0",
             "HSET h f v g w",
@@ -940,7 +944,7 @@ mod tests {
             "MULTI\nLSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC"
         )));
         assert!(is_generated_write(
-            "SET a 1 KEEPTTL\nPERSIST b\nZADD z XX 1 m"
+            "SET a 1 XX KEEPTTL GET\nPERSIST b\nZADD z XX 1 m"
         ));
     }
 

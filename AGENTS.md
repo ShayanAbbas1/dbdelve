@@ -126,7 +126,7 @@ require it, stop and raise it instead.
 
    Redis has its own pair too. `redis_cmd::edit::is_generated_write` admits
    only what the grid's edits, new rows and deleted rows write
-   (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … KEEPTTL` and `SET … NX`, `UNLINK`,
+   (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … XX KEEPTTL GET` and `SET … NX`, `UNLINK`,
    `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
    `ZREM`, and a `MULTI`/`EXEC` bracket around a list item's deletion), each
    written again from its parts and compared with the text.
@@ -1111,7 +1111,8 @@ Decided, and not to be re-litigated:
   back: a value cut for display, a non-UTF-8 key or value, JSON and streams
   are read-only.
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
-  field `HSETNX`, a rename `RENAMENX`, and the connection turns the reply that
+  field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
+  (nil on a key gone since), and the connection turns the reply that
   says nothing happened into an error. `LSET` is the exception: it writes
   whatever sits at that index now.
 - **Cancel kills the session.** The connection's `CLIENT ID` is killed from a

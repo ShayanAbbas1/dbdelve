@@ -1020,8 +1020,8 @@ fn edit_target(command: &Command, result: &QueryResult, database: &str) -> Optio
 }
 
 /// A generated write's reply that says it changed nothing, as the error it
-/// is: the name a rename or a new row wanted was taken, the key an expiry was
-/// for is gone, or a command inside the transaction failed.
+/// is: the name a rename or a new row wanted was taken, the key an expiry or
+/// a new value was for is gone, or a command inside the transaction failed.
 fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
     let word = |at: usize| {
         command
@@ -1030,7 +1030,8 @@ fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
             .map(|word| shown(word))
             .unwrap_or_default()
     };
-    let nx = |at: usize| command.words.get(at).is_some_and(|word| word == b"NX");
+    let flag = |at: usize, flag: &[u8]| command.words.get(at).is_some_and(|word| word == flag);
+    let nx = |at: usize| flag(at, b"NX");
     let message = match (command.name().as_str(), reply) {
         ("RENAMENX", Value::Int(0)) => format!(
             "{} was not renamed: a key named {} already exists.",
@@ -1039,6 +1040,9 @@ fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
         ),
         ("SET", Value::Nil) if nx(3) => {
             format!("A key named {} already exists, so it was not set.", word(1))
+        }
+        ("SET", Value::Nil) if flag(3, b"XX") => {
+            format!("{} no longer exists, so its value was not set.", word(1))
         }
         ("HSETNX", Value::Int(0)) => format!(
             "{} already has a field {}, so it was not set.",
@@ -1841,6 +1845,8 @@ mod tests {
         assert!(refused("SET k v NX", Value::Nil));
         assert!(refused("SET k v NX EX 5", Value::Nil));
         assert!(!refused("SET k v NX", Value::Okay));
+        assert!(refused("SET k v XX KEEPTTL GET", Value::Nil));
+        assert!(!refused("SET k v XX KEEPTTL GET", bulk("old")));
         assert!(refused("HSETNX h f v", Value::Int(0)));
         assert!(refused("SADD s m", Value::Int(0)));
         assert!(refused("ZADD z NX 1 m", Value::Int(0)));
@@ -2795,6 +2801,50 @@ mod tests {
         let binary = editing(&connection, &read("live:open:bin", "string"));
         assert!(!binary.editable(0, 0));
         clean(&connection, "live:open:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_value_edit_never_brings_back_a_deleted_key_or_replaces_another_type() {
+        let connection = scratch("live:stale:");
+        let other = scratch("live:stale:");
+        ran(&connection, "SET live:stale:gone v");
+        ran(&connection, "SET live:stale:hash v");
+        ran(&connection, "SET live:stale:str v");
+        let preview = preview_sql(Engine::Redis, "db4", KEYS, "MATCH live:stale:*", None, 0);
+        let mut keys = editing(&connection, &preview);
+        assert!(keys.set_pending(row_of(&keys, "live:stale:gone"), 3, staged("w")));
+        let gone = edits(&keys);
+        let mut keys = editing(&connection, &preview);
+        assert!(keys.set_pending(row_of(&keys, "live:stale:hash"), 3, staged("w")));
+        let replaced = edits(&keys);
+        let read = redis_cmd::browse::read("live:stale:str", "string", 100).unwrap();
+        let mut string = editing(&connection, &read);
+        assert!(string.set_pending(0, 0, staged("w")));
+        let opened = edits(&string);
+
+        ran(&other, "UNLINK live:stale:gone live:stale:str");
+        ran(&other, "UNLINK live:stale:hash");
+        ran(&other, "HSET live:stale:hash f 1");
+        for text in [&gone, &opened] {
+            let error = applied(&connection, text).unwrap_err();
+            assert!(
+                error.message.contains("no longer exists"),
+                "{}",
+                error.message
+            );
+        }
+        let error = applied(&connection, &replaced).unwrap_err();
+        assert!(error.message.contains("WRONGTYPE"), "{}", error.message);
+        assert_eq!(
+            one(&connection, "EXISTS live:stale:gone live:stale:str").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            one(&connection, "HGET live:stale:hash f").as_deref(),
+            Some("1")
+        );
+        clean(&connection, "live:stale:");
     }
 
     #[test]
