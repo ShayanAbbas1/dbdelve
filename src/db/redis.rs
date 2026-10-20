@@ -1021,7 +1021,9 @@ fn edit_target(command: &Command, result: &QueryResult, database: &str) -> Optio
 
 /// A generated write's reply that says it changed nothing, as the error it
 /// is: the name a rename or a new row wanted was taken, the key an expiry or
-/// a new value was for is gone, or a command inside the transaction failed.
+/// a new value was for is gone, as is the member a new score was for, or a
+/// command inside the transaction failed. A delete of what is already gone
+/// is not one: the key, field or member is gone, as was asked.
 fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
     let word = |at: usize| {
         command
@@ -1053,6 +1055,11 @@ fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
         ("ZADD", Value::Int(0)) if nx(2) => format!(
             "{} is already a member of {}, so its score was left as it was.",
             word(4),
+            word(1)
+        ),
+        ("ZADD", Value::Int(0)) if flag(2, b"XX") => format!(
+            "{} is no longer a member of {}, or already had that score, so nothing changed.",
+            word(5),
             word(1)
         ),
         ("EXPIRE", Value::Int(0)) => {
@@ -1850,8 +1857,8 @@ mod tests {
         assert!(refused("HSETNX h f v", Value::Int(0)));
         assert!(refused("SADD s m", Value::Int(0)));
         assert!(refused("ZADD z NX 1 m", Value::Int(0)));
-        // A score edit adds nothing, so its `0` is the change landing.
-        assert!(!refused("ZADD z XX 1 m", Value::Int(0)));
+        assert!(refused("ZADD z XX CH 1 m", Value::Int(0)));
+        assert!(!refused("ZADD z XX CH 1 m", Value::Int(1)));
         assert!(refused("EXPIRE k 5", Value::Int(0)));
         assert!(!refused("SADD s m", Value::SimpleString("QUEUED".into())));
         let failed = ::redis::parse_redis_value(b"-ERR index out of range\r\n").unwrap();

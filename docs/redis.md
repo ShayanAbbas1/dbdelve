@@ -122,10 +122,11 @@ On an opened key:
 | hash | value: `HSET` | `HSETNX` | `HDEL` |
 | list | value: `LSET` | `RPUSH` | `LSET` to a marker, then `LREM` |
 | set | member: `SADD` the new, then `SREM` the old | `SADD` | `SREM` |
-| sorted set | score: `ZADD XX`; member: `ZADD NX` the new, then `ZREM` the old | `ZADD NX` | `ZREM` |
+| sorted set | score: `ZADD XX CH`; member: `ZADD NX` the new, then `ZREM` the old | `ZADD NX` | `ZREM` |
 
 Renaming a member onto one the set already holds is an error, and the old
-member stays.
+member stays. So is a new score for a member that is gone. Deleting what is
+already gone is not: the end state is the one asked for.
 
 A batch is not wrapped in a transaction: the commands apply in order, and a
 failure says which one failed and how many ran before it.

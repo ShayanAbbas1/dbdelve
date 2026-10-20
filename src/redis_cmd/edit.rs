@@ -129,7 +129,7 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                     None => held("score")?,
                 };
                 match set("member") {
-                    None => lines.push(format!("ZADD {key} XX {score} {}", held("member")?)),
+                    None => lines.push(format!("ZADD {key} XX CH {score} {}", held("member")?)),
                     Some(_) => lines.extend([
                         format!("ZADD {key} NX {score} {}", typed("member")?),
                         format!("ZREM {key} {}", held("member")?),
@@ -305,7 +305,7 @@ enum Unit {
 ///
 /// - one or more edits: `SET k v XX KEEPTTL GET`, `EXPIRE k n` with `n` above zero
 ///   (zero would delete the key), `PERSIST k`, `RENAMENX k new`, `HSET k f v`,
-///   `LSET k i v`, `ZADD k XX score m`, and on one key an `SADD` then an
+///   `LSET k i v`, `ZADD k XX CH score m`, and on one key an `SADD` then an
 ///   `SREM`, or a `ZADD k NX score m` then a `ZREM`;
 /// - one new row: `SET k v NX` (with `EX n`), `HSETNX k f v`, `RPUSH k v`,
 ///   `SADD k m` or `ZADD k NX score m`;
@@ -391,7 +391,7 @@ fn single(words: &[&[u8]]) -> Option<Unit> {
         | [b"PERSIST", _]
         | [b"RENAMENX", _, _]
         | [b"HSET", _, _, _]
-        | [b"ZADD", _, b"XX", _, _] => Edit,
+        | [b"ZADD", _, b"XX", b"CH", _, _] => Edit,
         [b"EXPIRE", _, seconds] if positive(seconds) => Edit,
         [b"LSET", _, index, _] if whole(index) => Edit,
         [b"SET", _, _, b"NX"]
@@ -735,7 +735,7 @@ mod tests {
                 "LSET \"a list\" 2 v",
                 "SADD tags \"in memory\"",
                 "SREM tags fast",
-                "ZADD board XX 99.5 ada",
+                "ZADD board XX CH 99.5 ada",
                 "ZADD board NX 100 grace",
                 "ZREM board ada",
                 "SET greeting hi XX KEEPTTL GET",
@@ -932,6 +932,7 @@ mod tests {
             "SREM s a\nSADD s b",
             "ZADD z 1 b\nZREM z a",
             "ZADD z NX 1 b\nZREM y a",
+            "ZADD z XX 1 m",
             "SADD s b\nFLUSHDB",
             "MULTI\nLSET l 1 x\nLREM l 1 x\nEXEC",
             &format!("MULTI\nLSET l 1 {sentinel}\nLREM l 0 {sentinel}\nEXEC"),
@@ -944,7 +945,7 @@ mod tests {
             "MULTI\nLSET l 1 {sentinel}\nLREM l 1 {sentinel}\nEXEC"
         )));
         assert!(is_generated_write(
-            "SET a 1 XX KEEPTTL GET\nPERSIST b\nZADD z XX 1 m"
+            "SET a 1 XX KEEPTTL GET\nPERSIST b\nZADD z XX CH 1 m"
         ));
     }
 
