@@ -1,3 +1,7 @@
+# Pinned so a worktree checkout joins the same stack as the main one instead of
+# starting a second, folder-named one that fights it for the ports.
+name: dbdelve
+
 services:
   postgres:
     image: postgis/postgis:15-3.5
