@@ -761,15 +761,11 @@ impl Engine {
         )
     }
 
-    /// Where a profile picks the schema unqualified names resolve in, the one
-    /// they resolve in until it does. None where it can't: MySQL's database is
-    /// its schema, and SQL Server's default schema is the login's.
-    pub fn default_schema(self) -> Option<&'static str> {
-        match self {
-            Self::Postgres => Some("public"),
-            Self::Snowflake => Some("PUBLIC"),
-            _ => None,
-        }
+    /// Whether a profile picks the schema unqualified names resolve in.
+    /// MySQL's database is its schema, and SQL Server's default schema is the
+    /// login's.
+    pub fn picks_schema(self) -> bool {
+        matches!(self, Self::Postgres | Self::Snowflake)
     }
 
     /// A database the server keeps for itself, listed after the user's own.
@@ -1271,7 +1267,7 @@ pub struct ServerConfig {
     /// directly. None is the ordinary direct connection.
     pub ssh: Option<SshTunnel>,
     /// The schema unqualified names resolve in first, where
-    /// [`Engine::default_schema`] has one. None leaves the server's
+    /// [`Engine::picks_schema`]. None leaves the server's
     /// `search_path` alone.
     pub schema: Option<String>,
 }
@@ -1398,8 +1394,8 @@ impl ConnectionConfig {
         }
     }
 
-    /// The schema picked as the active one, where [`Engine::default_schema`]
-    /// has one. None until one is picked.
+    /// The schema picked as the active one, where [`Engine::picks_schema`].
+    /// None until one is picked.
     pub fn schema(&self) -> Option<&str> {
         match self {
             Self::Postgres(server) => server.schema.as_deref(),
@@ -1845,7 +1841,7 @@ impl Connection {
     /// session this connection opens from here on. Never waits, so switches
     /// made one after another are recorded in that order; the sessions
     /// already open follow on [`Self::apply_schema`]. A no-op where
-    /// [`Engine::default_schema`] has none.
+    /// [`Engine::picks_schema`] is false.
     pub fn set_schema(&self, schema: Option<&str>) {
         match self {
             Self::Postgres(connection) => connection.set_schema(schema),

@@ -1106,7 +1106,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        if profile.active_schema().is_none() {
+        if !profile.config.engine().picks_schema() {
             return;
         }
         let unready = match (&profile.state, &profile.catalog) {

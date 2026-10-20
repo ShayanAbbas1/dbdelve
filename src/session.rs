@@ -88,14 +88,17 @@ impl Profile {
 
     /// The schema unqualified names resolve in first, where the engine has
     /// one to pick: until one is picked, the one the server put the session
-    /// in, or the engine's default where it didn't say.
+    /// in. None where nothing is picked and the server named none, or wasn't
+    /// asked, rather than a guess at its default.
     pub(crate) fn active_schema(&self) -> Option<&str> {
-        let default = self.config.engine().default_schema()?;
+        if !self.config.engine().picks_schema() {
+            return None;
+        }
         let current = match &self.state {
             ProfileState::Connected(connection) => connection.current_schema(),
             _ => None,
         };
-        Some(self.config.schema().or(current).unwrap_or(default))
+        self.config.schema().or(current)
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {

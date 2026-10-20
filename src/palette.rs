@@ -971,7 +971,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             Command::SelectDatabase,
         ));
     }
-    if profile.active_schema().is_some() {
+    if profile.config.engine().picks_schema() {
         items.push(Item::command(
             "Select schema",
             "",

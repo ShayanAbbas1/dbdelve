@@ -2133,7 +2133,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return Vec::new();
         };
-        let segment = |id: &'static str, label: String| {
+        let segment = |id: &'static str, label: String, placeholder: bool| {
             div()
                 .id(id)
                 .flex()
@@ -2152,6 +2152,7 @@ impl Workspace {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
+                        .when(placeholder, |label| label.italic())
                         .child(label),
                 )
                 .child(row_icon(t, icon::CHEVRON_DOWN))
@@ -2174,21 +2175,26 @@ impl Workspace {
                 .unwrap_or_else(|| "Database".into());
             steps.push(separator());
             steps.push(
-                segment("database-switcher", database)
+                segment("database-switcher", database, false)
                     .on_click(cx.listener(|workspace, _, window, cx| {
                         workspace.select_database(&SelectDatabase, window, cx);
                     }))
                     .into_any_element(),
             );
         }
-        if let Some(schema) = profile.active_schema() {
+        if profile.config.engine().picks_schema() {
+            let schema = profile.active_schema();
             steps.push(separator());
             steps.push(
-                segment("schema-switcher", schema.to_string())
-                    .on_click(cx.listener(|workspace, _, window, cx| {
-                        workspace.select_schema(window, cx);
-                    }))
-                    .into_any_element(),
+                segment(
+                    "schema-switcher",
+                    schema.unwrap_or("Schema").to_string(),
+                    schema.is_none(),
+                )
+                .on_click(cx.listener(|workspace, _, window, cx| {
+                    workspace.select_schema(window, cx);
+                }))
+                .into_any_element(),
             );
         }
         steps
@@ -2427,6 +2433,7 @@ impl Workspace {
         let menu_workspace = workspace.clone();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
+        let picks_schema = profile.config.engine().picks_schema();
         let content = match &profile.catalog {
             CatalogState::Loading => div()
                 .p(px(layout::SPACE_MD))
@@ -2544,7 +2551,7 @@ impl Workspace {
                 )
                 .context_menu(move |_, entry, menu, _, cx| {
                     let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
-                        if menu_schema.is_none() || entry.depth() != 0 {
+                        if !picks_schema || entry.depth() != 0 {
                             return menu;
                         }
                         let workspace = menu_workspace.clone();
