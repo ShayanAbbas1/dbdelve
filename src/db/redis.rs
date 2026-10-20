@@ -1041,9 +1041,15 @@ fn shown_value(
                 "SCARD" => edit::SET_JSON,
                 _ => edit::ZSET_JSON,
             };
+            // A sparse hashtable or set can answer one page with a cursor that
+            // is not 0, which the edit's check read refuses.
+            let finished = sampled.is_some_and(|sampled| {
+                !matches!(command, "HLEN" | "SCARD")
+                    || scanned(sampled).is_some_and(|(cursor, _)| cursor == b"0")
+            });
             match whole {
-                Some((json, true)) => (Some(json), tag),
-                Some((json, false)) => (Some(json), edit::SUMMARY),
+                Some((json, true)) if finished => (Some(json), tag),
+                Some((json, _)) => (Some(json), edit::SUMMARY),
                 None => (Some(format!("{size} {noun}")), edit::SUMMARY),
             }
         }
@@ -2205,6 +2211,16 @@ mod tests {
             (Some("3 members".into()), edit::SUMMARY)
         );
         assert_eq!(preview("SCARD", 1, scan(&[bulk("a")])).1, edit::SET_JSON);
+        // A sparse hashtable answers with a cursor that is not 0: shown, not editable.
+        let sparse = |items: &[Value]| array(&[bulk("17"), array(items)]);
+        assert_eq!(
+            preview("SCARD", 1, sparse(&[bulk("a")])),
+            (Some(r#"["a"]"#.into()), edit::SUMMARY)
+        );
+        assert_eq!(
+            preview("HLEN", 1, sparse(&[bulk("f"), bulk("v")])).1,
+            edit::SUMMARY
+        );
         // Kept in the order read, which is by score, nested (RESP3) or flat.
         let nested = array(&[
             array(&[bulk("low"), Value::Double(1.0)]),
