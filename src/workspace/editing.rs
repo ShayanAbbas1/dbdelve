@@ -77,8 +77,9 @@ impl Workspace {
                     .collect();
                 (tab.schema.clone(), tab.name.clone(), columns)
             }
-            // The grid's own columns, where its rows are written back to.
-            Tab::Query(_) if engine.edits_query_rows() => {
+            // The grid's own columns, where its rows are written back to: one
+            // table, which is never so for a join or a computed result.
+            Tab::Query(_) => {
                 let target = profile
                     .session
                     .active_results()
@@ -89,7 +90,6 @@ impl Workspace {
                 };
                 target
             }
-            Tab::Query(_) => return,
         };
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {

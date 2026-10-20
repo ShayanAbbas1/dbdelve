@@ -3202,6 +3202,21 @@ fn render_query_toolbar(
                 ))
         });
 
+    // Only over rows read from one table with its key: what the grid
+    // writes its edits back to is what the new row is inserted into.
+    let new_row = session
+        .active_query_tab()
+        .filter(|tab| !tab.showing_plan && !session.naming)
+        .and_then(|_| session.active_results())
+        .filter(|results| results.read(cx).delegate().insert_target().is_some())
+        .map(|_| {
+            button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
+                |_, window, cx| {
+                    window.dispatch_action(Box::new(NewRow), cx);
+                },
+            )
+        });
+
     let named = session.open_query().is_some();
     let save_workspace = workspace.clone();
     let rename_workspace = workspace.clone();
@@ -3214,6 +3229,7 @@ fn render_query_toolbar(
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
         .children(plan_toggle)
+        .children(new_row)
         .child(div().flex_1())
         .children(naming)
         // A named query is already written to disk on every swap, so there

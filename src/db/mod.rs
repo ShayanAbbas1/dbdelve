@@ -984,11 +984,12 @@ impl Engine {
         }
     }
 
-    /// Whether a query tab's grid takes a new row and a deleted one, as a
-    /// relation's preview does, each shown for review before it runs and
-    /// never written into the buffer. Redis opens a key as a query tab of its
-    /// own, its contents having no relation to open, and that is where its
-    /// fields, items and members are added and taken out.
+    /// Whether a query tab's grid takes a deleted row, as a relation's preview
+    /// does, shown for review before it runs and never written into the
+    /// buffer. Redis opens a key as a query tab of its own, its contents having
+    /// no relation to open, and that is where its fields, items and members
+    /// are taken out. A new row needs no such gate: any grid written back to
+    /// one table takes one.
     pub fn edits_query_rows(self) -> bool {
         match self {
             Self::Redis => true,
