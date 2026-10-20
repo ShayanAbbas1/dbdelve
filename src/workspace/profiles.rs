@@ -981,8 +981,9 @@ impl Workspace {
     /// one left open would name a relation that may not exist here and a
     /// relation of the same name would read the old one's rows back. Query
     /// tabs keep their SQL, which is the user's to run wherever they like, but
-    /// drop their results: those rows belong to the database left behind, and
-    /// an edit staged on them would be applied to this one.
+    /// drop their results and a New row form open on one: those rows belong
+    /// to the database left behind, and an edit staged on them, or a row
+    /// added beside them, would be applied to this one.
     pub(crate) fn set_database(
         &mut self,
         name: String,
@@ -1093,6 +1094,7 @@ impl Workspace {
         }
         profile.session.clear_prompts();
         profile.session.apply_review = None;
+        profile.session.insert_form = None;
         profile.databases = Databases::default();
         profile.config.set_database(name);
         self.remember_profiles(cx);
