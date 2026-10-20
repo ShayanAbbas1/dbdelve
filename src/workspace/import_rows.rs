@@ -37,7 +37,7 @@ impl Workspace {
                 (
                     tab.schema.clone(),
                     tab.name.clone(),
-                    tab.takes_inserts(engine),
+                    tab.takes_imports(engine),
                 )
             });
         match target {

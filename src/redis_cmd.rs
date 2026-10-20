@@ -215,6 +215,15 @@ pub(crate) fn quoted(text: &str) -> String {
     }
 }
 
+/// A word as one word [`split`] reads back as exactly its bytes: [`quoted`]
+/// where they are UTF-8, else [`quoted_bytes`].
+pub(crate) fn spelled(word: &[u8]) -> String {
+    match std::str::from_utf8(word) {
+        Ok(text) => quoted(text),
+        Err(_) => quoted_bytes(word),
+    }
+}
+
 /// Bytes that are not UTF-8 as one double-quoted word, each byte outside
 /// printable ASCII written `\xHH`.
 pub(crate) fn quoted_bytes(bytes: &[u8]) -> String {

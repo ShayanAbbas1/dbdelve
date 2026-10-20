@@ -32,11 +32,11 @@ use ::redis::{
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, ColumnDefinition, DbError, Fetch, NamedDefinition, QueryResult,
-    Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped, Structure,
-    plain_error,
+    Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, NamedDefinition,
+    QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
+    Structure, plain_error,
 };
-use crate::redis_cmd::{self, Command};
+use crate::redis_cmd::{self, Command, edit};
 
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 6379;
@@ -281,6 +281,17 @@ impl Connection {
     /// reaches its `EXEC`, and keep the last one's result. Nothing is sent
     /// from a text holding a line that cannot be read or may not be sent.
     pub fn query(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(text, fetch, false)
+    }
+
+    /// [`Connection::query`] for commands DBDelve wrote, where a reply saying
+    /// the write did nothing is an error ([`unapplied`]) and stops the rest.
+    pub fn generated(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(text, fetch, true)
+    }
+
+    fn run(&self, text: &str, fetch: Fetch, generated: bool) -> Result<QueryResult, DbError> {
+        let database = format!("db{}", database_number(&self.server.database)?);
         let commands = redis_cmd::parse(text).map_err(|error| DbError {
             message: error.message,
             position: Some(error.at),
@@ -302,7 +313,7 @@ impl Connection {
         let mut step = || {
             let mut result = QueryResult::default();
             for (at, command) in commands.iter().enumerate() {
-                let outcome = self.command(&mut session, command, fetch.limit);
+                let outcome = self.command(&mut session, command, fetch.limit, generated);
                 match command.name().as_str() {
                     "MULTI" if outcome.is_ok() => multi = true,
                     "EXEC" | "DISCARD" => multi = false,
@@ -348,6 +359,9 @@ impl Connection {
         };
         let mut result = outcome?;
         result.elapsed = started.elapsed();
+        if let [command] = commands.as_slice() {
+            result.edit = edit_target(command, &result, &database);
+        }
         Ok(result)
     }
 
@@ -356,6 +370,7 @@ impl Connection {
         session: &mut Option<Session>,
         command: &Command,
         limit: Option<usize>,
+        generated: bool,
     ) -> Result<QueryResult, DbError> {
         let cursor_at = match command.name().as_str() {
             "SCAN" => Some(1),
@@ -374,17 +389,22 @@ impl Connection {
         })?;
         // Inside a `MULTI` the reply is `QUEUED`, and there is no cursor.
         let (Some(at), Some((mut cursor, mut page))) = (cursor_at, scanned(&reply)) else {
+            if generated {
+                unapplied(command, &reply)?;
+            }
             return rendered(command, reply, limit);
         };
         let shape = Scanned::of(command);
         let mut rows = Vec::new();
+        let mut tags = Vec::new();
         loop {
-            shape.rows(self, session, &page, limit, &mut rows)?;
+            shape.rows(self, session, &page, limit, &mut rows, &mut tags)?;
             if cursor == b"0" {
-                return table(shape.columns(), rows, limit, None);
+                return Ok(tagged(table(shape.columns(), rows, limit, None)?, tags));
             }
             if limit.is_some_and(|limit| rows.len() >= limit) {
-                return table(shape.columns(), rows, limit, Some(Stopped::AtLimit));
+                let stopped = table(shape.columns(), rows, limit, Some(Stopped::AtLimit))?;
+                return Ok(tagged(stopped, tags));
             }
             let mut words = command.words.clone();
             words[at] = cursor;
@@ -767,15 +787,23 @@ impl Scanned {
         page: &[Value],
         limit: Option<usize>,
         rows: &mut Vec<Vec<Cell>>,
+        tags: &mut Vec<Vec<&'static str>>,
     ) -> Result<(), DbError> {
         match self {
             Self::Members | Self::FieldNames => {
                 rows.extend(page.iter().map(|member| vec![cell(member)]));
+                tags.extend(page.iter().map(|member| vec![tag(member)]));
             }
-            Self::Fields | Self::Scores => rows.extend(
-                page.chunks(2)
-                    .map(|pair| pair.iter().map(cell).collect::<Vec<_>>()),
-            ),
+            Self::Fields | Self::Scores => {
+                rows.extend(
+                    page.chunks(2)
+                        .map(|pair| pair.iter().map(cell).collect::<Vec<_>>()),
+                );
+                tags.extend(page.chunks(2).map(|pair| match self {
+                    Self::Scores => vec![tag(&pair[0]), edit::DOUBLE],
+                    _ => pair.iter().map(tag).collect(),
+                }));
+            }
             Self::Keys => {
                 let room = limit.map_or(page.len(), |limit| limit.saturating_sub(rows.len()));
                 let (page, past) = page.split_at(room.min(page.len()));
@@ -783,6 +811,7 @@ impl Scanned {
                 // total a capped result reports, so nothing is read about it.
                 let counted = past.iter().map(|_| Vec::new());
                 if page.is_empty() {
+                    tags.extend(past.iter().map(|_| Vec::new()));
                     rows.extend(counted);
                     return Ok(());
                 }
@@ -801,8 +830,7 @@ impl Scanned {
                     .map(|pair| pair.first().and_then(answer))
                     .collect();
                 // A string or a document is shown as far as the row inspector
-                // shows a value and marked `…` past that, so an edit of one
-                // has to read the whole value first or it writes back the cut.
+                // shows a value ([`shown_value`]).
                 let mut values = ::redis::pipe();
                 values.ignore_errors();
                 let mut read = Vec::new();
@@ -829,42 +857,190 @@ impl Scanned {
                 };
                 for ((key, described), read) in page.iter().zip(described.chunks(2)).zip(read) {
                     let ttl = described.get(1).and_then(answer).filter(|ttl| ttl != "-1");
-                    let value = read.and_then(|(command, counted)| {
-                        let length = match command {
-                            "GETRANGE" => replies.next(),
-                            _ => None,
-                        };
-                        let reply = replies.next()?;
-                        match (counted, &reply, length) {
-                            (_, Value::ServerError(_), _) => None,
-                            (Some([one, many]), Value::Int(size), _) => {
-                                Some(format!("{size} {}", if *size == 1 { one } else { many }))
+                    let (value, shown_as) = match read {
+                        Some((command, counted)) => {
+                            let length = match command {
+                                "GETRANGE" => replies.next(),
+                                _ => None,
+                            };
+                            match replies.next() {
+                                Some(reply) => {
+                                    shown_value(command, counted, &reply, length.as_ref())
+                                }
+                                None => (None, edit::SUMMARY),
                             }
-                            (_, Value::BulkString(prefix), Some(Value::Int(length))) => {
-                                Some(prefixed(prefix, length))
-                            }
-                            // ponytail: a document has no ranged read, so the
-                            // server still sends the whole of it and the cut
-                            // is only what the grid keeps. `JSON.DEBUG MEMORY`
-                            // first could skip large ones, a round trip a page.
-                            _ => cell(&reply).map(|value| match value.char_indices().nth(SHOWN) {
-                                Some((end, _)) => format!("{}…", &value[..end]),
-                                None => value,
-                            }),
                         }
-                    });
+                        None => (None, edit::SUMMARY),
+                    };
                     rows.push(vec![
                         cell(key),
                         described.first().and_then(answer),
                         ttl,
                         value,
                     ]);
+                    tags.push(vec![tag(key), edit::STRING, edit::INTEGER, shown_as]);
                 }
+                tags.extend(past.iter().map(|_| Vec::new()));
                 rows.extend(counted);
             }
         }
         Ok(())
     }
+}
+
+/// The keys grid's value of a key, read by `command`, and the tag that says
+/// whether it is the whole of it. A string is shown as far as the row
+/// inspector shows a value and marked `…` past that, and so is a document;
+/// either is tagged [`edit::TRUNCATED`] then, which no edit writes back, so
+/// the cut is never written over the value it was cut from.
+fn shown_value(
+    command: &str,
+    counted: Option<[&str; 2]>,
+    reply: &Value,
+    length: Option<&Value>,
+) -> (Cell, &'static str) {
+    match (counted, reply, length) {
+        (_, Value::ServerError(_), _) => (None, edit::SUMMARY),
+        (Some([one, many]), Value::Int(size), _) => (
+            Some(format!("{size} {}", if *size == 1 { one } else { many })),
+            edit::SUMMARY,
+        ),
+        (_, Value::BulkString(prefix), Some(Value::Int(length))) => {
+            let whole = usize::try_from(*length).is_ok_and(|length| length <= prefix.len());
+            let shown_as = match whole {
+                true => tag(reply),
+                false => edit::TRUNCATED,
+            };
+            (Some(prefixed(prefix, *length)), shown_as)
+        }
+        // ponytail: a document has no ranged read, so the server still sends
+        // the whole of it and the cut is only what the grid keeps.
+        // `JSON.DEBUG MEMORY` first could skip large ones, a round trip a page.
+        _ => {
+            let text = cell(reply);
+            let cut = text
+                .as_deref()
+                .and_then(|text| text.char_indices().nth(SHOWN))
+                .map(|(end, _)| end);
+            // A string read without its length may be cut where the read stopped.
+            let read_whole = command != "GETRANGE" || bytes(reply).is_some_and(|b| b.len() < SHOWN);
+            let shown_as = match (cut, read_whole, command) {
+                (None, true, "GETRANGE") => tag(reply),
+                (None, true, _) => edit::JSON,
+                _ => edit::TRUNCATED,
+            };
+            let text = text.map(|text| match cut {
+                Some(end) => format!("{}…", &text[..end]),
+                None => text,
+            });
+            (text, shown_as)
+        }
+    }
+}
+
+/// How a reply's text stands for its bytes, as [`QueryResult::cell_types`]
+/// tags it on a grid that can be written to.
+fn tag(value: &Value) -> &'static str {
+    match value {
+        Value::BulkString(bytes) if std::str::from_utf8(bytes).is_err() => edit::BYTES,
+        Value::BulkString(_) | Value::SimpleString(_) | Value::VerbatimString { .. } => {
+            edit::STRING
+        }
+        Value::Int(_) => edit::INTEGER,
+        Value::Double(_) => edit::DOUBLE,
+        _ => edit::SUMMARY,
+    }
+}
+
+fn tagged(mut result: QueryResult, mut tags: Vec<Vec<&'static str>>) -> QueryResult {
+    tags.truncate(result.rows.len());
+    result.cell_types = tags;
+    result
+}
+
+/// Where the rows of `command`'s result are written back to: the keys grid's
+/// keys, or one key's fields, items, members or value, read whole and tagged
+/// cell by cell. `None` for any other result, a reply queued inside a `MULTI`
+/// among them, and for a list read from its end, whose indexes are unknown.
+fn edit_target(command: &Command, result: &QueryResult, database: &str) -> Option<EditTarget> {
+    if result.cell_types.len() != result.rows.len() || result.rows.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    let key = || command.words.get(1).map(|key| redis_cmd::spelled(key));
+    let (schema, table, columns, keys): (&str, String, &[&str], &[usize]) =
+        match (command.name().as_str(), names.as_slice()) {
+            ("SCAN", ["key", "type", "ttl", "value"]) => (
+                database,
+                redis_cmd::browse::KEYS.into(),
+                &["key", "", "ttl", "value"],
+                &[0],
+            ),
+            ("HSCAN", ["field", "value"]) => (edit::HASH, key()?, &["field", "value"], &[0]),
+            ("LRANGE", ["index", "value"]) => (edit::LIST, key()?, &["index", "value"], &[0]),
+            ("SSCAN", ["member"]) => (edit::SET, key()?, &["member"], &[0]),
+            ("ZSCAN", ["member", "score"]) => (edit::ZSET, key()?, &["member", "score"], &[0, 1]),
+            ("GET", ["value"]) => (edit::STRING, key()?, &["value"], &[0]),
+            _ => return None,
+        };
+    Some(EditTarget {
+        schema: schema.into(),
+        table,
+        columns: columns
+            .iter()
+            .map(|name| Some(name.to_string()).filter(|name| !name.is_empty()))
+            .collect(),
+        keys: keys.to_vec(),
+    })
+}
+
+/// A generated write's reply that says it changed nothing, as the error it
+/// is: the name a rename or a new row wanted was taken, the key an expiry was
+/// for is gone, or a command inside the transaction failed.
+fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
+    let word = |at: usize| {
+        command
+            .words
+            .get(at)
+            .map(|word| shown(word))
+            .unwrap_or_default()
+    };
+    let nx = |at: usize| command.words.get(at).is_some_and(|word| word == b"NX");
+    let message = match (command.name().as_str(), reply) {
+        ("RENAMENX", Value::Int(0)) => format!(
+            "{} was not renamed: a key named {} already exists.",
+            word(1),
+            word(2)
+        ),
+        ("SET", Value::Nil) if nx(3) => {
+            format!("A key named {} already exists, so it was not set.", word(1))
+        }
+        ("HSETNX", Value::Int(0)) => format!(
+            "{} already has a field {}, so it was not set.",
+            word(1),
+            word(2)
+        ),
+        ("SADD", Value::Int(0)) => format!("{} is already a member of {}.", word(2), word(1)),
+        ("ZADD", Value::Int(0)) if nx(2) => format!(
+            "{} is already a member of {}, so its score was left as it was.",
+            word(4),
+            word(1)
+        ),
+        ("EXPIRE", Value::Int(0)) => {
+            format!("{} no longer exists, so it has no TTL to set.", word(1))
+        }
+        ("EXEC", Value::Array(replies)) => match replies.iter().find_map(|reply| match reply {
+            Value::ServerError(error) => Some(server_message(error)),
+            _ => None,
+        }) {
+            Some(error) => {
+                format!("A command in the transaction failed, and the rest of it ran: {error}")
+            }
+            None => return Ok(()),
+        },
+        _ => return Ok(()),
+    };
+    Err(plain_error(message))
 }
 
 /// Whether a `*SCAN` of a key (`HSCAN key cursor …`) carries `flag` among its
@@ -934,6 +1110,19 @@ fn rendered(command: &Command, reply: Value, limit: Option<usize>) -> Result<Que
     let named = |columns: &[&str], rows: Vec<Vec<Cell>>| -> Grid {
         (columns.iter().map(|name| name.to_string()).collect(), rows)
     };
+    // Only `LRANGE` and `GET` are opened keys shaped here: one by `listed`,
+    // the other by its own scalar.
+    let (listed_tags, got_tags) = match (&reply, name.as_str()) {
+        (Value::Array(items), "LRANGE") => (
+            items
+                .iter()
+                .map(|item| vec![edit::INTEGER, tag(item)])
+                .collect(),
+            Vec::new(),
+        ),
+        (Value::BulkString(_), "GET") => (Vec::new(), vec![vec![tag(&reply)]]),
+        _ => (Vec::new(), Vec::new()),
+    };
     let shaped = match (&reply, name.as_str(), command.subcommand().as_str()) {
         (_, "INFO", _) => {
             text(&reply).map(|info| named(&["section", "key", "value"], info_rows(&info)))
@@ -953,8 +1142,8 @@ fn rendered(command: &Command, reply: Value, limit: Option<usize>) -> Result<Que
         _ => None,
     };
     let mut result = match shaped {
-        Some((columns, rows)) => table(&columns, rows, limit, None)?,
-        None => generic(reply, limit)?,
+        Some((columns, rows)) => tagged(table(&columns, rows, limit, None)?, listed_tags),
+        None => tagged(generic(reply, limit)?, got_tags),
     };
     result.rows_affected = affected;
     Ok(result)
@@ -1525,6 +1714,121 @@ mod tests {
         let (columns, rows) = grid("HRANDFIELD h 1 WITHVALUES", fields);
         assert_eq!(columns, ["field", "value"]);
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn an_opened_string_or_list_is_written_back_to_by_its_name_spelled() {
+        let target = |line: &str, reply: Value| {
+            let command = command(line);
+            let result = rendered(&command, reply, None).unwrap();
+            (edit_target(&command, &result, "db0"), result.cell_types)
+        };
+        let (edit, tags) = target(r#"GET "a key""#, bulk("v"));
+        let edit = edit.unwrap();
+        assert_eq!(
+            (edit.schema.as_str(), edit.table.as_str()),
+            ("string", "\"a key\"")
+        );
+        assert_eq!(tags, [[edit::STRING]]);
+        let (edit, tags) = target(r#"GET "\xff""#, Value::BulkString(b"\xfe".to_vec()));
+        assert_eq!(edit.unwrap().table, r#""\xff""#);
+        assert_eq!(tags, [[edit::BYTES]]);
+        // Nothing to write over, and a reply queued inside a session's MULTI.
+        assert_eq!(target("GET k", Value::Nil).0, None);
+        assert_eq!(
+            target("GET k", Value::SimpleString("QUEUED".into())).0,
+            None
+        );
+
+        let items = Value::Array(vec![bulk("a"), Value::BulkString(b"\xff".to_vec())]);
+        let (edit, tags) = target("LRANGE l 3 4", items.clone());
+        let edit = edit.unwrap();
+        assert_eq!(
+            (edit.schema.as_str(), edit.keys.as_slice()),
+            ("list", &[0][..])
+        );
+        assert_eq!(
+            tags,
+            [[edit::INTEGER, edit::STRING], [edit::INTEGER, edit::BYTES]]
+        );
+        // Read from the end, where no item's index is known.
+        assert_eq!(target("LRANGE l -2 -1", items).0, None);
+        assert_eq!(
+            target("HGETALL h", Value::Map(vec![(bulk("f"), bulk("v"))])).0,
+            None
+        );
+    }
+
+    #[test]
+    fn the_keys_grid_marks_a_value_it_does_not_hold_whole() {
+        let long = "x".repeat(SHOWN);
+        let shown = |command, counted, reply: Value, length: Option<Value>| {
+            shown_value(command, counted, &reply, length.as_ref())
+        };
+        assert_eq!(
+            shown("GETRANGE", None, bulk("hi"), Some(Value::Int(2))),
+            (Some("hi".into()), edit::STRING)
+        );
+        assert_eq!(
+            shown(
+                "GETRANGE",
+                None,
+                bulk(&long),
+                Some(Value::Int(SHOWN as i64 + 1))
+            )
+            .1,
+            edit::TRUNCATED
+        );
+        assert_eq!(
+            shown(
+                "GETRANGE",
+                None,
+                Value::BulkString(b"\xff".to_vec()),
+                Some(Value::Int(1))
+            )
+            .1,
+            edit::BYTES
+        );
+        // Without its length, a read that filled the range may have been cut.
+        assert_eq!(
+            shown("GETRANGE", None, bulk(&long), None).1,
+            edit::TRUNCATED
+        );
+        assert_eq!(shown("GETRANGE", None, bulk("hi"), None).1, edit::STRING);
+        assert_eq!(shown("JSON.GET", None, bulk("{}"), None).1, edit::JSON);
+        let document = format!("{long}!");
+        let (text, tag) = shown("JSON.GET", None, bulk(&document), None);
+        assert_eq!(
+            (text.unwrap().chars().last(), tag),
+            (Some('…'), edit::TRUNCATED)
+        );
+        assert_eq!(
+            shown("HLEN", Some(["field", "fields"]), Value::Int(3), None),
+            (Some("3 fields".into()), edit::SUMMARY)
+        );
+    }
+
+    #[test]
+    fn a_generated_write_that_changed_nothing_is_an_error() {
+        let refused = |line: &str, reply: Value| unapplied(&command(line), &reply).is_err();
+        assert!(refused("RENAMENX a b", Value::Int(0)));
+        assert!(!refused("RENAMENX a b", Value::Int(1)));
+        assert!(refused("SET k v NX", Value::Nil));
+        assert!(refused("SET k v NX EX 5", Value::Nil));
+        assert!(!refused("SET k v NX", Value::Okay));
+        assert!(refused("HSETNX h f v", Value::Int(0)));
+        assert!(refused("SADD s m", Value::Int(0)));
+        assert!(refused("ZADD z NX 1 m", Value::Int(0)));
+        // A score edit adds nothing, so its `0` is the change landing.
+        assert!(!refused("ZADD z XX 1 m", Value::Int(0)));
+        assert!(refused("EXPIRE k 5", Value::Int(0)));
+        assert!(!refused("SADD s m", Value::SimpleString("QUEUED".into())));
+        let failed = ::redis::parse_redis_value(b"-ERR index out of range\r\n").unwrap();
+        assert!(refused("EXEC", Value::Array(vec![failed, Value::Int(1)])));
+        assert!(!refused(
+            "EXEC",
+            Value::Array(vec![Value::Okay, Value::Int(1)])
+        ));
     }
 
     #[test]
@@ -2190,6 +2494,274 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// A database of the edit tests' own, so the seeded one keeps its keys.
+    fn scratch(prefix: &str) -> Connection {
+        let connection = Connection::open(&ServerConfig {
+            database: "4".into(),
+            ..live_config()
+        })
+        .unwrap();
+        clean(&connection, prefix);
+        connection
+    }
+
+    fn clean(connection: &Connection, prefix: &str) {
+        let found = ran(connection, &format!("SCAN 0 MATCH {prefix}* COUNT 1000"));
+        for row in cells(&found) {
+            let key = row[0].clone().unwrap();
+            ran(connection, &format!("UNLINK {}", redis_cmd::quoted(&key)));
+        }
+    }
+
+    /// `text` run the way the grid runs what it writes: through the gate,
+    /// then as a generated submission.
+    fn applied(connection: &Connection, text: &str) -> Result<QueryResult, DbError> {
+        assert!(
+            crate::sql::is_generated_write_on(Engine::Redis, text),
+            "{text}"
+        );
+        connection.generated(text, Fetch::default())
+    }
+
+    fn editing(connection: &Connection, read: &str) -> crate::result_grid::ResultGrid {
+        let result = connection.generated(read, Fetch::default()).unwrap();
+        assert!(result.edit.is_some(), "{read}");
+        crate::result_grid::ResultGrid::new(result, crate::sql::Mode::ReadWrite)
+            .with_engine(Engine::Redis)
+    }
+
+    fn row_of(grid: &crate::result_grid::ResultGrid, text: &str) -> usize {
+        (0..grid.result().rows.len())
+            .find(|&row| grid.cell(row, 0) == Some(text))
+            .unwrap_or_else(|| panic!("{text} is listed"))
+    }
+
+    fn staged(text: &str) -> crate::result_grid::NewValue {
+        crate::result_grid::NewValue::Value(text.to_string().into())
+    }
+
+    fn edits(grid: &crate::result_grid::ResultGrid) -> String {
+        crate::sql::update_batch(Engine::Redis, &grid.pending_updates()).unwrap()
+    }
+
+    fn deletion(grid: &crate::result_grid::ResultGrid, row: usize) -> String {
+        let (schema, table, keys) = grid.row_key(row).unwrap();
+        let keys: Vec<(&str, &str)> = keys
+            .iter()
+            .map(|(column, value)| (column.as_str(), value.as_str()))
+            .collect();
+        crate::sql::delete_row(Engine::Redis, &schema, &table, &keys, &grid.row_types(row)).unwrap()
+    }
+
+    fn insertion(schema: &str, table: &str, columns: &[(&str, Option<&str>)]) -> String {
+        crate::sql::insert_row(Engine::Redis, schema, table, columns, &[]).unwrap()
+    }
+
+    fn one(connection: &Connection, text: &str) -> Cell {
+        cells(&ran(connection, text))[0][0].clone()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_keys_grid_writes_back_values_ttls_and_names() {
+        let connection = scratch("live:keys:");
+        ran(&connection, "SET live:keys:a hello");
+        ran(&connection, "SET live:keys:b x");
+        ran(
+            &connection,
+            &format!("SET live:keys:long {}", "x".repeat(SHOWN + 1)),
+        );
+        ran(&connection, r#"SET "live:keys:\xff" "\x00\xfe""#);
+        let preview = preview_sql(Engine::Redis, "db4", KEYS, "MATCH live:keys:*", None, 0);
+        let mut keys = editing(&connection, &preview);
+        let a = row_of(&keys, "live:keys:a");
+        let b = row_of(&keys, "live:keys:b");
+        let long = row_of(&keys, "live:keys:long");
+        let binary = row_of(&keys, r#""live:keys:\xff""#);
+        assert!(!keys.editable(long, 3), "a cut value");
+        assert!(!keys.editable(binary, 0) && !keys.editable(binary, 3));
+        assert!(keys.set_pending(a, 3, staged("bonjour")));
+        assert!(keys.set_pending(a, 2, staged("100")));
+        assert!(keys.set_pending(b, 0, staged("live:keys:c")));
+        assert!(keys.set_pending(binary, 2, staged("100")));
+        applied(&connection, &edits(&keys)).unwrap();
+        assert_eq!(
+            one(&connection, "GET live:keys:a").as_deref(),
+            Some("bonjour")
+        );
+        assert_eq!(one(&connection, "EXISTS live:keys:b").as_deref(), Some("0"));
+        assert_eq!(one(&connection, "GET live:keys:c").as_deref(), Some("x"));
+        for key in ["live:keys:a", r#""live:keys:\xff""#] {
+            let ttl: i64 = one(&connection, &format!("TTL {key}"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=100).contains(&ttl), "{key}: {ttl}");
+        }
+
+        // The value is set again with the TTL kept, and a name that is taken
+        // is refused rather than written over.
+        let mut keys = editing(&connection, &preview);
+        let a = row_of(&keys, "live:keys:a");
+        assert!(keys.set_pending(a, 3, staged("hola")));
+        assert!(keys.set_pending(a, 0, staged("live:keys:c")));
+        let error = applied(&connection, &edits(&keys)).unwrap_err();
+        assert!(
+            error.message.contains("already exists"),
+            "{}",
+            error.message
+        );
+        assert_eq!(one(&connection, "GET live:keys:a").as_deref(), Some("hola"));
+        assert_eq!(one(&connection, "GET live:keys:c").as_deref(), Some("x"));
+        assert_ne!(one(&connection, "TTL live:keys:a").as_deref(), Some("-1"));
+
+        let mut keys = editing(&connection, &preview);
+        let a = row_of(&keys, "live:keys:a");
+        assert!(keys.set_pending(a, 2, crate::result_grid::NewValue::Null));
+        applied(&connection, &edits(&keys)).unwrap();
+        assert_eq!(one(&connection, "TTL live:keys:a").as_deref(), Some("-1"));
+
+        let new = insertion(
+            "db4",
+            KEYS,
+            &[
+                ("key", Some("live:keys:new")),
+                ("value", Some("v")),
+                ("ttl", Some("50")),
+            ],
+        );
+        applied(&connection, &new).unwrap();
+        assert_eq!(one(&connection, "GET live:keys:new").as_deref(), Some("v"));
+        assert_ne!(one(&connection, "TTL live:keys:new").as_deref(), Some("-1"));
+        let again = insertion(
+            "db4",
+            KEYS,
+            &[("key", Some("live:keys:a")), ("value", Some("v"))],
+        );
+        assert!(applied(&connection, &again).is_err());
+        assert_eq!(one(&connection, "GET live:keys:a").as_deref(), Some("hola"));
+
+        let keys = editing(&connection, &preview);
+        for key in ["live:keys:new", r#""live:keys:\xff""#] {
+            let deleted = deletion(&keys, row_of(&keys, key));
+            assert!(crate::sql::delete_matches_key_on(
+                Engine::Redis,
+                &deleted,
+                &["key"]
+            ));
+            applied(&connection, &deleted).unwrap();
+            assert_eq!(
+                one(&connection, &format!("EXISTS {key}")).as_deref(),
+                Some("0")
+            );
+        }
+        clean(&connection, "live:keys:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_an_opened_key_writes_back_its_own_type() {
+        let connection = scratch("live:open:");
+        let read = |key: &str, kind: &str| redis_cmd::browse::read(key, kind, 100).unwrap();
+
+        ran(&connection, "HSET live:open:h f 1 g 2");
+        let mut hash = editing(&connection, &read("live:open:h", "hash"));
+        let f = row_of(&hash, "f");
+        assert!(!hash.editable(f, 0) && hash.editable(f, 1));
+        assert!(hash.set_pending(f, 1, staged("one")));
+        applied(&connection, &edits(&hash)).unwrap();
+        assert_eq!(
+            one(&connection, "HGET live:open:h f").as_deref(),
+            Some("one")
+        );
+        let field = |name| {
+            insertion(
+                edit::HASH,
+                "live:open:h",
+                &[("field", Some(name)), ("value", Some("new"))],
+            )
+        };
+        applied(&connection, &field("n")).unwrap();
+        assert!(applied(&connection, &field("g")).is_err());
+        assert_eq!(one(&connection, "HGET live:open:h g").as_deref(), Some("2"));
+        let hash = editing(&connection, &read("live:open:h", "hash"));
+        applied(&connection, &deletion(&hash, row_of(&hash, "g"))).unwrap();
+        assert_eq!(
+            one(&connection, "HEXISTS live:open:h g").as_deref(),
+            Some("0")
+        );
+
+        ran(&connection, "RPUSH live:open:l a b c");
+        let mut list = editing(&connection, &read("live:open:l", "list"));
+        assert!(list.set_pending(1, 1, staged("B")));
+        applied(&connection, &edits(&list)).unwrap();
+        let list = editing(&connection, &read("live:open:l", "list"));
+        applied(&connection, &deletion(&list, 0)).unwrap();
+        applied(
+            &connection,
+            &insertion(edit::LIST, "live:open:l", &[("value", Some("d"))]),
+        )
+        .unwrap();
+        assert_eq!(
+            cells(&ran(&connection, "LRANGE live:open:l 0 -1")),
+            [some(&["0", "B"]), some(&["1", "c"]), some(&["2", "d"])]
+        );
+
+        ran(&connection, "SADD live:open:s a b");
+        let mut set = editing(&connection, &read("live:open:s", "set"));
+        assert!(set.set_pending(row_of(&set, "a"), 0, staged("z z")));
+        applied(&connection, &edits(&set)).unwrap();
+        assert_eq!(
+            one(&connection, "SISMEMBER live:open:s a").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            one(&connection, r#"SISMEMBER live:open:s "z z""#).as_deref(),
+            Some("1")
+        );
+        let member = insertion(edit::SET, "live:open:s", &[("member", Some("b"))]);
+        assert!(applied(&connection, &member).is_err());
+        let set = editing(&connection, &read("live:open:s", "set"));
+        applied(&connection, &deletion(&set, row_of(&set, "b"))).unwrap();
+        assert_eq!(one(&connection, "SCARD live:open:s").as_deref(), Some("1"));
+
+        ran(&connection, "ZADD live:open:z 1 a 2 b");
+        let mut zset = editing(&connection, &read("live:open:z", "zset"));
+        assert!(zset.set_pending(row_of(&zset, "a"), 1, staged("5.5")));
+        assert!(zset.set_pending(row_of(&zset, "b"), 0, staged("c")));
+        applied(&connection, &edits(&zset)).unwrap();
+        assert_eq!(
+            cells(&ran(&connection, "ZRANGE live:open:z 0 -1 WITHSCORES")),
+            [some(&["c", "2"]), some(&["a", "5.5"])]
+        );
+        let zset = editing(&connection, &read("live:open:z", "zset"));
+        applied(&connection, &deletion(&zset, row_of(&zset, "a"))).unwrap();
+        let member = |score| {
+            insertion(
+                edit::ZSET,
+                "live:open:z",
+                &[("member", Some("c")), ("score", Some(score))],
+            )
+        };
+        assert!(applied(&connection, &member("9")).is_err());
+        assert_eq!(
+            one(&connection, "ZSCORE live:open:z c").as_deref(),
+            Some("2")
+        );
+
+        ran(&connection, "SET live:open:str v EX 100");
+        let mut string = editing(&connection, &read("live:open:str", "string"));
+        assert!(string.set_pending(0, 0, staged("w")));
+        applied(&connection, &edits(&string)).unwrap();
+        assert_eq!(one(&connection, "GET live:open:str").as_deref(), Some("w"));
+        assert_ne!(one(&connection, "TTL live:open:str").as_deref(), Some("-1"));
+
+        ran(&connection, r#"SET live:open:bin "\x00\xfe""#);
+        let binary = editing(&connection, &read("live:open:bin", "string"));
+        assert!(!binary.editable(0, 0));
+        clean(&connection, "live:open:");
     }
 
     #[test]

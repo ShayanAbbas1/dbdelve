@@ -911,7 +911,7 @@ impl Render for Workspace {
             profile
                 .session
                 .active_object()
-                .is_some_and(|tab| tab.takes_inserts(profile.config.engine()))
+                .is_some_and(|tab| tab.takes_imports(profile.config.engine()))
         });
         if imports_rows != self.menu_imports_rows {
             self.menu_imports_rows = imports_rows;

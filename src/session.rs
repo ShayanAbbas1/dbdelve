@@ -1496,6 +1496,11 @@ impl ObjectTab {
         matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_inserts(kind))
     }
 
+    /// Whether Import Rows is offered here.
+    pub(crate) fn takes_imports(&self, engine: Engine) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_imports(kind))
+    }
+
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
     /// and for an unfiltered relation -- which is what makes an unfiltered tab
     /// dedupe exactly as it did before the filter joined the key.

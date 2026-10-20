@@ -720,6 +720,8 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }
             if tab.takes_inserts(profile.config.engine()) {
                 items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+            }
+            if tab.takes_imports(profile.config.engine()) {
                 items.push(Item::command(
                     &format!("Import Rows into {}…", tab.name),
                     "",

@@ -4016,6 +4016,74 @@ mod tests {
     }
 
     #[test]
+    fn a_redis_grid_edits_what_it_holds_whole_and_renames_by_its_key() {
+        use crate::redis_cmd::edit::{BYTES, INTEGER, STRING, SUMMARY, TRUNCATED};
+        let keys = |cells: Vec<Vec<Option<&str>>>, tags: Vec<Vec<&'static str>>| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: ["key", "type", "ttl", "value"].map(column).to_vec(),
+                    rows: rows(
+                        cells
+                            .into_iter()
+                            .map(|row| row.into_iter().map(|cell| cell.map(String::from)).collect())
+                            .collect(),
+                    ),
+                    cell_types: tags,
+                    edit: Some(EditTarget {
+                        schema: "db0".into(),
+                        table: "keys".into(),
+                        columns: vec![
+                            Some("key".into()),
+                            None,
+                            Some("ttl".into()),
+                            Some("value".into()),
+                        ],
+                        keys: vec![0],
+                    }),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+            .with_engine(db::Engine::Redis)
+        };
+        let mut grid = keys(
+            vec![
+                vec![Some("greeting"), Some("string"), None, Some("hello")],
+                vec![Some("long"), Some("string"), None, Some("xx…")],
+                vec![Some("user:1"), Some("hash"), Some("60"), Some("3 fields")],
+                vec![Some("\"\\xff\""), Some("string"), None, Some("\"\\xfe\"")],
+            ],
+            vec![
+                vec![STRING, STRING, INTEGER, STRING],
+                vec![STRING, STRING, INTEGER, TRUNCATED],
+                vec![STRING, STRING, INTEGER, SUMMARY],
+                vec![BYTES, STRING, INTEGER, BYTES],
+            ],
+        );
+        let editable = |grid: &ResultGrid, row| {
+            (0..4)
+                .map(|col| grid.editable(row, col))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(editable(&grid, 0), [true, false, true, true]);
+        assert_eq!(editable(&grid, 1), [true, false, true, false]);
+        assert_eq!(editable(&grid, 2), [true, false, true, false]);
+        // A name that is not text can be named, not typed.
+        assert_eq!(editable(&grid, 3), [false, false, true, false]);
+
+        assert!(grid.set_pending(0, 0, value("salutation")));
+        assert!(grid.set_pending(3, 2, value("30")));
+        let batch = crate::sql::update_batch(db::Engine::Redis, &grid.pending_updates()).unwrap();
+        assert_eq!(batch, "RENAMENX greeting salutation\nEXPIRE \"\\xff\" 30");
+        assert!(crate::sql::is_generated_write_on(db::Engine::Redis, &batch));
+
+        // The same grid on an engine that never edits a key column.
+        let postgres = keys(vec![vec![Some("k"), None, None, Some("v")]], Vec::new())
+            .with_engine(db::Engine::Postgres);
+        assert!(!postgres.editable(0, 0) && postgres.editable(0, 3));
+    }
+
+    #[test]
     fn an_image_column_is_binary_only_on_sql_server() {
         // A SQLite column declared `image` holds whatever it is given, and a
         // Postgres domain may be called anything.

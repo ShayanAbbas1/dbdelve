@@ -16,7 +16,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::browse::KEYS;
-use super::{Command, parse, quoted, quoted_bytes, split};
+use super::{Command, parse, quoted, spelled, split};
 use crate::result_grid::{NewValue, PendingRow};
 
 /// A cell's tag: text that is the whole of its value.
@@ -413,10 +413,7 @@ fn spelling(command: &Command) -> String {
     command
         .words
         .iter()
-        .map(|word| match std::str::from_utf8(word) {
-            Ok(text) => quoted(text),
-            Err(_) => quoted_bytes(word),
-        })
+        .map(|word| spelled(word))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -615,12 +612,12 @@ mod tests {
 
     #[test]
     fn a_binary_key_is_named_by_its_bytes() {
-        let spelled = quoted_bytes(b"\x00\xff k");
+        let name = crate::redis_cmd::quoted_bytes(b"\x00\xff k");
         let edited = row(
             "db0",
             KEYS,
             &[("ttl", value("5"))],
-            &[("key", &spelled)],
+            &[("key", &name)],
             &[("key", BYTES), ("ttl", INTEGER)],
         );
         let batch = update_batch(&[edited]).unwrap();
@@ -630,11 +627,11 @@ mod tests {
             "db0",
             KEYS,
             &[("ttl", value("5"))],
-            &[("key", &spelled)],
+            &[("key", &name)],
             &KEYS_TYPES,
         );
         let batch = update_batch(&[text]).unwrap();
-        assert_eq!(words(&batch)[0][1], spelled.as_bytes());
+        assert_eq!(words(&batch)[0][1], name.as_bytes());
     }
 
     #[test]

@@ -461,9 +461,24 @@ impl Engine {
             | Self::Snowflake
             | Self::SqlServer => true,
             Self::MongoDb => kind != RelationKind::View,
-            // ponytail: a key is inserted with `SET` from phase 3 of the Redis
-            // engine, which also keeps Import Rows off it.
+            Self::Redis => true,
+        }
+    }
+
+    /// Whether Import Rows may insert a file's rows into a relation of
+    /// `kind`: where New row may, bar Redis, whose new rows are keys that
+    /// each name their own value and not rows under a file's columns.
+    pub fn takes_imports(self, kind: RelationKind) -> bool {
+        match self {
             Self::Redis => false,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => self.takes_inserts(kind),
         }
     }
 
@@ -1560,8 +1575,10 @@ impl Connection {
 
     /// Run a statement dbdelve wrote at the user's ask -- a relation tab's
     /// preview, or an edit -- verbatim, as [`Connection::query`] does. SQL
-    /// Server alone runs it differently: its session options are the user's to
-    /// `SET`, and dbdelve's SQL is written for particular ones.
+    /// Server runs it differently: its session options are the user's to
+    /// `SET`, and dbdelve's SQL is written for particular ones. So does Redis,
+    /// where a write that changed nothing, a `RENAMENX` onto a name that is
+    /// taken, is an error rather than a `0`.
     ///
     /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
     /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
@@ -1584,13 +1601,20 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
+            Self::Redis(connection) => connection.generated(
+                sql,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::Snowflake(_)
-            | Self::MongoDb(_)
-            | Self::Redis(_) => self.query(
+            | Self::MongoDb(_) => self.query(
                 sql,
                 cancel,
                 Fetch {
@@ -3269,12 +3293,16 @@ mod tests {
 
     #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
-        // Redis takes no rows from the grid until its keys grid can write.
-        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
+        for engine in Engine::ALL {
             assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
             assert_eq!(
                 engine.takes_inserts(RelationKind::View),
                 engine != Engine::MongoDb,
+                "{engine:?}"
+            );
+            assert_eq!(
+                engine.takes_imports(RelationKind::Table),
+                engine != Engine::Redis,
                 "{engine:?}"
             );
         }

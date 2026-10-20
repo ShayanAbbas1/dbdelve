@@ -2494,7 +2494,7 @@ impl Workspace {
                     let mut menu = menu
                         .item(open("Open Data", false))
                         .item(open("Open Structure", true));
-                    if engine.takes_inserts(kind) {
+                    if engine.takes_imports(kind) {
                         menu = menu.item(PopupMenuItem::new("Import Rows…").on_click(
                             move |_, window, cx| {
                                 let (schema, relation) = import_names.clone();
