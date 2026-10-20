@@ -72,7 +72,18 @@ That is the one reshaping a command gets; nothing else is rewritten.
 Each database lists one relation, `keys`, with `key`, `type`, `ttl` and
 `value` columns. Its preview is a real command, `SCAN 0 MATCH * COUNT 1000`,
 shown in the tab. The value is the start of a string's or JSON document's own,
-or a collection's size (`5 fields`).
+or a stream's size (`5 entries`).
+
+A hash, list, set or sorted set shows its first 100 entries as compact JSON,
+read beside its size in the same round trip: `HSCAN key 0 COUNT 100` (one
+page, its cursor not followed), `LRANGE key 0 99`, `SSCAN key 0 COUNT 100` or
+`ZRANGE key 0 99 WITHSCORES`, so the read is bounded however big the key is.
+A hash and a sorted set are an object (`{"name":"Ada","plan":"pro"}`,
+`{"linus":72,"ada":100}` in score order), a list and a set an array. When
+those entries are not all of it, or do not fit in 4,000 characters, the JSON
+is cut after the last entry that fits and followed by the size:
+`{"field:1":"value 1","field:2":"value 2",…} · 1000 fields`. The size sits at
+the end, so a narrow column shows the entries and the row inspector the rest.
 
 - The filter bar narrows by `key` (written as a `MATCH` glob, with the value's
   glob characters escaped) and by `type`. Only one pattern and one type can be
@@ -163,6 +174,8 @@ failure says which one failed and how many ran before it.
 
 ## Known limits
 
+- **A collection's preview is read-only,** whole or cut: open the key to edit
+  its entries.
 - **Cut values are read-only.** A string or document longer than the grid
   holds (4,000 bytes of a string, 4,000 characters of a document) is shown
   cut, and a cut value cannot be edited,

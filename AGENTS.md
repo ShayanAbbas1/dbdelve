@@ -1111,8 +1111,9 @@ Decided, and not to be re-litigated:
   that tab are offered through `Engine::edits_query_rows`, shown in the review
   dialog and never written into the buffer. Each cell carries a tag for how
   its text stands for the bytes behind it, and only whole text is written
-  back: a value cut for display, a non-UTF-8 key or value, JSON and streams
-  are read-only.
+  back: a value cut for display, a non-UTF-8 key or value, JSON, streams and
+  a collection's preview (its first 100 entries as JSON, read with a bounded
+  `HSCAN`/`LRANGE`/`SSCAN`/`ZRANGE` beside its size) are read-only.
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
   field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
   (nil on a key gone since), and the connection turns the reply that
