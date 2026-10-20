@@ -163,6 +163,9 @@ struct Session {
     /// A `MULTI` is open, which a query tab may leave so across runs: every
     /// command sent now is only queued.
     multi: bool,
+    /// A query tab's `WATCH` holds, which the `EXEC` of a generated run's own
+    /// `WATCH` would clear along with its own.
+    watching: bool,
 }
 
 fn in_multi(session: &Option<Session>) -> bool {
@@ -242,6 +245,7 @@ impl Connection {
             client,
             id,
             multi: false,
+            watching: false,
         })
     }
 
@@ -315,6 +319,14 @@ impl Connection {
                     .into(),
             ));
         }
+        let watches = commands.iter().any(|command| command.name() == "WATCH");
+        if generated && watches && session.as_ref().is_some_and(|session| session.watching) {
+            return Err(plain_error(
+                "A query tab left a WATCH on this session, which this edit's EXEC would clear: \
+                 run UNWATCH, or the MULTI and EXEC it guards, in that tab first."
+                    .into(),
+            ));
+        }
         fetch.hold()?;
         let started = Instant::now();
         let run = {
@@ -332,6 +344,7 @@ impl Connection {
         let mut step = || {
             let mut result = QueryResult::default();
             for (at, command) in commands.iter().enumerate() {
+                let was_multi = in_multi(&session);
                 let outcome = self.command(&mut session, command, fetch.limit, generated);
                 let open = match command.name().as_str() {
                     "MULTI" if outcome.is_ok() => Some(true),
@@ -342,6 +355,15 @@ impl Connection {
                     multi = open;
                     if let Some(live) = session.as_mut() {
                         live.multi = open;
+                    }
+                }
+                if let Some(live) = session.as_mut() {
+                    match command.name().as_str() {
+                        "WATCH" if outcome.is_ok() && !generated => live.watching = true,
+                        "UNWATCH" if outcome.is_ok() => live.watching = false,
+                        // Outside a MULTI either is an error that leaves a WATCH be.
+                        "EXEC" | "DISCARD" if was_multi => live.watching = false,
+                        _ => {}
                     }
                 }
                 match command.name().as_str() {
@@ -3081,6 +3103,56 @@ mod tests {
         assert_eq!(databases.names.len(), DEFAULT_DATABASES as usize);
         assert_eq!(catalog.schemas[0].relations[0].rows, None);
         assert_eq!(cells(&exec.unwrap()), [some(&["OK"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_list_edit_is_refused_while_a_query_tab_holds_a_watch() {
+        let connection = scratch("live:watched:");
+        let other = scratch("live:watched:");
+        ran(&connection, "RPUSH live:watched:l a");
+        let read = redis_cmd::browse::read("live:watched:l", "list", 100).unwrap();
+        let edit = |value: &str| {
+            let mut list = editing(&connection, &read);
+            assert!(list.set_pending(0, 1, staged(value)));
+            edits(&list)
+        };
+        let refused = || {
+            let error = applied(&connection, &edit("refused")).unwrap_err();
+            assert!(error.message.contains("UNWATCH"), "{}", error.message);
+        };
+
+        ran(&connection, "WATCH live:watched:k");
+        refused();
+        // An edit with no WATCH of its own leaves the user's be.
+        applied(&connection, "HSET live:watched:h f 1").unwrap();
+        ran(&other, "SET live:watched:k 1");
+        ran(&connection, "MULTI\nSET live:watched:x 1");
+        assert_eq!(cells(&ran(&connection, "EXEC")), [vec![None]]);
+        applied(&connection, &edit("b")).unwrap();
+
+        // An EXEC outside a MULTI is an error that keeps the WATCH.
+        ran(&connection, "WATCH live:watched:k");
+        assert!(connection.query("EXEC", Fetch::default()).is_err());
+        refused();
+        ran(&connection, "UNWATCH");
+        applied(&connection, &edit("c")).unwrap();
+
+        // A redial starts with nothing watched.
+        ran(&connection, "WATCH live:watched:k");
+        let id = one(&connection, "CLIENT ID").unwrap();
+        ran(&live(), &format!("CLIENT KILL ID {id}"));
+        assert!(connection.query("PING", Fetch::default()).is_err());
+        applied(&connection, &edit("d")).unwrap();
+        assert_eq!(
+            cells(&ran(&connection, "LRANGE live:watched:l 0 -1")),
+            [some(&["0", "d"])]
+        );
+        assert_eq!(
+            one(&connection, "EXISTS live:watched:x").as_deref(),
+            Some("0")
+        );
+        clean(&connection, "live:watched:");
     }
 
     #[test]
