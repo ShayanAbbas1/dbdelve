@@ -80,10 +80,10 @@ page, its cursor not followed), `LRANGE key 0 99`, `SSCAN key 0 COUNT 100` or
 `ZRANGE key 0 99 WITHSCORES`, so the read is bounded however big the key is.
 A hash and a sorted set are an object (`{"name":"Ada","plan":"pro"}`,
 `{"linus":72,"ada":100}` in score order), a list and a set an array. When
-those entries are not all of it, or do not fit in 4,000 characters, the JSON
-is cut after the last entry that fits and followed by the size:
-`{"field:1":"value 1","field:2":"value 2",…} · 1000 fields`. The size sits at
-the end, so a narrow column shows the entries and the row inspector the rest.
+those entries are not all of it, or do not fit in 4,000 characters, the size
+leads, so a narrow column still shows it, and the JSON is cut after the last
+entry that fits: `1000 fields · {"field:1":"value 1","field:2":"value 2",…}`.
+A collection shown whole is plain JSON, with no size.
 
 - The filter bar narrows by `key` (written as a `MATCH` glob, with the value's
   glob characters escaped) and by `type`. Only one pattern and one type can be

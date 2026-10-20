@@ -1288,15 +1288,17 @@ fn score(value: &Value) -> String {
 
 /// A collection's preview: its entries as JSON, whole where they are all
 /// `size` of it and fit in [`SHOWN`] characters; else as many whole entries
-/// as fit beside a `…` and the size (`{"a":"1",…} · 1000 fields`), or as much
-/// of the first as fits, cut between characters.
+/// as fit after the size and before a `…` (`1000 fields · {"a":"1",…}`), or as
+/// much of the first as fits, cut between characters. The size leads so a
+/// narrow column still shows it.
 fn previewed(entries: &[String], [open, close]: [char; 2], size: i64, noun: &str) -> String {
     let whole = format!("{open}{}{close}", entries.join(","));
     if usize::try_from(size) == Ok(entries.len()) && whole.chars().count() <= SHOWN {
         return whole;
     }
-    let tail = format!("…{close} · {size} {noun}");
-    let room = SHOWN.saturating_sub(1 + tail.chars().count());
+    let head = format!("{size} {noun} · {open}");
+    let tail = format!("…{close}");
+    let room = SHOWN.saturating_sub(head.chars().count() + tail.chars().count());
     let mut body = String::new();
     let mut used = 0;
     for entry in entries {
@@ -1311,7 +1313,7 @@ fn previewed(entries: &[String], [open, close]: [char; 2], size: i64, noun: &str
         body.push(',');
         used += length;
     }
-    format!("{open}{body}{tail}")
+    format!("{head}{body}{tail}")
 }
 
 /// A string's first [`SHOWN`] bytes, of `length` in all, marked `…` when that
@@ -2073,7 +2075,7 @@ mod tests {
         // Entries read short of the size are cut, and say the size.
         assert_eq!(
             preview("HLEN", 1000, hash).0.as_deref(),
-            Some(r#"{"name":"Grace","plan":"free",…} · 1000 fields"#)
+            Some(r#"1000 fields · {"name":"Grace","plan":"free",…}"#)
         );
         assert_eq!(
             preview("LLEN", 1, array(&[bulk("a")])).0.as_deref(),
@@ -2081,7 +2083,7 @@ mod tests {
         );
         assert_eq!(
             preview("SCARD", 3, scan(&[bulk("a")])).0.as_deref(),
-            Some(r#"["a",…] · 3 members"#)
+            Some(r#"3 members · ["a",…]"#)
         );
         // Kept in the order read, which is by score, nested (RESP3) or flat.
         let nested = array(&[
@@ -2113,13 +2115,16 @@ mod tests {
         let (cut, _) = preview("LLEN", 100, array(&items));
         let cut = cut.unwrap();
         assert!(cut.chars().count() <= SHOWN, "{}", cut.len());
-        assert!(cut.ends_with(r#"x",…] · 100 items"#), "{cut}");
+        assert!(
+            cut.starts_with(r#"100 items · ["x"#) && cut.ends_with(r#"x",…]"#),
+            "{cut}"
+        );
         // ...and one too long for the cell on its own between characters.
         let wide = bulk(&format!("a{}", "é".repeat(SHOWN)));
         let (cut, _) = preview("LLEN", 1, array(&[wide]));
         let cut = cut.unwrap();
         assert!(
-            cut.starts_with("[\"aé") && cut.ends_with("é…] · 1 item"),
+            cut.starts_with("1 item · [\"aé") && cut.ends_with("é…]"),
             "{cut}"
         );
         assert!(cut.chars().count() <= SHOWN);
@@ -2572,19 +2577,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("{key} has a value"))
         };
         let hash = value("live:preview:hash");
-        assert!(hash.starts_with(r#"{"field:"#), "{hash}");
-        assert!(hash.ends_with(",…} · 1000 fields"), "{hash}");
+        assert!(hash.starts_with(r#"1000 fields · {"field:"#), "{hash}");
+        assert!(hash.ends_with(",…}"), "{hash}");
         let list = value("live:preview:list");
-        assert!(list.starts_with(r#"["item 1","item 2","#), "{list}");
-        assert!(list.ends_with(",…] · 1000 items"), "{list}");
+        assert!(
+            list.starts_with(r#"1000 items · ["item 1","item 2","#),
+            "{list}"
+        );
+        assert!(list.ends_with(",…]"), "{list}");
         let set = value("live:preview:set");
-        assert!(set.ends_with(",…] · 1000 members"), "{set}");
+        assert!(
+            set.starts_with("1000 members · [") && set.ends_with(",…]"),
+            "{set}"
+        );
         let zset = value("live:preview:zset");
         assert!(
-            zset.starts_with(r#"{"member:1000":1,"member:999":2,"#),
+            zset.starts_with(r#"1000 members · {"member:1000":1,"member:999":2,"#),
             "{zset}"
         );
-        assert!(zset.ends_with(",…} · 1000 members"), "{zset}");
+        assert!(zset.ends_with(",…}"), "{zset}");
         assert_eq!(
             value("live:preview:small"),
             r#"{"name":"Grace Hopper","email":"grace@example.test","plan":"free"}"#
