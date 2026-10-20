@@ -1098,11 +1098,25 @@ impl Workspace {
     /// Offer the schemas the catalog already holds, to pick the active one.
     pub(crate) fn select_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
-        if self
-            .profile()
-            .is_some_and(|profile| profile.active_schema().is_some())
-        {
-            self.open_palette(PaletteMode::Schema, window, cx);
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        if profile.active_schema().is_none() {
+            return;
+        }
+        let unready = match (&profile.state, &profile.catalog) {
+            (ProfileState::Connected(_), CatalogState::Loaded(..)) => None,
+            (ProfileState::Connected(_), CatalogState::Loading) => {
+                Some("The schemas are still loading.")
+            }
+            (ProfileState::Connected(_), CatalogState::Failed(_)) => {
+                Some("The catalog did not load, so there are no schemas to pick from.")
+            }
+            _ => Some("The connection is not open."),
+        };
+        match unready {
+            Some(message) => self.note(message.into(), cx),
+            None => self.open_palette(PaletteMode::Schema, window, cx),
         }
     }
 
@@ -1115,12 +1129,15 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        if profile.active_schema() == Some(name.as_str()) {
+        // Not `active_schema`: picking the one shown while none is stored
+        // still pins it, whatever the role's own `search_path` says.
+        if profile.config.schema() == Some(name.as_str()) {
             return;
         }
         // A `SET` inside the user's transaction is undone by their ROLLBACK,
         // which would leave the titlebar naming a schema the session left.
-        if profile.in_transaction {
+        // Snowflake's rides on each request instead, out of a ROLLBACK's reach.
+        if profile.in_transaction && profile.config.engine() == Engine::Postgres {
             self.note(
                 "A transaction is open on this connection, so the schema was not switched. \
                  Commit or roll it back first."
@@ -1132,7 +1149,8 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        profile.config.set_schema(name.clone());
+        let previous = profile.config.schema().map(str::to_string);
+        profile.config.set_schema(Some(name.clone()));
         let (id, generation) = (profile.id.clone(), profile.generation);
         let connecting = matches!(profile.state, ProfileState::Connecting);
         let connection = profile.connection();
@@ -1146,16 +1164,28 @@ impl Workspace {
         let Some(connection) = connection else {
             return;
         };
-        let set = on_own_thread(move || connection.set_schema(&name));
+        // Recorded here, in the order the switches were made, so that
+        // whichever thread applies last applies the latest.
+        connection.set_schema(Some(&name));
+        let applying = connection.clone();
+        let set = on_own_thread(move || applying.apply_schema());
         cx.spawn(async move |workspace, cx| {
             let Err(error) = set.await else {
                 return;
             };
             _ = workspace.update(cx, |workspace, cx| {
-                if let Some(profile) = workspace.issued_to(&id, generation) {
-                    profile.session.notice = Some(error.message);
-                    cx.notify();
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                // A later switch already holds the config, and is its own to
+                // report.
+                if profile.config.schema() == Some(name.as_str()) {
+                    profile.config.set_schema(previous.clone());
+                    connection.set_schema(previous.as_deref());
                 }
+                profile.session.notice = Some(error.message);
+                workspace.remember_profiles(cx);
+                cx.notify();
             });
         })
         .detach();

@@ -70,6 +70,15 @@ fn bare(name: &str) -> bool {
         && !name.starts_with(|first: char| first.is_ascii_digit())
 }
 
+/// `name`, as the catalog stores it, spelled to reach it from a request field:
+/// bare where the server's folding gives it back, quoted otherwise.
+fn spelled(name: &str) -> String {
+    match bare(name) && name == name.to_ascii_uppercase() {
+        true => name.to_string(),
+        false => Engine::Snowflake.quote_identifier(name),
+    }
+}
+
 /// The domain an account's own host is under, when the profile names no other.
 const ACCOUNT_DOMAIN: &str = ".snowflakecomputing.com";
 
@@ -142,10 +151,7 @@ impl SnowflakeConfig {
         if self.stored_database() == name {
             return;
         }
-        self.database = match bare(&name) && name == name.to_ascii_uppercase() {
-            true => name,
-            false => Engine::Snowflake.quote_identifier(&name),
-        };
+        self.database = spelled(&name);
         self.schema = None;
     }
 
@@ -459,10 +465,7 @@ fn request_body(config: &SnowflakeConfig, sql: &str, schema: Option<&str>) -> Va
         body["timeout"] = json!(config.statement_timeout);
     }
     if let Some(schema) = schema {
-        body["schema"] = match bare(schema) && schema == schema.to_ascii_uppercase() {
-            true => json!(schema),
-            false => json!(Engine::Snowflake.quote_identifier(schema)),
-        };
+        body["schema"] = json!(spelled(schema));
     }
     body
 }
@@ -604,6 +607,7 @@ fn rows_affected(body: &Value) -> Option<u64> {
 /// serialise -- a catalog load does not queue behind a slow query here.
 #[derive(Clone)]
 pub struct Connection {
+    /// Fixed at connect, with its `schema` moved out into [`Self::schema`].
     config: Arc<SnowflakeConfig>,
     agent: ureq::Agent,
     /// The active schema, shared between clones so a switch on one reaches
@@ -645,7 +649,10 @@ impl Connection {
             .build()
             .into();
         let connection = Self {
-            config: Arc::new(config.clone()),
+            config: Arc::new(SnowflakeConfig {
+                schema: None,
+                ..config.clone()
+            }),
             agent,
             schema: Arc::new(Mutex::new(config.schema.clone())),
         };
@@ -657,11 +664,11 @@ impl Connection {
 
     /// The user's statements resolve in `schema` from here on. dbdelve's own
     /// are qualified and never sent one.
-    pub fn set_schema(&self, schema: &str) {
+    pub fn set_schema(&self, schema: Option<&str>) {
         *self
             .schema
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(schema.to_string());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = schema.map(str::to_string);
     }
 
     /// `SHOW` rather than `INFORMATION_SCHEMA`, which would need a warehouse.
@@ -813,6 +820,17 @@ impl Connection {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         self.submit(sql, Cancellable::Yes(cancel), fetch, schema.as_deref())
+    }
+
+    /// [`Self::query_with`] outside the active schema, for a statement dbdelve
+    /// wrote for the user to run: a relation's preview or an applied edit.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, Cancellable::Yes(cancel), fetch, None)
     }
 
     /// The same, for a statement dbdelve wrote and the user cannot see.
@@ -1922,7 +1940,7 @@ mod tests {
         let current = databases.current.expect("the profile's own");
         assert!(databases.names.contains(&current), "{current}");
 
-        connection.set_schema("INFORMATION_SCHEMA");
+        connection.set_schema(Some("INFORMATION_SCHEMA"));
         let shown = connection
             .query_with(
                 "SELECT CURRENT_SCHEMA()",
@@ -2476,21 +2494,24 @@ mod tests {
         let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
         mock.answer(sql, "query");
         let connection = connected(&mock);
-        connection.clone().set_schema("Sales EU");
+        connection.clone().set_schema(Some("Sales EU"));
         connection
             .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+        connection
+            .generated(sql, &CancelToken::default(), Fetch::default())
             .expect("runs");
 
         let requests = mock.requests();
         let sent = |statement: &str| {
             requests
                 .iter()
-                .find(|request| request.body["statement"] == statement)
+                .filter(|request| request.body["statement"] == statement)
                 .map(|request| request.body["schema"].clone())
-                .expect("submitted")
+                .collect::<Vec<_>>()
         };
-        assert_eq!(sent(sql), r#""Sales EU""#);
-        assert_eq!(sent("SELECT CURRENT_VERSION()"), Value::Null);
+        assert_eq!(sent(sql), [json!(r#""Sales EU""#), Value::Null]);
+        assert_eq!(sent("SELECT CURRENT_VERSION()"), [Value::Null]);
     }
 
     #[test]

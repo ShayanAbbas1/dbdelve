@@ -1408,10 +1408,10 @@ impl ConnectionConfig {
         }
     }
 
-    pub fn set_schema(&mut self, schema: String) {
+    pub fn set_schema(&mut self, schema: Option<String>) {
         match self {
-            Self::Postgres(server) => server.schema = Some(schema),
-            Self::Snowflake(account) => account.schema = Some(schema),
+            Self::Postgres(server) => server.schema = schema,
+            Self::Snowflake(account) => account.schema = schema,
             _ => {}
         }
     }
@@ -1694,7 +1694,8 @@ impl Connection {
     /// Server runs it differently: its session options are the user's to
     /// `SET`, and dbdelve's SQL is written for particular ones. So does Redis,
     /// where a write that changed nothing, a `RENAMENX` onto a name that is
-    /// taken, is an error rather than a `0`.
+    /// taken, is an error rather than a `0`. And Snowflake, which sends it
+    /// without the active schema, a field only the user's statements carry.
     ///
     /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
     /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
@@ -1725,11 +1726,19 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
+            Self::Snowflake(connection) => connection.generated(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
-            | Self::Snowflake(_)
             | Self::MongoDb(_) => self.query(
                 sql,
                 cancel,
@@ -1832,17 +1841,35 @@ impl Connection {
         Ok(databases)
     }
 
-    /// Make `schema` the first place unqualified names resolve, on every
-    /// session this connection has open and every one it opens later. A
-    /// no-op where [`Engine::default_schema`] has none.
-    pub fn set_schema(&self, schema: &str) -> Result<(), DbError> {
+    /// Make `schema` the first place unqualified names resolve in every
+    /// session this connection opens from here on. Never waits, so switches
+    /// made one after another are recorded in that order; the sessions
+    /// already open follow on [`Self::apply_schema`]. A no-op where
+    /// [`Engine::default_schema`] has none.
+    pub fn set_schema(&self, schema: Option<&str>) {
         match self {
             Self::Postgres(connection) => connection.set_schema(schema),
-            Self::Snowflake(connection) => {
-                connection.set_schema(schema);
-                Ok(())
-            }
+            Self::Snowflake(connection) => connection.set_schema(schema),
+            _ => {}
+        }
+    }
+
+    /// Move the sessions already open onto the schema last recorded by
+    /// [`Self::set_schema`], which may be newer than the one recorded when
+    /// this was called. Waits for a statement running on them to finish.
+    pub fn apply_schema(&self) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(connection) => connection.apply_schema(),
             _ => Ok(()),
+        }
+    }
+
+    /// The schema the server put the session in when it connected, before any
+    /// picked one was applied. None where it isn't asked or there was none.
+    pub fn current_schema(&self) -> Option<&str> {
+        match self {
+            Self::Postgres(connection) => connection.current_schema(),
+            _ => None,
         }
     }
 
@@ -4066,7 +4093,7 @@ mod tests {
         assert_eq!(config.database_name().as_deref(), Some("ANALYTICS"));
         assert_eq!(config.schema(), None);
 
-        config.set_schema("Staging".into());
+        config.set_schema(Some("Staging".into()));
         assert_eq!(config.schema(), Some("Staging"));
         config.set_database("ANALYTICS".into());
         assert_eq!(config.schema(), Some("Staging"), "the same database");
