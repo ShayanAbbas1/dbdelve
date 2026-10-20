@@ -1348,10 +1348,14 @@ impl ConnectionConfig {
     /// Move the profile onto another database on the same server.
     pub fn set_database(&mut self, name: String) {
         match self {
-            Self::Postgres(server)
-            | Self::MySql(server)
-            | Self::MariaDb(server)
-            | Self::SqlServer(server) => server.database = name,
+            // Schemas belong to one database, so the active one doesn't carry over.
+            Self::Postgres(server) => {
+                server.database = name;
+                server.schema = None;
+            }
+            Self::MySql(server) | Self::MariaDb(server) | Self::SqlServer(server) => {
+                server.database = name
+            }
             Self::MongoDb(mongo) => mongo.set_database(name),
             // Listed as `db3`, stored as the number a URL's path holds.
             Self::Redis(server) => {
