@@ -2660,6 +2660,10 @@ pub(crate) fn render_view_sorting(
 ) -> Option<AnyElement> {
     let t = *theme(cx);
     let session = &profile.session;
+    // Memory is the only choice there, so there is no choice to show.
+    if !profile.config.engine().sorts_on_server() {
+        return None;
+    }
     let client = match session.active {
         Tab::Object(_) => relation_preview(session).and(session.sorting(session.active)),
         Tab::Query(_) => session

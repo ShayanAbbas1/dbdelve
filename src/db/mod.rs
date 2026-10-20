@@ -542,6 +542,22 @@ impl Engine {
         }
     }
 
+    /// Whether a header click can ask the server for an order. A Redis reply's
+    /// order is the command's own, so a view of one sorts the rows it holds.
+    pub fn sorts_on_server(self) -> bool {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => true,
+            Self::Redis => false,
+        }
+    }
+
     /// Whether a preview's statement carries its row limit and its page's
     /// offset. A Redis `SCAN` has neither: the fetch keeps the limit, and a
     /// cursor walk has no page after the first that it can be asked for.

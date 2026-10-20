@@ -801,9 +801,10 @@ pub(crate) fn sort_expression(
     match engine {
         // A document's fields are unique, and a position names nothing there.
         Engine::MongoDb => return crate::mql::browse::sort_field(name),
-        // A reply's order is the command's; nothing sorts it on the server.
-        Engine::Redis => return None,
-        Engine::Postgres
+        // Never written into a command: a key of the sort in memory, which is
+        // the only one Redis has (`Engine::sorts_on_server`).
+        Engine::Redis
+        | Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Sqlite
@@ -1894,9 +1895,7 @@ mod tests {
         // into the statement is the one read back out to light the header up,
         // and the quoting in between is the engine's own.
         let result = columns(&["id", "name"]);
-        // A Redis reply's order is the command's, so nothing sorts it there.
-        assert_eq!(sort_expression(Engine::Redis, &result, 1), None);
-        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
+        for engine in Engine::ALL {
             let expression = sort_expression(engine, &result, 1).expect("a unique name");
             assert_eq!(
                 sort_columns(engine, &[SortKey::new(expression, false)], &result),

@@ -65,8 +65,8 @@ impl Workspace {
     ) -> Option<u64> {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let row_limit = self.settings.row_limit;
-        let sorting = Sorting::new(self.settings.client_sort);
         let engine = self.engine();
+        let sorting = Sorting::new(self.settings.client_sort).on(engine);
         let structure = matches!(opened, OpenedObject::Structure { .. });
         let profile = self.profile_mut()?;
         let existing = matching_tab(
@@ -1246,7 +1246,7 @@ impl Workspace {
         show_snapshot(&results, &snapshot, mode, engine, cx);
         // The snapshot holds the rows already in this order. Sorted again so
         // the headers take a click, which a restored grid's do not.
-        let sorting = Sorting::restored(snapshot.client_sort.as_deref());
+        let sorting = Sorting::restored(snapshot.client_sort.as_deref()).on(engine);
         if let Some(keys) = sorting.client_keys() {
             results.update(cx, |table, cx| {
                 let order = sort_columns(engine, keys, table.delegate().columns());

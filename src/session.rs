@@ -995,6 +995,15 @@ impl Sorting {
         }
     }
 
+    /// This sorting, but in memory where the engine has no server sort to
+    /// offer (`Engine::sorts_on_server`).
+    pub(crate) fn on(self, engine: Engine) -> Self {
+        match (self, engine.sorts_on_server()) {
+            (Self::Server, false) => Self::Client(Vec::new()),
+            (sorting, _) => sorting,
+        }
+    }
+
     pub(crate) fn client_keys(&self) -> Option<&[SortKey]> {
         match self {
             Self::Client(keys) => Some(keys),
@@ -1443,7 +1452,7 @@ impl QueryTab {
             // nothing of a run in flight is kept.
             queue: None,
             queued_results: stored.queued_results,
-            sorting,
+            sorting: sorting.on(engine),
             row_limit,
             showing_plan: false,
             row_panel_folded: false,
