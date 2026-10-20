@@ -2295,11 +2295,14 @@ impl Workspace {
                         // an apply re-runs.
                         // A lane's is set once the last of the queue lands,
                         // since the order they finish in is not the buffer's.
-                        // A re-read of an earlier result is that result's,
-                        // not the slot's.
+                        // Nor is a run that carries a refresh: a generated
+                        // write, whose reply can have columns (a MongoDB
+                        // `insertOne`'s does) and would be run again by the
+                        // next apply, or a re-read of an earlier result, which
+                        // is that result's statement and not the slot's.
                         if produced_grid
                             && lane.is_none()
-                            && !matches!(refresh, Some(Refresh::Return))
+                            && refresh.is_none()
                             && let Some(statement) = statement
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
@@ -2352,7 +2355,25 @@ impl Workspace {
                     if ends_loan {
                         workspace.give_back(&id, generation, tab);
                     }
-                    if succeeded && let Some(refresh) = refresh {
+                    // A follow-up runs on the profile in front, whose tab ids
+                    // count from zero like every other's: after a switch it
+                    // would land in another connection's tab of the same id.
+                    let in_front = workspace.profile().is_some_and(|profile| {
+                        profile.id == id && profile.generation == generation
+                    });
+                    if succeeded
+                        && !in_front
+                        && let Some(
+                            Refresh::Statement(_) | Refresh::Earlier { .. } | Refresh::Relation(_),
+                        ) = &refresh
+                    {
+                        workspace.give_back(&id, generation, tab);
+                        if let Some(profile) = workspace.issued_to(&id, generation) {
+                            profile.session.notice = Some(
+                                "The change was applied. Run the statement again to see it.".into(),
+                            );
+                        }
+                    } else if succeeded && let Some(refresh) = refresh {
                         match refresh {
                             Refresh::Statement(sql) => workspace.execute_sql(sql, tab, cx),
                             Refresh::Earlier { sql, .. } => {

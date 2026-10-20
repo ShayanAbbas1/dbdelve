@@ -1398,9 +1398,11 @@ fn lend_slot<G: Clone + PartialEq>(
     *lent = Some((grid, state));
 }
 
-/// `QueryTab::give_back`. The lent result keeps the state its run ended in,
-/// unless the run was abandoned (still `Running`, or idled by
-/// `drop_stale_run`), which says nothing about it.
+/// `QueryTab::give_back`. The lent result keeps the state its run ended in.
+/// An abandoned run (still `Running`, or idled by `drop_stale_run`) has
+/// already blanked its grid, so the result says so rather than keep a row
+/// count it no longer shows -- and never `Idle`, which a queue reads as a
+/// statement still waiting to be sent.
 fn give_slot_back<G: PartialEq>(
     queue: Option<&mut Queue<G>>,
     (results, query): (&mut G, &mut QueryState),
@@ -1410,10 +1412,13 @@ fn give_slot_back<G: PartialEq>(
         return;
     };
     let borrowed = std::mem::replace(results, grid);
-    let left = std::mem::replace(query, state);
-    if matches!(left, QueryState::Running { .. } | QueryState::Idle) {
-        return;
-    }
+    let left = match std::mem::replace(query, state) {
+        QueryState::Running { .. } | QueryState::Idle => QueryState::Failed(DbError {
+            message: "This result was interrupted. Run the statement again to see it.".into(),
+            position: None,
+        }),
+        left => left,
+    };
     if let Some(finished) = queue.and_then(|queue| {
         queue
             .done
@@ -2572,13 +2577,14 @@ mod tests {
         ));
         assert!(lent.is_none());
 
-        // An abandoned run leaves the result's state as it was.
+        // An abandoned run's result says its rows are gone, without reading
+        // as a statement still to send.
         lend_slot(queue.as_ref(), 1, (&mut results, &mut query), &mut lent);
         query = QueryState::Idle;
         give_slot_back(queue.as_mut(), (&mut results, &mut query), &mut lent);
         assert!(matches!(
             queue.as_ref().unwrap().done[1].state,
-            QueryState::Complete { .. }
+            QueryState::Failed(_)
         ));
 
         // The slot's own result is never lent to itself.
