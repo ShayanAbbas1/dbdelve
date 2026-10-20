@@ -309,6 +309,9 @@ pub struct PendingRow {
     pub keys: Vec<(String, String)>,
     /// Real column name against its type, where the result says it.
     pub types: Vec<(String, String)>,
+    /// Each changed column's as-fetched value, where it has one: what an edit
+    /// that writes only its differences is diffed against.
+    pub held: Vec<(String, String)>,
 }
 
 fn next_rows_id() -> u64 {
@@ -1752,6 +1755,15 @@ impl ResultGrid {
                     sets,
                     keys: self.key_values(edit, row)?,
                     types: self.row_types(row),
+                    held: self
+                        .pending
+                        .iter()
+                        .filter(|pending| pending.row == row)
+                        .filter_map(|pending| {
+                            let name = edit.columns.get(pending.col)?.clone()?;
+                            Some((name, self.cell(row, pending.col)?.to_string()))
+                        })
+                        .collect(),
                 })
             })
             .collect()

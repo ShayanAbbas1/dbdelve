@@ -129,8 +129,10 @@ require it, stop and raise it instead.
    only what the grid's edits, new rows and deleted rows write
    (`RENAMENX`, `EXPIRE`, `PERSIST`, `SET … XX KEEPTTL GET` and `SET … NX`, `UNLINK`,
    `HSET`, `HSETNX`, `HDEL`, `LSET`/`LREM`, `RPUSH`, `SADD`, `SREM`, `ZADD`,
-   `ZREM`, and a list item's write: `WATCH`, an `LPOS` that checks the item
-   still is the one read, and a `MULTI`/`EXEC` bracket), each
+   `ZREM`, a list item's write: `WATCH`, an `LPOS` that checks the item
+   still is the one read, and a `MULTI`/`EXEC` bracket, and a collection's
+   JSON edit: `WATCH`, an `ECHO` of the JSON read, the preview's bounded read
+   of the key, and a `MULTI`/`EXEC` of writes of the key's own type), each
    written again from its parts and compared with the text.
    `redis_cmd::browse::is_generated_read` admits only the keys grid's
    `SCAN 0 [MATCH p] [TYPE t] COUNT 1000`, with `TYPE` before `MATCH` too,
@@ -1111,10 +1113,12 @@ Decided, and not to be re-litigated:
   that tab are offered through `Engine::edits_query_rows`, shown in the review
   dialog and never written into the buffer. Each cell carries a tag for how
   its text stands for the bytes behind it, and only whole text is written
-  back: a value cut for display, a non-UTF-8 key or value, JSON, streams and
-  a collection's preview (its first 100 entries read with a bounded
-  `HSCAN`/`LRANGE`/`SSCAN`/`ZRANGE` beside its size, shown as JSON when that is
-  all of it and at most 200 characters, `GLANCE`, else as the size) are
+  back: a value cut for display, a non-UTF-8 key or value, JSON documents
+  and streams are read-only. A collection's first 100 entries are read with a
+  bounded `HSCAN`/`LRANGE`/`SSCAN`/`ZRANGE` beside its size; it shows as JSON
+  only when that is all of it and at most 200 characters (`GLANCE`), tagged
+  `hash json` and so on so an edit can diff it, else as its size. JSON with a
+  byte that is not UTF-8 or an infinite score shows tagged `summary`, and is
   read-only.
 - **Edits never clobber what they did not read.** A new key is `SET … NX`, a
   field `HSETNX`, a rename `RENAMENX`, a string's new value `SET … XX … GET`
@@ -1122,7 +1126,12 @@ Decided, and not to be re-litigated:
   says nothing happened into an error. A list item, named by its index,
   is checked first: `WATCH`, an `LPOS … COUNT 0 MAXLEN n` that must end at
   the index, then the write in a `MULTI`, where a nil `EXEC` is an error. A
-  generated run that fails `UNWATCH`es, or closes the session.
+  collection's JSON edit is diffed against the JSON shown (`PendingRow::held`)
+  into the commands an opened key's grid writes, after a `WATCH`, an `ECHO`
+  of that JSON and the preview's bounded read, which the connection compares
+  with the `ECHO`: a different value, a cursor not `0`, or more entries is an
+  error before the `MULTI`. A generated run that fails `UNWATCH`es, or closes
+  the session.
 - **Cancel kills the session.** The connection's `CLIENT ID` is killed from a
   side connection and the next command redials, so an open `MULTI` or `WATCH`
   goes with it.

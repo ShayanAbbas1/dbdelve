@@ -36,6 +36,7 @@ use super::{
     QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
     Structure, plain_error,
 };
+use crate::redis_cmd::browse::PREVIEWED;
 use crate::redis_cmd::{self, Command, edit};
 
 /// The port the server listens on when the profile does not say.
@@ -349,9 +350,26 @@ impl Connection {
         let mut watching = false;
         let mut step = || {
             let mut result = QueryResult::default();
+            // What a collection edit's `ECHO` says the next read must find.
+            let mut echoed: Option<Vec<u8>> = None;
             for (at, command) in commands.iter().enumerate() {
                 let was_multi = in_multi(&session);
-                let outcome = self.command(&mut session, command, fetch.limit, generated);
+                let expected = echoed.take().filter(|_| {
+                    matches!(
+                        command.name().as_str(),
+                        "HSCAN" | "SSCAN" | "ZSCAN" | "LRANGE"
+                    )
+                });
+                let outcome = self.command(
+                    &mut session,
+                    command,
+                    fetch.limit,
+                    generated,
+                    expected.as_deref(),
+                );
+                if generated && command.name() == "ECHO" {
+                    echoed = command.words.get(1).cloned();
+                }
                 let open = match command.name().as_str() {
                     "MULTI" if outcome.is_ok() => Some(true),
                     "EXEC" | "DISCARD" if session.is_some() => Some(false),
@@ -444,6 +462,7 @@ impl Connection {
         command: &Command,
         limit: Option<usize>,
         generated: bool,
+        expected: Option<&[u8]>,
     ) -> Result<QueryResult, DbError> {
         let cursor_at = match command.name().as_str() {
             "SCAN" => Some(1),
@@ -460,6 +479,11 @@ impl Connection {
         let reply = self.send(session, |client| {
             client.req_command(&request(&command.words))
         })?;
+        // A check reads one page, never the cursor followed.
+        if let Some(expected) = expected {
+            verified(command, &reply, expected)?;
+            return Ok(QueryResult::default());
+        }
         // Inside a `MULTI` the reply is `QUEUED`, and there is no cursor.
         let (Some(at), Some((mut cursor, mut page))) = (cursor_at, scanned(&reply)) else {
             if generated {
@@ -990,7 +1014,9 @@ impl Scanned {
 /// either is tagged [`edit::TRUNCATED`] then, which no edit writes back, so
 /// the cut is never written over the value it was cut from. A collection is
 /// its JSON where `sampled` read all of it and that fits in [`GLANCE`]
-/// characters, else its size.
+/// characters, tagged by its type so an edit can diff it, unless a byte of it
+/// is not text or a score is infinite, which JSON cannot carry back; else its
+/// size.
 fn shown_value(
     command: &str,
     counted: Option<[&str; 2]>,
@@ -1004,11 +1030,22 @@ fn shown_value(
             let noun = if *size == 1 { one } else { many };
             let whole = sampled
                 .and_then(|sampled| entries(command, sampled))
-                .filter(|(entries, _)| usize::try_from(*size) == Ok(entries.len()))
-                .map(|(entries, [open, close])| format!("{open}{}{close}", entries.join(",")))
-                .filter(|json| json.chars().count() <= GLANCE);
-            let shown = whole.unwrap_or_else(|| format!("{size} {noun}"));
-            (Some(shown), edit::SUMMARY)
+                .filter(|(entries, ..)| usize::try_from(*size) == Ok(entries.len()))
+                .map(|(entries, [open, close], text)| {
+                    (format!("{open}{}{close}", entries.join(",")), text)
+                })
+                .filter(|(json, _)| json.chars().count() <= GLANCE);
+            let tag = match command {
+                "HLEN" => edit::HASH_JSON,
+                "LLEN" => edit::LIST_JSON,
+                "SCARD" => edit::SET_JSON,
+                _ => edit::ZSET_JSON,
+            };
+            match whole {
+                Some((json, true)) => (Some(json), tag),
+                Some((json, false)) => (Some(json), edit::SUMMARY),
+                None => (Some(format!("{size} {noun}")), edit::SUMMARY),
+            }
         }
         (_, Value::BulkString(prefix), Some(Value::Int(length))) => {
             let whole = usize::try_from(*length).is_ok_and(|length| length <= prefix.len());
@@ -1179,6 +1216,91 @@ fn unapplied(command: &Command, reply: &Value) -> Result<(), DbError> {
     Err(plain_error(message))
 }
 
+/// Whether a collection edit's read still finds the collection as the keys
+/// grid showed it, `expected` being that JSON, which the edit was diffed
+/// against: else it would write over a change made since. The edit's `WATCH`
+/// came first, so a change after this read voids its `EXEC` instead. A
+/// cursor that is not `0` means the read was not all of it, which no snapshot
+/// the grid edits is.
+fn verified(command: &Command, reply: &Value, expected: &[u8]) -> Result<(), DbError> {
+    let key = command
+        .words
+        .get(1)
+        .map(|word| shown(word))
+        .unwrap_or_default();
+    let changed = || {
+        plain_error(format!(
+            "{key} changed since it was read, so nothing was written: re-run to refresh."
+        ))
+    };
+    let (kind, items) = match (command.name().as_str(), reply) {
+        (_, Value::ServerError(error)) => return Err(plain_error(server_message(error))),
+        ("LRANGE", Value::Array(items)) => (edit::LIST, items.clone()),
+        (name, reply) => {
+            let kind = match name {
+                "HSCAN" => edit::HASH,
+                "SSCAN" => edit::SET,
+                "ZSCAN" => edit::ZSET,
+                _ => return Err(changed()),
+            };
+            match scanned(reply) {
+                Some((cursor, items)) if cursor == b"0" => (kind, items),
+                Some(_) => {
+                    return Err(plain_error(format!(
+                        "{key} is more than one read holds, so nothing was written: open the \
+                         key to edit it."
+                    )));
+                }
+                None => return Err(changed()),
+            }
+        }
+    };
+    let shown = std::str::from_utf8(expected)
+        .ok()
+        .and_then(|text| edit::Collection::parse(kind, text).ok());
+    match collection(kind, &items) {
+        Some(found) if Some(&found) == shown.as_ref() => Ok(()),
+        _ => Err(changed()),
+    }
+}
+
+/// A collection's read as the entries it holds; `None` where a byte of it is
+/// not text or a score not a number, which no JSON the grid showed holds.
+fn collection(kind: &str, items: &[Value]) -> Option<edit::Collection> {
+    use edit::Collection;
+    let flat: Vec<&Value> = items
+        .iter()
+        .flat_map(|item| match item {
+            Value::Array(pair) => pair.iter().collect(),
+            item => vec![item],
+        })
+        .collect();
+    let pairs = || {
+        flat.chunks(2)
+            .map(|pair| match pair {
+                [first, second] => Some((*first, *second)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+    };
+    Some(match kind {
+        edit::LIST => Collection::List(items.iter().map(utf8_text).collect::<Option<_>>()?),
+        edit::SET => Collection::Set(items.iter().map(utf8_text).collect::<Option<_>>()?),
+        edit::HASH => Collection::Hash(
+            pairs()?
+                .into_iter()
+                .map(|(field, value)| Some((utf8_text(field)?, utf8_text(value)?)))
+                .collect::<Option<_>>()?,
+        ),
+        _ => Collection::Zset(
+            pairs()?
+                .into_iter()
+                .map(|(member, score)| Some((utf8_text(member)?, scored(score)?)))
+                .collect::<Option<_>>()?,
+        ),
+    })
+}
+
 /// Whether a `*SCAN` of a key (`HSCAN key cursor …`) carries `flag` among its
 /// options, which are looked at as `MATCH pattern` and `COUNT n` pairs so a
 /// pattern that spells the flag is not taken for it.
@@ -1211,9 +1333,6 @@ fn summary(kind: &str) -> Option<(&'static str, Option<[&'static str; 2]>)> {
     })
 }
 
-/// How many of a collection's entries the keys grid reads to preview it.
-const PREVIEWED: usize = 100;
-
 /// The read of the first [`PREVIEWED`] entries of a collection counted by
 /// `counted_by`, never more whatever its size. `None` for a type previewed by
 /// its size alone.
@@ -1235,10 +1354,11 @@ fn sample(counted_by: &str, key: &[u8]) -> Option<::redis::Cmd> {
 }
 
 /// A [`sample`]'s entries, each as compact JSON (`"field":"value"`,
-/// `"member":score`, `"item"`), and the brackets they go between. A `*SCAN`'s
-/// `COUNT` is only a hint, and a small collection's one page is all of it, so
-/// past [`PREVIEWED`] they are dropped here.
-fn entries(counted_by: &str, sampled: &Value) -> Option<(Vec<String>, [char; 2])> {
+/// `"member":score`, `"item"`), the brackets they go between, and whether the
+/// JSON reads back as the same entries: every byte text, every score finite.
+/// A `*SCAN`'s `COUNT` is only a hint, and a small collection's one page is
+/// all of it, so past [`PREVIEWED`] they are dropped here.
+fn entries(counted_by: &str, sampled: &Value) -> Option<(Vec<String>, [char; 2], bool)> {
     let items = match (counted_by, sampled) {
         ("HLEN" | "SCARD", sampled) => scanned(sampled)?.1,
         (_, Value::Array(items)) => items.clone(),
@@ -1262,33 +1382,55 @@ fn entries(counted_by: &str, sampled: &Value) -> Option<(Vec<String>, [char; 2])
                 _ => json(value).to_string(),
             };
             let pairs = flat.chunks(2).take(PREVIEWED);
+            let text = pairs.clone().all(|pair| {
+                utf8(pair[0])
+                    && match counted_by {
+                        "ZCARD" => scored(pair[1]).is_some_and(f64::is_finite),
+                        _ => utf8(pair[1]),
+                    }
+            });
             let entries = pairs.map(|pair| format!("{}:{}", json(pair[0]), value(pair[1])));
-            (entries.collect(), ['{', '}'])
+            (entries.collect(), ['{', '}'], text)
         }
         _ => {
             let items = items.iter().take(PREVIEWED);
             (
-                items.map(|item| json(item).to_string()).collect(),
+                items.clone().map(|item| json(item).to_string()).collect(),
                 ['[', ']'],
+                items.clone().all(utf8),
             )
         }
     };
     Some(entries)
 }
 
+/// The text of a string reply that is UTF-8, which JSON carries as it is.
+fn utf8_text(value: &Value) -> Option<String> {
+    match value {
+        Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        Value::SimpleString(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn utf8(value: &Value) -> bool {
+    utf8_text(value).is_some()
+}
+
+/// A score whichever protocol carried it.
+fn scored(value: &Value) -> Option<f64> {
+    match value {
+        Value::Double(number) => Some(*number),
+        value => text(value).and_then(|text| text.parse().ok()),
+    }
+}
+
 /// A score as a JSON number, spelled as redis-cli spells it (`3`, not
 /// `3.0`), whichever protocol carried it; `inf` and `-inf`, which JSON has no
 /// number for, as text.
 fn score(value: &Value) -> String {
-    let parsed = match value {
-        Value::Double(number) => Some(*number),
-        value => text(value).and_then(|text| text.parse().ok()),
-    };
-    match parsed.and_then(serde_json::Number::from_f64) {
-        Some(number) => {
-            let number = number.to_string();
-            number.strip_suffix(".0").unwrap_or(&number).to_string()
-        }
+    match scored(value).filter(|score| score.is_finite()) {
+        Some(score) => edit::spelled_score(score),
         None => json(value).to_string(),
     }
 }
@@ -2039,23 +2181,30 @@ mod tests {
             })
             .unwrap()
             .1;
-            shown_value(counted_by, counted, &Value::Int(size), None, Some(&sampled)).0
+            shown_value(counted_by, counted, &Value::Int(size), None, Some(&sampled))
         };
         let hash = scan(&[bulk("name"), bulk("Grace"), bulk("plan"), bulk("free")]);
         assert_eq!(
-            preview("HLEN", 2, hash.clone()).as_deref(),
-            Some(r#"{"name":"Grace","plan":"free"}"#)
+            preview("HLEN", 2, hash.clone()),
+            (
+                Some(r#"{"name":"Grace","plan":"free"}"#.into()),
+                edit::HASH_JSON
+            )
         );
         // A read short of the size is only the size.
-        assert_eq!(preview("HLEN", 1000, hash).as_deref(), Some("1000 fields"));
         assert_eq!(
-            preview("LLEN", 1, array(&[bulk("a")])).as_deref(),
-            Some(r#"["a"]"#)
+            preview("HLEN", 1000, hash),
+            (Some("1000 fields".into()), edit::SUMMARY)
         );
         assert_eq!(
-            preview("SCARD", 3, scan(&[bulk("a")])).as_deref(),
-            Some("3 members")
+            preview("LLEN", 1, array(&[bulk("a")])),
+            (Some(r#"["a"]"#.into()), edit::LIST_JSON)
         );
+        assert_eq!(
+            preview("SCARD", 3, scan(&[bulk("a")])),
+            (Some("3 members".into()), edit::SUMMARY)
+        );
+        assert_eq!(preview("SCARD", 1, scan(&[bulk("a")])).1, edit::SET_JSON);
         // Kept in the order read, which is by score, nested (RESP3) or flat.
         let nested = array(&[
             array(&[bulk("low"), Value::Double(1.0)]),
@@ -2064,30 +2213,35 @@ mod tests {
         let flat = array(&[bulk("low"), bulk("1"), bulk("high"), bulk("2.5")]);
         for sampled in [nested, flat] {
             assert_eq!(
-                preview("ZCARD", 2, sampled).as_deref(),
-                Some(r#"{"low":1,"high":2.5}"#)
+                preview("ZCARD", 2, sampled),
+                (Some(r#"{"low":1,"high":2.5}"#.into()), edit::ZSET_JSON)
             );
         }
+        // An infinite score and bytes that are not UTF-8 show, quoted, but no
+        // JSON edit could write them back.
         assert_eq!(
-            preview("ZCARD", 1, array(&[bulk("a"), bulk("-inf")])).as_deref(),
-            Some(r#"{"a":"-inf"}"#)
+            preview("ZCARD", 1, array(&[bulk("a"), bulk("-inf")])),
+            (Some(r#"{"a":"-inf"}"#.into()), edit::SUMMARY)
         );
-        // Bytes that are not UTF-8 are their quoted spelling, never replaced.
+        let binary = Value::BulkString(b"\xff".to_vec());
         assert_eq!(
-            preview("LLEN", 1, array(&[Value::BulkString(b"\xff".to_vec())])).as_deref(),
-            Some(r#"["\"\\xff\""]"#)
+            preview("LLEN", 1, array(std::slice::from_ref(&binary))),
+            (Some(r#"["\"\\xff\""]"#.into()), edit::SUMMARY)
+        );
+        assert_eq!(
+            preview("HLEN", 1, scan(&[bulk("f"), binary])).1,
+            edit::SUMMARY
         );
         // 200 characters show; 201 are only the size.
         let item = |length: usize| array(&[bulk(&"x".repeat(length - 4))]);
         for length in [199, GLANCE] {
-            assert_eq!(
-                preview("LLEN", 1, item(length)).unwrap().chars().count(),
-                length
-            );
+            let (shown, tag) = preview("LLEN", 1, item(length));
+            assert_eq!(shown.unwrap().chars().count(), length);
+            assert_eq!(tag, edit::LIST_JSON);
         }
         assert_eq!(
-            preview("LLEN", 1, item(GLANCE + 1)).as_deref(),
-            Some("1 item")
+            preview("LLEN", 1, item(GLANCE + 1)),
+            (Some("1 item".into()), edit::SUMMARY)
         );
         // A sample that failed leaves the size.
         assert_eq!(
@@ -2095,9 +2249,49 @@ mod tests {
                 "HLEN",
                 3,
                 ::redis::parse_redis_value(b"-NOPERM no\r\n").unwrap()
-            ),
+            )
+            .0,
             Some("3 fields".into())
         );
+    }
+
+    #[test]
+    fn a_collection_edit_writes_only_over_the_collection_it_read() {
+        let check = |line: &str, reply: Value, expected: &str| {
+            verified(&command(line), &reply, expected.as_bytes())
+        };
+        let array = |items: &[Value]| Value::Array(items.to_vec());
+        let scan = |cursor: &str, items: &[Value]| array(&[bulk(cursor), array(items)]);
+        let hash = r#"{"a":"1","b":"2"}"#;
+        let read = "HSCAN h 0 COUNT 100";
+        let held = [bulk("b"), bulk("2"), bulk("a"), bulk("1")];
+        assert!(check(read, scan("0", &held), hash).is_ok());
+        // Changed, grown, gone, or more than one page: refused.
+        for reply in [
+            scan("0", &[bulk("a"), bulk("1"), bulk("b"), bulk("3")]),
+            scan("0", &[held.as_slice(), &[bulk("c"), bulk("3")]].concat()),
+            scan("0", &[]),
+            scan("17", &held),
+            ::redis::parse_redis_value(b"-WRONGTYPE no\r\n").unwrap(),
+        ] {
+            assert!(check(read, reply.clone(), hash).is_err(), "{reply:?}");
+        }
+        let list = r#"["a","b"]"#;
+        let read = "LRANGE l 0 100";
+        assert!(check(read, array(&[bulk("a"), bulk("b")]), list).is_ok());
+        for items in [
+            vec![bulk("b"), bulk("a")],
+            vec![bulk("a"), bulk("b"), bulk("c")],
+            vec![bulk("a"), Value::BulkString(b"\xff".to_vec())],
+        ] {
+            assert!(check(read, array(&items), list).is_err());
+        }
+        // A set and a sorted set compare as what they hold, in any order.
+        let set = scan("0", &[bulk("y"), bulk("x")]);
+        assert!(check("SSCAN s 0 COUNT 100", set, r#"["x","y"]"#).is_ok());
+        let zset = scan("0", &[bulk("m"), bulk("2.5"), bulk("n"), bulk("1")]);
+        assert!(check("ZSCAN z 0 COUNT 100", zset.clone(), r#"{"n":1,"m":2.5}"#).is_ok());
+        assert!(check("ZSCAN z 0 COUNT 100", zset, r#"{"n":1,"m":2}"#).is_err());
     }
 
     #[test]
@@ -3029,6 +3223,185 @@ mod tests {
         clean(&connection, "live:keys:");
     }
 
+    /// db 5, with keys of `prefix`'s own: db 4 is the other edit tests', and
+    /// db 6 is flushed by the glob test.
+    fn spare(prefix: &str) -> Connection {
+        let connection = Connection::open(&ServerConfig {
+            database: "5".into(),
+            ..live_config()
+        })
+        .unwrap();
+        clean(&connection, prefix);
+        connection
+    }
+
+    fn keys_grid(connection: &Connection, prefix: &str) -> crate::result_grid::ResultGrid {
+        let preview = preview_sql(
+            Engine::Redis,
+            "db5",
+            KEYS,
+            &format!("MATCH {prefix}*"),
+            None,
+            0,
+        );
+        editing(connection, &preview)
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_small_collections_json_is_edited_from_the_keys_grid() {
+        let prefix = "live:json:";
+        let connection = spare(prefix);
+        ran(&connection, "HSET live:json:h a 1 b 2 c 3");
+        ran(&connection, "RPUSH live:json:l a b c");
+        ran(&connection, "SADD live:json:s x y");
+        ran(&connection, "ZADD live:json:z 1 a 2.5 b");
+        ran(&connection, r#"SADD live:json:bin "\xff" a"#);
+        ran(
+            &connection,
+            "EVAL \"for i = 1, 300 do redis.call('RPUSH', KEYS[1], i) end\" 1 live:json:big",
+        );
+        let mut keys = keys_grid(&connection, prefix);
+        let at = |keys: &crate::result_grid::ResultGrid, key| row_of(keys, key);
+        assert_eq!(keys.cell(at(&keys, "live:json:big"), 3), Some("300 items"));
+        for key in ["live:json:big", "live:json:bin"] {
+            assert!(!keys.editable(at(&keys, key), 3), "{key}");
+        }
+        for (key, edited) in [
+            ("live:json:h", r#"{"a":"1","b":"two","d":"4"}"#),
+            ("live:json:l", r#"["a","B","c"]"#),
+            ("live:json:s", r#"["y","z z"]"#),
+            ("live:json:z", r#"{"a":1,"b":7,"c":-1}"#),
+        ] {
+            let row = at(&keys, key);
+            assert!(keys.editable(row, 3), "{key}");
+            assert!(keys.set_pending(row, 3, staged(edited)), "{key}");
+        }
+        applied(&connection, &edits(&keys)).unwrap();
+        let keys = keys_grid(&connection, prefix);
+        let shown = |key| keys.cell(at(&keys, key), 3).map(str::to_string);
+        assert_eq!(
+            cells(&ran(&connection, "HGETALL live:json:h")).len(),
+            3,
+            "c was deleted"
+        );
+        assert_eq!(
+            one(&connection, "HGET live:json:h b").as_deref(),
+            Some("two")
+        );
+        assert_eq!(one(&connection, "HGET live:json:h d").as_deref(), Some("4"));
+        assert_eq!(shown("live:json:l").as_deref(), Some(r#"["a","B","c"]"#));
+        assert_eq!(
+            one(&connection, r#"SISMEMBER live:json:s "z z""#).as_deref(),
+            Some("1")
+        );
+        assert_eq!(one(&connection, "SCARD live:json:s").as_deref(), Some("2"));
+        assert_eq!(
+            shown("live:json:z").as_deref(),
+            Some(r#"{"c":-1,"a":1,"b":7}"#)
+        );
+        clean(&connection, prefix);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_collection_changed_since_it_was_read_is_not_written() {
+        let prefix = "live:raced:";
+        let connection = spare(prefix);
+        let other = spare(prefix);
+        ran(&connection, "HSET live:raced:h a 1 b 2");
+        ran(&connection, "SADD live:raced:s x y");
+        let mut keys = keys_grid(&connection, prefix);
+        let h = row_of(&keys, "live:raced:h");
+        assert!(keys.set_pending(h, 3, staged(r#"{"a":"one","b":"2"}"#)));
+        let hash = edits(&keys);
+        let mut keys = keys_grid(&connection, prefix);
+        let s = row_of(&keys, "live:raced:s");
+        assert!(keys.set_pending(s, 3, staged(r#"["x"]"#)));
+        let set = edits(&keys);
+
+        ran(&other, "HSET live:raced:h b 3");
+        ran(&other, "SREM live:raced:s y");
+        ran(&other, "SADD live:raced:s y");
+        ran(&other, "SADD live:raced:s w");
+        for text in [&hash, &set] {
+            let error = applied(&connection, text).unwrap_err();
+            assert!(error.message.contains("changed"), "{}", error.message);
+        }
+        assert_eq!(
+            one(&connection, "HGET live:raced:h a").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            one(&connection, "HGET live:raced:h b").as_deref(),
+            Some("3")
+        );
+        assert_eq!(one(&connection, "SCARD live:raced:s").as_deref(), Some("3"));
+        // Retyped and gone are refused too.
+        ran(&other, "DEL live:raced:s");
+        ran(&other, "SET live:raced:h now-a-string");
+        for text in [&hash, &set] {
+            assert!(applied(&connection, text).is_err(), "{text}");
+        }
+        assert_eq!(
+            one(&connection, "EXISTS live:raced:s").as_deref(),
+            Some("0")
+        );
+        // The failed runs left no WATCH behind to void the next edit.
+        ran(&other, "DEL live:raced:h");
+        ran(&other, "HSET live:raced:h a 1");
+        let mut keys = keys_grid(&connection, prefix);
+        let h = row_of(&keys, "live:raced:h");
+        assert!(keys.set_pending(h, 3, staged(r#"{"a":"2"}"#)));
+        applied(&connection, &edits(&keys)).unwrap();
+        assert_eq!(
+            one(&connection, "HGET live:raced:h a").as_deref(),
+            Some("2")
+        );
+        clean(&connection, prefix);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_collection_grown_past_its_read_is_not_written() {
+        let prefix = "live:grown:";
+        let connection = spare(prefix);
+        let other = spare(prefix);
+        ran(&connection, "HSET live:grown:h a 1");
+        ran(&connection, "RPUSH live:grown:l a");
+        let mut keys = keys_grid(&connection, prefix);
+        let h = row_of(&keys, "live:grown:h");
+        assert!(keys.set_pending(h, 3, staged(r#"{"a":"2"}"#)));
+        let l = row_of(&keys, "live:grown:l");
+        assert!(keys.set_pending(l, 3, staged(r#"["b"]"#)));
+        let both = edits(&keys);
+        let (hash, list) = both.split_at(both.find("WATCH live:grown:l").unwrap());
+        let hash = hash.trim_end();
+
+        ran(
+            &other,
+            "EVAL \"for i = 1, 1000 do redis.call('HSET', KEYS[1], 'f' .. i, i) end\" 1 live:grown:h",
+        );
+        ran(&other, "RPUSH live:grown:l z");
+        for text in [hash, list] {
+            let error = applied(&connection, text).unwrap_err();
+            assert!(
+                error.message.contains("changed") || error.message.contains("one read"),
+                "{}",
+                error.message
+            );
+        }
+        assert_eq!(
+            one(&connection, "HGET live:grown:h a").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            one(&connection, "LINDEX live:grown:l 0").as_deref(),
+            Some("a")
+        );
+        clean(&connection, prefix);
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_an_opened_key_writes_back_its_own_type() {
@@ -3320,7 +3693,7 @@ mod tests {
         lock(&connection.running).asked = true;
         let exec = redis_cmd::parse("EXEC").unwrap().remove(0);
         let error = connection
-            .command(&mut lock(&connection.session), &exec, None, false)
+            .command(&mut lock(&connection.session), &exec, None, false, None)
             .unwrap_err();
         assert_eq!(error.message, CANCELLED);
         *lock(&connection.running) = Running::default();

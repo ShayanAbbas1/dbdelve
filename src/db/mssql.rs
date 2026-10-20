@@ -3445,6 +3445,7 @@ mod tests {
             sets: vec![("name".into(), NewValue::Value(name.to_string().into()))],
             keys: vec![("id".into(), id.into())],
             types: Vec::new(),
+            held: Vec::new(),
         };
         for id in ["901", "902"] {
             let _ = connection.query(

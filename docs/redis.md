@@ -123,8 +123,29 @@ On the keys grid:
 - A string `value` becomes `SET key value XX KEEPTTL GET`, which writes nothing
   to a key deleted since it was read (an error) or now holding another type
   (`WRONGTYPE`).
+- A hash, list, set or sorted set shown as JSON is edited as JSON (see below).
 - New row is `SET key value NX`, with `EX` when a ttl is given.
 - Delete row is `UNLINK`.
+
+A collection's JSON is diffed against the JSON shown, and each difference
+becomes the command an opened key's grid writes (below): a hash takes an object
+of string values (`HSET` the changed and new fields, `HDEL` the removed), a set
+an array of strings with no duplicates (`SADD`, `SREM`), a sorted set an object
+of member to number (`ZADD XX CH` a changed score, `ZADD NX` a new member,
+`ZREM`), and a list an array of strings **of the same length** (`LSET` each
+changed index). Anything else is refused: JSON that does not parse or is the
+wrong shape, a value that is not a string, an empty collection (delete the row
+instead), and JSON that changes nothing, which is no edit. A list edit that
+adds or removes items is refused too: open the key to insert or remove them.
+
+The write never lands over a change made since the read: `WATCH key`, then
+`ECHO` of the JSON shown and the preview's bounded read again (`HSCAN`,
+`SSCAN` or `ZSCAN key 0 COUNT 100`, `LRANGE key 0 100`), which must find
+exactly that JSON's entries, with the cursor back at `0` and nothing more. A
+key changed, grown, retyped or deleted is an error and nothing is written; a
+change after that read voids the `MULTI` the writes run in. A collection with a
+field, member or value that is not UTF-8, or an infinite score, is shown but is
+not editable.
 
 On an opened key:
 
@@ -161,9 +182,10 @@ failure says which one failed and how many ran before it.
   open across runs until its `EXEC` or `DISCARD`, and every command sent
   meanwhile is only queued, so the grids refuse to read or write until it is
   closed. A run that fails discards the `MULTI` it opened.
-- **A `WATCH` left open holds list edits back.** A list item's write carries a
-  `WATCH` of its own, whose `EXEC` would clear the query tab's too, so it is
-  refused until that tab runs `UNWATCH` or the `MULTI` and `EXEC` it guards.
+- **A `WATCH` left open holds list and collection edits back.** A list
+  item's write and a collection's JSON edit carry a `WATCH` of their own,
+  whose `EXEC` would clear the query tab's too, so they are refused until that
+  tab runs `UNWATCH` or the `MULTI` and `EXEC` it guards.
 - **Reading a key does not touch it.** Every session is `CLIENT NO-TOUCH ON`
   (Redis 7.2 and later), so neither browsing nor your own commands move a key's
   LRU or LFU, which eviction goes by; `TOUCH` still does.
@@ -173,8 +195,11 @@ failure says which one failed and how many ran before it.
 
 ## Known limits
 
-- **A collection's preview is read-only,** JSON or size: open the key to edit
-  its entries.
+- **Only a collection shown as JSON is editable from the keys grid,** and a
+  list's only item by item: open the key to edit a larger one or to add or
+  remove list items. Its edit's check is one bounded read, so a collection
+  Redis cannot hand back in one page (rare under 200 characters) is refused
+  rather than checked.
 - **Cut values are read-only.** A string or document longer than the grid
   holds (4,000 bytes of a string, 4,000 characters of a document) is shown
   cut, and a cut value cannot be edited,

@@ -12,13 +12,15 @@
 //! field `HSETNX`, a new member `SADD` or `ZADD NX`, a rename `RENAMENX`, a
 //! string's new value `SET … XX … GET` (so a key deleted or retyped since is
 //! not written), a list item's write checked against the item read
-//! ([`checked`]), and the connection turns the reply that says nothing
-//! happened into an error.
+//! ([`checked`]), a collection's JSON edit checked against the JSON shown
+//! ([`collection_edit`]), and the connection turns the reply that says
+//! nothing happened into an error.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, RandomState};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::browse::KEYS;
+use super::browse::{KEYS, PREVIEWED};
 use super::{Command, parse, quoted, spelled, split};
 use crate::result_grid::{NewValue, PendingRow};
 
@@ -33,12 +35,20 @@ pub(crate) const TRUNCATED: &str = "truncated";
 /// A whole JSON document, as the keys grid shows one.
 pub(crate) const JSON: &str = "json";
 /// What the keys grid shows for a key it does not hold the value of: a
-/// collection's size or small enough to show whole, or nothing for a type it
-/// has no read for. A collection shown whole is still a preview: its JSON is
-/// not what an edit would write back.
+/// collection's size, one whose bytes are not all text, or nothing for a
+/// type it has no read for.
 pub(crate) const SUMMARY: &str = "summary";
+/// A small collection's whole JSON on the keys grid, by its type, which says
+/// how an edit of it is written ([`collection_edit`]).
+pub(crate) const HASH_JSON: &str = "hash json";
+pub(crate) const LIST_JSON: &str = "list json";
+pub(crate) const SET_JSON: &str = "set json";
+pub(crate) const ZSET_JSON: &str = "zset json";
 
-const TAGS: [&str; 7] = [STRING, BYTES, INTEGER, DOUBLE, TRUNCATED, JSON, SUMMARY];
+const TAGS: [&str; 11] = [
+    STRING, BYTES, INTEGER, DOUBLE, TRUNCATED, JSON, SUMMARY, HASH_JSON, LIST_JSON, SET_JSON,
+    ZSET_JSON,
+];
 
 /// The schema of an opened key's grid: the key's type.
 pub(crate) const HASH: &str = "hash";
@@ -56,7 +66,18 @@ pub(crate) fn cell_type(name: &str) -> Option<&'static str> {
 
 /// Whether a cell tagged `tag` holds what an edit would write back.
 pub(crate) fn writes_back(tag: &str) -> bool {
-    matches!(tag, STRING | INTEGER | DOUBLE)
+    matches!(tag, STRING | INTEGER | DOUBLE) || shown_whole(tag).is_some()
+}
+
+/// The type of the collection a cell tagged `tag` holds the whole JSON of.
+fn shown_whole(tag: &str) -> Option<&'static str> {
+    Some(match tag {
+        HASH_JSON => HASH,
+        LIST_JSON => LIST,
+        SET_JSON => SET,
+        ZSET_JSON => ZSET,
+        _ => return None,
+    })
 }
 
 /// Whether a key column of a grid can be edited: a key's name, a member, a
@@ -148,8 +169,23 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
             _ => {
                 keyspace(&row.table)?;
                 let key = held("key")?;
-                if set("value").is_some() {
-                    lines.push(format!("SET {key} {} XX KEEPTTL GET", typed("value")?));
+                match (
+                    set("value"),
+                    type_of(&row.types, "value").and_then(shown_whole),
+                ) {
+                    (None, _) => {}
+                    (Some(value), Some(kind)) => {
+                        let shown = row
+                            .held
+                            .iter()
+                            .find(|(column, _)| column == "value")
+                            .map(|(_, text)| text.as_str())
+                            .ok_or("This row's value is not known.")?;
+                        lines.extend(collection_edit(&key, kind, shown, value)?);
+                    }
+                    (Some(_), None) => {
+                        lines.push(format!("SET {key} {} XX KEEPTTL GET", typed("value")?));
+                    }
                 }
                 match set("ttl") {
                     None => {}
@@ -171,7 +207,190 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
             }
         }
     }
+    if lines.is_empty() {
+        return Err("The edits change nothing.".into());
+    }
     Ok(lines.join("\n"))
+}
+
+/// A small collection as the keys grid shows it whole, read from its JSON or
+/// from the server's reply, to compare and to diff.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Collection {
+    Hash(BTreeMap<String, String>),
+    List(Vec<String>),
+    Set(BTreeSet<String>),
+    Zset(BTreeMap<String, f64>),
+}
+
+impl Collection {
+    /// `text` read as the JSON of a collection of `kind`, refused where it is
+    /// not that shape: Redis holds text, and a score is a number.
+    pub(crate) fn parse(kind: &str, text: &str) -> Result<Self, String> {
+        use serde_json::Value as Json;
+        let json: Json =
+            serde_json::from_str(text).map_err(|error| format!("This is not JSON: {error}."))?;
+        let string = |value: &Json, what: &str| match value {
+            Json::String(text) => Ok(text.clone()),
+            other => Err(format!(
+                "{what} must be a JSON string, and {other} is not one."
+            )),
+        };
+        let parsed = match (kind, json) {
+            (HASH, Json::Object(fields)) => Self::Hash(
+                fields
+                    .iter()
+                    .map(|(field, value)| Ok((field.clone(), string(value, field)?)))
+                    .collect::<Result<_, String>>()?,
+            ),
+            (ZSET, Json::Object(members)) => Self::Zset(
+                members
+                    .iter()
+                    .map(|(member, score)| match score.as_f64() {
+                        Some(score) => Ok((member.clone(), score)),
+                        None => Err(format!("{member}'s score must be a number, not {score}.")),
+                    })
+                    .collect::<Result<_, String>>()?,
+            ),
+            (LIST, Json::Array(items)) => Self::List(
+                items
+                    .iter()
+                    .map(|item| string(item, "Each item"))
+                    .collect::<Result<_, _>>()?,
+            ),
+            (SET, Json::Array(members)) => {
+                let mut set = BTreeSet::new();
+                for member in &members {
+                    let member = string(member, "Each member")?;
+                    if !set.insert(member.clone()) {
+                        return Err(format!(
+                            "A set holds each member once, and {member} is twice."
+                        ));
+                    }
+                }
+                Self::Set(set)
+            }
+            (HASH, _) => return Err("A hash is a JSON object of field to value.".into()),
+            (ZSET, _) => return Err("A sorted set is a JSON object of member to score.".into()),
+            (LIST, _) => return Err("A list is a JSON array of its items.".into()),
+            (SET, _) => return Err("A set is a JSON array of its members.".into()),
+            _ => return Err(format!("A {kind} is not edited as JSON.")),
+        };
+        let empty = match &parsed {
+            Self::Hash(map) => map.is_empty(),
+            Self::List(items) => items.is_empty(),
+            Self::Set(set) => set.is_empty(),
+            Self::Zset(map) => map.is_empty(),
+        };
+        match empty {
+            true => {
+                Err("Redis holds no empty collection: delete the row to delete the key.".into())
+            }
+            false => Ok(parsed),
+        }
+    }
+}
+
+/// A score as redis-cli spells it (`3`, not `3.0`), which is also JSON.
+pub(crate) fn spelled_score(score: f64) -> String {
+    let text =
+        serde_json::Number::from_f64(score).map_or_else(|| score.to_string(), |n| n.to_string());
+    text.strip_suffix(".0").unwrap_or(&text).to_string()
+}
+
+/// A collection's JSON edited on the keys grid, as the opened key's grid
+/// would write each difference from the JSON `shown`, nothing where there is
+/// none. Like [`checked`], under a `WATCH` and in a `MULTI`, after a read
+/// the connection compares with `shown` (the `ECHO`), bounded as the
+/// preview's is, so a change made since the read is never written over.
+fn collection_edit(
+    key: &str,
+    kind: &str,
+    shown: &str,
+    value: &NewValue,
+) -> Result<Vec<String>, String> {
+    let NewValue::Value(edited) = value else {
+        return Err("value cannot be NULL: Redis has no NULL to store.".into());
+    };
+    let held = Collection::parse(kind, shown)?;
+    let writes = changes(key, &held, &Collection::parse(kind, edited)?)?;
+    if writes.is_empty() {
+        return Ok(writes);
+    }
+    let read = match kind {
+        LIST => format!("LRANGE {key} 0 {PREVIEWED}"),
+        HASH => format!("HSCAN {key} 0 COUNT {PREVIEWED}"),
+        SET => format!("SSCAN {key} 0 COUNT {PREVIEWED}"),
+        _ => format!("ZSCAN {key} 0 COUNT {PREVIEWED}"),
+    };
+    let mut lines = vec![
+        format!("WATCH {key}"),
+        format!("ECHO {}", quoted(shown)),
+        read,
+        "MULTI".to_string(),
+    ];
+    lines.extend(writes);
+    lines.push("EXEC".into());
+    Ok(lines)
+}
+
+/// The commands that take `key` from `held` to `edited`.
+fn changes(key: &str, held: &Collection, edited: &Collection) -> Result<Vec<String>, String> {
+    use Collection::*;
+    let mut lines = Vec::new();
+    match (held, edited) {
+        (Hash(held), Hash(edited)) => {
+            for (field, value) in edited {
+                if held.get(field) != Some(value) {
+                    lines.push(format!("HSET {key} {} {}", quoted(field), quoted(value)));
+                }
+            }
+            for field in held.keys().filter(|field| !edited.contains_key(*field)) {
+                lines.push(format!("HDEL {key} {}", quoted(field)));
+            }
+        }
+        (Set(held), Set(edited)) => {
+            for member in edited.difference(held) {
+                lines.push(format!("SADD {key} {}", quoted(member)));
+            }
+            for member in held.difference(edited) {
+                lines.push(format!("SREM {key} {}", quoted(member)));
+            }
+        }
+        (Zset(held), Zset(edited)) => {
+            for (member, &score) in edited {
+                let flag = match held.get(member) {
+                    Some(&old) if old == score => continue,
+                    Some(_) => "XX CH",
+                    None => "NX",
+                };
+                lines.push(format!(
+                    "ZADD {key} {flag} {} {}",
+                    spelled_score(score),
+                    quoted(member)
+                ));
+            }
+            for member in held.keys().filter(|member| !edited.contains_key(*member)) {
+                lines.push(format!("ZREM {key} {}", quoted(member)));
+            }
+        }
+        (List(held), List(edited)) if held.len() != edited.len() => {
+            return Err(format!(
+                "The list has {} items here and {} were read: open the key to add or remove items.",
+                edited.len(),
+                held.len()
+            ));
+        }
+        (List(held), List(edited)) => {
+            for (index, (was, item)) in held.iter().zip(edited).enumerate() {
+                if was != item {
+                    lines.push(format!("LSET {key} {index} {}", quoted(item)));
+                }
+            }
+        }
+        _ => return Err("The edit is not the collection that was read.".into()),
+    }
+    Ok(lines)
 }
 
 /// The command a new row is: a key that does not exist yet, or a field,
@@ -328,8 +547,9 @@ enum Unit {
 /// - one or more edits: `SET k v XX KEEPTTL GET`, `EXPIRE k n` with `n`
 ///   above zero (zero would delete the key), `PERSIST k`, `RENAMENX k new`,
 ///   `HSET k f v`, `ZADD k XX CH score m`, on one key an `SADD` then an
-///   `SREM`, or a `ZADD k NX score m` then a `ZREM`, and an `LSET k i v`
-///   in the `MULTI` its [`checked`] opens;
+///   `SREM`, or a `ZADD k NX score m` then a `ZREM`, an `LSET k i v`
+///   in the `MULTI` its [`checked`] opens, and a collection's writes, each of
+///   its type, in the `MULTI` a [`collection_edit`] opens;
 /// - one new row: `SET k v NX` (with `EX n`), `HSETNX k f v`, `RPUSH k v`,
 ///   `SADD k m` or `ZADD k NX score m`;
 /// - one deleted row: `UNLINK k`, `HDEL k f`, `SREM k m`, `ZREM k m`, or an
@@ -419,9 +639,55 @@ fn unit<'a, 'b>(lines: &'b Lines<'a>) -> Option<(Unit, &'b Lines<'a>)> {
         {
             (Unit::Delete(&["index", "value"]), after)
         }
+        [[b"WATCH", key], [b"ECHO", _], read, [b"MULTI"], rest @ ..] => {
+            let kind = collection_read(read, key)?;
+            let writes = rest
+                .iter()
+                .take_while(|words| collection_write(kind, words, key))
+                .count();
+            match &rest[writes..] {
+                [[b"EXEC"], after @ ..] if writes > 0 => (Unit::Edit, after),
+                _ => return None,
+            }
+        }
         [first, after @ ..] => (single(first)?, after),
         [] => return None,
     })
+}
+
+/// The type a [`collection_edit`]'s check reads `key` as.
+fn collection_read(words: &[&[u8]], key: &[u8]) -> Option<&'static str> {
+    let previewed = PREVIEWED.to_string();
+    let kind = match words {
+        [b"LRANGE", read, b"0", last] if *last == previewed.as_bytes() => (LIST, read),
+        [name, read, b"0", b"COUNT", count] if *count == previewed.as_bytes() => (
+            match *name {
+                b"HSCAN" => HASH,
+                b"SSCAN" => SET,
+                b"ZSCAN" => ZSET,
+                _ => return None,
+            },
+            read,
+        ),
+        _ => return None,
+    };
+    (*kind.1 == key).then_some(kind.0)
+}
+
+/// Whether `words` is one of the writes a [`collection_edit`] of `kind` makes.
+fn collection_write(kind: &str, words: &[&[u8]], key: &[u8]) -> bool {
+    match (kind, words) {
+        (HASH, [b"HSET", written, _, _] | [b"HDEL", written, _])
+        | (SET, [b"SADD", written, _] | [b"SREM", written, _])
+        | (
+            ZSET,
+            [b"ZADD", written, b"XX", b"CH", _, _]
+            | [b"ZADD", written, b"NX", _, _]
+            | [b"ZREM", written, _],
+        ) => *written == key,
+        (LIST, [b"LSET", written, index, _]) => *written == key && whole(index),
+        _ => false,
+    }
 }
 
 fn single(words: &[&[u8]]) -> Option<Unit> {
@@ -598,6 +864,7 @@ mod tests {
                 .iter()
                 .map(|(column, tag)| (column.to_string(), tag.to_string()))
                 .collect(),
+            held: Vec::new(),
         }
     }
 
@@ -1019,6 +1286,131 @@ mod tests {
         assert!(is_generated_write(
             "SET a 1 XX KEEPTTL GET\nPERSIST b\nZADD z XX CH 1 m"
         ));
+    }
+
+    /// A keys grid row whose `value` shows `shown`, tagged `tag`, edited to `edited`.
+    fn collection_row(tag: &str, shown: &str, edited: &str) -> PendingRow {
+        PendingRow {
+            held: vec![("value".into(), shown.into())],
+            ..row(
+                "db0",
+                KEYS,
+                &[("value", value(edited))],
+                &[("key", "k")],
+                &[("key", STRING), ("ttl", INTEGER), ("value", tag)],
+            )
+        }
+    }
+
+    fn collection_batch(tag: &str, shown: &str, edited: &str) -> Result<String, String> {
+        update_batch(&[collection_row(tag, shown, edited)])
+    }
+
+    #[test]
+    fn a_collections_json_edit_writes_each_difference_under_a_check() {
+        let check =
+            |read: &str, shown: &str| format!("WATCH k\nECHO {}\n{read}\nMULTI", quoted(shown));
+        let hash = r#"{"a":"1","b":"2","c":"3"}"#;
+        assert_eq!(
+            admitted(
+                &collection_batch(HASH_JSON, hash, r#"{"a":"1","b":"two","d":"4 4"}"#).unwrap()
+            ),
+            format!(
+                "{}\nHSET k b two\nHSET k d \"4 4\"\nHDEL k c\nEXEC",
+                check("HSCAN k 0 COUNT 100", hash)
+            )
+        );
+        let set = r#"["x","y"]"#;
+        assert_eq!(
+            admitted(&collection_batch(SET_JSON, set, r#"["y","z"]"#).unwrap()),
+            format!(
+                "{}\nSADD k z\nSREM k x\nEXEC",
+                check("SSCAN k 0 COUNT 100", set)
+            )
+        );
+        let zset = r#"{"a":1,"b":2.5,"c":3}"#;
+        assert_eq!(
+            admitted(&collection_batch(ZSET_JSON, zset, r#"{"a":1.0,"b":7,"d":-0.5}"#).unwrap()),
+            format!(
+                "{}\nZADD k XX CH 7 b\nZADD k NX -0.5 d\nZREM k c\nEXEC",
+                check("ZSCAN k 0 COUNT 100", zset)
+            )
+        );
+        let list = r#"["a","b","c"]"#;
+        assert_eq!(
+            admitted(&collection_batch(LIST_JSON, list, r#"["a","B","c"]"#).unwrap()),
+            format!("{}\nLSET k 1 B\nEXEC", check("LRANGE k 0 100", list))
+        );
+        // A ttl edit on the same row follows the collection's.
+        let mut both = collection_row(LIST_JSON, list, r#"["A","b","c"]"#);
+        both.sets.push(("ttl".into(), value("9")));
+        let batch = update_batch(&[both]).unwrap();
+        assert!(admitted(&batch).ends_with("EXEC\nEXPIRE k 9"), "{batch}");
+    }
+
+    #[test]
+    fn a_collections_json_edit_refuses_what_is_not_its_shape_or_no_change() {
+        for (tag, shown, edited, said) in [
+            (HASH_JSON, r#"{"a":"1"}"#, "{", "not JSON"),
+            (HASH_JSON, r#"{"a":"1"}"#, r#"["a"]"#, "JSON object"),
+            (HASH_JSON, r#"{"a":"1"}"#, r#"{"a":1}"#, "JSON string"),
+            (HASH_JSON, r#"{"a":"1"}"#, "{}", "empty"),
+            (SET_JSON, r#"["a"]"#, r#"{"a":"1"}"#, "JSON array"),
+            (SET_JSON, r#"["a"]"#, r#"["a","b","a"]"#, "once"),
+            (SET_JSON, r#"["a"]"#, r#"["a",null]"#, "JSON string"),
+            (ZSET_JSON, r#"{"a":1}"#, r#"{"a":"1"}"#, "number"),
+            (ZSET_JSON, r#"{"a":1}"#, r#"[1]"#, "JSON object"),
+            (LIST_JSON, r#"["a","b"]"#, r#"["a"]"#, "open the key"),
+            (
+                LIST_JSON,
+                r#"["a","b"]"#,
+                r#"["a","b","c"]"#,
+                "open the key",
+            ),
+            (LIST_JSON, r#"["a"]"#, r#"[true]"#, "JSON string"),
+            (LIST_JSON, r#"["a"]"#, r#"["a"]"#, "change nothing"),
+            (ZSET_JSON, r#"{"a":1}"#, r#"{"a":1.0}"#, "change nothing"),
+            (
+                HASH_JSON,
+                r#"{"a":"1","b":"2"}"#,
+                r#" {"b":"2", "a":"1"} "#,
+                "change nothing",
+            ),
+        ] {
+            let error = collection_batch(tag, shown, edited).unwrap_err();
+            assert!(error.contains(said), "{edited}: {error}");
+        }
+        // NULL, and a cell whose JSON could not be written back, are refused.
+        let mut nulled = collection_row(HASH_JSON, r#"{"a":"1"}"#, "");
+        nulled.sets = vec![("value".into(), NewValue::Null)];
+        assert!(update_batch(&[nulled]).is_err());
+        assert!(collection_batch(SUMMARY, r#"["\"\\xff\""]"#, r#"["a"]"#).is_err());
+        assert!(!writes_back(SUMMARY) && writes_back(SET_JSON));
+    }
+
+    #[test]
+    fn the_gate_admits_a_collection_edit_only_whole_and_of_its_own_type() {
+        let head = "WATCH k\nECHO x\nHSCAN k 0 COUNT 100\nMULTI\n";
+        assert!(is_generated_write(&format!(
+            "{head}HSET k f v\nHDEL k g\nEXEC"
+        )));
+        for text in [
+            format!("{head}EXEC"),
+            format!("{head}HSET k f v"),
+            format!("{head}SADD k m\nEXEC"),
+            format!("{head}HSET j f v\nEXEC"),
+            format!("{head}HSET k f v\nFLUSHDB\nEXEC"),
+            format!("{head}HSET k f v\nEXEC\nFLUSHDB"),
+            "WATCH k\nECHO x\nHSCAN k 0 COUNT 1000\nMULTI\nHSET k f v\nEXEC".into(),
+            "WATCH k\nECHO x\nHSCAN j 0 COUNT 100\nMULTI\nHSET k f v\nEXEC".into(),
+            "WATCH k\nHSCAN k 0 COUNT 100\nMULTI\nHSET k f v\nEXEC".into(),
+            "WATCH k\nECHO x\nLRANGE k 0 -1\nMULTI\nLSET k 0 v\nEXEC".into(),
+            "WATCH k\nECHO x\nLRANGE k 0 100\nMULTI\nLSET k -1 v\nEXEC".into(),
+            "WATCH k\nECHO x\nZSCAN k 0 COUNT 100\nMULTI\nZADD k 1 m\nEXEC".into(),
+            "WATCH k\nECHO x\nSSCAN k 0 COUNT 100\nMULTI\nHDEL k f\nEXEC".into(),
+        ] {
+            assert!(!is_generated_write(&text), "{text}");
+        }
     }
 
     #[test]

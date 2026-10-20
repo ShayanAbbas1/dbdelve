@@ -17,6 +17,10 @@ pub(crate) const KEYS: &str = "keys";
 /// the keyspace to walk per round trip, not how many keys to return.
 const COUNT: &str = "1000";
 
+/// How many of a collection's entries the keys grid reads to preview it, and
+/// an edit of its JSON reads again to check it.
+pub(crate) const PREVIEWED: usize = 100;
+
 pub(crate) fn preview(filter: &str) -> String {
     match filter.trim() {
         "" => format!("SCAN 0 MATCH * COUNT {COUNT}"),

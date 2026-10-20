@@ -4788,6 +4788,7 @@ mod tests {
                 .collect(),
             keys: owned(keys),
             types: Vec::new(),
+            held: Vec::new(),
         }
     }
 
