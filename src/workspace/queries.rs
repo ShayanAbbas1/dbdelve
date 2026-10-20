@@ -1469,6 +1469,34 @@ impl Workspace {
         self.activate_tab(Tab::Query(id), window, cx);
     }
 
+    /// A new query tab holding `statement`, run at once: a row opened as a
+    /// result of its own, by a command that is then the user's to read, edit
+    /// and run again, through the same gate as any they type.
+    pub(crate) fn run_in_new_query(
+        &mut self,
+        statement: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.profile().map(|profile| profile.session.next_query_id);
+        self.new_query(&NewQuery, window, cx);
+        // Not whatever tab is in front if the new one could not be made: that
+        // buffer is the user's.
+        let Some(editor) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .filter(|tab| Some(tab.id) == id)
+            .map(|tab| tab.editor.clone())
+        else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            editor.set_value(statement, window, cx);
+            editor.set_cursor_position(Position::new(0, 0), window, cx);
+        });
+        self.run_query(&RunQuery, window, cx);
+    }
+
     /// The first unsaved buffer, or a new one when every open tab has a name.
     ///
     /// It used to swap the scratch file into the single editor, which is what

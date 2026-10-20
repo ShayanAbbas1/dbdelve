@@ -1,6 +1,6 @@
 //! The keys grid: the `SCAN` its preview runs, the `DBSIZE` its count runs,
-//! the `SCAN` options its filter bar writes, and the gate the
-//! preview and the count pass.
+//! the `SCAN` options its filter bar writes, the read a key opens with, and
+//! the gate the preview and the count pass.
 //!
 //! A tab's filter is the run of `SCAN` options its bars add up to (`MATCH
 //! user:* TYPE hash`), so the preview is that run between the cursor and the
@@ -131,6 +131,31 @@ pub(crate) fn is_generated_read(text: &str) -> bool {
     preview(&options) == text
 }
 
+/// The command a key of `kind` opens with: the whole of it, in the shape each
+/// type reads back as a grid. `None` for a type there is no read for.
+///
+/// `key` is as the keys grid shows it, which for a name that is not UTF-8 is
+/// already redis-cli's quoted spelling of its bytes, and is sent as written.
+/// A UTF-8 name that happens to spell such a word the same way reads as those
+/// bytes; the grid cannot tell the two apart.
+pub(crate) fn read(key: &str, kind: &str) -> Option<String> {
+    let key = match super::split(key).as_deref() {
+        Ok([bytes]) if std::str::from_utf8(bytes).is_err() => key.to_string(),
+        _ => quoted(key),
+    };
+    Some(match kind {
+        "string" => format!("GET {key}"),
+        "hash" => format!("HGETALL {key}"),
+        "list" => format!("LRANGE {key} 0 -1"),
+        "set" => format!("SMEMBERS {key}"),
+        "zset" => format!("ZRANGE {key} 0 -1 WITHSCORES"),
+        "stream" => format!("XRANGE {key} - +"),
+        "ReJSON-RL" => format!("JSON.GET {key} $"),
+        "TSDB-TYPE" => format!("TS.RANGE {key} - +"),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +240,29 @@ mod tests {
         ] {
             assert!(!is_generated_read(text), "{text}");
         }
+    }
+
+    #[test]
+    fn a_key_opens_with_its_types_read_and_its_name_quoted() {
+        assert_eq!(read("user:1", "hash").as_deref(), Some("HGETALL user:1"));
+        assert_eq!(
+            read("a key \"q\"", "list").as_deref(),
+            Some(r#"LRANGE "a key \"q\"" 0 -1"#)
+        );
+        assert_eq!(
+            read("leaderboard", "zset").as_deref(),
+            Some("ZRANGE leaderboard 0 -1 WITHSCORES")
+        );
+        assert_eq!(
+            read("doc:1", "ReJSON-RL").as_deref(),
+            Some("JSON.GET doc:1 $")
+        );
+        // A name that is not UTF-8 is shown spelled as a word already.
+        assert_eq!(
+            read(r#""\x00\xff""#, "string").as_deref(),
+            Some(r#"GET "\x00\xff""#)
+        );
+        assert_eq!(read("k", "none"), None);
+        assert_eq!(read("k", "vectorset"), None);
     }
 }

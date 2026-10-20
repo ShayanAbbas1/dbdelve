@@ -542,6 +542,24 @@ impl Engine {
         }
     }
 
+    /// The column of a relation's preview naming what each of its rows opens
+    /// as a result of its own ([`crate::explorer::open_row_sql`]): a Redis key,
+    /// whose contents are a read of their own. `None` where a row is all there
+    /// is.
+    pub fn opened_column(self) -> Option<&'static str> {
+        match self {
+            Self::Redis => Some("key"),
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => None,
+        }
+    }
+
     /// Whether a header click can ask the server for an order. A Redis reply's
     /// order is the command's own, so a view of one sorts the rows it holds.
     pub fn sorts_on_server(self) -> bool {

@@ -41,6 +41,9 @@ const CLIP_SCAN_LIMIT: usize = 16 * CELL_DISPLAY_LIMIT;
 /// still copies all of it. Raise this if a real value gets cut.
 const FIELD_DISPLAY_LIMIT: usize = 4_000;
 
+/// How much of a row's name the cell menu's Open entry spells out.
+const OPEN_LABEL_CHARS: usize = 40;
+
 /// What an absent value is called wherever one is shown.
 pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
 
@@ -195,6 +198,9 @@ pub struct ResultGrid {
     /// The result columns that make up the relation's primary key, marked
     /// where the structure arrives, by name for the reason `foreign_keys` is.
     primary_key: Vec<usize>,
+    /// The column naming what each row opens as a result of its own
+    /// (`Engine::opened_column`), marked where the structure arrives.
+    opened: Option<usize>,
     /// The rows picked out by clicks in the gutter or cells, for a multi-row copy.
     /// Separate from `active`, which is the single cell the keyboard and the
     /// single-cell gestures act on.
@@ -365,6 +371,7 @@ impl ResultGrid {
             follow_groups: Vec::new(),
             reference_menus: Vec::new(),
             primary_key: Vec::new(),
+            opened: None,
             selected_rows: std::collections::BTreeSet::new(),
             row_selection_anchor: None,
             pointer_row: None,
@@ -979,6 +986,20 @@ impl ResultGrid {
 
     pub fn mark_primary_key(&mut self, columns: &[String]) {
         self.primary_key = self.columns_named(columns);
+    }
+
+    /// Record which column names what a row opens, by name for the reason
+    /// [`ResultGrid::mark_foreign_keys`] is. Its cells carry the follow arrow
+    /// once it is marked as a key too; this is what lets the rest of the row
+    /// open it, from the cell menu and by a double-click on a cell that cannot
+    /// be edited.
+    pub fn mark_opened(&mut self, column: Option<&str>) {
+        self.opened = column.and_then(|name| {
+            self.result
+                .columns
+                .iter()
+                .position(|column| column.name == name)
+        });
     }
 
     fn key_icon(&self, col: usize, color: Srgb) -> Option<impl IntoElement> {
@@ -2429,8 +2450,24 @@ impl TableDelegate for ResultGrid {
         };
         let hidden = self.hidden_columns();
         let name = &self.result.columns[col].name;
+        // The row's own name for it, which is the one thing a generic label
+        // could not say.
+        let opens = self
+            .opened
+            .and_then(|opened| self.cell(row, opened))
+            .map(|name| {
+                let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
+                match short.len() < name.len() {
+                    true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
+                    false => format!("Open \u{201c}{name}\u{201d}"),
+                }
+            });
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
+            .when_some(opens, |menu, label| {
+                menu.menu(label, Box::new(crate::FollowForeignKey))
+                    .separator()
+            })
             .menu("Copy Cell", Box::new(crate::CopyCell))
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
             .separator()
@@ -2855,8 +2892,15 @@ impl ResultGrid {
             // Read-write, a key or computed column) reaches the same
             // explanation `EditCell` already gives from the keyboard.
             .on_double_click(cx.listener(move |table, _, window, cx| {
-                table.delegate_mut().set_active(row_ix, col_ix);
-                window.dispatch_action(Box::new(crate::EditCell), cx);
+                let grid = table.delegate_mut();
+                grid.set_active(row_ix, col_ix);
+                // A row that opens as a result of its own opens from any cell
+                // there is no edit to begin in.
+                let opens = grid.opened.is_some() && !grid.editable(row_ix, col_ix);
+                match opens {
+                    true => window.dispatch_action(Box::new(crate::FollowForeignKey), cx),
+                    false => window.dispatch_action(Box::new(crate::EditCell), cx),
+                }
                 cx.notify();
             }))
             // The library's row click would select a toggled-off row again.

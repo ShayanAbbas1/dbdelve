@@ -1151,7 +1151,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::db::{Engine, is_cancel, ssh::live_bastion};
-    use crate::explorer::{count_sql, preview_sql};
+    use crate::explorer::{count_sql, open_row_sql, preview_sql};
     use crate::filter::{FilterBar, Operator, derived_filter};
     use crate::redis_cmd::browse::KEYS;
     use crate::sql::is_generated_select;
@@ -1665,6 +1665,45 @@ mod tests {
         assert_eq!(preview(&[bar("key", Operator::Contains, "*key?[")]), [odd]);
         assert_eq!(preview(&[bar("key", Operator::EndsWith, r"]\x")]), [odd]);
         ran(&connection, "FLUSHDB");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_key_opens_with_its_types_read() {
+        let connection = live();
+        for (key, kind, columns, rows) in [
+            ("greeting", "string", &["value"][..], 1),
+            ("user:1", "hash", &["field", "value"][..], 3),
+            ("queue:emails", "list", &["index", "value"][..], 3),
+            ("tags:redis", "set", &["value"][..], 3),
+            ("leaderboard", "zset", &["member", "score"][..], 3),
+            (
+                "events:signup",
+                "stream",
+                &["id", "user", "plan", "referrer"][..],
+                3,
+            ),
+            ("doc:1", "ReJSON-RL", &["value"][..], 1),
+            (
+                "key with spaces and \"quotes\"",
+                "string",
+                &["value"][..],
+                1,
+            ),
+            ("bin:blob", "string", &["value"][..], 1),
+        ] {
+            let read = open_row_sql(Engine::Redis, |column| match column {
+                "key" => Some(key),
+                "type" => Some(kind),
+                _ => None,
+            })
+            .unwrap();
+            let result = ran(&connection, &read);
+            let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, columns, "{read}");
+            assert_eq!(result.rows.len(), rows, "{read}");
+            assert!(cells(&result)[0][0].is_some(), "{read}");
+        }
     }
 
     #[test]

@@ -341,6 +341,24 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     }
 }
 
+/// The command a preview's row opens with, as a result of its own
+/// ([`Engine::opened_column`]), read off the row's cells by column name: a
+/// Redis key's whole contents, by the read its type takes. `None` where rows
+/// open nothing, and for a type with no read.
+pub fn open_row_sql<'a>(engine: Engine, cell: impl Fn(&str) -> Option<&'a str>) -> Option<String> {
+    match engine {
+        Engine::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?),
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Turso
+        | Engine::Snowflake
+        | Engine::SqlServer
+        | Engine::MongoDb => None,
+    }
+}
+
 /// Whether a row matches `filter`, for the reference arrow: a constant rather
 /// than `*`, so no column's value is read or sent back to answer it.
 pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
@@ -753,6 +771,26 @@ mod tests {
             truncate_sql(Engine::MongoDb, "db", "c"),
             r#"db.getCollection("c").deleteMany({})"#
         );
+    }
+
+    #[test]
+    fn a_redis_row_opens_its_key_and_no_other_engines_row_opens_anything() {
+        let row = |column: &str| match column {
+            "key" => Some("queue:emails"),
+            "type" => Some("list"),
+            _ => None,
+        };
+        for engine in Engine::ALL {
+            let opened = open_row_sql(engine, row);
+            assert_eq!(opened.is_some(), engine.opened_column().is_some());
+        }
+        assert_eq!(
+            open_row_sql(Engine::Redis, row).as_deref(),
+            Some("LRANGE queue:emails 0 -1")
+        );
+        let read = open_row_sql(Engine::Redis, row).unwrap();
+        let verdict = crate::sql::classify(Engine::Redis, &read);
+        assert!(crate::sql::gate(&verdict, crate::sql::Mode::ReadOnly, &[]).is_none());
     }
 
     #[test]

@@ -655,10 +655,13 @@ impl Workspace {
         else {
             return;
         };
+        // A row's opener carries the arrow a key does: following it is the
+        // same gesture.
         let foreign_keys: Vec<String> = structure
             .foreign_keys
             .iter()
             .map(|key| key.column.clone())
+            .chain(engine.opened_column().map(str::to_string))
             .collect();
         let referenced_by = structure.referenced_by.clone();
         let primary_key = structure.primary_key();
@@ -671,6 +674,7 @@ impl Workspace {
             grid.mark_foreign_keys(&foreign_keys);
             grid.mark_references(&referenced_by, &schema);
             grid.mark_primary_key(&primary_key);
+            grid.mark_opened(engine.opened_column());
             grid.mark_columns(&not_nullable, &has_default);
             cx.notify();
         });
@@ -719,6 +723,17 @@ impl Workspace {
             .find(|key| key.column == name)
             .cloned()
         else {
+            // Any cell of a row that opens as a result of its own opens it.
+            if engine.opened_column().is_none() {
+                return;
+            }
+            let opened = grid.active().and_then(|(row, _)| {
+                explorer::open_row_sql(engine, |column| grid.cell(row, grid.column_named(column)?))
+            });
+            match opened {
+                Some(statement) => self.run_in_new_query(statement, window, cx),
+                None => self.note("There is no read for this row's type.".into(), cx),
+            }
             return;
         };
         let Some(bar) = foreign_key_filter(&key, grid.active_value()) else {
