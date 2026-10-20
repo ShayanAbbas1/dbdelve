@@ -1102,6 +1102,75 @@ impl Workspace {
         self.reconnect(index, cx);
     }
 
+    /// Offer the schemas the catalog already holds, to pick the active one.
+    pub(crate) fn select_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_notice();
+        if self
+            .profile()
+            .is_some_and(|profile| profile.active_schema().is_some())
+        {
+            self.open_palette(PaletteMode::Schema, window, cx);
+        }
+    }
+
+    /// Make `name` the profile's active schema, on the sessions it has open
+    /// and the ones it opens later, without a reconnect: tabs, results and
+    /// staged edits all stay. A statement running holds the session, so the
+    /// `SET` waits for it rather than cancelling it.
+    pub(crate) fn set_schema(&mut self, name: String, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        if profile.active_schema() == Some(name.as_str()) {
+            return;
+        }
+        // A `SET` inside the user's transaction is undone by their ROLLBACK,
+        // which would leave the titlebar naming a schema the session left.
+        if profile.in_transaction {
+            self.note(
+                "A transaction is open on this connection, so the schema was not switched. \
+                 Commit or roll it back first."
+                    .into(),
+                cx,
+            );
+            return;
+        }
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(server) = profile.config.server_mut() else {
+            return;
+        };
+        server.schema = Some(name.clone());
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let connecting = matches!(profile.state, ProfileState::Connecting);
+        let connection = profile.connection();
+        self.remember_profiles(cx);
+        cx.notify();
+        // A connect in flight was handed the config before this; one not
+        // started yet reads it when it is.
+        if connecting {
+            self.reconnect(self.active, cx);
+        }
+        let Some(connection) = connection else {
+            return;
+        };
+        let set = on_own_thread(move || connection.set_schema(&name));
+        cx.spawn(async move |workspace, cx| {
+            let Err(error) = set.await else {
+                return;
+            };
+            _ = workspace.update(cx, |workspace, cx| {
+                if let Some(profile) = workspace.issued_to(&id, generation) {
+                    profile.session.notice = Some(error.message);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn open_connection_form(
         &mut self,
         _: &NewConnection,

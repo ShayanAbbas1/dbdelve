@@ -1361,6 +1361,20 @@ impl ConnectionConfig {
         }
     }
 
+    /// The database the profile is on, spelled as [`Connection::databases`]
+    /// lists it. None where a blank one leaves the server to pick.
+    pub fn database_name(&self) -> Option<String> {
+        let database = self.server()?.database.as_str();
+        match self {
+            Self::Postgres(_) if database.is_empty() => Some("postgres".into()),
+            Self::Redis(_) => Some(format!(
+                "db{}",
+                if database.is_empty() { "0" } else { database }
+            )),
+            _ => Some(database.to_string()).filter(|name| !name.is_empty()),
+        }
+    }
+
     /// The scheme picks the engine, and the engine parses the rest. dbdelve never
     /// guesses from the shape of a URL: a host-looking string is a host to
     /// three different drivers.

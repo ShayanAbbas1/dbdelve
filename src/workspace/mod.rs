@@ -1869,7 +1869,7 @@ impl Render for Workspace {
                         .into_any_element()
                 }))
                 .collect(),
-                vec![
+                [
                     icon_button(
                         "toggle-sidebar",
                         icon::SIDEBAR,
@@ -1882,7 +1882,10 @@ impl Render for Workspace {
                     }))
                     .into_any_element(),
                     self.render_profile_switcher(cx),
-                ],
+                ]
+                .into_iter()
+                .chain(self.render_breadcrumb(cx))
+                .collect(),
                 vec![
                     icon_button(
                         "open-settings",

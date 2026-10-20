@@ -181,6 +181,17 @@ impl Workspace {
                 .iter()
                 .position(|candidate| candidate.name == theme(cx).name)
                 .unwrap_or_default(),
+            PaletteMode::Schema => self
+                .profile()
+                .and_then(|profile| {
+                    let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+                        return None;
+                    };
+                    catalog.by_name().iter().position(|(_, schema)| {
+                        Some(schema.name.as_str()) == profile.active_schema()
+                    })
+                })
+                .unwrap_or_default(),
             PaletteMode::Database => self
                 .profile()
                 .and_then(|profile| {
@@ -435,6 +446,8 @@ impl Workspace {
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),
+            Command::SelectSchema => self.select_schema(window, cx),
+            Command::SetSchema(name) => self.set_schema(name, cx),
             Command::SetTheme(theme) => self.set_theme(*theme, window, cx),
             Command::BrowseThemes(source) => {
                 self.open_palette(PaletteMode::ImportTheme(source), window, cx)

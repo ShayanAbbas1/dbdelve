@@ -2126,6 +2126,74 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The database the connection is on and, where the engine has one, the
+    /// active schema, each a step after the switcher that opens its picker.
+    pub(crate) fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = *theme(cx);
+        let Some(profile) = self.profile() else {
+            return Vec::new();
+        };
+        let segment = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
+                .px(px(layout::SPACE_SM))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_faint)
+                .hover(|style| style.bg(t.element_hover).text_color(t.text))
+                .child(
+                    div()
+                        .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+                .child(row_icon(t, icon::CHEVRON_DOWN))
+        };
+        let separator = || {
+            div()
+                .flex_shrink_0()
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_faint)
+                .child("/")
+                .into_any_element()
+        };
+        let mut steps = Vec::new();
+        if profile.config.engine().switches_database() {
+            let database = profile
+                .databases
+                .current
+                .clone()
+                .or_else(|| profile.config.database_name())
+                .unwrap_or_else(|| "Database".into());
+            steps.push(separator());
+            steps.push(
+                segment("database-switcher", database)
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.select_database(&SelectDatabase, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if let Some(schema) = profile.active_schema() {
+            steps.push(separator());
+            steps.push(
+                segment("schema-switcher", schema.to_string())
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.select_schema(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        steps
+    }
+
     /// No project, then each project, as groups any of which may be
     /// expanded, each holding its `members`. The group of the connection in front is
     /// marked, but looking inside another switches nothing. With no projects
@@ -2357,6 +2425,8 @@ impl Workspace {
         let leaves = profile.session.explorer_leaves.clone();
         let menu_leaves = leaves.clone();
         let menu_workspace = workspace.clone();
+        let active_schema = profile.active_schema().map(gpui::SharedString::from);
+        let menu_schema = active_schema.clone();
         let content = match &profile.catalog {
             CatalogState::Loading => div()
                 .p(px(layout::SPACE_MD))
@@ -2380,6 +2450,9 @@ impl Workspace {
                         let t = *theme(cx);
                         let leaf = leaves.get(entry.item().id.as_str()).copied();
                         let label = entry.item().label.clone();
+                        let active = leaf.is_none()
+                            && entry.depth() == 0
+                            && active_schema.as_ref() == Some(&label);
                         // Three ranks, three weights: a schema owns the column, a
                         // category only labels the run of objects under it, and the
                         // objects themselves are what the eye is actually hunting for.
@@ -2433,6 +2506,17 @@ impl Workspace {
                                             .whitespace_nowrap()
                                             .child(label),
                                     )
+                                    .when(active, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .whitespace_nowrap()
+                                                .text_color(t.text_faint)
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                                .font_weight(FontWeight::NORMAL)
+                                                .child("active"),
+                                        )
+                                    })
                                     .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
                                         row.child(
                                             div()
@@ -2460,7 +2544,21 @@ impl Workspace {
                 )
                 .context_menu(move |_, entry, menu, _, cx| {
                     let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
-                        return menu;
+                        if menu_schema.is_none() || entry.depth() != 0 {
+                            return menu;
+                        }
+                        let workspace = menu_workspace.clone();
+                        let schema = entry.item().label.to_string();
+                        return menu.item(
+                            PopupMenuItem::new("Set as Active Schema")
+                                .checked(menu_schema.as_ref() == Some(&entry.item().label))
+                                .on_click(move |_, _, cx| {
+                                    let schema = schema.clone();
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.set_schema(schema, cx);
+                                    });
+                                }),
+                        );
                     };
                     let Some(workspace) = menu_workspace.upgrade() else {
                         return menu;

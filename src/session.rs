@@ -86,6 +86,17 @@ impl Profile {
         }
     }
 
+    /// The schema unqualified names resolve in first, where the engine has
+    /// one to pick: `public` until one is picked, which is where the server's
+    /// default `search_path` lands them.
+    pub(crate) fn active_schema(&self) -> Option<&str> {
+        let server = self.config.server()?;
+        self.config
+            .engine()
+            .has_active_schema()
+            .then(|| server.schema.as_deref().unwrap_or("public"))
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),

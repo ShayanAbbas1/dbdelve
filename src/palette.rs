@@ -54,6 +54,8 @@ pub enum Mode {
     ImportTheme(user::Source),
     /// The databases on the active profile's server, as last fetched.
     Database,
+    /// The schemas in the active profile's catalog, to pick the active one.
+    Schema,
     /// The columns of the grid in front, to jump to one of them.
     Columns,
 }
@@ -137,6 +139,9 @@ pub enum Command {
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
     SetDatabase(String),
+    /// Put the palette back up over the catalog's schemas.
+    SelectSchema,
+    SetSchema(String),
     /// Put the palette back up over the font list for this slot, the way
     /// [`Command::QueryHistory`] does for the history.
     PickFont(FontSlot),
@@ -204,6 +209,7 @@ impl Palette {
             (Mode::History, Some(profile)) => history_items(profile),
             (Mode::Font(slot), Some(_)) => font_items(slot, cx),
             (Mode::Database, Some(profile)) => database_items(profile),
+            (Mode::Schema, Some(profile)) => schema_items(profile),
             (Mode::Columns, Some(profile)) => column_items(profile, cx),
             (_, None) => Vec::new(),
         };
@@ -240,6 +246,7 @@ impl Palette {
             Mode::Theme => "Pick a theme…",
             Mode::ImportTheme(_) => "Import a theme…",
             Mode::Database => "Switch database…",
+            Mode::Schema => "Switch schema…",
             Mode::Columns => "Go to a column…",
         }
     }
@@ -554,6 +561,30 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             .into(),
             icon: icon::DATABASE,
             command: Command::SetDatabase(name.clone()),
+        })
+        .collect()
+}
+
+/// The catalog's schemas by name, the active one marked as the current
+/// database is.
+fn schema_items(profile: &Profile) -> Vec<Item> {
+    let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+        return Vec::new();
+    };
+    let active = profile.active_schema();
+    catalog
+        .by_name()
+        .into_iter()
+        .map(|(_, schema)| Item {
+            label: schema.name.clone(),
+            hint: if active == Some(schema.name.as_str()) {
+                "active"
+            } else {
+                ""
+            }
+            .into(),
+            icon: icon::PROJECT,
+            command: Command::SetSchema(schema.name.clone()),
         })
         .collect()
 }
@@ -938,6 +969,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             chord_hint("select_database", overrides),
             icon::DATABASE,
             Command::SelectDatabase,
+        ));
+    }
+    if profile.active_schema().is_some() {
+        items.push(Item::command(
+            "Select schema",
+            "",
+            icon::PROJECT,
+            Command::SelectSchema,
         ));
     }
     items.push(Item::command(
