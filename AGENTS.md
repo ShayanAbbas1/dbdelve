@@ -66,7 +66,8 @@ require it, stop and raise it instead.
    from a direct ask, with the statement shown before it runs
    (`sql::delete_row`). The one exception to both is the explorer's
    right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
-   `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`) put the text on the
+   `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`, Redis's Copy
+   TRUNCATE `FLUSHDB`, with no Copy DROP) put the text on the
    clipboard and nothing else: no buffer, no run, no gate, so pasting and
    running it is the user's own statement. And it never writes into
    a statement it cannot parse whole: `sql::with_order_by` refuses rather than
@@ -132,7 +133,8 @@ require it, stop and raise it instead.
    still is the one read, and a `MULTI`/`EXEC` bracket), each
    written again from its parts and compared with the text.
    `redis_cmd::browse::is_generated_read` admits only the keys grid's
-   `SCAN 0 [MATCH p] [TYPE t] COUNT n` and `DBSIZE`. A key opened as a grid
+   `SCAN 0 [MATCH p] [TYPE t] COUNT 1000`, with `TYPE` before `MATCH` too,
+   and `DBSIZE`. A key opened as a grid
    runs through `classify` and `gate` like any typed read. A user's own
    command is never one of these: `redis_cmd::classify` reads it by name and
    subcommand from the `READS`, `WRITES` and `DROPS` tables, and a name in none
@@ -1460,7 +1462,8 @@ than a query.
 
 A Redis buffer offers command names only, in the first word of a line, from
 `redis_cmd::names` (the classify tables, less the refused commands), tagged
-read, write or destructive; key names are not offered.
+read, write or destructive; a name whose subcommand decides that (`CONFIG`,
+`CLIENT`) has no tag. Key names are not offered.
 
 A MongoDB buffer (`Engine::syntax`) is read by `mql::completing` instead, a
 scan of the same kind: collections and database methods after `db.`, the

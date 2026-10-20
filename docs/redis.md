@@ -40,7 +40,9 @@ The editor takes redis-cli commands, one per line, split into words by
 redis-cli's own rules, so a line pasted from redis-cli means here what it meant
 there. A line starting with `#` is a comment. Run All sends the commands in
 order on the one connection, so `MULTI` ... `EXEC` works, and shows the last
-result. Command names complete as you type, tagged read, write or destructive.
+result. Command names complete as you type, tagged read, write or destructive,
+except a name whose subcommand decides that (`CONFIG`, `CLIENT`), which has no
+tag.
 
 Some commands are refused before anything is sent, because they take the
 session DBDelve owns out from under it:
@@ -132,7 +134,8 @@ MAXLEN n`, which lists where the value read sits among the first `n = index +
 error, and nothing is written.
 
 Renaming a member onto one the set already holds is an error, and the old
-member stays. So is a new score for a member that is gone. Deleting what is
+member stays. So is a new score for a member that is gone, or one equal to the
+score it has (`ZADD XX CH` answers 0 to both). Deleting what is
 already gone is not: the end state is the one asked for.
 
 A batch is not wrapped in a transaction: the commands apply in order, and a
@@ -161,7 +164,8 @@ failure says which one failed and how many ran before it.
 ## Known limits
 
 - **Cut values are read-only.** A string or document longer than the grid
-  holds (4,000 characters) is shown cut, and a cut value cannot be edited,
+  holds (4,000 bytes of a string, 4,000 characters of a document) is shown
+  cut, and a cut value cannot be edited,
   since writing it back would truncate the key.
 - **JSON is read whole** (`JSON.GET key $`), not paged, and is read-only along
   with streams.
