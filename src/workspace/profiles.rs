@@ -105,7 +105,8 @@ impl Workspace {
             | Engine::MySql
             | Engine::MariaDb
             | Engine::SqlServer
-            | Engine::MongoDb => {
+            | Engine::MongoDb
+            | Engine::Redis => {
                 let server = ServerConfig {
                     host: stored.host,
                     port: stored.port,
@@ -122,6 +123,7 @@ impl Workspace {
                     Engine::MySql => ConnectionConfig::MySql(server),
                     Engine::MariaDb => ConnectionConfig::MariaDb(server),
                     Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                    Engine::Redis => ConnectionConfig::Redis(server),
                     Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
                         server,
                         srv: stored.srv.unwrap_or_default(),
@@ -359,6 +361,7 @@ impl Workspace {
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server)
+            | ConnectionConfig::Redis(server)
             | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.host, server.host.clone()),

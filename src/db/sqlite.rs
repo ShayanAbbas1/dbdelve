@@ -388,7 +388,8 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::MariaDb
             | Engine::SqlServer
             | Engine::Snowflake
-            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
+            | Engine::MongoDb
+            | Engine::Redis => unreachable!("only the file engines read pragmas"),
         }
     }
 
@@ -401,7 +402,8 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::MariaDb
             | Engine::SqlServer
             | Engine::Snowflake
-            | Engine::MongoDb => unreachable!("only the file engines read pragmas"),
+            | Engine::MongoDb
+            | Engine::Redis => unreachable!("only the file engines read pragmas"),
         }
     }
 

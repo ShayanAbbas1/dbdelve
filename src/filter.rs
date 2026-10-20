@@ -77,7 +77,7 @@ impl Operator {
     /// What the bar's own button shows: the SQL shape rather than the English,
     /// because the bar is read beside the statement it writes.
     pub(crate) fn symbol(self, engine: Engine) -> &'static str {
-        if engine.syntax() == Syntax::Mongo {
+        if engine.syntax() != Syntax::Sql {
             return self.mongo_symbol();
         }
         match self {
@@ -102,8 +102,8 @@ impl Operator {
         }
     }
 
-    /// MongoDB's filter documents have no `LIKE`: the same operators read as
-    /// the English they compile from.
+    /// MongoDB's filter documents and Redis's patterns have no `LIKE`: the
+    /// same operators read as the English they compile from.
     fn mongo_symbol(self) -> &'static str {
         match self {
             Self::Equals => "=",
@@ -130,7 +130,7 @@ impl Operator {
     /// What the dropdown row reads: the symbol and the English for it, so the
     /// list can be scanned by either.
     pub(crate) fn label(self, engine: Engine) -> &'static str {
-        if engine.syntax() == Syntax::Mongo {
+        if engine.syntax() != Syntax::Sql {
             return match self {
                 Self::Equals => "= equals",
                 Self::NotEquals => "!= not equals",
@@ -372,6 +372,9 @@ pub(crate) fn derived_filter(
             None => predicate,
             Some(left) => match engine {
                 Engine::MongoDb => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
+                // ponytail: one MATCH pattern until phase 2's filter bar,
+                // which folds a key's bars into it; the first bar stands.
+                Engine::Redis => left,
                 Engine::Postgres
                 | Engine::MySql
                 | Engine::MariaDb
@@ -402,6 +405,8 @@ pub(crate) fn bar_predicate(
         // exactly what the gate is for (spec §2.3).
         return (!value.is_empty()).then(|| match engine {
             Engine::MongoDb => crate::mql::browse::raw_filter(value),
+            // A MATCH glob, as typed.
+            Engine::Redis => value.to_string(),
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb
@@ -456,6 +461,8 @@ pub(crate) fn filter_predicate(
         Engine::MongoDb => {
             return crate::mql::browse::filter_predicate(column, data_type, operator, value);
         }
+        // ponytail: a key's bars become a MATCH glob with phase 2's filter bar.
+        Engine::Redis => return None,
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -532,8 +539,8 @@ pub(crate) fn filter_predicate(
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
             Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
-            // Written by `mql::browse::filter_predicate`, above.
-            Engine::MongoDb => None,
+            // Written by `mql::browse::filter_predicate`, above, or not at all.
+            Engine::MongoDb | Engine::Redis => None,
         },
     }
 }
@@ -759,6 +766,8 @@ pub(crate) fn sort_expression(
     match engine {
         // A document's fields are unique, and a position names nothing there.
         Engine::MongoDb => return crate::mql::browse::sort_field(name),
+        // A reply's order is the command's; nothing sorts it on the server.
+        Engine::Redis => return None,
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -1240,7 +1249,8 @@ mod tests {
         // The other half of the operator list: a predicate that does not parse
         // is refused before it runs, which would make an operator unusable
         // rather than unsafe. Checked per engine, because the quoting differs.
-        for engine in Engine::ALL {
+        // Redis's bar, a MATCH pattern, arrives with browsing.
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
             for operator in Operator::ALL.into_iter().filter(|o| o.on(engine)) {
                 let value = match operator {
                     Operator::Between => "1..9",
@@ -1840,7 +1850,9 @@ mod tests {
         // into the statement is the one read back out to light the header up,
         // and the quoting in between is the engine's own.
         let result = columns(&["id", "name"]);
-        for engine in Engine::ALL {
+        // A Redis reply's order is the command's, so nothing sorts it there.
+        assert_eq!(sort_expression(Engine::Redis, &result, 1), None);
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
             let expression = sort_expression(engine, &result, 1).expect("a unique name");
             assert_eq!(
                 sort_columns(engine, &[SortKey::new(expression, false)], &result),

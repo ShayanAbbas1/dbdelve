@@ -259,6 +259,15 @@ pub fn preview_sql(
 ) -> String {
     match engine {
         Engine::MongoDb => return mql::browse::find_preview(relation, filter, limit, offset),
+        // ponytail: the keys grid, its paging and its gate arrive with phase 2
+        // of the Redis engine; this is the command it will start from.
+        Engine::Redis => {
+            let pattern = match filter.trim() {
+                "" => "*".to_string(),
+                pattern => crate::redis_cmd::quoted(pattern),
+            };
+            return format!("SCAN 0 MATCH {pattern} COUNT 1000");
+        }
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -295,13 +304,17 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
-        | Engine::Snowflake => preview_sql(engine, schema, relation, "", Some(100), 0),
+        | Engine::Snowflake
+        | Engine::Redis => preview_sql(engine, schema, relation, "", Some(100), 0),
     }
 }
 
 pub fn drop_sql(engine: Engine, schema: &str, relation: &str, kind: RelationKind) -> String {
     let keyword = match (engine, kind) {
         (Engine::MongoDb, _) => return format!("{}.drop()", mql::browse::handle(relation)),
+        // The keyspace is the database's own; there is nothing apart from it
+        // to drop.
+        (Engine::Redis, _) => return String::new(),
         (_, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
         (_, RelationKind::View) => "VIEW",
         (_, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
@@ -315,6 +328,7 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     let qualified = engine.qualified(schema, relation);
     match engine {
         Engine::MongoDb => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
+        Engine::Redis => "FLUSHDB".into(),
         // SQLite has no TRUNCATE.
         Engine::Sqlite | Engine::Turso => format!("DELETE FROM {qualified};"),
         Engine::Postgres
@@ -339,6 +353,8 @@ pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
     match engine {
         Engine::MongoDb => return mql::browse::count_documents(relation, filter),
+        // ponytail: a filtered count arrives with phase 2's filter bar.
+        Engine::Redis => return "DBSIZE".into(),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -746,7 +762,8 @@ mod tests {
 
     #[test]
     fn a_preview_with_no_limit_asks_for_every_row() {
-        for engine in Engine::ALL {
+        // Redis's keys grid, and the gate it passes, arrive with browsing.
+        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
             let sql = preview_sql(engine, "public", "accounts", "", None, 0);
             assert!(!sql.contains("LIMIT") && !sql.contains("limit("), "{sql}");
             assert!(crate::sql::is_generated_select(engine, &sql), "{sql}");

@@ -192,6 +192,48 @@ pub(crate) fn split(line: &str) -> Result<Vec<Vec<u8>>, String> {
     }
 }
 
+/// `text` as one word [`split`] reads back as exactly `text`: bare where
+/// nothing in it would be read otherwise, else double-quoted.
+pub(crate) fn quoted(text: &str) -> String {
+    let bare = !text.is_empty()
+        && !text.bytes().any(|byte| {
+            byte.is_ascii_whitespace() || byte.is_ascii_control() || b"\"'\\".contains(&byte)
+        });
+    match bare {
+        true => text.to_string(),
+        false => escaped(text.as_bytes(), false),
+    }
+}
+
+/// Bytes that are not UTF-8 as one double-quoted word, each byte outside
+/// printable ASCII written `\xHH`.
+pub(crate) fn quoted_bytes(bytes: &[u8]) -> String {
+    escaped(bytes, true)
+}
+
+fn escaped(bytes: &[u8], ascii: bool) -> String {
+    let mut quoted = Vec::with_capacity(bytes.len() + 2);
+    quoted.push(b'"');
+    for &byte in bytes {
+        match byte {
+            b'\\' | b'"' => quoted.extend([b'\\', byte]),
+            b'\n' => quoted.extend(b"\\n"),
+            b'\r' => quoted.extend(b"\\r"),
+            b'\t' => quoted.extend(b"\\t"),
+            0x07 => quoted.extend(b"\\a"),
+            0x08 => quoted.extend(b"\\b"),
+            byte if byte.is_ascii_control() || (ascii && !byte.is_ascii()) => {
+                quoted.extend(format!("\\x{byte:02x}").bytes());
+            }
+            byte => quoted.push(byte),
+        }
+    }
+    quoted.push(b'"');
+    // Every byte escaped is ASCII, and the rest were UTF-8 coming in or are
+    // escaped when they might not be.
+    String::from_utf8(quoted).expect("escaped to UTF-8")
+}
+
 /// Why `command` is not sent, for the ones that would take the session
 /// DBDelve owns out from under it.
 fn refusal(command: &Command) -> Option<String> {
@@ -785,6 +827,29 @@ mod tests {
         assert!(split(r#"SET k "closed"tail"#).is_err());
         assert!(split("SET k 'closed'tail").is_err());
         assert!(split(r#"SET k "trailing\"#).is_err());
+    }
+
+    #[test]
+    fn a_quoted_word_reads_back_as_itself() {
+        for text in [
+            "user:1",
+            "",
+            "with space",
+            "quo\"te",
+            "it's",
+            "back\\slash",
+            "tab\tnew\nline",
+            "é ü",
+        ] {
+            let line = format!("GET {}", quoted(text));
+            assert_eq!(split(&line).unwrap()[1], text.as_bytes(), "{line}");
+        }
+        assert_eq!(quoted("user:1"), "user:1");
+        assert_eq!(quoted("a b"), "\"a b\"");
+        let binary = b"\x00\xff\xfe\"raw";
+        let line = format!("GET {}", quoted_bytes(binary));
+        assert_eq!(split(&line).unwrap()[1], binary);
+        assert_eq!(quoted_bytes(binary), r#""\x00\xff\xfe\"raw""#);
     }
 
     #[test]

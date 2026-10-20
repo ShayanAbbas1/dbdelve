@@ -364,6 +364,9 @@ impl ConnectionForm {
                     options: read(&self.options),
                 })
             }
+            // An ACL user and a password are both optional: a server with
+            // neither configured takes any connection.
+            Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
         };
 
         Ok((name, config))
@@ -554,6 +557,8 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
             file_stem(path).to_string()
         }
         ConnectionConfig::Snowflake(account) => account.database.clone(),
+        // A database there is a number, which names nothing.
+        ConnectionConfig::Redis(server) => server.host.clone(),
     }
 }
 

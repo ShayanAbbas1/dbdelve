@@ -435,6 +435,9 @@ impl SchemaCompletions {
         let word = word_before(sql, offset);
         match self.syntax {
             Syntax::Sql => {}
+            // ponytail: command names arrive with phase 4 of the Redis engine;
+            // until then nothing is offered rather than SQL's keywords.
+            Syntax::Redis => return (Vec::new(), wanted),
             Syntax::Mongo => {
                 let candidates = self.mongo_candidates(sql, word.clone(), &mut wanted);
                 let ranked = rank(

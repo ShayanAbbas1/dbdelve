@@ -15,8 +15,6 @@ mod import_rows;
 #[cfg_attr(not(test), allow(dead_code))]
 mod mql;
 mod palette;
-// Nothing calls it until the Redis engine is wired in.
-#[cfg_attr(not(test), allow(dead_code))]
 mod redis_cmd;
 mod result_grid;
 mod scroller;
