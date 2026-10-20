@@ -55,11 +55,14 @@ pub(crate) struct ParseError {
 /// Each command's line, trimmed: every line holding something other than
 /// blanks or a comment.
 pub(crate) fn statements(text: &str) -> Vec<Range<usize>> {
+    // Only what `split` takes for a blank: `str::trim` would also take a key's
+    // trailing U+00A0, which `split` keeps as part of the word.
+    let blank = |character: char| u8::try_from(character).is_ok_and(is_space);
     let mut start = 0;
     let mut spans = Vec::new();
     for line in text.split_inclusive('\n') {
-        let leading = line.len() - line.trim_start().len();
-        let trimmed = line.trim();
+        let leading = line.len() - line.trim_start_matches(blank).len();
+        let trimmed = line.trim_matches(blank);
         if !trimmed.is_empty() && !trimmed.starts_with('#') {
             spans.push(start + leading..start + leading + trimmed.len());
         }
@@ -103,8 +106,7 @@ pub(crate) fn split(line: &str) -> Result<Vec<Vec<u8>>, String> {
     }
     let bytes = line.as_bytes();
     let at = |index: usize| bytes.get(index).copied();
-    // C's `isspace`, which is what decides a word's end there.
-    let space = |byte: Option<u8>| matches!(byte, Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+    let space = |byte: Option<u8>| byte.is_some_and(is_space);
     let unterminated = || "Unbalanced quotes in the command.".to_string();
     let mut words = Vec::new();
     let mut index = 0;
@@ -192,6 +194,11 @@ pub(crate) fn split(line: &str) -> Result<Vec<Vec<u8>>, String> {
         }
         words.push(current);
     }
+}
+
+/// C's `isspace`, which is what ends a word in `sdssplitargs`: ASCII only.
+fn is_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 /// `text` as one word [`split`] reads back as exactly `text`: bare where
@@ -843,9 +850,11 @@ mod tests {
             "back\\slash",
             "tab\tnew\nline",
             "é ü",
+            "\u{a0}no-break\u{a0}",
+            "ideographic\u{3000}",
         ] {
             let line = format!("GET {}", quoted(text));
-            assert_eq!(split(&line).unwrap()[1], text.as_bytes(), "{line}");
+            assert_eq!(parse(&line).unwrap()[0].words[1], text.as_bytes(), "{line}");
         }
         assert_eq!(quoted("user:1"), "user:1");
         assert_eq!(quoted("a b"), "\"a b\"");
