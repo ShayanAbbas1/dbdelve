@@ -183,14 +183,7 @@ impl Workspace {
                 .unwrap_or_default(),
             PaletteMode::Schema => self
                 .profile()
-                .and_then(|profile| {
-                    let CatalogState::Loaded(catalog, _) = &profile.catalog else {
-                        return None;
-                    };
-                    catalog.by_name().iter().position(|(_, schema)| {
-                        Some(schema.name.as_str()) == profile.active_schema()
-                    })
-                })
+                .and_then(crate::palette::active_schema_row)
                 .unwrap_or_default(),
             PaletteMode::Database => self
                 .profile()

@@ -565,6 +565,13 @@ fn database_items(profile: &Profile) -> Vec<Item> {
         .collect()
 }
 
+/// Where [`schema_items`] lists the active schema, for the palette to open on.
+pub(crate) fn active_schema_row(profile: &Profile) -> Option<usize> {
+    schema_items(profile)
+        .iter()
+        .position(|item| item.hint.as_ref() == "active")
+}
+
 /// The catalog's schemas by name, the active one marked as the current
 /// database is.
 fn schema_items(profile: &Profile) -> Vec<Item> {
