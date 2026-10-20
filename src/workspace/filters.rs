@@ -179,11 +179,17 @@ impl Workspace {
         let Some(id) = self.active_object_id() else {
             return;
         };
+        let engine = self.engine();
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
         filter.column = Some(action.column.clone());
         filter.raw = false;
+        // One the new column does not take would leave the bar narrowing
+        // nothing under an operator the dropdown no longer lists.
+        if !filter.operator.offered(engine, filter.column.as_deref()) {
+            filter.operator = Operator::default();
+        }
         let (operator, input) = (filter.operator, filter.value.clone());
         input.update(cx, |input, cx| {
             input.set_placeholder(

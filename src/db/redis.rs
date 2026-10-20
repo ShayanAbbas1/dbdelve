@@ -1152,7 +1152,7 @@ mod tests {
     use super::*;
     use crate::db::{Engine, is_cancel, ssh::live_bastion};
     use crate::explorer::{count_sql, preview_sql};
-    use crate::filter::{FilterBar, derived_filter};
+    use crate::filter::{FilterBar, Operator, derived_filter};
     use crate::redis_cmd::browse::KEYS;
     use crate::sql::is_generated_select;
 
@@ -1498,6 +1498,24 @@ mod tests {
             .unwrap_or_else(|error| panic!("{text}: {}", error.message))
     }
 
+    fn bar(column: &str, operator: Operator, value: &str) -> FilterBar {
+        FilterBar {
+            column: Some(column.into()),
+            operator,
+            value: value.into(),
+            ..FilterBar::default()
+        }
+    }
+
+    fn keys(result: &QueryResult) -> Vec<String> {
+        let mut keys: Vec<String> = cells(result)
+            .into_iter()
+            .filter_map(|row| row[0].clone())
+            .collect();
+        keys.sort();
+        keys
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_the_catalog_is_one_keyspace_counted_by_dbsize() {
@@ -1564,6 +1582,89 @@ mod tests {
         assert_eq!(capped.rows.len(), 10);
         // One page held them all, so it says how many there were.
         assert_eq!(capped.capped_from, Some(214));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_filter_bar_narrows_by_glob_and_type() {
+        let connection = live();
+        let raw = FilterBar {
+            raw: true,
+            value: "user:*".into(),
+            ..FilterBar::default()
+        };
+        assert_eq!(
+            keys(&preview(&connection, &[raw], None)),
+            ["user:1", "user:2", "user:3"]
+        );
+        assert_eq!(
+            keys(&preview(
+                &connection,
+                &[bar("type", Operator::Equals, "hash")],
+                None
+            )),
+            ["cache:page", "user:1", "user:2", "user:3"]
+        );
+        assert_eq!(
+            keys(&preview(
+                &connection,
+                &[
+                    bar("key", Operator::StartsWith, "c"),
+                    bar("type", Operator::Equals, "string"),
+                ],
+                None
+            )),
+            ["counter"]
+        );
+        assert_eq!(
+            keys(&preview(
+                &connection,
+                &[bar("key", Operator::EndsWith, ":signup")],
+                None
+            )),
+            ["events:signup"]
+        );
+        assert_eq!(
+            keys(&preview(
+                &connection,
+                &[bar("key", Operator::Contains, "with spaces")],
+                None
+            )),
+            ["key with spaces and \"quotes\""]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_keys_glob_metacharacters_match_only_themselves() {
+        // A database of its own, so the seeded one keeps its size.
+        let connection = Connection::open(&ServerConfig {
+            database: "2".into(),
+            ..live_config()
+        })
+        .unwrap();
+        let odd = r"odd*key?[1]\x";
+        let set = |key: &str| format!("SET {} 1", redis_cmd::quoted(key));
+        ran(&connection, "FLUSHDB");
+        ran(&connection, &set(odd));
+        // What the same text matches read as a glob.
+        ran(&connection, &set("oddZZkeyQ1x"));
+        let preview = |bars: &[FilterBar]| {
+            let filter = derived_filter(Engine::Redis, bars, &[]);
+            let text = preview_sql(Engine::Redis, "db2", KEYS, &filter, None, 0);
+            assert!(is_generated_select(Engine::Redis, &text), "{text}");
+            keys(&ran(&connection, &text))
+        };
+        let raw = FilterBar {
+            raw: true,
+            value: odd.into(),
+            ..FilterBar::default()
+        };
+        assert_eq!(preview(&[raw]), ["oddZZkeyQ1x"]);
+        assert_eq!(preview(&[bar("key", Operator::Equals, odd)]), [odd]);
+        assert_eq!(preview(&[bar("key", Operator::Contains, "*key?[")]), [odd]);
+        assert_eq!(preview(&[bar("key", Operator::EndsWith, r"]\x")]), [odd]);
+        ran(&connection, "FLUSHDB");
     }
 
     #[test]

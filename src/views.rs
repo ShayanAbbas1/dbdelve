@@ -828,6 +828,7 @@ fn render_filter_bar(
 ) -> AnyElement {
     let names: Vec<SharedString> = columns
         .iter()
+        .filter(|column| crate::filter::filters_on(engine, &column.name))
         .map(|column| SharedString::from(column.name.clone()))
         .collect();
     div()
@@ -922,12 +923,13 @@ fn render_filter_bar(
                     )
                     .dropdown_menu({
                         let chosen = filter.operator;
+                        let column = filter.column.clone();
                         move |menu, _, _| {
                             Operator::ALL
                                 .into_iter()
                                 // An operator the engine cannot express is not
                                 // offered: SQLite has no regex (spec §7).
-                                .filter(|operator| operator.on(engine))
+                                .filter(|operator| operator.offered(engine, column.as_deref()))
                                 .fold(
                                     menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
                                     |menu, operator| {
