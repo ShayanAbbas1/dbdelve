@@ -165,6 +165,10 @@ struct Session {
     multi: bool,
 }
 
+fn in_multi(session: &Option<Session>) -> bool {
+    session.as_ref().is_some_and(|session| session.multi)
+}
+
 #[derive(Default)]
 struct Running {
     /// A user's commands are out, so Cancel has something to stop. Never
@@ -304,7 +308,7 @@ impl Connection {
             position: Some(error.at),
         })?;
         let mut session = lock(&self.session);
-        if generated && session.as_ref().is_some_and(|session| session.multi) {
+        if generated && in_multi(&session) {
             return Err(plain_error(
                 "A query tab left this session inside a MULTI, so this would only be queued: \
                  run EXEC or DISCARD in that tab first."
@@ -508,17 +512,22 @@ impl Connection {
 
     /// The databases `CONFIG GET databases` says there are, as `db0` and on.
     /// A server that disables `CONFIG`, as managed services do, is taken to
-    /// have Redis's default number.
+    /// have Redis's default number, and so is one whose session a query tab
+    /// holds in a `MULTI`, which would queue the `CONFIG` into the user's
+    /// transaction and, where `CONFIG` is not allowed, abort it.
     pub fn databases(&self) -> Result<super::Databases, DbError> {
         let mut session = lock(&self.session);
-        let count = self
-            .send(&mut session, |client| {
-                ::redis::cmd("CONFIG")
-                    .arg("GET")
-                    .arg("databases")
-                    .query::<Value>(client)
+        let count = (!in_multi(&session))
+            .then(|| {
+                self.send(&mut session, |client| {
+                    ::redis::cmd("CONFIG")
+                        .arg("GET")
+                        .arg("databases")
+                        .query::<Value>(client)
+                })
+                .ok()
             })
-            .ok()
+            .flatten()
             .and_then(|reply| {
                 let pairs = match reply {
                     Value::Map(pairs) => pairs,
@@ -540,15 +549,19 @@ impl Connection {
 
     /// One schema, named for the database as [`Connection::databases`] lists
     /// it, holding the one relation a Redis database has: its keyspace, with
-    /// `DBSIZE` as its row count where the server will say.
+    /// `DBSIZE` as its row count where the server will say, and outside a
+    /// query tab's `MULTI`, as with [`Connection::databases`].
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         let name = format!("db{}", database_number(&self.server.database)?);
         let mut session = lock(&self.session);
-        let rows = self
-            .send(&mut session, |client| {
-                ::redis::cmd("DBSIZE").query::<u64>(client)
+        let rows = (!in_multi(&session))
+            .then(|| {
+                self.send(&mut session, |client| {
+                    ::redis::cmd("DBSIZE").query::<u64>(client)
+                })
+                .ok()
             })
-            .ok();
+            .flatten();
         Ok(Catalog {
             schemas: vec![Schema {
                 name,
@@ -3047,6 +3060,27 @@ mod tests {
             Some("1")
         );
         clean(&connection, "live:skipped:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_listing_databases_and_the_catalog_queue_nothing_into_a_users_multi() {
+        let admin = live();
+        let server = ServerConfig {
+            database: "4".into(),
+            ..with_user(&admin, "live_noconfig", "on >pw ~* +@all -config -dbsize")
+        };
+        let connection = Connection::open(&server).unwrap();
+        ran(&connection, "MULTI");
+        ran(&connection, "SET live:queued:a 1");
+        let databases = connection.databases().unwrap();
+        let catalog = connection.catalog().unwrap();
+        let exec = connection.query("EXEC", Fetch::default());
+        clean(&connection, "live:queued:");
+        ran(&admin, "ACL DELUSER live_noconfig");
+        assert_eq!(databases.names.len(), DEFAULT_DATABASES as usize);
+        assert_eq!(catalog.schemas[0].relations[0].rows, None);
+        assert_eq!(cells(&exec.unwrap()), [some(&["OK"])]);
     }
 
     #[test]
