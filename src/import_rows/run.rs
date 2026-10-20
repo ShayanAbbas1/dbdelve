@@ -309,7 +309,7 @@ pub(crate) fn send(
         position: None,
     })?;
     connection
-        .generated(sql, cancel, None)
+        .generated(sql, cancel, None, None)
         .map(|result| result.rows_affected)
         .map_err(|error| Failure {
             cancel: db::is_cancel(engine, &error),

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use gpui_component::tree::TreeItem;
 
 use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
-use crate::mql;
+use crate::{mql, redis_cmd};
 
 /// The row counts a preview can be asked for besides none at all, and the one
 /// it opens with. The grid shows which one is in effect.
@@ -259,15 +259,8 @@ pub fn preview_sql(
 ) -> String {
     match engine {
         Engine::MongoDb => return mql::browse::find_preview(relation, filter, limit, offset),
-        // ponytail: the keys grid, its paging and its gate arrive with phase 2
-        // of the Redis engine; this is the command it will start from.
-        Engine::Redis => {
-            let pattern = match filter.trim() {
-                "" => "*".to_string(),
-                pattern => crate::redis_cmd::quoted(pattern),
-            };
-            return format!("SCAN 0 MATCH {pattern} COUNT 1000");
-        }
+        // No limit or offset to write: see `Engine::pages`.
+        Engine::Redis => return redis_cmd::browse::preview(filter),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -292,8 +285,9 @@ pub fn preview_sql(
     sql
 }
 
-pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
-    match engine {
+/// `None` where no command reads a hundred rows: a Redis `SCAN` has no limit.
+pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> Option<String> {
+    Some(match engine {
         Engine::SqlServer => format!(
             "SELECT TOP 100 * FROM {}",
             engine.qualified(schema, relation)
@@ -304,24 +298,32 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
-        | Engine::Snowflake
-        | Engine::Redis => preview_sql(engine, schema, relation, "", Some(100), 0),
-    }
+        | Engine::Snowflake => preview_sql(engine, schema, relation, "", Some(100), 0),
+        Engine::Redis => return None,
+    })
 }
 
-pub fn drop_sql(engine: Engine, schema: &str, relation: &str, kind: RelationKind) -> String {
+/// `None` where the relation cannot be dropped apart from its database: a
+/// Redis keyspace is the database's own.
+pub fn drop_sql(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    kind: RelationKind,
+) -> Option<String> {
     let keyword = match (engine, kind) {
-        (Engine::MongoDb, _) => return format!("{}.drop()", mql::browse::handle(relation)),
-        // The keyspace is the database's own; there is nothing apart from it
-        // to drop.
-        (Engine::Redis, _) => return String::new(),
+        (Engine::MongoDb, _) => return Some(format!("{}.drop()", mql::browse::handle(relation))),
+        (Engine::Redis, _) => return None,
         (_, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
         (_, RelationKind::View) => "VIEW",
         (_, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
         (Engine::Snowflake, RelationKind::ForeignTable) => "EXTERNAL TABLE",
         (_, RelationKind::ForeignTable) => "FOREIGN TABLE",
     };
-    format!("DROP {keyword} {};", engine.qualified(schema, relation))
+    Some(format!(
+        "DROP {keyword} {};",
+        engine.qualified(schema, relation)
+    ))
 }
 
 pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
@@ -353,8 +355,7 @@ pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
     match engine {
         Engine::MongoDb => return mql::browse::count_documents(relation, filter),
-        // ponytail: a filtered count arrives with phase 2's filter bar.
-        Engine::Redis => return "DBSIZE".into(),
+        Engine::Redis => return redis_cmd::browse::count(filter),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -435,6 +436,15 @@ mod tests {
                 );
             }
         }
+
+        let keys = count_sql(Engine::Redis, "db0", "keys", "");
+        assert_eq!(keys, "DBSIZE");
+        assert!(crate::sql::is_generated_select(Engine::Redis, &keys));
+        let verdict = crate::sql::classify(Engine::Redis, &keys);
+        assert!(crate::sql::gate(&verdict, crate::sql::Mode::ReadOnly, &[]).is_none());
+        // `DBSIZE` counts every key, so a filtered count is refused, not wrong.
+        let filtered = count_sql(Engine::Redis, "db0", "keys", "MATCH user:*");
+        assert!(!crate::sql::is_generated_select(Engine::Redis, &filtered));
     }
 
     #[test]
@@ -716,19 +726,19 @@ mod tests {
     #[test]
     fn copied_statements_are_spelled_for_the_engine() {
         assert_eq!(
-            select_top_sql(Engine::SqlServer, "dbo", "t"),
+            select_top_sql(Engine::SqlServer, "dbo", "t").unwrap(),
             r#"SELECT TOP 100 * FROM "dbo"."t""#
         );
         assert_eq!(
-            select_top_sql(Engine::MySql, "db", "t"),
+            select_top_sql(Engine::MySql, "db", "t").unwrap(),
             "SELECT * FROM `db`.`t` LIMIT 100"
         );
         assert_eq!(
-            drop_sql(Engine::Postgres, "public", "v", RelationKind::View),
+            drop_sql(Engine::Postgres, "public", "v", RelationKind::View).unwrap(),
             r#"DROP VIEW "public"."v";"#
         );
         assert_eq!(
-            drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable),
+            drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable).unwrap(),
             r#"DROP EXTERNAL TABLE "S"."e";"#
         );
         assert_eq!(
@@ -736,7 +746,7 @@ mod tests {
             r#"DELETE FROM "main"."t";"#
         );
         assert_eq!(
-            drop_sql(Engine::MongoDb, "db", "c", RelationKind::Table),
+            drop_sql(Engine::MongoDb, "db", "c", RelationKind::Table).unwrap(),
             r#"db.getCollection("c").drop()"#
         );
         assert_eq!(
@@ -762,8 +772,7 @@ mod tests {
 
     #[test]
     fn a_preview_with_no_limit_asks_for_every_row() {
-        // Redis's keys grid, and the gate it passes, arrive with browsing.
-        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::Redis) {
+        for engine in Engine::ALL {
             let sql = preview_sql(engine, "public", "accounts", "", None, 0);
             assert!(!sql.contains("LIMIT") && !sql.contains("limit("), "{sql}");
             assert!(crate::sql::is_generated_select(engine, &sql), "{sql}");

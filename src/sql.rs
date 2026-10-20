@@ -975,8 +975,7 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
 pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
     match engine {
         Engine::MongoDb => return crate::mql::browse::is_generated_read(sql),
-        // Nothing generates a Redis read yet, so nothing is admitted.
-        Engine::Redis => return false,
+        Engine::Redis => return crate::redis_cmd::browse::is_generated_read(sql),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb

@@ -31,8 +31,9 @@ use ::redis::{
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, Fetch, QueryResult, Row, RowBuilder, ServerConfig, SslMode,
-    Stopped, Structure, plain_error,
+    Catalog, Cell, Column, ColumnDefinition, DbError, Fetch, NamedDefinition, QueryResult,
+    Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped, Structure,
+    plain_error,
 };
 use crate::redis_cmd::{self, Command};
 
@@ -420,14 +421,56 @@ impl Connection {
         })
     }
 
-    // ponytail: the keyspace browser, its structure and its preview arrive
-    // with phase 2 of the Redis engine; until then the explorer lists nothing.
+    /// One schema, named for the database as [`Connection::databases`] lists
+    /// it, holding the one relation a Redis database has: its keyspace, with
+    /// `DBSIZE` as its row count where the server will say.
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        Ok(Catalog::default())
+        let name = format!("db{}", database_number(&self.server.database)?);
+        let mut session = lock(&self.session);
+        let rows = self
+            .send(&mut session, |client| {
+                ::redis::cmd("DBSIZE").query::<u64>(client)
+            })
+            .ok();
+        Ok(Catalog {
+            schemas: vec![Schema {
+                name,
+                relations: vec![Relation {
+                    name: redis_cmd::browse::KEYS.into(),
+                    kind: RelationKind::Table,
+                    partition_of: None,
+                    size: None,
+                    rows,
+                }],
+                routines: Vec::new(),
+            }],
+        })
     }
 
+    /// The keyspace's columns, which are the preview's own: nothing declares
+    /// them. A key names one value, so it is the key.
     pub fn structure(&self, _schema: &str, _relation: &str) -> Result<Structure, DbError> {
-        Ok(Structure::default())
+        let column = |name: &str, data_type: &str, nullable: bool| ColumnDefinition {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable,
+            default: None,
+        };
+        Ok(Structure {
+            columns: vec![
+                column("key", "string", false),
+                column("type", "string", false),
+                // NULL where the key never expires.
+                column("ttl", "integer", true),
+                // NULL for a type the grid has no read for.
+                column("value", "string", true),
+            ],
+            constraints: vec![NamedDefinition {
+                name: "key".into(),
+                definition: "PRIMARY KEY (key)".into(),
+            }],
+            ..Structure::default()
+        })
     }
 
     pub fn ddl(&self, _schema: &str, _relation: &str) -> Result<String, DbError> {
@@ -1108,6 +1151,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::db::{Engine, is_cancel, ssh::live_bastion};
+    use crate::explorer::{count_sql, preview_sql};
+    use crate::filter::{FilterBar, derived_filter};
+    use crate::redis_cmd::browse::KEYS;
+    use crate::sql::is_generated_select;
 
     #[test]
     fn the_scheme_says_whether_to_use_tls_and_the_path_is_the_database() {
@@ -1434,6 +1481,89 @@ mod tests {
             cells(&ran(&connection, "ZSCAN leaderboard 0 MATCH ada")),
             [some(&["ada", "100"])]
         );
+    }
+
+    fn preview(connection: &Connection, bars: &[FilterBar], limit: Option<usize>) -> QueryResult {
+        let filter = derived_filter(Engine::Redis, bars, &[]);
+        let text = preview_sql(Engine::Redis, "db0", KEYS, &filter, limit, 0);
+        assert!(is_generated_select(Engine::Redis, &text), "{text}");
+        connection
+            .query(
+                &text,
+                Fetch {
+                    limit,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{text}: {}", error.message))
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_catalog_is_one_keyspace_counted_by_dbsize() {
+        let connection = live();
+        let catalog = connection.catalog().unwrap();
+        let [schema] = catalog.schemas.as_slice() else {
+            panic!("one schema: {catalog:?}");
+        };
+        assert_eq!(schema.name, "db0");
+        assert_eq!(schema.relations.len(), 1);
+        assert_eq!(schema.relations[0].name, KEYS);
+        assert_eq!(schema.relations[0].rows, Some(214));
+        let structure = connection.structure("db0", KEYS).unwrap();
+        let names: Vec<&str> = structure.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["key", "type", "ttl", "value"]);
+        assert_eq!(structure.row_key(), ["key"]);
+
+        let count = count_sql(Engine::Redis, "db0", KEYS, "");
+        assert!(is_generated_select(Engine::Redis, &count));
+        assert_eq!(cells(&ran(&connection, &count)), [some(&["214"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_keys_grid_shows_each_keys_value_or_its_size() {
+        let connection = live();
+        let all = preview(&connection, &[], Some(1_000));
+        assert_eq!(all.rows.len(), 214);
+        assert_eq!(all.stopped, None);
+        let row = |key: &str| {
+            cells(&all)
+                .into_iter()
+                .find(|row| row[0].as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("{key} is listed"))
+        };
+        assert_eq!(
+            row("greeting"),
+            [
+                Some("greeting".into()),
+                Some("string".into()),
+                None,
+                Some("hello world".into())
+            ]
+        );
+        assert_eq!(row("user:1")[3].as_deref(), Some("3 fields"));
+        assert_eq!(row("queue:emails")[3].as_deref(), Some("3 items"));
+        assert_eq!(row("tags:redis")[3].as_deref(), Some("3 members"));
+        assert_eq!(row("leaderboard")[3].as_deref(), Some("3 members"));
+        assert_eq!(row("events:signup")[3].as_deref(), Some("3 entries"));
+        assert_eq!(row("doc:1")[1].as_deref(), Some("ReJSON-RL"));
+        assert!(
+            row("doc:1")[3]
+                .as_deref()
+                .is_some_and(|json| json.contains("\"Ada\""))
+        );
+        assert_eq!(
+            row("bin:blob")[3].as_deref(),
+            Some(r#""\x00\xff\xfebinary\x01""#)
+        );
+        assert!(row("session:abc")[2].is_some());
+
+        // The tab's row limit is the fetch's: SCAN has none to write.
+        let capped = preview(&connection, &[], Some(10));
+        assert_eq!(capped.rows.len(), 10);
+        // One page held them all, so it says how many there were.
+        assert_eq!(capped.capped_from, Some(214));
     }
 
     #[test]

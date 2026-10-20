@@ -249,6 +249,7 @@ impl Workspace {
             return;
         };
         let can_turn = match forward {
+            true if !self.engine().pages() => false,
             true => matches!(
                 query,
                 QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
@@ -294,7 +295,7 @@ impl Workspace {
             return;
         };
         let typed = input.read(cx).value().trim().to_string();
-        if typed.is_empty() {
+        if typed.is_empty() || !self.engine().pages() {
             return;
         }
         let Some(page) = typed_page(&typed) else {

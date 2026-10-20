@@ -405,8 +405,7 @@ pub(crate) fn bar_predicate(
         // exactly what the gate is for (spec §2.3).
         return (!value.is_empty()).then(|| match engine {
             Engine::MongoDb => crate::mql::browse::raw_filter(value),
-            // A MATCH glob, as typed.
-            Engine::Redis => value.to_string(),
+            Engine::Redis => crate::redis_cmd::browse::raw_filter(value),
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb

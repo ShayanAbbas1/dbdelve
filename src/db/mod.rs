@@ -542,6 +542,23 @@ impl Engine {
         }
     }
 
+    /// Whether a preview's statement carries its row limit and its page's
+    /// offset. A Redis `SCAN` has neither: the fetch keeps the limit, and a
+    /// cursor walk has no page after the first that it can be asked for.
+    pub fn pages(self) -> bool {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => true,
+            Self::Redis => false,
+        }
+    }
+
     /// Whether a preview page is ordered by the relation's key when nothing
     /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
     /// one that orders nothing lets a parallel plan repeat or skip rows from
@@ -585,8 +602,8 @@ impl Engine {
     pub fn count_all(self) -> &'static str {
         match self {
             Self::SqlServer => "COUNT_BIG(*)",
-            // ponytail: MongoDB and Redis write no SQL, so this is never what
-            // their count runs; theirs arrives with browsing.
+            // MongoDB and Redis write no SQL, so this is never what their
+            // count runs.
             Self::Postgres
             | Self::MySql
             | Self::MariaDb
@@ -644,6 +661,22 @@ impl Engine {
             | Self::SqlServer => Syntax::Sql,
             Self::MongoDb => Syntax::Mongo,
             Self::Redis => Syntax::Redis,
+        }
+    }
+
+    /// Whether a relation has a definition [`Connection::ddl`] can write out.
+    /// A Redis keyspace is declared nowhere.
+    pub fn copies_ddl(self) -> bool {
+        match self {
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => true,
+            Self::Redis => false,
         }
     }
 
@@ -1461,18 +1494,22 @@ impl Connection {
     ///
     /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
     /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
-    /// applies.
+    /// applies -- but `limit`, the row limit of a preview whose statement has
+    /// nowhere to write one (see [`Engine::pages`]), and `None` everywhere
+    /// else.
     pub fn generated(
         &self,
         sql: &str,
         cancel: &CancelToken,
         feed: Option<&Feed>,
+        limit: Option<usize>,
     ) -> Result<QueryResult, DbError> {
         match self {
             Self::SqlServer(connection) => connection.generated(
                 sql,
                 Fetch {
                     feed,
+                    limit,
                     ..Fetch::default()
                 },
             ),
@@ -1487,6 +1524,7 @@ impl Connection {
                 cancel,
                 Fetch {
                     feed,
+                    limit,
                     ..Fetch::default()
                 },
             ),

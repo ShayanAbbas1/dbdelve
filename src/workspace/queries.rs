@@ -1866,6 +1866,17 @@ impl Workspace {
                 .and_then(|query| query.row_limit),
             _ => None,
         };
+        // A preview whose statement has nowhere to write its limit.
+        let preview_limit = match tab {
+            Tab::Object(object) if !engine.pages() => self
+                .issued_to(&id, generation)
+                .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == object))
+                .and_then(|tab| match &tab.body {
+                    ObjectBody::Relation { limit, .. } => *limit,
+                    ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                }),
+            Tab::Object(_) | Tab::Query(_) => None,
+        };
         // Rows land in the grid as they arrive, but only in a grid cleared for
         // them: a refresh keeps the rows it is replacing until the new ones are
         // whole, and a plan's rows never reach the grid at all. A relation's
@@ -1922,7 +1933,7 @@ impl Workspace {
                 held: None,
             };
             let result = match (generated, alongside) {
-                (true, _) => connection.generated(&sql, &cancel, fed.as_ref()),
+                (true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
                 (false, false) => connection.query(&sql, &cancel, fetch),
                 (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
             };
