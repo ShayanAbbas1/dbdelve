@@ -343,11 +343,15 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
 
 /// The command a preview's row opens with, as a result of its own
 /// ([`Engine::opened_column`]), read off the row's cells by column name: a
-/// Redis key's whole contents, by the read its type takes. `None` where rows
-/// open nothing, and for a type with no read.
-pub fn open_row_sql<'a>(engine: Engine, cell: impl Fn(&str) -> Option<&'a str>) -> Option<String> {
+/// Redis key's first `rows` entries, by the read its type takes. `None` where
+/// rows open nothing, and for a type with no read.
+pub fn open_row_sql<'a>(
+    engine: Engine,
+    rows: usize,
+    cell: impl Fn(&str) -> Option<&'a str>,
+) -> Option<String> {
     match engine {
-        Engine::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?),
+        Engine::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?, rows),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -781,14 +785,14 @@ mod tests {
             _ => None,
         };
         for engine in Engine::ALL {
-            let opened = open_row_sql(engine, row);
+            let opened = open_row_sql(engine, PREVIEW_ROW_LIMIT, row);
             assert_eq!(opened.is_some(), engine.opened_column().is_some());
         }
         assert_eq!(
-            open_row_sql(Engine::Redis, row).as_deref(),
-            Some("LRANGE queue:emails 0 -1")
+            open_row_sql(Engine::Redis, PREVIEW_ROW_LIMIT, row).as_deref(),
+            Some("LRANGE queue:emails 0 999")
         );
-        let read = open_row_sql(Engine::Redis, row).unwrap();
+        let read = open_row_sql(Engine::Redis, PREVIEW_ROW_LIMIT, row).unwrap();
         let verdict = crate::sql::classify(Engine::Redis, &read);
         assert!(crate::sql::gate(&verdict, crate::sql::Mode::ReadOnly, &[]).is_none());
     }

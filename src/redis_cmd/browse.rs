@@ -134,27 +134,30 @@ pub(crate) fn is_generated_read(text: &str) -> bool {
     preview(&options) == text
 }
 
-/// The command a key of `kind` opens with: the whole of it, in the shape each
-/// type reads back as a grid. `None` for a type there is no read for.
+/// The command a key of `kind` opens with: its first `rows` entries, in the
+/// shape each type reads back as a grid, and never in one read that holds the
+/// server for as long as the key is big. A hash, set and sorted set are
+/// scanned, so the fetch's limit stops the cursor; a list and a stream say
+/// how many to read. `None` for a type there is no read for.
 ///
 /// `key` is as the keys grid shows it, which for a name that is not UTF-8 is
 /// already redis-cli's quoted spelling of its bytes, and is sent as written.
 /// A UTF-8 name that happens to spell such a word the same way reads as those
 /// bytes; the grid cannot tell the two apart.
-pub(crate) fn read(key: &str, kind: &str) -> Option<String> {
+pub(crate) fn read(key: &str, kind: &str, rows: usize) -> Option<String> {
     let key = match super::split(key).as_deref() {
         Ok([bytes]) if std::str::from_utf8(bytes).is_err() => key.to_string(),
         _ => quoted(key),
     };
     Some(match kind {
         "string" => format!("GET {key}"),
-        "hash" => format!("HGETALL {key}"),
-        "list" => format!("LRANGE {key} 0 -1"),
-        "set" => format!("SMEMBERS {key}"),
-        "zset" => format!("ZRANGE {key} 0 -1 WITHSCORES"),
-        "stream" => format!("XRANGE {key} - +"),
+        "hash" => format!("HSCAN {key} 0 COUNT {COUNT}"),
+        "list" => format!("LRANGE {key} 0 {}", rows.max(1) - 1),
+        "set" => format!("SSCAN {key} 0 COUNT {COUNT}"),
+        "zset" => format!("ZSCAN {key} 0 COUNT {COUNT}"),
+        "stream" => format!("XRANGE {key} - + COUNT {rows}"),
         "ReJSON-RL" => format!("JSON.GET {key} $"),
-        "TSDB-TYPE" => format!("TS.RANGE {key} - +"),
+        "TSDB-TYPE" => format!("TS.RANGE {key} - + COUNT {rows}"),
         _ => return None,
     })
 }
@@ -252,14 +255,26 @@ mod tests {
 
     #[test]
     fn a_key_opens_with_its_types_read_and_its_name_quoted() {
-        assert_eq!(read("user:1", "hash").as_deref(), Some("HGETALL user:1"));
+        let read = |key, kind| read(key, kind, 100);
+        assert_eq!(
+            read("user:1", "hash").as_deref(),
+            Some("HSCAN user:1 0 COUNT 1000")
+        );
         assert_eq!(
             read("a key \"q\"", "list").as_deref(),
-            Some(r#"LRANGE "a key \"q\"" 0 -1"#)
+            Some(r#"LRANGE "a key \"q\"" 0 99"#)
+        );
+        assert_eq!(
+            read("tags", "set").as_deref(),
+            Some("SSCAN tags 0 COUNT 1000")
         );
         assert_eq!(
             read("leaderboard", "zset").as_deref(),
-            Some("ZRANGE leaderboard 0 -1 WITHSCORES")
+            Some("ZSCAN leaderboard 0 COUNT 1000")
+        );
+        assert_eq!(
+            read("events", "stream").as_deref(),
+            Some("XRANGE events - + COUNT 100")
         );
         assert_eq!(
             read("doc:1", "ReJSON-RL").as_deref(),

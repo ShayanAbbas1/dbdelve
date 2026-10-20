@@ -1961,7 +1961,7 @@ mod tests {
             ("greeting", "string", &["value"][..], 1),
             ("user:1", "hash", &["field", "value"][..], 3),
             ("queue:emails", "list", &["index", "value"][..], 3),
-            ("tags:redis", "set", &["value"][..], 3),
+            ("tags:redis", "set", &["member"][..], 3),
             ("leaderboard", "zset", &["member", "score"][..], 3),
             (
                 "events:signup",
@@ -1978,17 +1978,29 @@ mod tests {
             ),
             ("bin:blob", "string", &["value"][..], 1),
         ] {
-            let read = open_row_sql(Engine::Redis, |column| match column {
-                "key" => Some(key),
-                "type" => Some(kind),
-                _ => None,
-            })
-            .unwrap();
-            let result = ran(&connection, &read);
+            let read = |limit| {
+                open_row_sql(Engine::Redis, limit, |column| match column {
+                    "key" => Some(key),
+                    "type" => Some(kind),
+                    _ => None,
+                })
+                .unwrap()
+            };
+            let result = ran(&connection, &read(100));
             let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-            assert_eq!(names, columns, "{read}");
-            assert_eq!(result.rows.len(), rows, "{read}");
-            assert!(cells(&result)[0][0].is_some(), "{read}");
+            assert_eq!(names, columns, "{}", read(100));
+            assert_eq!(result.rows.len(), rows, "{}", read(100));
+            assert!(cells(&result)[0][0].is_some(), "{}", read(100));
+            // Under the limit a collection reads no further, whichever way
+            // it stops: by what the command asks for or by the fetch's limit.
+            if rows > 1 {
+                let fetch = Fetch {
+                    limit: Some(2),
+                    ..Fetch::default()
+                };
+                let capped = connection.query(&read(2), fetch).unwrap();
+                assert_eq!(capped.rows.len(), 2, "{}", read(2));
+            }
         }
     }
 

@@ -727,8 +727,15 @@ impl Workspace {
             if engine.opened_column().is_none() {
                 return;
             }
+            // The new query tab's limit, and a bound even where it has none.
+            let rows = self
+                .settings
+                .row_limit
+                .unwrap_or(explorer::PREVIEW_ROW_LIMIT);
             let opened = grid.active().and_then(|(row, _)| {
-                explorer::open_row_sql(engine, |column| grid.cell(row, grid.column_named(column)?))
+                explorer::open_row_sql(engine, rows, |column| {
+                    grid.cell(row, grid.column_named(column)?)
+                })
             });
             match opened {
                 Some(statement) => self.run_in_new_query(statement, window, cx),
