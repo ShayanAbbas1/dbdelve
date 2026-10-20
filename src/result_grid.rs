@@ -1435,21 +1435,22 @@ impl ResultGrid {
         self.mode = mode;
     }
 
-    /// Whether this cell can be written back at all: the result has to be
-    /// traceable to one table, the column has to exist in it, and it must not
-    /// be part of the key — a key edit is the one edit whose result cannot be
-    /// re-verified afterwards, so the spec's §3 refuses it.
-    ///
-    /// Nor a binary column. What the grid shows there is a blob *literal* the
-    /// user could not type a replacement for anyway, and the value that came
-    /// back would be written as the text it looks like — see
-    /// [`db::Engine::is_binary_type`].
     /// Whether any cell of the row can be edited: what the row panel's pencil
     /// and the "cannot be edited" refusal both ask.
     pub fn row_editable(&self, row: usize) -> bool {
         (0..self.columns.len()).any(|col| self.editable(row, col))
     }
 
+    /// Whether this cell can be written back at all: the result has to be
+    /// traceable to one table, the column has to exist in it, and it must not
+    /// be part of the key — a key edit is the one edit whose result cannot be
+    /// re-verified afterwards, so the spec's §3 refuses it. The exception is a
+    /// key the engine edits as what the row is ([`db::Engine::edits_key_column`]).
+    ///
+    /// Nor a binary column. What the grid shows there is a blob *literal* the
+    /// user could not type a replacement for anyway, and the value that came
+    /// back would be written as the text it looks like — see
+    /// [`db::Engine::writes_back`].
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -1458,13 +1459,15 @@ impl ResultGrid {
         let Some(edit) = &self.result.edit else {
             return false;
         };
+        let Some(Some(name)) = edit.columns.get(col) else {
+            return false;
+        };
         row < self.result.rows.len()
-            && edit.columns.get(col).is_some_and(Option::is_some)
-            && !edit.keys.contains(&col)
-            && ![self.column_type(col), self.cell_type(row, col)]
+            && (!edit.keys.contains(&col) || self.engine.edits_key_column(name))
+            && [self.column_type(col), self.cell_type(row, col)]
                 .into_iter()
                 .flatten()
-                .any(|data_type| self.engine.is_binary_type(data_type))
+                .all(|data_type| self.engine.writes_back(data_type))
     }
 
     fn column_type(&self, col: usize) -> Option<&str> {

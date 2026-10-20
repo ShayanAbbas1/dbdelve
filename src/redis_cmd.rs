@@ -16,6 +16,7 @@ use std::ops::Range;
 use crate::sql::{Destructive, Leaves, Mode, Verdict};
 
 pub(crate) mod browse;
+pub(crate) mod edit;
 
 /// One command of a buffer, as DBDelve reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -934,6 +934,43 @@ impl Engine {
             || (self == Self::MongoDb && name == "bindata")
     }
 
+    /// Whether a cell of `data_type` holds what an edit of it would write
+    /// back: not bytes ([`Engine::is_binary_type`]), and on Redis only text
+    /// that is the whole of its value, never the start of a long one, a
+    /// collection's size or the spelling of bytes that are not text.
+    pub fn writes_back(self, data_type: &str) -> bool {
+        match self {
+            Self::Redis => crate::redis_cmd::edit::writes_back(data_type),
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => !self.is_binary_type(data_type),
+        }
+    }
+
+    /// Whether `column`, part of what names a grid's row, can be edited all
+    /// the same. Elsewhere a key column says which row an edit lands on and is
+    /// never what it changes. On Redis a key's name, a set's member, a sorted
+    /// set's member and score and a string's value are the row, and an edit
+    /// of one is written as a `RENAMENX`, or as a removal and an addition.
+    pub fn edits_key_column(self, column: &str) -> bool {
+        match self {
+            Self::Redis => crate::redis_cmd::edit::edits_key_column(column),
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::Snowflake
+            | Self::SqlServer
+            | Self::MongoDb => false,
+        }
+    }
+
     /// What a header click adds to a statement, as a notice names it.
     pub fn sort_clause(self) -> &'static str {
         match self {
@@ -1841,7 +1878,7 @@ pub const MISSING: &str = "missing";
 /// The tag [`QueryResult::cell_types`] holds for `name`, for a snapshot read
 /// back from disk; `None` for a name no engine gives.
 pub fn cell_type(name: &str) -> Option<&'static str> {
-    mongo::cell_type(name)
+    mongo::cell_type(name).or_else(|| crate::redis_cmd::edit::cell_type(name))
 }
 
 /// A cell value, already formatted by the server. `None` is SQL NULL, which is

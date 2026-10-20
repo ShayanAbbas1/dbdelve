@@ -512,8 +512,7 @@ pub fn insert_row(
 ) -> Result<String, String> {
     match engine {
         Engine::MongoDb => return crate::mql::insert_row(table, columns, types),
-        // ponytail: Redis's grid edits arrive with phase 3 of its engine.
-        Engine::Redis => return Err("Redis takes no rows from the grid yet.".into()),
+        Engine::Redis => return crate::redis_cmd::edit::insert_row(schema, table, columns),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -672,7 +671,9 @@ pub fn delete_row(
 ) -> Option<String> {
     match engine {
         Engine::MongoDb => return crate::mql::delete_row(table, keys, types).ok(),
-        Engine::Redis => return None,
+        Engine::Redis => {
+            return crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok();
+        }
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -927,8 +928,7 @@ fn delete_key_matches(sql: &str, keys: &[&str], backslash_escapes: bool) -> bool
 pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     match engine {
         Engine::MongoDb => crate::mql::is_generated_write(statement),
-        // Nothing generates a Redis write yet, so nothing is admitted.
-        Engine::Redis => false,
+        Engine::Redis => crate::redis_cmd::edit::is_generated_write(statement),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -943,7 +943,7 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
 pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
     match engine {
         Engine::MongoDb => crate::mql::delete_matches_key(statement, keys),
-        Engine::Redis => false,
+        Engine::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
@@ -1829,7 +1829,7 @@ fn repeats(count: u64) -> Result<(), String> {
 pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
     match engine {
         Engine::MongoDb => return crate::mql::update_batch(rows),
-        Engine::Redis => return Err("Redis rows are not edited from the grid yet.".into()),
+        Engine::Redis => return crate::redis_cmd::edit::update_batch(rows),
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
