@@ -60,6 +60,7 @@ jobs:
       dbdelve_MARIADB_URL: mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
       dbdelve_MSSQL_URL: mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
       dbdelve_MONGO_URL: mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+      dbdelve_REDIS_URL: redis://dbdelve:dbdelve@127.0.0.1:56379/0
       dbdelve_SQLITE_PATH: ${{ github.workspace }}/dev/dbdelve_dev.db
       # For the live_ssh_ tests a later checkpoint adds; setup.sh writes this.
       dbdelve_SSH_CONFIG: ${{ github.workspace }}/dev/ssh/.generated/ssh_config
