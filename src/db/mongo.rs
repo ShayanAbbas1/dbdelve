@@ -218,6 +218,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             // A URL has nowhere to say either; the form is where they are set.
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         },
         srv,
         options,

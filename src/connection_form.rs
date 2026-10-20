@@ -67,6 +67,9 @@ pub(crate) struct ConnectionForm {
     /// The profile's login database, which the form does not show and keeps
     /// as it was.
     pub(crate) login_database: Option<String>,
+    /// The active schema, picked in the titlebar rather than here, and kept
+    /// as it was.
+    pub(crate) schema: Option<String>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -265,6 +268,7 @@ impl ConnectionForm {
             options,
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
+            schema: server.and_then(|server| server.schema.clone()),
             statement_timeout,
             error: None,
             test: None,
@@ -474,6 +478,10 @@ impl ConnectionForm {
                     read(&self.ssh_identity_file),
                 ],
             )?,
+            schema: self
+                .schema
+                .clone()
+                .filter(|_| self.engine.has_active_schema()),
         })
     }
 }
@@ -700,6 +708,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         };
         let typed = ConnectionConfig::Postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

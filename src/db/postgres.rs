@@ -459,6 +459,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
         ssh: None,
+        schema: None,
     })
 }
 
@@ -494,22 +495,52 @@ fn connection_string(server: &ServerConfig) -> String {
     // that resolves but drops packets pins the UI in "Connecting…" for
     // minutes with no cancel.
     parts.push(format!("connect_timeout={CONNECT_TIMEOUT_SECONDS}"));
+    // Session defaults set once, here, rather than a `SET` prepended to the
+    // user's submission -- see `ServerConfig::statement_timeout`. They ride in
+    // as startup options because `options` is the only channel libpq has for
+    // one, and nothing collides with it: dbdelve's URL parser has no `options`
+    // field, so a user-supplied one never reaches here.
+    let mut options = Vec::new();
     if server.statement_timeout > 0 {
-        // A session default set once, here, rather than a `SET` prepended to
-        // the user's submission -- see `ServerConfig::statement_timeout`. It
-        // rides in as a startup option because `options` is the only channel
-        // libpq has for one, and nothing collides with it: dbdelve's URL parser
-        // has no `options` field, so a user-supplied one never reaches here.
         // `statement_timeout` counts milliseconds when given a bare number.
-        parts.push(format!(
-            "options={}",
-            quote(&format!(
-                "-c statement_timeout={}",
-                u64::from(server.statement_timeout) * 1_000
-            ))
+        options.push(format!(
+            "-c statement_timeout={}",
+            u64::from(server.statement_timeout) * 1_000
         ));
     }
+    if let Some(schema) = &server.schema {
+        options.push(format!(
+            "-c search_path={}",
+            startup_option(&search_path(schema))
+        ));
+    }
+    if !options.is_empty() {
+        parts.push(format!("options={}", quote(&options.join(" "))));
+    }
     parts.join(" ")
+}
+
+/// `schema` first and `public` after it, as `search_path` takes a list.
+fn search_path(schema: &str) -> String {
+    let first = Engine::Postgres.quote_identifier(schema);
+    match schema {
+        "public" => first,
+        _ => format!("{first},public"),
+    }
+}
+
+/// The server splits `options` on whitespace and reads a backslash as
+/// escaping the character after it, so a schema named with a space would
+/// otherwise arrive as two arguments.
+fn startup_option(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character == '\\' || character.is_whitespace() {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
@@ -613,8 +644,9 @@ pub struct Connection {
     /// What [`Self::sizes`] opens its own connection with. Kept for the reason
     /// MySQL keeps its copy: the password is already held by the live client,
     /// and nothing above `src/db/` may learn which engines want a second one
-    /// (AGENTS.md, hard rule 4).
-    server: ServerConfig,
+    /// (AGENTS.md, hard rule 4). Shared between clones, so a schema set on one
+    /// reaches the sessions any of them opens later.
+    server: Arc<Mutex<ServerConfig>>,
 }
 
 impl Connection {
@@ -685,8 +717,37 @@ impl Connection {
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
-            server: server.clone(),
+            server: Arc::new(Mutex::new(server.clone())),
         })
+    }
+
+    fn server(&self) -> ServerConfig {
+        self.server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Recorded first, for every session opened from here on, then `SET` on
+    /// the two already open. The side session is never in a transaction of
+    /// the user's; this one waits for a statement running on it to finish,
+    /// and a `SET` inside a transaction the user then rolls back is undone
+    /// with it, as one they typed would be.
+    pub fn set_schema(&self, schema: &str) -> Result<(), DbError> {
+        self.server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .schema = Some(schema.to_string());
+        let set = format!("SET search_path TO {}", search_path(schema));
+        if let Ok(mut side) = self.side.lock()
+            && side
+                .as_ref()
+                .is_some_and(|side| side.internal_query(&set).is_err())
+        {
+            // Reopened from the config above the next time it is needed.
+            *side = None;
+        }
+        self.internal_query(&set).map(drop)
     }
 
     /// A second session, for a statement to run on beside this one's; see
@@ -695,7 +756,7 @@ impl Connection {
     pub fn alongside(&self) -> Result<Self, DbError> {
         Ok(Self {
             side: self.side.clone(),
-            ..Self::connect(&self.server, self.tunnel.clone())?
+            ..Self::connect(&self.server(), self.tunnel.clone())?
         })
     }
 
@@ -867,7 +928,7 @@ impl Connection {
         if side.as_ref().is_none_or(Connection::is_lost) {
             let server = ServerConfig {
                 statement_timeout: SIDE_TIMEOUT_SECONDS,
-                ..self.server.clone()
+                ..self.server()
             };
             *side = Self::connect(&server, self.tunnel.clone()).ok();
         }
@@ -970,7 +1031,7 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server, self.tunnel.clone())?;
+        let side = Self::connect(&self.server(), self.tunnel.clone())?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -1615,6 +1676,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         }
     }
 
@@ -1634,6 +1696,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         }
     }
 
@@ -1712,6 +1775,63 @@ mod tests {
             "{}",
             connection_string(&config)
         );
+    }
+
+    #[test]
+    fn an_active_schema_leads_the_search_path_as_one_startup_argument() {
+        let config = ServerConfig {
+            schema: Some(r#"My "Odd" \Schema"#.into()),
+            statement_timeout: 30,
+            ..config()
+        };
+        let string = connection_string(&config);
+        let options = r#"-c statement_timeout=30000 -c search_path="My\ ""Odd""\ \\Schema",public"#;
+        assert!(
+            string.contains(&format!("options={}", quote(options))),
+            "{string}"
+        );
+        let parsed = string
+            .parse::<tokio_postgres::Config>()
+            .expect("the driver should parse the string");
+        assert_eq!(parsed.get_options(), Some(options));
+    }
+
+    #[test]
+    fn public_as_the_active_schema_is_not_listed_twice() {
+        assert_eq!(search_path("public"), r#""public""#);
+        assert_eq!(search_path("Sales"), r#""Sales",public"#);
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_active_schema_leads_every_session_and_moves_the_open_ones() {
+        let shown = |connection: &Connection| {
+            connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                // `SET` lists it back spaced and a startup option as given.
+                .map(|path| path.replace(", ", ","))
+        };
+        let connection = Connection::open(&ServerConfig {
+            schema: Some("odd schema".into()),
+            ..live_config()
+        })
+        .expect("connection should open");
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""odd schema",public"#)
+        );
+
+        connection
+            .set_schema("Other")
+            .expect("the schema should set");
+        assert_eq!(shown(&connection).as_deref(), Some(r#""Other",public"#));
+        let fresh = connection
+            .alongside()
+            .expect("a second session should open");
+        assert_eq!(shown(&fresh).as_deref(), Some(r#""Other",public"#));
     }
 
     #[test]
@@ -1812,6 +1932,7 @@ mod tests {
                 root_certificate: None,
                 statement_timeout: 0,
                 ssh: None,
+                schema: None,
             }
         );
     }

@@ -157,6 +157,7 @@ impl Profile {
             srv: mongo.map(|mongo| mongo.srv),
             options: mongo.map(|mongo| mongo.options.clone()),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
+            schema: server.and_then(|server| server.schema.clone()),
             // App-wide now, in `[settings]`. Kept on the stored shape and left
             // unwritten so the value an older build put here is still there for
             // the migration to read on the next upgrade.

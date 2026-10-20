@@ -118,6 +118,7 @@ impl Workspace {
                     root_certificate: stored.root_certificate,
                     statement_timeout: stored.statement_timeout.unwrap_or_default(),
                     ssh: stored.ssh,
+                    schema: stored.schema,
                 };
                 match engine {
                     Engine::MySql => ConnectionConfig::MySql(server),
@@ -944,7 +945,7 @@ impl Workspace {
         let (id, generation) = (profile.id.clone(), profile.generation);
         let fetch = cx
             .background_executor()
-            .spawn(async move { connection.databases() });
+            .spawn(async move { connection.databases(engine) });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {

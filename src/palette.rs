@@ -533,10 +533,12 @@ fn import_items(source: user::Source) -> Vec<Item> {
         .collect()
 }
 
-/// The server's databases in the order it listed them, the one this
-/// connection is in marked the way the theme list marks its theme.
+/// The server's databases in the order it listed them, its own after the
+/// user's, the one this connection is in marked the way the theme list marks
+/// its theme.
 fn database_items(profile: &Profile) -> Vec<Item> {
     let databases = &profile.databases;
+    let engine = profile.config.engine();
     databases
         .names
         .iter()
@@ -544,6 +546,8 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             label: name.clone(),
             hint: if databases.current.as_ref() == Some(name) {
                 "current"
+            } else if engine.is_system_database(name) {
+                "system"
             } else {
                 ""
             }

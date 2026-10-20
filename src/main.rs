@@ -161,6 +161,7 @@ fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, Stri
         // No `PG*` variable means it, and dbdelve is not inventing one.
         statement_timeout: 0,
         ssh: None,
+        schema: None,
     })))
 }
 

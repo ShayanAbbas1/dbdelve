@@ -1159,6 +1159,7 @@ mod tests {
                 root_certificate: None,
                 statement_timeout: 0,
                 ssh: None,
+                schema: None,
             }
         );
         assert_eq!(

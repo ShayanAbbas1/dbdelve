@@ -760,6 +760,26 @@ impl Engine {
         )
     }
 
+    /// Whether a profile picks the schema unqualified names resolve in. MySQL's
+    /// database is its schema, and SQL Server's default schema is the login's.
+    pub fn has_active_schema(self) -> bool {
+        self == Self::Postgres
+    }
+
+    /// A database the server keeps for itself, listed after the user's own.
+    /// Postgres's `postgres` is an ordinary database people work in.
+    pub fn is_system_database(self, name: &str) -> bool {
+        let system: &[&str] = match self {
+            Self::MySql | Self::MariaDb => {
+                &["information_schema", "mysql", "performance_schema", "sys"]
+            }
+            Self::SqlServer => &["master", "tempdb", "model", "msdb"],
+            Self::MongoDb => &["admin", "local", "config"],
+            _ => &[],
+        };
+        system.contains(&name)
+    }
+
     /// Postgres and SQLite take the standard's double quote. MySQL takes a
     /// backtick, which it accepts whether or not `ANSI_QUOTES` is set — a double
     /// quote there is a *string literal*, so quoting a MySQL identifier the
@@ -1164,6 +1184,7 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         statement_timeout: 0,
         // Same reason: a URL has nowhere to say it either.
         ssh: None,
+        schema: None,
     })
 }
 
@@ -1240,6 +1261,10 @@ pub struct ServerConfig {
     /// A local port forward to dial through instead of connecting to `host`
     /// directly. None is the ordinary direct connection.
     pub ssh: Option<SshTunnel>,
+    /// The schema unqualified names resolve in first, where
+    /// [`Engine::has_active_schema`]. None leaves the server's `search_path`
+    /// alone.
+    pub schema: Option<String>,
 }
 
 impl ServerConfig {
@@ -1738,14 +1763,26 @@ impl Connection {
 
     /// The databases on the server, for a profile to be moved onto one. Empty
     /// where [`Engine::switches_database`] is false.
-    pub fn databases(&self) -> Result<Databases, DbError> {
-        match self {
+    pub fn databases(&self, engine: Engine) -> Result<Databases, DbError> {
+        let mut databases = match self {
             Self::Postgres(connection) => connection.databases(),
             Self::MySql(connection) => connection.databases(),
             Self::SqlServer(connection) => connection.databases(),
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
             Self::Sqlite(_) | Self::Turso(_) | Self::Snowflake(_) => Ok(Databases::default()),
+        }?;
+        databases.system_last(engine);
+        Ok(databases)
+    }
+
+    /// Make `schema` the first place unqualified names resolve, on every
+    /// session this connection has open and every one it opens later. A
+    /// no-op where [`Engine::has_active_schema`] is false.
+    pub fn set_schema(&self, schema: &str) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(connection) => connection.set_schema(schema),
+            _ => Ok(()),
         }
     }
 
@@ -2159,6 +2196,14 @@ pub struct Databases {
     pub names: Vec<String>,
     /// The one this connection is in. MySQL can be in none.
     pub current: Option<String>,
+}
+
+impl Databases {
+    /// Stable, so each half keeps the order the server listed it in.
+    fn system_last(&mut self, engine: Engine) {
+        self.names
+            .sort_by_key(|name| engine.is_system_database(name));
+    }
 }
 
 pub type Sizes = std::collections::HashMap<String, std::collections::HashMap<String, Statistics>>;
@@ -3215,6 +3260,44 @@ pub(super) mod at_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_databases_are_listed_after_the_users_own_in_server_order() {
+        let listed = |engine, names: &[&str]| {
+            let mut databases = Databases {
+                names: names.iter().map(|name| (*name).to_string()).collect(),
+                current: None,
+            };
+            databases.system_last(engine);
+            databases.names
+        };
+        assert_eq!(
+            listed(
+                Engine::MySql,
+                &["app", "information_schema", "mysql", "orders", "sys"]
+            ),
+            ["app", "orders", "information_schema", "mysql", "sys"]
+        );
+        assert_eq!(
+            listed(
+                Engine::SqlServer,
+                &["master", "model", "msdb", "sales", "tempdb"]
+            ),
+            ["sales", "master", "model", "msdb", "tempdb"]
+        );
+        assert_eq!(
+            listed(Engine::MongoDb, &["admin", "config", "local", "shop"]),
+            ["shop", "admin", "config", "local"]
+        );
+        // `postgres` is a database people work in.
+        assert_eq!(
+            listed(Engine::Postgres, &["app", "postgres", "zeta"]),
+            ["app", "postgres", "zeta"]
+        );
+        assert!(Engine::MariaDb.is_system_database("performance_schema"));
+        assert!(!Engine::Postgres.is_system_database("mysql"));
+        assert!(!Engine::Redis.is_system_database("db0"));
+    }
 
     #[test]
     fn every_engine_answers_the_import_questions() {

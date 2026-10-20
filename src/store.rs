@@ -80,6 +80,11 @@ pub struct StoredProfile {
     /// profile off it. Absent until then, and for every other engine.
     #[serde(default)]
     pub login_database: Option<String>,
+    /// The schema unqualified names resolve in first, as picked in the
+    /// titlebar. Absent leaves the server's `search_path` as it is, which is
+    /// what every profile written before it could be picked connected with.
+    #[serde(default)]
+    pub schema: Option<String>,
     /// The editor's zoom, back when it was a per-profile setting. Read only:
     /// the live value is [`StoredSettings::editor_font_size`] now, and this is
     /// what the migration seeds it from for anyone upgrading -- dropping the
@@ -1387,6 +1392,7 @@ user = "shayan"
                 srv: None,
                 options: None,
                 login_database: None,
+                schema: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
                 next_query_id: Some(1),
@@ -1435,6 +1441,7 @@ user = "shayan"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1536,6 +1543,8 @@ open_objects = []
         assert_eq!(profile.statement_timeout, None);
         // A profile predating tunnels connected directly, and still does.
         assert_eq!(profile.ssh, None);
+        // And on the server's own search_path.
+        assert_eq!(profile.schema, None);
     }
 
     /// A minimal profile the SSH tunnel tests vary just the `ssh` field of.
@@ -1558,6 +1567,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1622,6 +1632,30 @@ open_objects = []
     }
 
     #[test]
+    fn an_active_schema_survives_the_round_trip_through_toml_beside_a_tunnel() {
+        let profile = StoredProfile {
+            schema: Some(r#"Sales "EU""#.into()),
+            ssh: Some(SshTunnel {
+                host: "dbdelve-bastion".into(),
+                ..SshTunnel::default()
+            }),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
     fn no_tunnel_is_not_written_as_an_empty_section() {
         let file = ProfileFile {
             fonts: None,
@@ -1658,6 +1692,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1731,6 +1766,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
             next_query_id: Some(7),
@@ -1790,6 +1826,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: Some(60),
             next_query_id: Some(1),
@@ -1896,6 +1933,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -2011,6 +2049,7 @@ open_objects = []
                     srv: None,
                     options: None,
                     login_database: None,
+                    schema: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
                     next_query_id: Some(2),
@@ -2040,6 +2079,7 @@ open_objects = []
                     srv: None,
                     options: None,
                     login_database: None,
+                    schema: None,
                     editor_font_size: None,
                     statement_timeout: None,
                     next_query_id: None,
@@ -2393,6 +2433,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -2742,6 +2783,7 @@ name = \"accounts\"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -2851,6 +2893,7 @@ name = \"accounts\"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
