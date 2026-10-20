@@ -148,6 +148,12 @@ failure says which one failed and how many ran before it.
   open across runs until its `EXEC` or `DISCARD`, and every command sent
   meanwhile is only queued, so the grids refuse to read or write until it is
   closed. A run that fails discards the `MULTI` it opened.
+- **A `WATCH` left open holds list edits back.** A list item's write carries a
+  `WATCH` of its own, whose `EXEC` would clear the query tab's too, so it is
+  refused until that tab runs `UNWATCH` or the `MULTI` and `EXEC` it guards.
+- **Reading a key does not touch it.** Every session is `CLIENT NO-TOUCH ON`
+  (Redis 7.2 and later), so neither browsing nor your own commands move a key's
+  LRU or LFU, which eviction goes by; `TOUCH` still does.
 - **Databases are numbers.** Select Database moves the profile to another one.
 - **There is no export as SQL and no Import Rows,** since a key names
   its own value rather than a row under a file's columns.

@@ -1123,7 +1123,15 @@ Decided, and not to be re-litigated:
   goes with it.
 - **The session remembers an open `MULTI` across runs** (`Session::multi`),
   and a generated run, read or write, is refused while it is set: inside it a
-  write's reply is `QUEUED`, which would pass for applied.
+  write's reply is `QUEUED`, which would pass for applied. Nor does listing
+  the databases or the catalog send `CONFIG GET` or `DBSIZE` then, which
+  would be queued into the user's transaction. A Cancel that skips a command
+  closes the session, since the one skipped may have been the `EXEC`.
+- **It remembers a query tab's `WATCH` the same way** (`Session::watching`:
+  set by a typed `WATCH`, cleared by `UNWATCH`, by an `EXEC` or `DISCARD`
+  that closes a `MULTI`, and by a redial), and a generated run holding a
+  `WATCH` of its own, a list item's write, is refused while it is set: its
+  `EXEC` or `UNWATCH` would clear the user's along with its own.
 
 ### SSH tunnels
 

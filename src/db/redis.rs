@@ -231,7 +231,8 @@ impl Connection {
             .arg("ID")
             .query::<i64>(&mut client)
             .ok();
-        // Browsing then leaves keys' LRU/LFU, which eviction goes by, untouched; 7.2+.
+        // Browsing and the user's own commands then leave keys' LRU/LFU, which
+        // eviction goes by, untouched; 7.2+.
         let _ = ::redis::cmd("CLIENT")
             .arg("NO-TOUCH")
             .arg("ON")
