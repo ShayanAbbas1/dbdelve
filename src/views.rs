@@ -3203,18 +3203,17 @@ fn render_query_toolbar(
         });
 
     // Only over rows read from one table with its key: what the grid
-    // writes its edits back to is what the new row is inserted into.
+    // writes its edits back to is what the new row is inserted into. Named,
+    // since a queue's results can each be a different table.
     let new_row = session
         .active_query_tab()
         .filter(|tab| !tab.showing_plan && !session.naming)
-        .and_then(|_| session.active_results())
-        .filter(|results| results.read(cx).delegate().insert_target().is_some())
-        .map(|_| {
-            button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
-                |_, window, cx| {
-                    window.dispatch_action(Box::new(NewRow), cx);
-                },
-            )
+        .and_then(|_| session.query_insert_target(cx))
+        .map(|(_, table, _)| {
+            let label = format!("New row in {table}");
+            button("new-row", label, Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(NewRow), cx);
+            })
         });
 
     let named = session.open_query().is_some();

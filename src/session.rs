@@ -32,7 +32,7 @@ use crate::{
         stored_filter,
     },
     import_rows, result_grid,
-    result_grid::{NewValue, ResultGrid},
+    result_grid::{InsertTarget, NewValue, ResultGrid},
     sql::{self, Destructive, Mode, SortKey, Verdict},
     store,
     structure_grid::StructureGrid,
@@ -702,6 +702,17 @@ impl Session {
                 ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
             },
         }
+    }
+
+    /// What a new row of the rows in front of the active query tab is
+    /// inserted into, a queue's earlier result included.
+    pub(crate) fn query_insert_target(&self, cx: &App) -> Option<InsertTarget> {
+        self.active_query_tab()?
+            .shown()
+            .1
+            .read(cx)
+            .delegate()
+            .insert_target()
     }
 
     /// Every buffer highlighted and prompted for `syntax`, once an edit has
@@ -1896,6 +1907,17 @@ pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
 pub(crate) enum Refresh {
     /// The query tab's stashed `SELECT`.
     Statement(String),
+    /// A queue's earlier result, `sql` re-run in its own entry. The batch ran
+    /// in the tab's slot, which is the last result's grid, so `slot` is asked
+    /// again first to put that one back.
+    Queued {
+        slot: Option<String>,
+        index: usize,
+        sql: String,
+    },
+    /// `Queued`'s second step, carried by the slot's own statement. That run
+    /// is the user's statement and not dbdelve's, so it keeps the row limit.
+    Lane { index: usize, sql: String },
     /// A relation tab, refreshed the way its own controls refresh it — so it
     /// picks up whatever sort and row limit the tab is now set to.
     Relation(u64),

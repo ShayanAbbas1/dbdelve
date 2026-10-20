@@ -1885,8 +1885,12 @@ impl Workspace {
         }
         // Everything an object tab runs is dbdelve's, and a query tab runs
         // dbdelve's statement only when an edit is applied from its grid, the
-        // one run that carries a refresh.
-        let generated = matches!(tab, Tab::Object(_)) || refresh.is_some();
+        // one run that carries a refresh -- bar a `Lane`, which the user's own
+        // statement carries.
+        let generated = matches!(tab, Tab::Object(_))
+            || refresh
+                .as_ref()
+                .is_some_and(|refresh| !matches!(refresh, Refresh::Lane { .. }));
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
         if !generated && let Some(profile) = self.issued_to(&id, generation) {
@@ -2317,6 +2321,46 @@ impl Workspace {
                     if succeeded && let Some(refresh) = refresh {
                         match refresh {
                             Refresh::Statement(sql) => workspace.execute_sql(sql, tab, cx),
+                            Refresh::Queued {
+                                slot: Some(slot),
+                                index,
+                                sql,
+                            } => workspace.execute_and_then(
+                                slot,
+                                tab,
+                                Some(Refresh::Lane { index, sql }),
+                                false,
+                                None,
+                                cx,
+                            ),
+                            Refresh::Queued {
+                                slot: None,
+                                index,
+                                sql,
+                            }
+                            | Refresh::Lane { index, sql } => {
+                                let note = if !workspace.rerun_queued(tab, index, sql, cx) {
+                                    Some(
+                                        "The change was applied, but these rows could not be \
+                                         read again. Run the statement to see it.",
+                                    )
+                                } else if workspace
+                                    .profile()
+                                    .is_some_and(|profile| profile.in_transaction)
+                                {
+                                    // A lane reads on a connection of its own.
+                                    Some(
+                                        "The change is in your open transaction. These rows \
+                                         are read on another connection, so they show it \
+                                         once you commit.",
+                                    )
+                                } else {
+                                    None
+                                };
+                                if let Some(note) = note {
+                                    workspace.note(note.into(), cx);
+                                }
+                            }
                             Refresh::Relation(id) => workspace.refresh_relation(id, cx),
                         }
                     }

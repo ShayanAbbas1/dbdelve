@@ -642,11 +642,13 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // engine, and a deleted one where the engine deletes them there as well
     // as on a relation's.
     if session.active_query_tab().is_some() {
-        if session
-            .active_results()
-            .is_some_and(|results| results.read(cx).delegate().insert_target().is_some())
-        {
-            items.push(Item::command("New row…", "", icon::PLUS, Command::NewRow));
+        if let Some((_, table, _)) = session.query_insert_target(cx) {
+            items.push(Item::command(
+                &format!("New row in {table}…"),
+                "",
+                icon::PLUS,
+                Command::NewRow,
+            ));
         }
         if profile.config.engine().edits_query_rows() && workspace.has_nameable_row(cx) {
             items.push(Item::command(

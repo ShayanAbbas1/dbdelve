@@ -80,11 +80,7 @@ impl Workspace {
             // The grid's own columns, where its rows are written back to: one
             // table, which is never so for a join or a computed result.
             Tab::Query(_) => {
-                let target = profile
-                    .session
-                    .active_results()
-                    .and_then(|results| results.read(cx).delegate().insert_target());
-                let Some(target) = target else {
+                let Some(target) = profile.session.query_insert_target(cx) else {
                     self.note("These rows take no new row.".into(), cx);
                     return;
                 };
@@ -1717,17 +1713,42 @@ impl Workspace {
             return;
         };
         let (tab, sql) = (review.tab, review.sql.clone());
+        let engine = profile.config.engine();
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
         let refresh = match tab {
             Tab::Object(id) => Refresh::Relation(id),
-            Tab::Query(id) => match profile
-                .session
-                .query_tab(id)
-                .and_then(|query| query.last_query.clone())
-            {
-                Some(statement) => Refresh::Statement(statement),
-                None => {
+            Tab::Query(id) => match profile.session.query_tab(id).map(|query| {
+                // A queue's earlier result on screen, as against the slot.
+                let earlier = query.queue.as_ref().and_then(|queue| {
+                    let finished = queue.done.get(queue.showing)?;
+                    (finished.grid != query.results).then(|| {
+                        // The batch blanks the slot, which is the last result's
+                        // grid. Its own statement puts it back -- not
+                        // `last_query`, which a result without columns leaves
+                        // naming an earlier one -- and only where it held rows
+                        // and asking again writes nothing.
+                        let slot = queue
+                            .done
+                            .iter()
+                            .find(|slot| slot.grid == query.results)
+                            .filter(|slot| {
+                                !slot.grid.read(cx).delegate().result().columns.is_empty()
+                                    && sql::rerunnable(engine, &slot.sql)
+                            })
+                            .map(|slot| slot.sql.clone());
+                        Refresh::Queued {
+                            slot,
+                            index: queue.showing,
+                            sql: finished.sql.clone(),
+                        }
+                    })
+                });
+                (earlier, query.last_query.clone())
+            }) {
+                Some((Some(queued), _)) => queued,
+                Some((None, Some(statement))) => Refresh::Statement(statement),
+                Some((None, None)) | None => {
                     self.note(
                         "dbdelve does not know which statement produced these rows.".into(),
                         cx,
