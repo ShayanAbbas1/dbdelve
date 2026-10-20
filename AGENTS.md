@@ -1117,6 +1117,9 @@ Decided, and not to be re-litigated:
 - **Cancel kills the session.** The connection's `CLIENT ID` is killed from a
   side connection and the next command redials, so an open `MULTI` or `WATCH`
   goes with it.
+- **The session remembers an open `MULTI` across runs** (`Session::multi`),
+  and a generated run, read or write, is refused while it is set: inside it a
+  write's reply is `QUEUED`, which would pass for applied.
 
 ### SSH tunnels
 

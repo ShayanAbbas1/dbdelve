@@ -131,6 +131,10 @@ failure says which one failed and how many ran before it.
   and sends `CLIENT KILL ID` from a second connection. The next command dials
   a fresh one, so a `MULTI` or `WATCH` open on the old session is gone. The
   statement timeout, and a broken socket, end the session the same way.
+- **A `MULTI` left open holds the grids back.** A query tab's `MULTI` stays
+  open across runs until its `EXEC` or `DISCARD`, and every command sent
+  meanwhile is only queued, so the grids refuse to read or write until it is
+  closed. A run that fails discards the `MULTI` it opened.
 - **Databases are numbers.** Select Database moves the profile to another one.
 - **There is no export as SQL and no Import Rows,** since a key names
   its own value rather than a row under a file's columns.

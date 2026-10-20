@@ -160,6 +160,9 @@ struct Session {
     /// The server's name for this session, for `CLIENT KILL ID`. `None` where
     /// the server would not say, which leaves Cancel nothing to name.
     id: Option<i64>,
+    /// A `MULTI` is open, which a query tab may leave so across runs: every
+    /// command sent now is only queued.
+    multi: bool,
 }
 
 #[derive(Default)]
@@ -231,7 +234,11 @@ impl Connection {
         client
             .set_read_timeout(timeout)
             .map_err(|error| plain_error(message(&error)))?;
-        Ok(Session { client, id })
+        Ok(Session {
+            client,
+            id,
+            multi: false,
+        })
     }
 
     /// `CLIENT KILL ID` over a connection of its own, because the session
@@ -297,6 +304,13 @@ impl Connection {
             position: Some(error.at),
         })?;
         let mut session = lock(&self.session);
+        if generated && session.as_ref().is_some_and(|session| session.multi) {
+            return Err(plain_error(
+                "A query tab left this session inside a MULTI, so this would only be queued: \
+                 run EXEC or DISCARD in that tab first."
+                    .into(),
+            ));
+        }
         fetch.hold()?;
         let started = Instant::now();
         let run = {
@@ -314,10 +328,16 @@ impl Connection {
             let mut result = QueryResult::default();
             for (at, command) in commands.iter().enumerate() {
                 let outcome = self.command(&mut session, command, fetch.limit, generated);
-                match command.name().as_str() {
-                    "MULTI" if outcome.is_ok() => multi = true,
-                    "EXEC" | "DISCARD" => multi = false,
-                    _ => {}
+                let open = match command.name().as_str() {
+                    "MULTI" if outcome.is_ok() => Some(true),
+                    "EXEC" | "DISCARD" => Some(false),
+                    _ => None,
+                };
+                if let Some(open) = open {
+                    multi = open;
+                    if let Some(live) = session.as_mut() {
+                        live.multi = open;
+                    }
                 }
                 result = outcome.map_err(|error| match at {
                     0 => error,
@@ -345,7 +365,12 @@ impl Connection {
             let note = match self.send(&mut session, |client| {
                 client.req_command(&::redis::cmd("DISCARD"))
             }) {
-                Ok(_) => "The MULTI it opened was discarded.",
+                Ok(_) => {
+                    if let Some(live) = session.as_mut() {
+                        live.multi = false;
+                    }
+                    "The MULTI it opened was discarded."
+                }
                 Err(_) => {
                     *session = None;
                     "The session was closed to drop the MULTI it opened."
@@ -2770,6 +2795,60 @@ mod tests {
         let binary = editing(&connection, &read("live:open:bin", "string"));
         assert!(!binary.editable(0, 0));
         clean(&connection, "live:open:");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_an_edit_is_refused_while_a_query_tab_holds_the_session_in_a_multi() {
+        let connection = scratch("live:multi:");
+        ran(&connection, "HSET live:multi:h f 1");
+        let edit = "HSET live:multi:h f 2";
+        let refused = |connection: &Connection| {
+            let error = applied(connection, edit).unwrap_err();
+            assert!(
+                error.message.contains("EXEC or DISCARD"),
+                "{}",
+                error.message
+            );
+        };
+        ran(&connection, "MULTI");
+        refused(&connection);
+        ran(&connection, "DISCARD");
+        assert_eq!(
+            one(&connection, "HGET live:multi:h f").as_deref(),
+            Some("1")
+        );
+
+        // Across runs, until the EXEC.
+        ran(&connection, "MULTI\nHGET live:multi:h f");
+        refused(&connection);
+        ran(&connection, "EXEC");
+        applied(&connection, edit).unwrap();
+        assert_eq!(
+            one(&connection, "HGET live:multi:h f").as_deref(),
+            Some("2")
+        );
+
+        // A run that fails discards the MULTI it opened.
+        assert!(
+            connection
+                .query("MULTI\nSET onlyone", Fetch::default())
+                .is_err()
+        );
+        applied(&connection, "HSET live:multi:h f 3").unwrap();
+
+        // A redial starts outside any MULTI.
+        let id = one(&connection, "CLIENT ID").unwrap();
+        ran(&connection, "MULTI");
+        refused(&connection);
+        ran(&live(), &format!("CLIENT KILL ID {id}"));
+        assert!(connection.query("PING", Fetch::default()).is_err());
+        applied(&connection, "HSET live:multi:h f 4").unwrap();
+        assert_eq!(
+            one(&connection, "HGET live:multi:h f").as_deref(),
+            Some("4")
+        );
+        clean(&connection, "live:multi:");
     }
 
     #[test]
