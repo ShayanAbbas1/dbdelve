@@ -439,8 +439,8 @@ fn render(value: &str, row_type: &RowType) -> String {
 /// Everything here is a field of the request and none of it is SQL: the
 /// statement goes out exactly as it was written (hard rule 1).
 ///
-/// `schema` is quoted because it is the catalog's stored name, which a bare
-/// field would fold to upper case.
+/// `schema` is the catalog's stored name, so it is quoted unless sending it
+/// bare folds back to the same name.
 fn request_body(config: &SnowflakeConfig, sql: &str, schema: Option<&str>) -> Value {
     let mut body = json!({
         "statement": sql,
@@ -459,7 +459,10 @@ fn request_body(config: &SnowflakeConfig, sql: &str, schema: Option<&str>) -> Va
         body["timeout"] = json!(config.statement_timeout);
     }
     if let Some(schema) = schema {
-        body["schema"] = json!(Engine::Snowflake.quote_identifier(schema));
+        body["schema"] = match bare(schema) && schema == schema.to_ascii_uppercase() {
+            true => json!(schema),
+            false => json!(Engine::Snowflake.quote_identifier(schema)),
+        };
     }
     body
 }
@@ -1616,9 +1619,9 @@ mod tests {
     }
 
     #[test]
-    fn an_active_schema_is_sent_quoted_as_the_catalog_stores_it() {
+    fn an_active_schema_is_sent_bare_only_where_that_folds_back_to_it() {
         let schema = |name| request_body(&config("k"), "select 1", Some(name))["schema"].clone();
-        assert_eq!(schema("PUBLIC"), r#""PUBLIC""#);
+        assert_eq!(schema("PUBLIC"), "PUBLIC");
         // Folded to `SALES` were it sent bare.
         assert_eq!(schema("sales"), r#""sales""#);
         assert_eq!(schema(r#"My "Odd" Schema"#), r#""My ""Odd"" Schema""#);
