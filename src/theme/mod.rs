@@ -28,7 +28,7 @@ use gpui::{App, Window};
 
 use crate::store;
 
-use color::{Oklch, Rgba, Srgb};
+use color::{Oklch, Rgba, Srgb, contrast_ratio};
 use gpui_component::{
     ThemeMode,
     highlighter::{HighlightTheme, HighlightThemeStyle, SyntaxColors},
@@ -352,11 +352,17 @@ pub const OPACITY_MAX: f32 = 0.95;
 pub const OPACITY_STEP: f32 = 0.05;
 const PANEL_ALPHA: f32 = 0.14;
 const DATA_ALPHA: f32 = 0.14;
-/// A modal card's own transmission. Nowhere near the other three, and for the
-/// opposite reason: what is behind a modal is the app's own text, not the
-/// desktop. Enough to keep the card from reading as a slab cut out of the
-/// window, never enough to read a grid row through.
-const OVERLAY_ALPHA: f32 = 0.97;
+/// The least of its own tone a floating card is allowed on glass: Zeron's menu
+/// fill. A floor, not the fill — see [`Theme::overlay_glass`].
+const OVERLAY_ALPHA_FLOOR: f32 = 0.15;
+/// What a floating card's text holds against the worst backdrop the card can
+/// be shown over: WCAG AA for body text, and AA large for muted text, which on
+/// a card is a shortcut, a detail or a hint beside the body rather than body.
+const POPUP_TEXT_CONTRAST: f32 = 4.5;
+const POPUP_MUTED_CONTRAST: f32 = 3.0;
+/// Muted and faint text on a glass card, as shares of the body text: Zeron's.
+const POPUP_MUTED_INK: f32 = 0.64;
+const POPUP_FAINT_INK: f32 = 0.48;
 
 fn neutral(lightness: f32) -> Srgb {
     Oklch::new(lightness, NEUTRAL_CHROMA, NEUTRAL_HUE).to_srgb()
@@ -659,12 +665,66 @@ impl Theme {
         self.bg.alpha(self.tint(DATA_ALPHA))
     }
 
-    /// A modal's card. The densest plane in the window by a long way — it
-    /// covers the work rather than sitting beside it, and what shows through
-    /// is that work, not the desktop — but not opaque: on a glass theme a
-    /// fully solid card is the one surface that stops being the same window.
+    /// Every floating card — a modal, the palette, the switcher, and each
+    /// menu, select, tooltip and completion list gpui-component draws. On glass
+    /// it is a tint over a backdrop blur of whatever it covers, which turns a
+    /// grid's rows into tone but does not darken them: a blurred bright patch,
+    /// a pale wallpaper through the frost, is still bright. So Zeron's menu
+    /// fill is only where the search starts. The card takes as much more of its
+    /// own tone as it needs for its text to hold [`POPUP_TEXT_CONTRAST`], and
+    /// muted text [`POPUP_MUTED_CONTRAST`], over the worst backdrop there is —
+    /// white under dark glass, black under light.
+    ///
+    /// Searched for here rather than tabled per theme, because a theme
+    /// imported from Zed can ask for glass too.
     pub fn overlay_glass(self) -> Rgba {
-        self.overlay.alpha(self.tint(OVERLAY_ALPHA))
+        if !self.is_glass {
+            return self.overlay.opaque();
+        }
+        let backdrop = match self.appearance {
+            Appearance::Dark => WHITE,
+            Appearance::Light => BLACK,
+        };
+        // The theme's own muted as well as the card's: gpui-component paints
+        // its popups' secondary text in the theme's, and has no card to ask.
+        let popup = self.for_popup();
+        let holds = |alpha: f32| {
+            let card = self.overlay.alpha(alpha).flatten(backdrop);
+            contrast_ratio(self.text, card) >= POPUP_TEXT_CONTRAST
+                && [self.text_muted, popup.text_muted]
+                    .into_iter()
+                    .all(|muted| contrast_ratio(muted, card) >= POPUP_MUTED_CONTRAST)
+        };
+        let alpha = (0..=20)
+            .map(|step| OVERLAY_ALPHA_FLOOR + (1.0 - OVERLAY_ALPHA_FLOOR) * step as f32 / 20.0)
+            .find(|&alpha| holds(alpha))
+            .unwrap_or(1.0);
+        self.overlay.alpha(alpha)
+    }
+
+    /// This theme as text is set on a floating card. On glass, muted and faint
+    /// may be Zeron's fixed shares of the body text instead of the theme's own
+    /// greys, whichever stands further off the card's tone: most families'
+    /// own muted already reads better than Zeron's share does, and a card the
+    /// backdrop shows through is no place to give any of that up. An opaque
+    /// theme comes back unchanged.
+    pub fn for_popup(self) -> Self {
+        if !self.is_glass {
+            return self;
+        }
+        let stronger = |own: Srgb, share: f32| {
+            let share = self.text.alpha(share).flatten(self.overlay);
+            if contrast_ratio(share, self.overlay) > contrast_ratio(own, self.overlay) {
+                share
+            } else {
+                own
+            }
+        };
+        Self {
+            text_muted: stronger(self.text_muted, POPUP_MUTED_INK),
+            text_faint: stronger(self.text_faint, POPUP_FAINT_INK),
+            ..self
+        }
     }
 
     /// An opaque theme has no desktop behind it to let through, so every tint
@@ -727,7 +787,9 @@ impl Theme {
             component.colors.blue = self.accent.into();
             component.colors.muted = self.surface.into();
             component.colors.muted_foreground = self.text_muted.into();
-            component.colors.popover = self.overlay.into();
+            // Translucent on glass only, and that is what tells gpui-component
+            // to frost its popups; opaque, they are drawn exactly as before.
+            component.colors.popover = self.overlay_glass().into();
             component.colors.popover_foreground = self.text.into();
             // Both button variants are the same neutral: a dbdelve button is a grey
             // that steps visibly brighter under the pointer, never a colour.
@@ -1659,7 +1721,6 @@ pub(crate) fn restored_fonts(stored: Option<store::StoredFonts>, available: &[St
 
 #[cfg(test)]
 mod tests {
-    use super::color::contrast_ratio;
     use super::*;
 
     /// WCAG AA: 4.5 for body text, 3.0 for large text and UI components.
@@ -2015,6 +2076,74 @@ mod tests {
                         own.h
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_keeps_its_text_over_the_worst_backdrop() {
+        // A glass card is a tint over a blur of whatever it covers, and the
+        // blur softens what is under it without darkening it, so the raw-tint
+        // checks say nothing here. White is the worst a dark card can sit on,
+        // black the worst for a light one.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            let card = t.overlay_glass();
+            let worst = match t.appearance {
+                Appearance::Dark => WHITE,
+                Appearance::Light => BLACK,
+            };
+            let under = card.flatten(worst);
+            check(t, "text on a floating card", t.text, under, AA_TEXT);
+            check(t, "muted on a floating card", t.text_muted, under, AA_LARGE);
+            check(
+                t,
+                "a floating card's own muted",
+                t.for_popup().text_muted,
+                under,
+                AA_LARGE,
+            );
+            // A card that has to go solid to be read has stopped being glass,
+            // which is a palette to fix rather than a fill to accept.
+            assert!(
+                (OVERLAY_ALPHA_FLOOR..1.0).contains(&card.a),
+                "{}: a floating card at {:.3} of its own tone",
+                t.name,
+                card.a
+            );
+        }
+    }
+
+    #[test]
+    fn an_opaque_theme_floats_its_cards_exactly_as_before() {
+        for t in Theme::all().into_iter().filter(|t| !t.is_glass) {
+            assert_eq!(t.overlay_glass(), t.overlay.opaque(), "{}", t.name);
+            let popup = t.for_popup();
+            assert_eq!(
+                (popup.text_muted, popup.text_faint),
+                (t.text_muted, t.text_faint),
+                "{}",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_floating_cards_muted_text_never_reads_worse_than_the_themes_own() {
+        for t in Theme::all() {
+            let popup = t.for_popup();
+            for (name, own, card) in [
+                ("muted", t.text_muted, popup.text_muted),
+                ("faint", t.text_faint, popup.text_faint),
+            ] {
+                let (own, card) = (
+                    contrast_ratio(own, t.overlay),
+                    contrast_ratio(card, t.overlay),
+                );
+                assert!(
+                    card >= own,
+                    "{}: {name} on a floating card at {card:.2}, the theme's own at {own:.2}",
+                    t.name
+                );
             }
         }
     }
