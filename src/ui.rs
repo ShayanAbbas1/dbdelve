@@ -11,7 +11,7 @@ use gpui::{
     div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    InteractiveElementExt,
+    InteractiveElementExt, POPOVER_BLUR,
     button::{Button, ButtonVariants},
     kbd::Kbd,
 };
@@ -290,10 +290,13 @@ pub(crate) fn dialog(t: Theme) -> gpui::Div {
         .flex_col()
         .gap(px(layout::SPACE_MD))
         .bg(t.overlay_glass())
+        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
         .border_1()
         .border_color(t.border_strong)
         .rounded(px(layout::RADIUS_PANEL))
-        .shadow_lg()
+        // None under frost: GPUI paints a drop shadow as a filled rect under
+        // the whole card, so through the tint it would darken the frost itself.
+        .when(!t.is_glass, |card| card.shadow_lg())
 }
 
 /// What a button's fill says. Colour is state here as everywhere else: a dbdelve

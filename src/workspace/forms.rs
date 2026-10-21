@@ -3,6 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use gpui_component::POPOVER_BLUR;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
@@ -939,10 +940,12 @@ impl Workspace {
                         .mt(px(layout::TITLEBAR_HEIGHT * 2.))
                         .w(px(layout::PALETTE_WIDTH))
                         .bg(t.overlay_glass())
+                        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
                         .border_1()
                         .border_color(t.border_strong)
                         .rounded(px(layout::RADIUS_PANEL))
-                        .shadow_lg()
+                        // See `ui::dialog`.
+                        .when(!t.is_glass, |card| card.shadow_lg())
                         .overflow_hidden()
                         .child(
                             List::new(list)
@@ -961,7 +964,7 @@ impl Workspace {
 
     /// What `cmd+w` asks before it takes unapplied cell edits with the tab.
     pub(crate) fn render_reference_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = theme(cx).for_popup();
         let popup = self.reference_popup.as_ref()?;
         let rows: Vec<AnyElement> = match &popup.choices {
             None => vec![note(t, "Checking…")],
@@ -1021,7 +1024,8 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .rounded(px(layout::RADIUS_CONTROL))
-                        .bg(t.overlay)
+                        .bg(t.overlay_glass())
+                        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
                         .border_1()
                         .border_color(t.border)
                         .children(rows)
@@ -1724,6 +1728,7 @@ impl Workspace {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let panel = self.switcher_open.then(|| {
+            let t = t.for_popup();
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
             let searched = self.searched_connections(cx);
@@ -1990,10 +1995,12 @@ impl Workspace {
                 .w(px(layout::SWITCHER_WIDTH))
                 .p(px(layout::SPACE_XS))
                 .bg(t.overlay_glass())
+                .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
                 .border_1()
                 .border_color(t.border_strong)
                 .rounded(px(layout::RADIUS_PANEL))
-                .shadow_lg()
+                // See `ui::dialog`.
+                .when(!t.is_glass, |card| card.shadow_lg())
                 .flex()
                 .flex_col()
                 .children(self.connection_search.as_ref().map(|input| {
