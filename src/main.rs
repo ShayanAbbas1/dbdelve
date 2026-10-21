@@ -91,9 +91,9 @@ use session::{
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
 use ui::{
-    Control, Tone, button, button_label, dialog, group_thousands, human_bytes, icon_button,
-    object_icon, one_line, relative_age, row_icon, row_icon_tinted, row_readout, section_label,
-    segment, titlebar,
+    Control, Tone, button, button_label, dialog, engine_logo, group_thousands, human_bytes,
+    icon_button, object_icon, one_line, relative_age, row_icon, row_icon_tinted, row_readout,
+    section_label, segment, titlebar,
 };
 use workspace::Workspace;
 

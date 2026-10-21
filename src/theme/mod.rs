@@ -483,22 +483,22 @@ impl ConnectionColor {
     }
 }
 
-/// An engine's logo colour: its brand hue, not its brand lightness, since
-/// brands like SQLite's are near-black and would vanish on a dark theme. It
-/// takes the lightness closest to the swatches' that clears 3:1 against both
-/// of the theme's planes, trying the side away from the theme first on a tie,
-/// so an imported theme gets a legible logo too. When no lightness clears, the
-/// best-contrasting one is the closest it can get.
-pub fn engine_brand(engine: Engine, theme: Theme) -> Srgb {
+/// An engine's logo colour on `planes`: its brand hue, not its brand
+/// lightness, since brands like SQLite's are near-black and would vanish on a
+/// dark theme. It takes the lightness closest to the swatches' that clears 3:1
+/// against every plane, trying the side away from the theme first on a tie, so
+/// an imported theme or a coloured titlebar gets a legible logo too. When no
+/// lightness clears, the best-contrasting one is the closest it can get.
+pub fn engine_brand(engine: Engine, theme: Theme, planes: &[Srgb]) -> Srgb {
     let brand = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
     let away = match theme.appearance {
         Appearance::Dark => 1.0,
         Appearance::Light => -1.0,
     };
     let worst = |color: Srgb| {
-        [theme.bg, theme.panel]
-            .map(|plane| color::contrast_ratio(color, plane))
-            .into_iter()
+        planes
+            .iter()
+            .map(|plane| color::contrast_ratio(color, *plane))
             .fold(f32::INFINITY, f32::min)
     };
     let candidates = (0..=22)
@@ -1752,9 +1752,27 @@ mod tests {
     fn every_engine_logo_stands_off_the_background_in_every_theme() {
         for t in Theme::all() {
             for engine in Engine::ALL {
-                let logo = engine_brand(engine, t);
+                let logo = engine_brand(engine, t, &[t.bg, t.panel]);
                 check(t, engine.label(), logo, t.bg, AA_LARGE);
                 check(t, engine.label(), logo, t.panel, AA_LARGE);
+            }
+        }
+    }
+
+    #[test]
+    fn the_titlebar_logo_stands_off_every_band_and_chip() {
+        for t in Theme::all() {
+            for color in ConnectionColor::ALL {
+                for (name, plane) in [
+                    ("band", color.band(t).flatten(t.surface)),
+                    ("chip", color.chip(t)),
+                ] {
+                    for engine in Engine::ALL {
+                        let logo = engine_brand(engine, t, &[plane]);
+                        let what = format!("{} on a {} {name}", engine.label(), color.label());
+                        check(t, &what, logo, plane, AA_LARGE);
+                    }
+                }
             }
         }
     }
@@ -1768,7 +1786,7 @@ mod tests {
             ..Theme::dark()
         };
         for engine in Engine::ALL {
-            let logo = engine_brand(engine, t);
+            let logo = engine_brand(engine, t, &[t.bg, t.panel]);
             let hue = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
             let worst = |color: Srgb| {
                 color::contrast_ratio(color, t.bg).min(color::contrast_ratio(color, t.panel))

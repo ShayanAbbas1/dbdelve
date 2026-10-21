@@ -2054,9 +2054,20 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
-        let active_icon = self
-            .profile()
-            .map_or(icon::DATABASE, |profile| profile.config.engine().logo());
+        // The logo keeps its brand here, never the connection's colour: the
+        // band or pill behind it is already wearing that colour, and the logo
+        // would sink into it. So its lightness is tuned to whatever it sits on.
+        let behind_logo = match active_color {
+            Some(color) if self.settings.color_titlebar => color.band(t).flatten(t.surface),
+            Some(color) => color.chip(t),
+            None => t.surface,
+        };
+        let active_logo = match self.profile() {
+            Some(profile) => {
+                engine_logo(t, profile.config.engine(), &[behind_logo]).into_any_element()
+            }
+            None => row_icon(t, icon::DATABASE).into_any_element(),
+        };
         let project_name = self.current_group().map(str::to_string);
         // While the panel is open its `on_mouse_down_out` already owns closing,
         // and it fires on the press. Carrying a click handler here too would
@@ -2104,7 +2115,7 @@ impl Workspace {
                         crumb(
                             "profile-switcher",
                             t,
-                            Some(row_icon_tinted(t, active_icon, active_color).into_any_element()),
+                            Some(active_logo),
                             active_name,
                             false,
                             layout::SIDEBAR_DEFAULT_WIDTH,

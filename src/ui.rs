@@ -26,7 +26,7 @@ use crate::{
     keybindings,
     session::ProfileState,
     sql::Mode,
-    theme::{self, ConnectionColor, Theme, layout},
+    theme::{self, ConnectionColor, Theme, color::Srgb, layout},
 };
 
 /// The icon a sidebar row carries: a grid for a table, layers for one split
@@ -81,11 +81,21 @@ pub(crate) fn row_icon_tinted(
         Engine::ALL
             .into_iter()
             .find(|engine| engine.logo() == path)
-            .map_or(t.text_faint, |engine| theme::engine_brand(engine, t))
+            .map_or(t.text_faint, |engine| {
+                theme::engine_brand(engine, t, &[t.bg, t.panel])
+            })
     };
     icon(path)
         .size(px(layout::chrome(layout::ICON_SIZE)))
         .text_color(color.map_or_else(brand, ConnectionColor::swatch))
+}
+
+/// An engine's logo in its brand hue, at a lightness that stands off every
+/// one of `planes`: for a surface whose colour is not the theme's own.
+pub(crate) fn engine_logo(t: Theme, engine: Engine, planes: &[Srgb]) -> impl IntoElement {
+    icon(engine.logo())
+        .size(px(layout::chrome(layout::ICON_SIZE)))
+        .text_color(theme::engine_brand(engine, t, planes))
 }
 
 /// A connection's state as one dot, the same in the status bar and the
