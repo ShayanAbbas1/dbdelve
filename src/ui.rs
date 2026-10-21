@@ -48,13 +48,7 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
 /// One column of icons down the sidebar, so every label starts at the same x
 /// whether its row is a folder or an object.
 pub(crate) fn row_icon(t: Theme, path: &'static str) -> impl IntoElement {
-    let color = match Engine::ALL.into_iter().find(|engine| icon::engine(*engine) == path) {
-        Some(engine) => theme::engine_brand(engine, t),
-        None => kind_color(path).map_or(t.text_faint, ConnectionColor::swatch),
-    };
-    icon(path)
-        .size(px(layout::chrome(layout::ICON_SIZE)))
-        .text_color(color)
+    row_icon_tinted(t, path, kind_color(path))
 }
 
 /// The hue an object's or a query's icon always wears, wherever it is drawn:
@@ -75,15 +69,23 @@ pub(crate) fn kind_color(path: &str) -> Option<ConnectionColor> {
 }
 
 /// `row_icon`, in a connection's own colour. Without one it is `row_icon`
-/// exactly, so an uncoloured connection is drawn the way it always was.
+/// exactly, so an uncoloured connection is drawn the way it always was. An
+/// engine's logo without one wears its brand; with one, the colour the user
+/// chose wins, since it is how they tell production from the rest.
 pub(crate) fn row_icon_tinted(
     t: Theme,
     path: &'static str,
     color: Option<ConnectionColor>,
 ) -> impl IntoElement {
+    let brand = || {
+        Engine::ALL
+            .into_iter()
+            .find(|engine| icon::engine(*engine) == path)
+            .map_or(t.text_faint, |engine| theme::engine_brand(engine, t))
+    };
     icon(path)
         .size(px(layout::chrome(layout::ICON_SIZE)))
-        .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
+        .text_color(color.map_or_else(brand, ConnectionColor::swatch))
 }
 
 /// A connection's state as one dot, the same in the status bar and the

@@ -1770,7 +1770,11 @@ impl Workspace {
                         .rounded(px(layout::RADIUS_CONTROL))
                         .hover(|style| style.bg(t.element_hover))
                         .when(selected == Some(index), |row| row.bg(t.element_active))
-                        .child(row_icon_tinted(t, icon::DATABASE, profile.color))
+                        .child(row_icon_tinted(
+                            t,
+                            icon::engine(profile.config.engine()),
+                            profile.color,
+                        ))
                         .child(ui::status_dot(t, &profile.state))
                         .child(
                             div()
@@ -2050,6 +2054,9 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
+        let active_icon = self.profile().map_or(icon::DATABASE, |profile| {
+            icon::engine(profile.config.engine())
+        });
         let project_name = self.current_group().map(str::to_string);
         let toggle_workspace = workspace.clone();
 
@@ -2086,7 +2093,7 @@ impl Workspace {
                             )
                             .child("/")
                     })
-                    .child(row_icon_tinted(t, icon::DATABASE, active_color))
+                    .child(row_icon_tinted(t, active_icon, active_color))
                     .child(
                         div()
                             .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))

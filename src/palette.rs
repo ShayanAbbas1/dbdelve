@@ -577,7 +577,12 @@ fn engine_items(workspace: &Workspace) -> Vec<Item> {
         .into_iter()
         .map(|engine| Item {
             label: engine.label().to_string(),
-            hint: if current == Some(engine) { "current" } else { "" }.into(),
+            hint: if current == Some(engine) {
+                "current"
+            } else {
+                ""
+            }
+            .into(),
             icon: icon::engine(engine),
             command: Command::SetEngine(engine),
         })
@@ -938,7 +943,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             .map(|(index, other)| Item {
                 label: format!("Switch to {}", other.name),
                 hint: "".into(),
-                icon: icon::DATABASE,
+                icon: icon::engine(other.config.engine()),
                 command: Command::SwitchProfile(index),
             }),
     );

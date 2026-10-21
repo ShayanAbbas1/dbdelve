@@ -13,7 +13,8 @@ use gpui_component::input::InputState;
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
+        ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel,
+        SslMode,
     },
     session::Profile,
     sql::Mode,
