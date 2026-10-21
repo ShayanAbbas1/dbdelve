@@ -293,8 +293,8 @@ pub struct Style {
 
     /// dbdelve patch: frost whatever is painted beneath this element, with a
     /// gaussian blur of this radius (the sigma) clipped to its rounded bounds.
-    /// Keep a translucent background over it: only the Metal renderer draws
-    /// the blur.
+    /// Keep a translucent background over it: only the Metal and DirectX
+    /// renderers draw the blur.
     pub backdrop_blur: Option<Pixels>,
 
     /// The text style of this element
