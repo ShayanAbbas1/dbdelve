@@ -346,6 +346,14 @@ winresource = "=0.1.31"
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# gpui-component is vendored so its popups can use that blur: every menu,
+# select, popover, tooltip and completion list it draws goes through
+# `popover_style`, which frosts the card when the theme hands it a translucent
+# `popover` colour -- a glass theme does, an opaque one never -- with a
+# hairline in place of the drop shadow that would darken the frost, and thin
+# washes for the hover and selection inside it. Every change is marked
+# `dbdelve patch`; re-apply them on a gpui-component bump.
+gpui-component = { path = "vendor/gpui-component" }
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
 # an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are
