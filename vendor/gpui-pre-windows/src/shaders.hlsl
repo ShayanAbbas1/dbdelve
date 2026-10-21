@@ -1266,3 +1266,89 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+// dbdelve patch: backdrop blur, ported from zui. These passes are lazy and stay
+// within the window. b2, not zui's b1, since BatchParams already holds b1
+// here; the layout mirrors `Params` in directx_renderer/backdrop.rs.
+cbuffer BackdropParams: register(b2) {
+    Bounds backdrop_bounds;
+    Corners backdrop_corners;
+    Bounds backdrop_clip;
+    float4 backdrop_source;
+    float4 backdrop_kernel;
+    float4 backdrop_weights[33];
+};
+
+struct BackdropVertex {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+BackdropVertex backdrop_pass_vertex(uint vertex_id: SV_VertexID) {
+    float2 uv = float2(vertex_id & 1u, (vertex_id >> 1u) & 1u);
+    BackdropVertex output;
+    output.position = float4(uv * float2(2., -2.) + float2(-1., 1.), 0., 1.);
+    output.uv = uv;
+    return output;
+}
+
+float4 backdrop_pass_fragment(BackdropVertex input): SV_Target {
+    // Defense in depth: bound the dynamic loop before converting to int.
+    // Matches MAX_SIGMA in directx_renderer/backdrop.rs.
+    float sigma = clamp(backdrop_kernel.z, 1., 64.);
+    int radius = min(int(ceil(3. * sigma)), 192);
+    float2 step_uv = backdrop_kernel.xy;
+    float4 sum = 0.;
+    if (radius <= 128) {
+        if (backdrop_kernel.w == 1.) {
+            // Combine neighboring taps using linear filtering at unit stride.
+            sum = t_sprite.SampleLevel(s_sprite, input.uv, 0.) * backdrop_weights[0].x;
+            [loop] for (int k = 1; k <= radius; k += 2) {
+                uint index = uint(k);
+                float a = backdrop_weights[index >> 2u][index & 3u];
+                float b = backdrop_weights[(index + 1u) >> 2u][(index + 1u) & 3u];
+                float weight = a + b;
+                float2 offset = (float(k) + b / weight) * step_uv;
+                sum += t_sprite.SampleLevel(s_sprite, input.uv + offset, 0.) * weight;
+                sum += t_sprite.SampleLevel(s_sprite, input.uv - offset, 0.) * weight;
+            }
+        } else {
+            [loop] for (int k = -radius; k <= radius; ++k) {
+                uint index = uint(abs(k));
+                float weight = backdrop_weights[index >> 2u][index & 3u];
+                sum += t_sprite.SampleLevel(s_sprite, input.uv + float(k) * step_uv, 0.) * weight;
+            }
+        }
+        return sum;
+    }
+    // Compute uncached weights, with a hard maximum of 385 samples per pixel.
+    float total_weight = 0.;
+    [loop] for (int k = -radius; k <= radius; ++k) {
+        float weight = exp(-float(k) * float(k) / (2. * sigma * sigma));
+        sum += t_sprite.SampleLevel(s_sprite, input.uv + float(k) * step_uv, 0.) * weight;
+        total_weight += weight;
+    }
+    return sum / total_weight;
+}
+
+BackdropVertex backdrop_composite_vertex(uint vertex_id: SV_VertexID) {
+    float2 uv = float2(vertex_id & 1u, (vertex_id >> 1u) & 1u);
+    BackdropVertex output;
+    float2 position = backdrop_bounds.origin + uv * backdrop_bounds.size;
+    output.position = float4(position / global_viewport_size * float2(2., -2.) + float2(-1., 1.), 0., 1.);
+    output.uv = uv;
+    return output;
+}
+
+float4 backdrop_composite_fragment(BackdropVertex input): SV_Target {
+    float2 position = input.position.xy;
+    // Blending is disabled. Discard outside the mask/rounded bounds instead
+    // of returning transparent black, which would erase the existing frame.
+    if (any(position < backdrop_clip.origin) || any(position >= backdrop_clip.origin + backdrop_clip.size)
+        || quad_sdf(position, backdrop_bounds, backdrop_corners) > 0.) {
+        discard;
+    }
+    float2 uv = (position - backdrop_source.xy) / backdrop_source.zw;
+    // The entire sampled RGBA is premultiplied; do not multiply alpha again.
+    return t_sprite.SampleLevel(s_sprite, uv, 0.);
+}

@@ -29,6 +29,13 @@ const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
+// dbdelve patch: backdrop blur, ported from zui's DirectX renderer.
+mod backdrop;
+use backdrop::BackdropResources;
+
+#[cfg(test)]
+mod backdrop_tests;
+
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
@@ -68,6 +75,9 @@ pub(crate) struct DirectXRendererDevices {
 }
 
 struct DirectXResources {
+    // dbdelve patch: created only when a visible backdrop blur is drawn;
+    // dropped on resize, on device loss and after 120 frames without one.
+    backdrop: Option<BackdropResources>,
     // Direct3D rendering objects
     swap_chain: IDXGISwapChain1,
     render_target: Option<ID3D11Texture2D>,
@@ -357,12 +367,35 @@ impl DirectXRenderer {
         })?;
         self.upload_scene_buffers(scene)?;
 
+        // dbdelve patch: age the blur's scratch even when the scene's blurs are
+        // all clipped or invalid; drawing a visible one resets the count.
+        {
+            let resources = self.resources.as_mut().context("resources missing")?;
+            if resources
+                .backdrop
+                .as_mut()
+                .is_some_and(|backdrop| backdrop.expire())
+            {
+                resources.backdrop = None;
+            }
+        }
+        let mut blurs = scene.backdrop_blurs.iter().peekable();
+
         let annotation = self
             .devices
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
         for batch in scene.batches() {
+            // dbdelve patch: the scene stops every batch before the next blur's
+            // order, so snapshotting here, ahead of the primitives at that
+            // order, takes in everything below it, earlier frosted layers too.
+            if blurs.peek().is_some() {
+                let order = batch.first_order(scene);
+                while let Some(blur) = blurs.next_if(|blur| blur.order <= order) {
+                    self.draw_backdrop_blur(blur)?;
+                }
+            }
             let _annotation = annotation
                 .as_ref()
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
@@ -401,6 +434,10 @@ impl DirectXRenderer {
                 )
             })?;
         }
+        // dbdelve patch: blurs above every primitive still frost what's below.
+        for blur in blurs {
+            self.draw_backdrop_blur(blur)?;
+        }
         Ok(())
     }
 
@@ -409,7 +446,8 @@ impl DirectXRenderer {
     /// goes through MetalRenderer; this is the Windows analogue). Draws into
     /// the existing render target, copies it into a `D3D11_USAGE_STAGING`
     /// texture, maps it, and converts BGRA to RGBA.
-    #[cfg(any(test, feature = "test-support"))]
+    // dbdelve patch: see `WindowsWindow::render_to_image`.
+    #[cfg(feature = "test-support")]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,
@@ -495,6 +533,8 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         unsafe { devices.device_context.OMSetRenderTargets(None, None) };
         let resources = self.resources.as_mut().context("resources missing")?;
+        // dbdelve patch: the blur's scratch is clamped to the old size.
+        resources.backdrop = None;
         resources.render_target.take();
         resources.render_target_view.take();
 
@@ -901,6 +941,8 @@ impl DirectXResources {
         set_rasterizer_state(&devices.device, &devices.device_context)?;
 
         Ok(Self {
+            // dbdelve patch: backdrop blur.
+            backdrop: None,
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
@@ -1713,6 +1755,9 @@ pub(crate) mod shader_resources {
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
+        // dbdelve patch: backdrop blur.
+        BackdropPass,
+        BackdropComposite,
         Quad,
         Shadow,
         Underline,
@@ -1763,6 +1808,15 @@ pub(crate) mod shader_resources {
         #[cfg(not(debug_assertions))]
         fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
             let bytes = match module {
+                // dbdelve patch: backdrop blur.
+                ShaderModule::BackdropPass => match target {
+                    ShaderTarget::Vertex => BACKDROP_PASS_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_PASS_FRAGMENT_BYTES,
+                },
+                ShaderModule::BackdropComposite => match target {
+                    ShaderTarget::Vertex => BACKDROP_COMPOSITE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_COMPOSITE_FRAGMENT_BYTES,
+                },
                 ShaderModule::Quad => match target {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
@@ -1877,6 +1931,9 @@ pub(crate) mod shader_resources {
     impl ShaderModule {
         pub fn as_str(self) -> &'static str {
             match self {
+                // dbdelve patch: backdrop blur.
+                ShaderModule::BackdropPass => "backdrop_pass",
+                ShaderModule::BackdropComposite => "backdrop_composite",
                 ShaderModule::Quad => "quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",

@@ -32,6 +32,9 @@ mod shader_compilation {
 
         // Define all modules
         let modules = [
+            // dbdelve patch: backdrop blur.
+            "backdrop_pass",
+            "backdrop_composite",
             "quad",
             "shadow",
             "path_rasterization",

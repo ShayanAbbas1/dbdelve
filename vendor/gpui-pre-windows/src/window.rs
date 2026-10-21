@@ -1041,7 +1041,9 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    // dbdelve patch: `test` alone doesn't turn on gpui's `test-support`, which
+    // declares this trait method, so the crate's own unit tests didn't build.
+    #[cfg(feature = "test-support")]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
             .renderer

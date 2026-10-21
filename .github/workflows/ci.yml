@@ -114,3 +114,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
       - run: cargo test
+      # The backdrop blur's Direct3D WARP pixel tests live in the vendored
+      # DirectX renderer, which isn't a workspace member, so `cargo test` alone
+      # never runs them. Release, because only release builds use the shaders
+      # fxc compiles in build.rs, which is what ships.
+      - run: cargo test --release -p gpui-pre-windows --lib directx_renderer::backdrop_tests -- --test-threads=1
