@@ -109,6 +109,11 @@ pub(super) struct BackdropResources {
 }
 
 impl BackdropResources {
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> &ID3D11Texture2D {
+        &self.scratch.as_ref().unwrap().snapshot.texture
+    }
+
     fn new(device: &ID3D11Device) -> Result<Self> {
         let pass = Shaders::new(device, ShaderModule::BackdropPass)?;
         let composite = Shaders::new(device, ShaderModule::BackdropComposite)?;

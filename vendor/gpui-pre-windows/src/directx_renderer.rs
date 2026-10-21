@@ -33,6 +33,9 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 mod backdrop;
 use backdrop::BackdropResources;
 
+#[cfg(test)]
+mod backdrop_tests;
+
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
@@ -443,7 +446,8 @@ impl DirectXRenderer {
     /// goes through MetalRenderer; this is the Windows analogue). Draws into
     /// the existing render target, copies it into a `D3D11_USAGE_STAGING`
     /// texture, maps it, and converts BGRA to RGBA.
-    #[cfg(any(test, feature = "test-support"))]
+    // dbdelve patch: see `WindowsWindow::render_to_image`.
+    #[cfg(feature = "test-support")]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,
