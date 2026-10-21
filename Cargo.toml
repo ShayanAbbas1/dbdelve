@@ -342,9 +342,12 @@ winresource = "=0.1.31"
 # regions and the Metal renderer draws them; Windows and Linux ignore them and
 # show the popover's own fill. Every change is marked `dbdelve patch`, in
 # gpui-pre and gpui-pre-apple alike; re-apply them on a gpui bump.
+#
+# gpui-pre-wgpu, Linux's renderer, is vendored to draw the same blur regions.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
