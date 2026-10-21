@@ -750,8 +750,8 @@ pub trait Styled: Sized {
 
     /// dbdelve patch: frosts whatever is painted beneath this element, blurred
     /// with a gaussian of this radius (the sigma) inside its rounded corners.
-    /// Pair it with a translucent background, which is all that renderers
-    /// without the blur (everything but Metal and DirectX) show.
+    /// Pair it with a translucent background, through which the blur shows;
+    /// every renderer (Metal, DirectX, wgpu) draws it.
     fn backdrop_blur(mut self, blur_radius: crate::Pixels) -> Self {
         self.style().backdrop_blur = Some(blur_radius);
         self

@@ -327,25 +327,26 @@ libc = "=0.2.189"
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "=0.1.31"
 
-# gpui's Metal (macOS) and DirectX 11 (Windows) renderers, each with one blend
-# factor changed in two pipelines (see the `dbdelve patch` notes in their
-# metal_renderer.rs and directx_renderer.rs). Upstream sums alpha instead of
-# compositing it, so on a glass theme every tint laid over the frost -- the
-# editor and the results planes above all -- loses about a tenth of the
-# desktop's light and goes grey. Opaque windows keep alpha at 1 either way, and
-# Linux's wgpu renderer already composites alpha correctly. Drop these once
-# upstream composites alpha with `over`; re-apply the lines on a gpui bump.
+# gpui's Metal (macOS), DirectX 11 (Windows) and wgpu (Linux) renderers, each
+# with one blend factor changed (in two pipelines on Metal and DirectX, in the
+# path pipeline on wgpu; see the `dbdelve patch` notes in their
+# metal_renderer.rs, directx_renderer.rs and wgpu_renderer.rs). Upstream sums
+# alpha instead of compositing it, so on a glass theme every tint laid over the
+# frost -- the editor and the results planes above all -- loses about a tenth
+# of the desktop's light and goes grey. Opaque windows keep alpha at 1 either
+# way. Drop these once upstream composites alpha with `over`; re-apply the
+# lines on a gpui bump.
 #
 # gpui-pre itself is vendored for a backdrop blur ported from zui, the gpui fork
 # behind Zeron: `Window::paint_backdrop_blur` and the `backdrop_blur` style,
 # which frost whatever a popover is painted over. The scene records the blur
-# regions and the Metal and DirectX renderers draw them; Linux ignores them and
-# shows the popover's own fill. Every change is marked `dbdelve patch`, in
-# gpui-pre, gpui-pre-apple and gpui-pre-windows alike; re-apply them on a gpui
-# bump.
+# regions and every renderer (Metal, DirectX, wgpu) draws them. Every change is
+# marked `dbdelve patch`, in gpui-pre and its renderer crates alike; re-apply
+# them on a gpui bump.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # gpui-component is vendored so its popups can use that blur: every menu,
 # select, popover, tooltip and completion list it draws goes through
