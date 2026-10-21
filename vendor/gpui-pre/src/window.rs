@@ -6,8 +6,8 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
@@ -4631,6 +4631,52 @@ impl Window {
                 pad: 0,
             });
         }
+    }
+
+    /// dbdelve patch: paint a backdrop blur within the window. Everything
+    /// already painted beneath `bounds` is snapshotted and painted back
+    /// gaussian-blurred inside the rounded rect, and whatever is painted after
+    /// this call composites on top of the blur. `blur_radius` is the gaussian
+    /// sigma. Only the Metal renderer draws blurs, so keep a translucent fill
+    /// over it for the others.
+    ///
+    /// A blur takes its layer's draw order: give each frosted panel its own
+    /// [`Self::paint_layer`], so the blur captures what lies beneath its order
+    /// and the panel's own contents land above it.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur_radius: Pixels,
+    ) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        let bounds = self.snap_bounds(bounds);
+        let corner_radii = corner_radii.scale(scale_factor);
+        let content_mask = self.snapped_content_mask();
+        // An invisible splitter: it forces a batch boundary at this order, so
+        // the renderer can break its render pass exactly here.
+        self.next_frame.scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(0.),
+            bounds,
+            corner_radii,
+            content_mask,
+            color: crate::transparent_black(),
+            element_bounds: bounds,
+            element_corner_radii: corner_radii,
+            inset: 0,
+            pad: 0,
+        });
+        self.next_frame.scene.insert_backdrop_blur(BackdropBlur {
+            order: 0,
+            blur_radius: blur_radius.scale(scale_factor),
+            bounds,
+            content_mask,
+            corner_radii,
+        });
     }
 
     fn largest_border_interior(quad: &Quad) -> Bounds<ScaledPixels> {

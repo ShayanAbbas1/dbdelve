@@ -291,6 +291,12 @@ pub struct Style {
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
+    /// dbdelve patch: frost whatever is painted beneath this element, with a
+    /// gaussian blur of this radius (the sigma) clipped to its rounded bounds.
+    /// Keep a translucent background over it: only the Metal renderer draws
+    /// the blur.
+    pub backdrop_blur: Option<Pixels>,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -692,6 +698,30 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
+        // dbdelve patch: a frosted element paints in a layer of its own, so the
+        // blur and everything the element paints over it -- shadows, fill,
+        // border, children -- share one draw order. The blur then runs right
+        // before that content, and nothing the element paints (a row repainted
+        // on hover, say) can sort below the blur and be frosted over.
+        if let Some(blur_radius) = self.backdrop_blur.filter(|_| !bounds.is_empty()) {
+            window.paint_layer(bounds, |window| {
+                let corner_radii = self.paint_corner_radii(bounds, window);
+                window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
+                self.paint_unfrosted(bounds, window, cx, continuation);
+            });
+        } else {
+            self.paint_unfrosted(bounds, window, cx, continuation);
+        }
+    }
+
+    // dbdelve patch: upstream's `paint`, split out for the backdrop blur.
+    fn paint_unfrosted(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        continuation: impl FnOnce(&mut Window, &mut App),
+    ) {
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.set_global(DebugBelow)
@@ -703,10 +733,8 @@ impl Style {
         }
 
         let rem_size = window.rem_size();
-        let corner_radii = self
-            .corner_radii
-            .to_pixels(rem_size)
-            .clamp_radii_for_quad_size(bounds.size);
+        // dbdelve patch: shared with the backdrop blur.
+        let corner_radii = self.paint_corner_radii(bounds, window);
 
         window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
 
@@ -761,6 +789,13 @@ impl Style {
         }
     }
 
+    // dbdelve patch: split out of `paint` for the backdrop blur.
+    fn paint_corner_radii(&self, bounds: Bounds<Pixels>, window: &Window) -> Corners<Pixels> {
+        self.corner_radii
+            .to_pixels(window.rem_size())
+            .clamp_radii_for_quad_size(bounds.size)
+    }
+
     fn is_border_visible(&self) -> bool {
         self.border_color
             .is_some_and(|color| !color.is_transparent())
@@ -806,6 +841,8 @@ impl Default for Style {
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            // dbdelve patch: backdrop blur.
+            backdrop_blur: None,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

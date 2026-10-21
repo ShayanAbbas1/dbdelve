@@ -748,6 +748,15 @@ pub trait Styled: Sized {
         self
     }
 
+    /// dbdelve patch: frosts whatever is painted beneath this element, blurred
+    /// with a gaussian of this radius (the sigma) inside its rounded corners.
+    /// Pair it with a translucent background, which is all that renderers
+    /// without the blur (everything but Metal) show.
+    fn backdrop_blur(mut self, blur_radius: crate::Pixels) -> Self {
+        self.style().backdrop_blur = Some(blur_radius);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {
