@@ -23,7 +23,7 @@ use nucleo_matcher::{
 
 use crate::{
     Workspace,
-    db::{ExplainMode, RelationKind, RoutineKind},
+    db::{Engine, ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
     icons::icon,
@@ -58,6 +58,8 @@ pub enum Mode {
     Schema,
     /// The columns of the grid in front, to jump to one of them.
     Columns,
+    /// Every engine, to pick the connection form's.
+    Engine,
 }
 
 /// What a row does when it is confirmed.
@@ -69,6 +71,7 @@ pub enum Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     OpenQuery(String),
+    SetEngine(Engine),
     OpenScratch,
     NewQuery,
     RunQuery,
@@ -211,6 +214,7 @@ impl Palette {
             (Mode::Database, Some(profile)) => database_items(profile),
             (Mode::Schema, Some(profile)) => schema_items(profile),
             (Mode::Columns, Some(profile)) => column_items(profile, cx),
+            (Mode::Engine, _) => engine_items(workspace),
             (_, None) => Vec::new(),
         };
         Self {
@@ -248,6 +252,7 @@ impl Palette {
             Mode::Database => "Switch database…",
             Mode::Schema => "Switch schema…",
             Mode::Columns => "Go to a column…",
+            Mode::Engine => "Pick an engine…",
         }
     }
 }
@@ -561,6 +566,20 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             .into(),
             icon: icon::DATABASE,
             command: Command::SetDatabase(name.clone()),
+        })
+        .collect()
+}
+
+/// Every engine, the one the connection form is set to marked as current.
+fn engine_items(workspace: &Workspace) -> Vec<Item> {
+    let current = workspace.form.as_ref().map(|form| form.engine);
+    Engine::ALL
+        .into_iter()
+        .map(|engine| Item {
+            label: engine.label().to_string(),
+            hint: if current == Some(engine) { "current" } else { "" }.into(),
+            icon: icon::DATABASE,
+            command: Command::SetEngine(engine),
         })
         .collect()
 }
