@@ -2394,6 +2394,66 @@ mod backdrop_blur_tests {
     }
 
     #[test]
+    fn blur_keeps_a_transparent_windows_alpha() {
+        // On a vibrant window the drawable starts clear and the app paints
+        // translucent planes, which the compositor lays over the desktop. The
+        // blur must carry that alpha through, or a card would shut the desktop
+        // out wherever it frosts: 30% white blurred, under 20% black, has to
+        // stay 44% covered, premultiplied, not turn opaque.
+        let mut scene = Scene::default();
+        let translucent = |l: f32, a: f32| Hsla { h: 0., s: 0., l, a };
+        let push = |scene: &mut Scene, b: Bounds<ScaledPixels>, color: Hsla| {
+            scene.insert_primitive(Quad {
+                order: 0,
+                border_style: Default::default(),
+                bounds: b,
+                content_mask: ContentMask { bounds: viewport() },
+                background: solid_background(color),
+                border_color: transparent_black(),
+                corner_radii: Corners::default(),
+                border_widths: Edges::default(),
+            });
+        };
+        push(&mut scene, viewport(), translucent(1., 0.3));
+        let card = bounds(200., 150., 200., 120.);
+        scene.push_layer(card);
+        scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(0.),
+            bounds: card,
+            corner_radii: Corners::default(),
+            content_mask: ContentMask { bounds: viewport() },
+            color: transparent_black(),
+            element_bounds: card,
+            element_corner_radii: Corners::default(),
+            inset: 0,
+            pad: 0,
+        });
+        scene.insert_backdrop_blur(BackdropBlur {
+            order: 0,
+            blur_radius: ScaledPixels(16.),
+            bounds: card,
+            content_mask: ContentMask { bounds: viewport() },
+            corner_radii: Corners::default(),
+        });
+        push(&mut scene, card, translucent(0., 0.2));
+        scene.pop_layer();
+        scene.finish();
+
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        renderer.update_transparency(true);
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(VIEW_W), DevicePixels(VIEW_H)))
+            .unwrap();
+        let outside = image.get_pixel(50, 50);
+        assert!(outside[3].abs_diff(77) <= 2, "window alpha {:?}", outside);
+        let inside = image.get_pixel(300, 210);
+        assert!(inside[3].abs_diff(112) <= 2, "card alpha {:?}", inside);
+        assert!(inside[0].abs_diff(61) <= 2, "card colour {:?}", inside);
+    }
+
+    #[test]
     fn backdrop_cache_is_bounded_across_sizes_and_window_shrink() {
         let mut renderer =
             MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
