@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::{
     actions::RefreshConnection,
-    db::{RelationKind, RoutineKind},
+    db::{Engine, RelationKind, RoutineKind},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
@@ -48,7 +48,13 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
 /// One column of icons down the sidebar, so every label starts at the same x
 /// whether its row is a folder or an object.
 pub(crate) fn row_icon(t: Theme, path: &'static str) -> impl IntoElement {
-    row_icon_tinted(t, path, kind_color(path))
+    let color = match Engine::ALL.into_iter().find(|engine| icon::engine(*engine) == path) {
+        Some(engine) => theme::engine_brand(engine, t),
+        None => kind_color(path).map_or(t.text_faint, ConnectionColor::swatch),
+    };
+    icon(path)
+        .size(px(layout::chrome(layout::ICON_SIZE)))
+        .text_color(color)
 }
 
 /// The hue an object's or a query's icon always wears, wherever it is drawn:

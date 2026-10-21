@@ -26,7 +26,7 @@ mod zed;
 
 use gpui::{App, Window};
 
-use crate::store;
+use crate::{db::Engine, store};
 
 use color::{Oklch, Rgba, Srgb};
 use gpui_component::{
@@ -480,6 +480,41 @@ impl ConnectionColor {
     /// `a_titlebar_pill_stands_off_every_band`.
     pub fn chip(self, theme: Theme) -> Srgb {
         self.fill().flatten(theme.surface)
+    }
+}
+
+/// An engine's logo colour: its brand hue, not its brand lightness, since
+/// brands like SQLite's are near-black and would vanish on a dark theme. It
+/// starts at the swatches' lightness and steps away from the theme's planes
+/// until it stands off both, so an imported theme gets a legible logo too.
+pub fn engine_brand(engine: Engine, theme: Theme) -> Srgb {
+    let hex = match engine {
+        Engine::Postgres => 0x4169E1,
+        Engine::MySql => 0x4479A1,
+        // The sea lion's colour rather than the wordmark's near-black teal.
+        Engine::MariaDb => 0xC0765A,
+        Engine::Sqlite => 0x003B57,
+        Engine::Turso => 0x4FF8D2,
+        Engine::Snowflake => 0x29B5E8,
+        Engine::SqlServer => 0xCC2927,
+        Engine::MongoDb => 0x47A248,
+        Engine::Redis => 0xFF4438,
+    };
+    let brand = Oklch::from_srgb(Srgb::from_hex(hex));
+    let away = match theme.appearance {
+        Appearance::Dark => 0.02,
+        Appearance::Light => -0.02,
+    };
+    let mut lightness = SWATCH_LIGHTNESS;
+    loop {
+        let color = Oklch::new(lightness, brand.c, brand.h).to_srgb();
+        let clears = [theme.bg, theme.panel]
+            .into_iter()
+            .all(|plane| color::contrast_ratio(color, plane) >= 3.0);
+        if clears || !(0.2..=0.95).contains(&lightness) {
+            return color;
+        }
+        lightness += away;
     }
 }
 
@@ -1710,6 +1745,17 @@ mod tests {
                 missing.is_empty(),
                 "highlighter categories fell back to the component theme: {missing:?}"
             );
+        }
+    }
+
+    #[test]
+    fn every_engine_logo_stands_off_the_background_in_every_theme() {
+        for t in Theme::all() {
+            for engine in Engine::ALL {
+                let logo = engine_brand(engine, t);
+                check(t, engine.label(), logo, t.bg, AA_LARGE);
+                check(t, engine.label(), logo, t.panel, AA_LARGE);
+            }
         }
     }
 
