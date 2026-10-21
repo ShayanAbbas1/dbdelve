@@ -667,24 +667,24 @@ impl Theme {
 
     /// Every floating card — a modal, the palette, the switcher, and each
     /// menu, select, tooltip and completion list gpui-component draws. On glass
-    /// it is a tint over a backdrop blur of whatever it covers, which turns a
-    /// grid's rows into tone but does not darken them: a blurred bright patch,
-    /// a pale wallpaper through the frost, is still bright. So Zeron's menu
-    /// fill is only where the search starts. The card takes as much more of its
-    /// own tone as it needs for its text to hold [`POPUP_TEXT_CONTRAST`], and
-    /// muted text [`POPUP_MUTED_CONTRAST`], over the worst backdrop there is —
-    /// white under dark glass, black under light.
+    /// it is a tint over a backdrop blur of the window beneath it, and that is
+    /// all it covers: the blur only sees what the window drew, and the desktop
+    /// shows through the card exactly as far as it shows through the window
+    /// there. So Zeron's menu fill is where the search starts, and the card
+    /// takes as much more of its own tone as it needs for its text to hold
+    /// [`POPUP_TEXT_CONTRAST`], and muted text [`POPUP_MUTED_CONTRAST`], over
+    /// [`Theme::popup_backdrop`].
     ///
-    /// Searched for here rather than tabled per theme, because a theme
-    /// imported from Zed can ask for glass too.
+    /// Searched for at this theme's opacity, not the floor's: the less of the
+    /// desktop the window lets through, the less a card has to shut out, and
+    /// every opacity change reinstalls the theme and so searches again.
+    /// Searched for rather than tabled per theme, because a theme imported from
+    /// Zed can ask for glass too.
     pub fn overlay_glass(self) -> Rgba {
         if !self.is_glass {
             return self.overlay.opaque();
         }
-        let backdrop = match self.appearance {
-            Appearance::Dark => WHITE,
-            Appearance::Light => BLACK,
-        };
+        let backdrop = self.popup_backdrop();
         // The theme's own muted as well as the card's: gpui-component paints
         // its popups' secondary text in the theme's, and has no card to ask.
         let popup = self.for_popup();
@@ -695,11 +695,43 @@ impl Theme {
                     .into_iter()
                     .all(|muted| contrast_ratio(muted, card) >= POPUP_MUTED_CONTRAST)
         };
-        let alpha = (0..=20)
-            .map(|step| OVERLAY_ALPHA_FLOOR + (1.0 - OVERLAY_ALPHA_FLOOR) * step as f32 / 20.0)
+        let alpha = (0..=40)
+            .map(|step| OVERLAY_ALPHA_FLOOR + (1.0 - OVERLAY_ALPHA_FLOOR) * step as f32 / 40.0)
             .find(|&alpha| holds(alpha))
             .unwrap_or(1.0);
         self.overlay.alpha(alpha)
+    }
+
+    /// The worst a glass card's text can be shown over: the brightest broad
+    /// fill the window paints under dark glass, and the darkest under light,
+    /// with the frost over the worst desktop there is — white under dark
+    /// glass, black under light. Broad because the blur is: at
+    /// [`gpui_component::POPOVER_BLUR`] a line of text or an icon is tone a few
+    /// levels off its plane, and only a fill that covers a good part of the
+    /// card survives it — a plane, a block of selected or edited rows, a
+    /// button. Not a titlebar band: a card opens below the titlebar, never
+    /// over it.
+    fn popup_backdrop(self) -> Srgb {
+        let desktop = match self.appearance {
+            Appearance::Dark => WHITE,
+            Appearance::Light => BLACK,
+        };
+        let chrome = self.frost().flatten(desktop);
+        let planes = [
+            chrome,
+            self.panel_glass().flatten(chrome),
+            self.data_glass().flatten(chrome),
+        ];
+        let washed = planes.into_iter().flat_map(|plane| {
+            [self.selection, self.edited, self.element_active].map(|wash| wash.flatten(plane))
+        });
+        let luminance = |c: &Srgb| c.relative_luminance();
+        let fills = planes.into_iter().chain(washed).chain([self.control]);
+        match self.appearance {
+            Appearance::Dark => fills.max_by(|a, b| luminance(a).total_cmp(&luminance(b))),
+            Appearance::Light => fills.min_by(|a, b| luminance(a).total_cmp(&luminance(b))),
+        }
+        .unwrap_or(desktop)
     }
 
     /// This theme as text is set on a floating card. On glass, muted and faint
@@ -2080,33 +2112,102 @@ mod tests {
         }
     }
 
+    /// Every opacity the setting can land on, floor to ceiling.
+    fn opacities() -> impl Iterator<Item = f32> {
+        let steps = ((OPACITY_MAX - OPACITY_MIN) / OPACITY_STEP).round() as usize;
+        (0..=steps).map(|step| OPACITY_MIN + OPACITY_STEP * step as f32)
+    }
+
     #[test]
     fn a_floating_card_keeps_its_text_over_the_worst_backdrop() {
-        // A glass card is a tint over a blur of whatever it covers, and the
+        // A glass card is a tint over a blur of the window beneath it, and the
         // blur softens what is under it without darkening it, so the raw-tint
-        // checks say nothing here. White is the worst a dark card can sit on,
-        // black the worst for a light one.
+        // checks say nothing here. At every opacity the setting allows, since
+        // the card is searched for at the one in force.
         for t in Theme::all().into_iter().filter(|t| t.is_glass) {
-            let card = t.overlay_glass();
-            let worst = match t.appearance {
-                Appearance::Dark => WHITE,
-                Appearance::Light => BLACK,
-            };
-            let under = card.flatten(worst);
-            check(t, "text on a floating card", t.text, under, AA_TEXT);
-            check(t, "muted on a floating card", t.text_muted, under, AA_LARGE);
-            check(
-                t,
-                "a floating card's own muted",
-                t.for_popup().text_muted,
-                under,
-                AA_LARGE,
-            );
-            // A card that has to go solid to be read has stopped being glass,
-            // which is a palette to fix rather than a fill to accept.
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let card = t.overlay_glass();
+                let under = card.flatten(t.popup_backdrop());
+                let at = |what: &str| format!("{what} at {:.2}", t.opacity);
+                check(t, &at("text on a floating card"), t.text, under, AA_TEXT);
+                check(
+                    t,
+                    &at("muted on a floating card"),
+                    t.text_muted,
+                    under,
+                    AA_LARGE,
+                );
+                check(
+                    t,
+                    &at("a floating card's own muted"),
+                    t.for_popup().text_muted,
+                    under,
+                    AA_LARGE,
+                );
+                // A card that has to go solid to be read has stopped being
+                // glass, which is a palette to fix rather than a fill to accept.
+                assert!(
+                    (OVERLAY_ALPHA_FLOOR..1.0).contains(&card.a),
+                    "{}: a floating card at {:.3} of its own tone at {:.2}",
+                    t.name,
+                    card.a,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_is_backed_by_the_worst_fill_it_can_cover() {
+        // The card's backdrop is the window, not the desktop: nothing the
+        // window paints is brighter than the frost over white under dark glass,
+        // or darker than it over black under light, and nothing a card can
+        // cover is worse for its text than the backdrop the search used.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let backdrop = t.popup_backdrop().relative_luminance();
+                let (desktop, worse): (Srgb, fn(f32, f32) -> bool) = match t.appearance {
+                    Appearance::Dark => (WHITE, |a, b| a > b),
+                    Appearance::Light => (BLACK, |a, b| a < b),
+                };
+                let chrome = t.frost().flatten(desktop);
+                let results = t.data_glass().flatten(chrome);
+                for (name, fill) in [
+                    ("chrome", chrome),
+                    ("the editor", t.panel_glass().flatten(chrome)),
+                    ("the results", results),
+                    ("a block of selected rows", t.selection.flatten(results)),
+                    ("a block of edited cells", t.edited.flatten(results)),
+                    ("a button", t.control),
+                ] {
+                    assert!(
+                        !worse(fill.relative_luminance(), backdrop),
+                        "{} at {:.2}: {name} is worse than the card's backdrop",
+                        t.name,
+                        t.opacity
+                    );
+                }
+                assert!(
+                    worse(desktop.relative_luminance(), backdrop),
+                    "{} at {:.2}: a card searched against the bare desktop",
+                    t.name,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_lets_the_desktop_through_at_the_default() {
+        // The complaint this exists to catch: a card searched against a white
+        // backdrop came out near-opaque and read as a solid slab beside the
+        // frosted window around it. At the default every family's card is
+        // still mostly the window behind it.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            let card = t.with_opacity(t.default_opacity()).overlay_glass();
             assert!(
-                (OVERLAY_ALPHA_FLOOR..1.0).contains(&card.a),
-                "{}: a floating card at {:.3} of its own tone",
+                card.a <= 0.30,
+                "{}: a floating card at {:.3} of its own tone at the default",
                 t.name,
                 card.a
             );
