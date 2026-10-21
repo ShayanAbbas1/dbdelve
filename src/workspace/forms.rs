@@ -654,7 +654,7 @@ impl Workspace {
                             .text_color(t.text_faint)
                             .child("No connections yet"),
                     )
-                    .child(self.project_actions(index, &project.name, cx))
+                    .child(self.project_actions(index, &project.name, t, cx))
                     .child(
                         button(
                             ("welcome-add-connection", index),
@@ -1973,7 +1973,7 @@ impl Workspace {
                 };
                 profile_rows.entry(group).or_default().push(row);
             }
-            let groups = self.render_project_groups(profile_rows, searched.is_some(), cx);
+            let groups = self.render_project_groups(profile_rows, searched.is_some(), t, cx);
 
             div()
                 .absolute()
@@ -2217,9 +2217,9 @@ impl Workspace {
         &self,
         mut members: HashMap<Option<String>, Vec<AnyElement>>,
         searching: bool,
+        t: Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let current = self.current_group().map(str::to_string);
         let mut rows = Vec::new();
@@ -2310,7 +2310,7 @@ impl Workspace {
                 {
                     rows.push(name_field(input));
                 } else {
-                    rows.push(self.project_header(index, project, is_current, expanded, cx));
+                    rows.push(self.project_header(index, project, is_current, expanded, t, cx));
                 }
                 if expanded {
                     rows.push(group_body(Some(&project.name), index));
@@ -2342,9 +2342,9 @@ impl Workspace {
         project: &store::StoredProject,
         selected: bool,
         expanded: bool,
+        t: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let name = project.name.clone();
         group_header(("project", index), selected, expanded, t)
@@ -2359,7 +2359,7 @@ impl Workspace {
                     .whitespace_nowrap()
                     .child(project.name.clone()),
             )
-            .child(self.project_actions(index, &project.name, cx))
+            .child(self.project_actions(index, &project.name, t, cx))
             .on_click(move |_, _, cx| {
                 _ = workspace.update(cx, |workspace, cx| {
                     workspace.toggle_group(Some(name.clone()), cx);
@@ -2370,8 +2370,13 @@ impl Workspace {
 
     /// Rename and delete, revealed by hovering a row grouped as
     /// `project-row-{index}`, or held in view while the delete is armed.
-    fn project_actions(&self, index: usize, name: &str, cx: &mut Context<Self>) -> gpui::Div {
-        let t = *theme(cx);
+    fn project_actions(
+        &self,
+        index: usize,
+        name: &str,
+        t: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let workspace = cx.entity().downgrade();
         let rename_workspace = workspace.clone();
         let rename_name = name.to_string();

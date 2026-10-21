@@ -582,6 +582,12 @@ pub struct Theme {
     pub syntax_type: Srgb,
     pub syntax_variable: Srgb,
     pub syntax_operator: Srgb,
+
+    /// The card [`Theme::for_popup`] set this theme's inks for. Kept rather
+    /// than searched for again, because the search reads the theme's own muted
+    /// text, which gpui-component still paints on the card, and `for_popup`
+    /// has replaced it with one that can stand a thinner card.
+    popup_card: Option<Rgba>,
 }
 
 impl Theme {
@@ -681,17 +687,20 @@ impl Theme {
     /// Searched for rather than tabled per theme, because a theme imported from
     /// Zed can ask for glass too.
     pub fn overlay_glass(self) -> Rgba {
+        if let Some(card) = self.popup_card {
+            return card;
+        }
         if !self.is_glass {
             return self.overlay.opaque();
         }
         let backdrop = self.popup_backdrop();
         // The theme's own muted as well as the card's: gpui-component paints
         // its popups' secondary text in the theme's, and has no card to ask.
-        let popup = self.for_popup();
+        let card_muted = self.popup_ink(self.text_muted, POPUP_MUTED_INK);
         let holds = |alpha: f32| {
             let card = self.overlay.alpha(alpha).flatten(backdrop);
             contrast_ratio(self.text, card) >= POPUP_TEXT_CONTRAST
-                && [self.text_muted, popup.text_muted]
+                && [self.text_muted, card_muted]
                     .into_iter()
                     .all(|muted| contrast_ratio(muted, card) >= POPUP_MUTED_CONTRAST)
         };
@@ -736,26 +745,30 @@ impl Theme {
 
     /// This theme as text is set on a floating card. On glass, muted and faint
     /// may be Zeron's fixed shares of the body text instead of the theme's own
-    /// greys, whichever stands further off the card's tone: most families'
-    /// own muted already reads better than Zeron's share does, and a card the
-    /// backdrop shows through is no place to give any of that up. An opaque
-    /// theme comes back unchanged.
+    /// greys — see [`Theme::popup_ink`]. An opaque theme comes back unchanged.
     pub fn for_popup(self) -> Self {
-        if !self.is_glass {
+        if !self.is_glass || self.popup_card.is_some() {
             return self;
         }
-        let stronger = |own: Srgb, share: f32| {
-            let share = self.text.alpha(share).flatten(self.overlay);
-            if contrast_ratio(share, self.overlay) > contrast_ratio(own, self.overlay) {
-                share
-            } else {
-                own
-            }
-        };
         Self {
-            text_muted: stronger(self.text_muted, POPUP_MUTED_INK),
-            text_faint: stronger(self.text_faint, POPUP_FAINT_INK),
+            text_muted: self.popup_ink(self.text_muted, POPUP_MUTED_INK),
+            text_faint: self.popup_ink(self.text_faint, POPUP_FAINT_INK),
+            popup_card: Some(self.overlay_glass()),
             ..self
+        }
+    }
+
+    /// The theme's own grey or Zeron's `share` of the body text, whichever
+    /// stands further off the card's own tone: most families' own muted
+    /// already reads better than Zeron's share does, and a card the backdrop
+    /// shows through is no place to give any of that up. Judged on the opaque
+    /// tone, since how much of it the card takes is searched for from this.
+    fn popup_ink(self, own: Srgb, share: f32) -> Srgb {
+        let share = self.text.alpha(share).flatten(self.overlay);
+        if contrast_ratio(share, self.overlay) > contrast_ratio(own, self.overlay) {
+            share
+        } else {
+            own
         }
     }
 
@@ -1138,6 +1151,8 @@ impl Theme {
             syntax_type: Oklch::new(0.80, 0.10, 205.0).to_srgb(),
             syntax_variable: neutral(0.90),
             syntax_operator: neutral(0.74),
+
+            popup_card: None,
         }
     }
 
@@ -1184,6 +1199,8 @@ impl Theme {
             syntax_type: Oklch::new(0.44, 0.12, 205.0).to_srgb(),
             syntax_variable: neutral(0.28),
             syntax_operator: neutral(0.40),
+
+            popup_card: None,
         }
     }
 
@@ -2151,6 +2168,33 @@ mod tests {
                     "{}: a floating card at {:.3} of its own tone at {:.2}",
                     t.name,
                     card.a,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_is_the_same_card_whichever_theme_asks_for_it() {
+        // The switcher and the reference popup ask on the theme `for_popup`
+        // returns, gpui-component's popups on the installed one, and they sit
+        // side by side.
+        for t in Theme::all() {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                assert_eq!(
+                    popup.overlay_glass(),
+                    t.overlay_glass(),
+                    "{} at {:.2}",
+                    t.name,
+                    t.opacity
+                );
+                let again = popup.for_popup();
+                assert_eq!(
+                    (again.text_muted, again.text_faint),
+                    (popup.text_muted, popup.text_faint),
+                    "{} at {:.2}",
+                    t.name,
                     t.opacity
                 );
             }
