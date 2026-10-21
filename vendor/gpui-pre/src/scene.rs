@@ -659,8 +659,9 @@ impl From<Shadow> for Primitive {
 
 /// dbdelve patch: a backdrop-blur region within the window. The renderer
 /// snapshots everything painted below this order and paints it back
-/// gaussian-blurred inside the rounded bounds (frosted-glass popovers). Only
-/// the Metal renderer draws it; see [`crate::Window::paint_backdrop_blur`].
+/// gaussian-blurred inside the rounded bounds (frosted-glass popovers). Every
+/// renderer (Metal, DirectX, wgpu) draws it; see
+/// [`crate::Window::paint_backdrop_blur`].
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 #[expect(missing_docs)]

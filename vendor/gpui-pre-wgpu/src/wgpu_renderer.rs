@@ -2,9 +2,10 @@ use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
+// dbdelve patch: `BackdropBlur`, for the backdrop blur.
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    AtlasTextureId, BackdropBlur, Background, Bounds, DevicePixels, GpuSpecs, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -134,6 +135,11 @@ struct WgpuPipelines {
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    // dbdelve patch: backdrop blur. One separable-gaussian pipeline serves both
+    // passes (the direction rides the uniform), and the composite paints the
+    // blurred snapshot back over the blur's rounded bounds.
+    backdrop_blur_pass: wgpu::RenderPipeline,
+    backdrop_composite: wgpu::RenderPipeline,
 }
 
 /// One frame allocation of instance data, ready to bind.
@@ -161,10 +167,60 @@ struct WgpuBindGroupLayouts {
     instances: wgpu::BindGroupLayout,
     texture: wgpu::BindGroupLayout,
     surfaces: wgpu::BindGroupLayout,
+    // dbdelve patch: backdrop blur. Uniform + texture + sampler, shared by the
+    // blur passes and the composite, each binding its own uniform slot.
+    backdrop: wgpu::BindGroupLayout,
 }
 
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
 pub type GpuContext = Rc<RefCell<Option<WgpuContext>>>;
+
+/// dbdelve patch: uniform for one separable blur pass (`BlurPassParams` in
+/// shaders.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BlurPassUniform {
+    direction: [f32; 2],
+    sigma: f32,
+    stride: f32,
+    source_texel_size: [f32; 2],
+    _padding: [f32; 2],
+    weights: [[f32; 4]; crate::blur_kernel::KERNEL_VECTORS],
+}
+
+/// dbdelve patch: uniform for the blur's composite pass (`BackdropBlurParams`
+/// in shaders.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BackdropBlurUniform {
+    bounds: PodBounds,
+    corner_radii: [f32; 4],
+    clip_bounds: PodBounds,
+    source_rect: [f32; 4],
+}
+
+/// dbdelve patch: one backdrop blur's scratch: a full-resolution copy of the
+/// padded region beneath it and the two downsampled products of the separable
+/// gaussian. Sized to the region, not the frame, and dropped after a run of
+/// blur-free frames, as the Metal renderer does.
+#[derive(Clone)]
+struct BackdropScratch {
+    width: u32,
+    height: u32,
+    downsample: u32,
+    blur_width: u32,
+    blur_height: u32,
+    snapshot: wgpu::Texture,
+    snapshot_view: wgpu::TextureView,
+    blur_a_view: wgpu::TextureView,
+    blur_b_view: wgpu::TextureView,
+}
+
+/// dbdelve patch: frames without a backdrop blur before its scratch textures
+/// are released.
+const SCRATCH_RELEASE_AFTER_FRAMES: u32 = 30;
+/// dbdelve patch: blurs drawn per frame; each takes three uniform slots.
+const BACKDROP_MAX_BLURS: usize = 32;
 
 enum InstanceData {
     Storage(wgpu::Buffer),
@@ -194,6 +250,14 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    // dbdelve patch: backdrop blur.
+    backdrop_blur_params_buffer: wgpu::Buffer,
+    backdrop_blur_sampler: wgpu::Sampler,
+    backdrop_scratch: Option<BackdropScratch>,
+    // dbdelve patch: a blur copies out of the frame it's drawn into, which some
+    // surfaces (GL's among them) don't allow. Those frames are drawn into this
+    // copyable texture instead and blitted to the surface at the end.
+    backdrop_frame: Option<(wgpu::Texture, wgpu::util::TextureBlitter)>,
 }
 
 struct CachedTextureBindGroup {
@@ -207,6 +271,9 @@ impl WgpuResources {
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
+        // dbdelve patch: backdrop blur.
+        self.backdrop_scratch = None;
+        self.backdrop_frame = None;
     }
 }
 
@@ -225,6 +292,10 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    // dbdelve patch: backdrop blur. Frames since the last one with a blur, and
+    // the byte stride between uniform slots in `backdrop_blur_params_buffer`.
+    blur_free_frames: u32,
+    backdrop_slot_stride: u64,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -444,8 +515,16 @@ impl WgpuRenderer {
             );
         }
 
+        // dbdelve patch: a backdrop blur copies straight out of a surface that
+        // allows it; frames on other surfaces go through a copyable texture.
+        let surface_usage = if surface_caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
+
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: surface_usage,
             format: surface_format,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
@@ -608,11 +687,47 @@ impl WgpuRendererCore {
             ],
         });
 
+        // dbdelve patch: backdrop blur. No min_binding_size, so one layout serves
+        // both uniform shapes.
+        let backdrop = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("backdrop_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         WgpuBindGroupLayouts {
             globals,
             instances,
             texture,
             surfaces,
+            // dbdelve patch: backdrop blur.
+            backdrop,
         }
     }
 
@@ -935,6 +1050,38 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        // dbdelve patch: backdrop blur. Neither pipeline blends: the blur passes
+        // overwrite their targets and the composite replaces its region.
+        let backdrop_target = wgpu::ColorTargetState {
+            format: surface_format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let backdrop_blur_pass = create_pipeline(
+            "backdrop_blur_pass",
+            "vs_blur_pass",
+            "fs_blur_pass",
+            &layouts.globals,
+            &layouts.backdrop,
+            None,
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(backdrop_target.clone())],
+            1,
+            &shader_module,
+        );
+        let backdrop_composite = create_pipeline(
+            "backdrop_composite",
+            "vs_backdrop_blur",
+            "fs_backdrop_blur",
+            &layouts.globals,
+            &layouts.backdrop,
+            None,
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(backdrop_target)],
+            1,
+            &shader_module,
+        );
+
         WgpuPipelines {
             quads,
             shadows,
@@ -945,6 +1092,9 @@ impl WgpuRendererCore {
             subpixel_sprites,
             poly_sprites,
             surfaces,
+            // dbdelve patch: backdrop blur.
+            backdrop_blur_pass,
+            backdrop_composite,
         }
     }
 
@@ -1196,14 +1346,13 @@ impl WgpuRenderer {
             width: DevicePixels(frame.texture.width() as i32),
             height: DevicePixels(frame.texture.height() as i32),
         };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        // dbdelve patch: the texture rather than a view of it, which a backdrop
+        // blur copies out of.
         if let Err(error) = core.render_frame(
             scene,
-            &frame_view,
+            &frame.texture,
             size,
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
@@ -1342,6 +1491,28 @@ impl WgpuRendererCore {
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
 
+        // dbdelve patch: backdrop blur. Three uniform slots per blur (horizontal
+        // pass, vertical pass, composite), all written before the frame is
+        // submitted, so every pass reads a slot of its own.
+        let backdrop_slot_stride = (std::mem::size_of::<BackdropBlurUniform>() as u64)
+            .max(std::mem::size_of::<BlurPassUniform>() as u64)
+            .next_multiple_of(uniform_alignment);
+        let backdrop_blur_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("backdrop_blur_params_buffer"),
+            size: backdrop_slot_stride * (BACKDROP_MAX_BLURS as u64) * 3,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let backdrop_blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("backdrop_blur_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
         Self {
             resources: WgpuResources {
                 device,
@@ -1358,6 +1529,11 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                // dbdelve patch: backdrop blur.
+                backdrop_blur_params_buffer,
+                backdrop_blur_sampler,
+                backdrop_scratch: None,
+                backdrop_frame: None,
             },
             atlas,
             path_globals_offset,
@@ -1372,6 +1548,9 @@ impl WgpuRendererCore {
             adapter_info: context.adapter.get_info(),
             target_format,
             max_texture_size,
+            // dbdelve patch: backdrop blur.
+            blur_free_frames: 0,
+            backdrop_slot_stride,
         }
     }
 
@@ -1422,7 +1601,8 @@ impl WgpuRendererCore {
     fn render_frame(
         &mut self,
         scene: &Scene,
-        target_view: &wgpu::TextureView,
+        // dbdelve patch: the target texture rather than a view of it.
+        target: &wgpu::Texture,
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
@@ -1473,19 +1653,80 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
-            .inspect_err(|_| {
-                // Queue writes are staged before encoding; flush them even if the frame fails.
-                self.resources.queue.submit(std::iter::empty());
-            })
+        // dbdelve patch: backdrop blur. The scratch textures are only worth
+        // holding while blurs keep appearing.
+        if scene.backdrop_blurs.is_empty() {
+            self.blur_free_frames = self.blur_free_frames.saturating_add(1);
+            if self.blur_free_frames >= SCRATCH_RELEASE_AFTER_FRAMES {
+                self.resources.backdrop_scratch = None;
+                self.resources.backdrop_frame = None;
+            }
+        } else {
+            self.blur_free_frames = 0;
+        }
+        let copies_through_frame = !scene.backdrop_blurs.is_empty()
+            && !target.usage().contains(wgpu::TextureUsages::COPY_SRC);
+        let frame_texture = if copies_through_frame {
+            self.ensure_backdrop_frame(target.size())
+        } else {
+            target.clone()
+        };
+
+        self.record_frame(
+            scene,
+            &frame_texture,
+            copies_through_frame.then_some(target),
+            clear_color,
+        )
+        .inspect_err(|_| {
+            // Queue writes are staged before encoding; flush them even if the frame fails.
+            self.resources.queue.submit(std::iter::empty());
+        })
     }
 
+    /// dbdelve patch: the copyable texture a frame with a backdrop blur is drawn
+    /// into when its target can't be copied from, sized to that target.
+    fn ensure_backdrop_frame(&mut self, size: wgpu::Extent3d) -> wgpu::Texture {
+        let format = self.target_format;
+        let resources = &mut self.resources;
+        if resources
+            .backdrop_frame
+            .as_ref()
+            .is_none_or(|(texture, _)| texture.size() != size)
+        {
+            let texture = resources.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("copyable_backdrop_frame"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let blitter = wgpu::util::TextureBlitter::new(&resources.device, format);
+            resources.backdrop_frame = Some((texture, blitter));
+        }
+        resources
+            .backdrop_frame
+            .as_ref()
+            .map(|(texture, _)| texture.clone())
+            .expect("backdrop frame was just ensured")
+    }
+
+    // dbdelve patch: `frame_texture`, which backdrop blurs copy out of, in place
+    // of a view; and `blit_target`, the target to copy the finished frame onto
+    // when it was drawn into the copyable backdrop frame instead.
     fn record_frame(
         &mut self,
         scene: &Scene,
-        frame_view: &wgpu::TextureView,
+        frame_texture: &wgpu::Texture,
+        blit_target: Option<&wgpu::Texture>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        let frame_view = &frame_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1526,7 +1767,30 @@ impl WgpuRendererCore {
                 ..Default::default()
             });
 
+            // dbdelve patch: blurs interleave with the batches by draw order.
+            // Before the first batch at or above a blur's order, break the pass,
+            // snapshot what's been drawn, blur it and paint it back. Blurs past
+            // the uniform buffer's slots are left undrawn.
+            let mut pending_blurs = scene
+                .backdrop_blurs
+                .iter()
+                .take(BACKDROP_MAX_BLURS)
+                .enumerate()
+                .peekable();
             for batch in scene.batches() {
+                let batch_order = batch.first_order(scene);
+                while let Some((index, blur)) =
+                    pending_blurs.next_if(|(_, blur)| blur.order <= batch_order)
+                {
+                    drop(pass);
+                    pass = self.draw_backdrop_blur(
+                        &mut encoder,
+                        frame_texture,
+                        frame_view,
+                        blur,
+                        index,
+                    );
+                }
                 match batch {
                     PrimitiveBatch::Quads(range) => self.draw_instances(
                         &instance_bindings.quads,
@@ -1619,6 +1883,25 @@ impl WgpuRendererCore {
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
+            // dbdelve patch: a blur above every batch still frosts what's below.
+            for (index, blur) in pending_blurs {
+                drop(pass);
+                pass =
+                    self.draw_backdrop_blur(&mut encoder, frame_texture, frame_view, blur, index);
+            }
+        }
+
+        // dbdelve patch: backdrop blur.
+        if let Some(target) = blit_target
+            && let Some((_, blitter)) = self.resources().backdrop_frame.as_ref()
+        {
+            let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            blitter.copy(
+                &self.resources().device,
+                &mut encoder,
+                frame_view,
+                &target_view,
+            );
         }
 
         let submission = self
@@ -1626,6 +1909,358 @@ impl WgpuRendererCore {
             .queue
             .submit(std::iter::once(encoder.finish()));
         Ok(submission)
+    }
+
+    /// dbdelve patch: snapshot the frame beneath `blur`, gaussian-blur it and
+    /// paint it back inside the blur's rounded bounds. Called with the main pass
+    /// ended; returns it reopened, with the blur painted when it was visible.
+    fn draw_backdrop_blur<'encoder>(
+        &mut self,
+        encoder: &'encoder mut wgpu::CommandEncoder,
+        frame_texture: &wgpu::Texture,
+        frame_view: &wgpu::TextureView,
+        blur: &BackdropBlur,
+        index: usize,
+    ) -> wgpu::RenderPass<'encoder> {
+        let blurred = self.blur_backdrop(encoder, frame_texture, blur, index);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("main_pass_continued"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        if blurred {
+            self.draw_backdrop_composite(index, &mut pass);
+        }
+        pass
+    }
+
+    /// dbdelve patch: copies the blur's padded region out of the frame and runs
+    /// the two separable gaussian passes over it into scratch. False when the
+    /// blur is fully clipped and there is nothing to composite.
+    fn blur_backdrop(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_texture: &wgpu::Texture,
+        blur: &BackdropBlur,
+        slot: usize,
+    ) -> bool {
+        // Only the visible (clipped) bounds are ever sampled, and the gaussian
+        // reaches about 3 sigma past a sampled pixel, so the snapshot needs just
+        // that padded region rather than the whole frame.
+        let sigma = blur.blur_radius.0.max(1.0);
+        let padding = (sigma * 3.0).ceil() + 2.0;
+        let visible = blur.bounds.intersect(&blur.content_mask.bounds);
+        let drawable_width = frame_texture.width() as i64;
+        let drawable_height = frame_texture.height() as i64;
+        let x0 = ((visible.origin.x.0 - padding).floor() as i64).max(0);
+        let y0 = ((visible.origin.y.0 - padding).floor() as i64).max(0);
+        let x1 = ((visible.origin.x.0 + visible.size.width.0 + padding).ceil() as i64)
+            .min(drawable_width);
+        let y1 = ((visible.origin.y.0 + visible.size.height.0 + padding).ceil() as i64)
+            .min(drawable_height);
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+
+        // Downsampling keeps the tap count tracking the visual radius rather
+        // than the device-pixel one; both passes run at the matching sigma in
+        // their own texel space.
+        let downsample = ((sigma / 8.0) as u32).clamp(1, 4);
+        let scratch = self.ensure_backdrop_scratch(
+            (x1 - x0) as u32,
+            (y1 - y0) as u32,
+            frame_texture.width(),
+            frame_texture.height(),
+            downsample,
+        );
+
+        // Fill the entire snapshot, shifting the copy window back inside the
+        // frame where needed: its edges then always hold real content, so the
+        // gaussian's clamped edges don't bleed in a dark vignette.
+        let copy_x = x0.min(drawable_width - scratch.width as i64).max(0) as u32;
+        let copy_y = y0.min(drawable_height - scratch.height as i64).max(0) as u32;
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: frame_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: copy_x,
+                    y: copy_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &scratch.snapshot,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: scratch.width,
+                height: scratch.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let slot_base = self.backdrop_slot_stride * (slot as u64) * 3;
+        let h_offset = slot_base;
+        let v_offset = slot_base + self.backdrop_slot_stride;
+        let c_offset = slot_base + 2 * self.backdrop_slot_stride;
+        let sigma_texels = (sigma / downsample as f32).max(0.5);
+        let weights = crate::blur_kernel::gaussian_weights(sigma_texels);
+        let (horizontal_region, vertical_region) = crate::blur_kernel::blur_regions(
+            [
+                visible.origin.x.0,
+                visible.origin.y.0,
+                visible.size.width.0,
+                visible.size.height.0,
+            ],
+            [copy_x, copy_y, scratch.width, scratch.height],
+            [scratch.blur_width, scratch.blur_height],
+            sigma_texels,
+        );
+
+        let resources = self.resources();
+        resources.queue.write_buffer(
+            &resources.backdrop_blur_params_buffer,
+            h_offset,
+            bytemuck::bytes_of(&BlurPassUniform {
+                direction: [1.0, 0.0],
+                sigma: sigma_texels,
+                stride: downsample as f32,
+                source_texel_size: [1.0 / scratch.width as f32, 1.0 / scratch.height as f32],
+                _padding: [0.0; 2],
+                weights,
+            }),
+        );
+        resources.queue.write_buffer(
+            &resources.backdrop_blur_params_buffer,
+            v_offset,
+            bytemuck::bytes_of(&BlurPassUniform {
+                direction: [0.0, 1.0],
+                sigma: sigma_texels,
+                stride: 1.0,
+                source_texel_size: [
+                    1.0 / scratch.blur_width as f32,
+                    1.0 / scratch.blur_height as f32,
+                ],
+                _padding: [0.0; 2],
+                weights,
+            }),
+        );
+        resources.queue.write_buffer(
+            &resources.backdrop_blur_params_buffer,
+            c_offset,
+            bytemuck::bytes_of(&BackdropBlurUniform {
+                bounds: blur.bounds.into(),
+                corner_radii: [
+                    blur.corner_radii.top_left.0,
+                    blur.corner_radii.top_right.0,
+                    blur.corner_radii.bottom_right.0,
+                    blur.corner_radii.bottom_left.0,
+                ],
+                clip_bounds: blur.content_mask.bounds.into(),
+                source_rect: [
+                    copy_x as f32,
+                    copy_y as f32,
+                    scratch.width as f32,
+                    scratch.height as f32,
+                ],
+            }),
+        );
+
+        let passes = [
+            (
+                "backdrop_blur_h_pass",
+                h_offset,
+                &scratch.snapshot_view,
+                &scratch.blur_a_view,
+                horizontal_region,
+            ),
+            (
+                "backdrop_blur_v_pass",
+                v_offset,
+                &scratch.blur_a_view,
+                &scratch.blur_b_view,
+                vertical_region,
+            ),
+        ];
+        for (label, offset, source, target, [x, y, width, height]) in passes {
+            let bind_group = self.backdrop_bind_group(
+                offset,
+                std::mem::size_of::<BlurPassUniform>() as u64,
+                source,
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            if width > 0 && height > 0 {
+                pass.set_pipeline(&resources.pipelines.backdrop_blur_pass);
+                pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+                pass.set_bind_group(1, &bind_group, &[]);
+                pass.set_scissor_rect(x, y, width, height);
+                pass.draw(0..4, 0..1);
+            }
+        }
+        true
+    }
+
+    /// dbdelve patch: paints a blur's blurred snapshot over its rounded bounds,
+    /// unblended, from the uniform slot `blur_backdrop` wrote.
+    fn draw_backdrop_composite(&self, slot: usize, pass: &mut wgpu::RenderPass<'_>) {
+        let resources = self.resources();
+        let Some(scratch) = resources.backdrop_scratch.as_ref() else {
+            return;
+        };
+        let offset = self.backdrop_slot_stride * (slot as u64 * 3 + 2);
+        let bind_group = self.backdrop_bind_group(
+            offset,
+            std::mem::size_of::<BackdropBlurUniform>() as u64,
+            &scratch.blur_b_view,
+        );
+        pass.set_pipeline(&resources.pipelines.backdrop_composite);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+        pass.set_bind_group(1, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
+    /// dbdelve patch: backdrop blur.
+    fn backdrop_bind_group(
+        &self,
+        params_offset: u64,
+        params_size: u64,
+        source: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        let resources = self.resources();
+        resources
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("backdrop_bind_group"),
+                layout: &resources.bind_group_layouts.backdrop,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &resources.backdrop_blur_params_buffer,
+                            offset: params_offset,
+                            size: NonZeroU64::new(params_size),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&resources.backdrop_blur_sampler),
+                    },
+                ],
+            })
+    }
+
+    /// dbdelve patch: scratch textures sized to the padded blur region. A cached
+    /// set is reused while it holds the region and still fits in the frame: the
+    /// copy always fills the whole snapshot, so reuse leaves no stale texels.
+    fn ensure_backdrop_scratch(
+        &mut self,
+        needed_width: u32,
+        needed_height: u32,
+        drawable_width: u32,
+        drawable_height: u32,
+        downsample: u32,
+    ) -> BackdropScratch {
+        let reusable = self
+            .resources
+            .backdrop_scratch
+            .as_ref()
+            .is_some_and(|scratch| {
+                scratch.downsample == downsample
+                    && scratch.width >= needed_width
+                    && scratch.width <= drawable_width
+                    && scratch.height >= needed_height
+                    && scratch.height <= drawable_height
+            });
+        if !reusable {
+            // Quantized up, so regions that differ slightly in size share one
+            // allocation instead of churning every frame.
+            const QUANTUM: u32 = 256;
+            let width = (needed_width.div_ceil(QUANTUM) * QUANTUM)
+                .min(drawable_width)
+                .max(1);
+            let height = (needed_height.div_ceil(QUANTUM) * QUANTUM)
+                .min(drawable_height)
+                .max(1);
+            let blur_width = width.div_ceil(downsample).max(1);
+            let blur_height = height.div_ceil(downsample).max(1);
+
+            let format = self.target_format;
+            let device = &self.resources.device;
+            let create_texture = |label: &str, width: u32, height: u32, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            let view = |texture: &wgpu::Texture| {
+                texture.create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let snapshot = create_texture(
+                "backdrop_snapshot",
+                width,
+                height,
+                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            );
+            let blur_usage =
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+            let blur_a = create_texture("backdrop_blur_a", blur_width, blur_height, blur_usage);
+            let blur_b = create_texture("backdrop_blur_b", blur_width, blur_height, blur_usage);
+            self.resources.backdrop_scratch = Some(BackdropScratch {
+                width,
+                height,
+                downsample,
+                blur_width,
+                blur_height,
+                snapshot_view: view(&snapshot),
+                snapshot,
+                blur_a_view: view(&blur_a),
+                blur_b_view: view(&blur_b),
+            });
+        }
+        self.resources
+            .backdrop_scratch
+            .clone()
+            .expect("backdrop scratch was just ensured")
     }
 
     fn write_instances(
@@ -2289,9 +2924,9 @@ impl WgpuRenderer {
     not(target_family = "wasm"),
     any(test, feature = "bench-support", feature = "test-support")
 ))]
+// dbdelve patch: no view, as frames render into the texture itself.
 struct HeadlessRenderTarget {
     texture: wgpu::Texture,
-    view: wgpu::TextureView,
 }
 
 #[cfg(all(
@@ -2381,8 +3016,7 @@ impl WgpuHeadlessRenderer {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.render_target = Some(HeadlessRenderTarget { texture, view });
+        self.render_target = Some(HeadlessRenderTarget { texture });
         Ok(())
     }
 
@@ -2404,14 +3038,15 @@ impl WgpuHeadlessRenderer {
     fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.check_gpu_errors()?;
         self.ensure_render_target(size)?;
-        let view = self
+        // dbdelve patch: the target texture rather than a view of it.
+        let texture = self
             .render_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
-            .view
+            .texture
             .clone();
         self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+            .render_frame(scene, &texture, size, false, wgpu::Color::BLACK)?;
         Ok(())
     }
 
@@ -2802,6 +3437,63 @@ mod tests {
             .expect("shader should validate");
     }
 
+    // dbdelve patch: the backdrop blur's uniforms are written from Rust structs,
+    // so their layout has to match the WGSL declarations field for field.
+    #[test]
+    fn backdrop_blur_uniforms_match_shader_layout() {
+        use std::mem::{offset_of, size_of};
+        let module =
+            naga::front::wgsl::parse_str(STORAGE_BUFFER_SHADERS).expect("shader should parse");
+        for (name, size, offsets) in [
+            (
+                "BlurPassParams",
+                size_of::<BlurPassUniform>(),
+                vec![
+                    ("direction", offset_of!(BlurPassUniform, direction)),
+                    ("sigma", offset_of!(BlurPassUniform, sigma)),
+                    ("stride", offset_of!(BlurPassUniform, stride)),
+                    (
+                        "source_texel_size",
+                        offset_of!(BlurPassUniform, source_texel_size),
+                    ),
+                    ("padding", offset_of!(BlurPassUniform, _padding)),
+                    ("weights", offset_of!(BlurPassUniform, weights)),
+                ],
+            ),
+            (
+                "BackdropBlurParams",
+                size_of::<BackdropBlurUniform>(),
+                vec![
+                    ("bounds", offset_of!(BackdropBlurUniform, bounds)),
+                    (
+                        "corner_radii",
+                        offset_of!(BackdropBlurUniform, corner_radii),
+                    ),
+                    ("clip_bounds", offset_of!(BackdropBlurUniform, clip_bounds)),
+                    ("source_rect", offset_of!(BackdropBlurUniform, source_rect)),
+                ],
+            ),
+        ] {
+            let (_, ty) = module
+                .types
+                .iter()
+                .find(|(_, ty)| ty.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} is not in the shader"));
+            let naga::TypeInner::Struct { members, span } = &ty.inner else {
+                panic!("{name} is not a struct");
+            };
+            assert_eq!(*span as usize, size, "{name} size");
+            assert_eq!(members.len(), offsets.len(), "{name} field count");
+            for (field, offset) in offsets {
+                let member = members
+                    .iter()
+                    .find(|member| member.name.as_deref() == Some(field))
+                    .unwrap_or_else(|| panic!("{name}.{field} is not in the shader"));
+                assert_eq!(member.offset as usize, offset, "{name}.{field} offset");
+            }
+        }
+    }
+
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
@@ -2930,5 +3622,273 @@ mod tests {
                 33.0_f32.to_bits(),
             ]
         );
+    }
+
+    // dbdelve patch: backdrop-blur rendering tests. Headless like the tests
+    // above, so they need a GPU adapter (software Vulkan is enough).
+    #[cfg(target_os = "linux")]
+    mod backdrop_blur {
+        use super::*;
+        use gpui::BackdropBlur;
+
+        const WIDTH: i32 = 128;
+        const HEIGHT: i32 = 64;
+        const STRIPE: u32 = 4;
+
+        fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: Point {
+                    x: x.into(),
+                    y: y.into(),
+                },
+                size: Size {
+                    width: width.into(),
+                    height: height.into(),
+                },
+            }
+        }
+
+        fn stripe_color(x: u32) -> [u8; 4] {
+            if (x / STRIPE).is_multiple_of(2) {
+                RED
+            } else {
+                BLUE
+            }
+        }
+
+        fn insert_stripes(scene: &mut Scene) {
+            for index in 0..WIDTH as u32 / STRIPE {
+                let color = if index.is_multiple_of(2) {
+                    gpui::red()
+                } else {
+                    gpui::blue()
+                };
+                scene.insert_primitive(solid_quad(
+                    (index * STRIPE) as f32,
+                    0.0,
+                    STRIPE as f32,
+                    HEIGHT as f32,
+                    color,
+                ));
+            }
+        }
+
+        fn blur(
+            bounds: Bounds<ScaledPixels>,
+            mask: Bounds<ScaledPixels>,
+            sigma: f32,
+        ) -> BackdropBlur {
+            BackdropBlur {
+                order: 0,
+                blur_radius: sigma.into(),
+                bounds,
+                content_mask: ContentMask { bounds: mask },
+                corner_radii: Corners::all(12.0.into()),
+            }
+        }
+
+        /// The frost as `Window::paint_backdrop_blur` paints it: in a layer of
+        /// its own behind an invisible splitter, with `cover` painted over it.
+        fn frosted_scene(blur: BackdropBlur, cover: Option<Quad>) -> Scene {
+            let mut scene = Scene::default();
+            insert_stripes(&mut scene);
+            insert_frost(&mut scene, blur, cover);
+            scene.finish();
+            scene
+        }
+
+        fn insert_frost(scene: &mut Scene, blur: BackdropBlur, cover: Option<Quad>) {
+            scene.push_layer(blur.bounds);
+            scene.insert_primitive(Shadow {
+                order: 0,
+                blur_radius: 0.0.into(),
+                bounds: blur.bounds,
+                corner_radii: blur.corner_radii,
+                content_mask: blur.content_mask,
+                color: gpui::transparent_black(),
+                element_bounds: blur.bounds,
+                element_corner_radii: blur.corner_radii,
+                inset: 0,
+                pad: 0,
+            });
+            scene.insert_backdrop_blur(blur);
+            if let Some(cover) = cover {
+                scene.insert_primitive(cover);
+            }
+            scene.pop_layer();
+        }
+
+        fn assert_untouched(image: &image::RgbaImage, x: u32, y: u32) {
+            assert_pixel(image, x, y, stripe_color(x));
+        }
+
+        /// Red and blue stripes blur to an even purple.
+        fn assert_frosted(image: &image::RgbaImage, x: u32, y: u32) {
+            let [red, green, blue, alpha] = image.get_pixel(x, y).0;
+            assert!(
+                (96..=160).contains(&red)
+                    && green <= 3
+                    && (96..=160).contains(&blue)
+                    && alpha == 255,
+                "pixel ({x}, {y}) was {:?}, expected a red-blue mix",
+                [red, green, blue, alpha]
+            );
+        }
+
+        #[test]
+        fn blurs_inside_the_rounded_bounds_only() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            // 6 runs the passes at full resolution, 20 downsampled by two.
+            for sigma in [6.0, 20.0] {
+                let bounds = rect(16.0, 8.0, 96.0, 48.0);
+                let scene = frosted_scene(blur(bounds, bounds, sigma), None);
+                let image = renderer.render_scene_to_image(&scene, device_size(WIDTH, HEIGHT))?;
+                for y in [12, 32, 52] {
+                    for x in 20..108 {
+                        assert_frosted(&image, x, y);
+                    }
+                }
+                for (x, y) in [(4, 32), (15, 32), (112, 32), (64, 4), (64, 59)] {
+                    assert_untouched(&image, x, y);
+                }
+                // Inside the bounds but outside their rounded corners.
+                for (x, y) in [(16, 8), (111, 8), (16, 55), (111, 55)] {
+                    assert_untouched(&image, x, y);
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn clips_to_the_content_mask() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let bounds = rect(16.0, 8.0, 96.0, 48.0);
+            let scene = frosted_scene(blur(bounds, rect(0.0, 0.0, 64.0, 64.0), 6.0), None);
+            let image = renderer.render_scene_to_image(&scene, device_size(WIDTH, HEIGHT))?;
+            for x in 20..62 {
+                assert_frosted(&image, x, 32);
+            }
+            for x in 64..WIDTH as u32 {
+                assert_untouched(&image, x, 32);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn draws_what_is_painted_over_the_frost_unblurred() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let bounds = rect(16.0, 8.0, 96.0, 48.0);
+            let cover = solid_quad(56.0, 24.0, 16.0, 16.0, gpui::white());
+            let scene = frosted_scene(blur(bounds, bounds, 6.0), Some(cover));
+            let image = renderer.render_scene_to_image(&scene, device_size(WIDTH, HEIGHT))?;
+            assert_pixel(&image, 64, 32, [255, 255, 255, 255]);
+            assert_frosted(&image, 40, 32);
+            Ok(())
+        }
+
+        #[test]
+        fn blurs_each_panel_from_its_own_uniforms() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let left = rect(8.0, 8.0, 48.0, 48.0);
+            let right = rect(72.0, 8.0, 48.0, 48.0);
+            let mut scene = Scene::default();
+            insert_stripes(&mut scene);
+            // Different sigmas, so the second blur also swaps the scratch for
+            // one at another downsample factor mid-frame.
+            insert_frost(&mut scene, blur(left, left, 6.0), None);
+            insert_frost(&mut scene, blur(right, right, 20.0), None);
+            scene.finish();
+            let image = renderer.render_scene_to_image(&scene, device_size(WIDTH, HEIGHT))?;
+            for x in (16..48).chain(80..112) {
+                assert_frosted(&image, x, 32);
+            }
+            for x in [4, 60, 64, 67, 124] {
+                assert_untouched(&image, x, 32);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn blurs_above_every_batch() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let bounds = rect(16.0, 8.0, 96.0, 48.0);
+            let mut scene = Scene::default();
+            insert_stripes(&mut scene);
+            scene.insert_backdrop_blur(blur(bounds, bounds, 6.0));
+            scene.finish();
+            assert!(
+                scene
+                    .batches()
+                    .all(|batch| batch.first_order(&scene) < scene.backdrop_blurs[0].order)
+            );
+            let image = renderer.render_scene_to_image(&scene, device_size(WIDTH, HEIGHT))?;
+            assert_frosted(&image, 64, 32);
+            assert_untouched(&image, 4, 32);
+            Ok(())
+        }
+
+        #[test]
+        fn targets_that_cannot_be_copied_match_ones_that_can() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let size = device_size(WIDTH, HEIGHT);
+            let bounds = rect(16.0, 8.0, 96.0, 48.0);
+            let scene = frosted_scene(blur(bounds, bounds, 6.0), None);
+            let copyable = renderer.render_scene_to_image(&scene, size)?;
+
+            let device = renderer.core.resources.device.clone();
+            let format = renderer.core.target_format;
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("uncopyable_target"),
+                size: wgpu::Extent3d {
+                    width: WIDTH as u32,
+                    height: HEIGHT as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            renderer
+                .core
+                .render_frame(&scene, &target, size, false, wgpu::Color::BLACK)?;
+            assert!(renderer.core.resources.backdrop_frame.is_some());
+
+            // Read it back through the headless target, which can be copied.
+            let readable = renderer.render_target.as_ref().unwrap().texture.clone();
+            let mut encoder = device.create_command_encoder(&Default::default());
+            wgpu::util::TextureBlitter::new(&device, format).copy(
+                &device,
+                &mut encoder,
+                &target.create_view(&Default::default()),
+                &readable.create_view(&Default::default()),
+            );
+            renderer.core.resources.queue.submit([encoder.finish()]);
+            let uncopyable = renderer.read_image()?;
+            assert_eq!(copyable, uncopyable);
+            Ok(())
+        }
+
+        #[test]
+        fn releases_scratch_after_blur_free_frames() -> anyhow::Result<()> {
+            let mut renderer = WgpuHeadlessRenderer::new()?;
+            let size = device_size(WIDTH, HEIGHT);
+            let bounds = rect(16.0, 8.0, 96.0, 48.0);
+            renderer.render_scene(&frosted_scene(blur(bounds, bounds, 6.0), None), size)?;
+            assert!(renderer.core.resources.backdrop_scratch.is_some());
+            let mut plain = Scene::default();
+            insert_stripes(&mut plain);
+            plain.finish();
+            for _ in 1..SCRATCH_RELEASE_AFTER_FRAMES {
+                renderer.render_scene(&plain, size)?;
+            }
+            assert!(renderer.core.resources.backdrop_scratch.is_some());
+            renderer.render_scene(&plain, size)?;
+            assert!(renderer.core.resources.backdrop_scratch.is_none());
+            Ok(())
+        }
     }
 }

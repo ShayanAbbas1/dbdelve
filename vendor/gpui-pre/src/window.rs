@@ -4637,8 +4637,8 @@ impl Window {
     /// already painted beneath `bounds` is snapshotted and painted back
     /// gaussian-blurred inside the rounded rect, and whatever is painted after
     /// this call composites on top of the blur. `blur_radius` is the gaussian
-    /// sigma. Only the Metal renderer draws blurs, so keep a translucent fill
-    /// over it for the others.
+    /// sigma. Every renderer (Metal, DirectX, wgpu) draws blurs; keep a
+    /// translucent fill over it, through which the blur shows.
     ///
     /// A blur takes its layer's draw order: give each frosted panel its own
     /// [`Self::paint_layer`], so the blur captures what lies beneath its order
