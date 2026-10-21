@@ -1,4 +1,8 @@
 /target
+# A vendored crate built or tested on its own leaves these behind. The app
+# builds it against the root lockfile, into the root target.
+/vendor/*/target/
+/vendor/*/Cargo.lock
 **/*.rs.bk
 *.pdb
 
