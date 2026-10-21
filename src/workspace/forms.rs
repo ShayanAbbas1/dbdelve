@@ -2109,18 +2109,12 @@ impl Workspace {
                             false,
                             layout::SIDEBAR_DEFAULT_WIDTH,
                         )
-                        // With a colour the name is set off from the rest of
-                        // the path. A coloured band already says which
-                        // connection this is, so there it only reads stronger;
-                        // without one it becomes a pill in its own hue. The
-                        // text keeps the normal colour, because the hue at text
-                        // size on a tint of itself is the one arrangement
-                        // nobody can read.
-                        .when_some(active_color, |name, color| {
-                            name.when(!self.settings.color_titlebar, |pill| pill.bg(color.chip(t)))
-                                .text_color(t.text)
-                                .font_weight(FontWeight::MEDIUM)
-                        }),
+                        // Without a coloured band to say which connection
+                        // this is, the name becomes a pill in its own hue.
+                        .when_some(
+                            active_color.filter(|_| !self.settings.color_titlebar),
+                            |pill, color| pill.bg(color.chip(t)),
+                        ),
                     )),
             )
             .into_any_element()
@@ -2746,8 +2740,9 @@ fn crumb(
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
         .text_size(px(layout::chrome(layout::TEXT_SM)))
-        .text_color(t.text_faint)
-        .hover(|style| style.bg(t.element_hover).text_color(t.text))
+        .text_color(t.text)
+        .font_weight(FontWeight::MEDIUM)
+        .hover(|style| style.bg(t.element_hover))
         .children(marker)
         .child(
             div()
