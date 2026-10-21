@@ -22,7 +22,7 @@ use crate::{
     input::{Input, InputEvent, InputState},
     kbd::Kbd,
     scroll::Scrollbar,
-    styled::popover_frosted,
+    styled::{popover_frosted, popover_highlight},
     v_flex, v_virtual_list,
 };
 
@@ -734,8 +734,14 @@ impl CommandState {
             .text_sm()
             .rounded(self.item_radius(window, cx))
             .when(selected, |this| {
-                this.bg(cx.theme().accent)
-                    .text_color(cx.theme().accent_foreground)
+                // dbdelve patch: a wash under frost (see `popover_highlight`).
+                if popover_frosted(cx) {
+                    let highlight = popover_highlight(cx);
+                    this.bg(highlight.fill).text_color(highlight.foreground)
+                } else {
+                    this.bg(cx.theme().accent)
+                        .text_color(cx.theme().accent_foreground)
+                }
             })
     }
 

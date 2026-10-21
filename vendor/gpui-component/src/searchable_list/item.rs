@@ -112,18 +112,24 @@ impl RenderOnce for SearchableListItemElement {
             .refine_style(&self.style)
             .when(!self.disabled, |this| {
                 this.when(!self.selected, |this| {
-                    // dbdelve patch: on frost the hover is the same wash as the
-                    // selection (see `popover_highlight`).
+                    // dbdelve patch: on frost the hover is a weaker share of the
+                    // selection's wash (see `popover_highlight`).
                     this.hover(|this| {
                         if popover_frosted(cx) {
-                            this.bg(popover_highlight(cx))
+                            this.bg(popover_highlight(cx).hover_fill(0.7))
                         } else {
                             this.bg(cx.theme().accent.opacity(0.7))
                         }
                     })
                 })
             })
-            .when(self.selected, |this| this.bg(popover_highlight(cx)))
+            .when(self.selected, |this| {
+                // dbdelve patch: the wash's own text colour on frost.
+                let highlight = popover_highlight(cx);
+                this.bg(highlight.fill).when(popover_frosted(cx), |this| {
+                    this.text_color(highlight.foreground)
+                })
+            })
             .when(self.disabled, |this| {
                 this.cursor_not_allowed()
                     .text_color(cx.theme().muted_foreground)

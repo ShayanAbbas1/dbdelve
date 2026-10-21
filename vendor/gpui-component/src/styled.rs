@@ -53,15 +53,41 @@ pub(crate) fn popover_frosted(cx: &App) -> bool {
 /// the theme's own `accent` when that already is one, so a menu's highlight
 /// still matches every other hover in the app, and Zeron's menu wash when it
 /// is not. Off frost, the `accent` token upstream paints.
-pub(crate) fn popover_highlight(cx: &App) -> Background {
+///
+/// The text colour comes with it: `accent_foreground` is chosen for an opaque
+/// accent fill, so it is only kept where the accent itself is the highlight.
+pub(crate) struct PopoverHighlight {
+    pub fill: Background,
+    pub foreground: Hsla,
+    wash: Hsla,
+}
+
+impl PopoverHighlight {
+    /// The weaker fill of a hovered row, at `share` of the highlight's strength,
+    /// so hover stays distinct from the selected row.
+    pub fn hover_fill(&self, share: f32) -> Background {
+        self.wash.opacity(share).into()
+    }
+}
+
+pub(crate) fn popover_highlight(cx: &App) -> PopoverHighlight {
     let theme = cx.theme();
     if !popover_frosted(cx) || theme.accent.a < 1. {
-        return theme.tokens.accent.into();
+        return PopoverHighlight {
+            fill: theme.tokens.accent.into(),
+            foreground: theme.accent_foreground,
+            wash: theme.accent,
+        };
     }
-    if theme.mode.is_dark() {
-        hsla(0., 0., 0.92, 0.11).into()
+    let wash = if theme.mode.is_dark() {
+        hsla(0., 0., 0.92, 0.11)
     } else {
-        hsla(0., 0., 0.10, 0.06).into()
+        hsla(0., 0., 0.10, 0.06)
+    };
+    PopoverHighlight {
+        fill: wash.into(),
+        foreground: theme.popover_foreground,
+        wash,
     }
 }
 

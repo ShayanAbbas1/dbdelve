@@ -101,7 +101,12 @@ pub(crate) fn dropdown_popup(
             // ramps the blur itself; at full strength from the first frame the
             // frost would land before the tint fading in over it.
             if frosted {
-                surface.backdrop_blur(POPOVER_BLUR * delta)
+                let mut surface = surface;
+                let blur = POPOVER_BLUR * delta;
+                // Sub-pixel blur still costs a full pass, and the call
+                // below could not clear what `popover_style` already set.
+                surface.style().backdrop_blur = (blur > px(0.5)).then_some(blur);
+                surface
             } else {
                 surface.shadow(popover_shadow(ring, delta * delta * delta))
             }

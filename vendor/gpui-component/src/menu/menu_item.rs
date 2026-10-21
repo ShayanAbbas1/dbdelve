@@ -115,10 +115,9 @@ impl RenderOnce for MenuItemElement {
                 // the pointer's item lit after a key moves the highlight away.
                 // dbdelve patch: `popover_highlight`, a wash on frost.
                 let highlight = popover_highlight(cx);
-                this.hover(|this| this.bg(highlight).text_color(cx.theme().accent_foreground))
-                    .when(self.selected, |this| {
-                        this.bg(highlight).text_color(cx.theme().accent_foreground)
-                    })
+                let (fill, foreground) = (highlight.fill, highlight.foreground);
+                this.hover(|this| this.bg(fill).text_color(foreground))
+                    .when(self.selected, |this| this.bg(fill).text_color(foreground))
                     .when_some(self.on_click, |this, on_click| {
                         this.on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             cx.stop_propagation();

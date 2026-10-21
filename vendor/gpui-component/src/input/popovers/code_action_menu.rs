@@ -86,18 +86,18 @@ impl RenderOnce for MenuItem {
             .text_xs()
             .line_height(relative(1.))
             .rounded(cx.theme().radius.half())
-            // dbdelve patch: on frost the hover is the same wash as the
-            // selection (see `popover_highlight`).
+            // dbdelve patch: on frost the hover is a weaker share of the
+            // selection's wash (see `popover_highlight`).
             .hover(|this| {
                 if popover_frosted(cx) {
-                    this.bg(popover_highlight(cx))
+                    this.bg(popover_highlight(cx).hover_fill(0.8))
                 } else {
                     this.bg(cx.theme().accent.opacity(0.8))
                 }
             })
             .when(self.selected, |this| {
-                this.bg(popover_highlight(cx))
-                    .text_color(cx.theme().accent_foreground)
+                let highlight = popover_highlight(cx);
+                this.bg(highlight.fill).text_color(highlight.foreground)
             })
             .child(
                 div().child(StyledText::new(item.action.title.clone()).with_highlights(highlights)),

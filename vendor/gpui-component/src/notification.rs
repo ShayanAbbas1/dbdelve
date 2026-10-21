@@ -542,9 +542,13 @@ impl Render for Notification {
 /// dbdelve patch: what a fading toast carries at `opacity`. The shadow ramps by
 /// the cube of the fade, as upstream; on frost there is no shadow, and the blur,
 /// which ignores `opacity`, ramps with the fade instead of popping in or out.
-fn toast_ink<E: Styled>(toast: E, frosted: bool, opacity: f32) -> E {
+fn toast_ink<E: Styled>(mut toast: E, frosted: bool, opacity: f32) -> E {
     if frosted {
-        toast.backdrop_blur(POPOVER_BLUR * opacity)
+        let blur = POPOVER_BLUR * opacity;
+        // Sub-pixel blur still costs a full pass, and `backdrop_blur` could not
+        // clear what the toast's style already set.
+        toast.style().backdrop_blur = (blur > px(0.5)).then_some(blur);
+        toast
     } else {
         toast.shadow(toast_shadow(opacity.powi(3)))
     }
