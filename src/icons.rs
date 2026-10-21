@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 51] = [
+const ICONS: [(&str, &IconData); 60] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -77,11 +77,22 @@ const ICONS: [(&str, &IconData); 51] = [
     ("icons/folder.svg", icondata_lu::LuFolder),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
+    ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
+    ("icons/engine-mysql.svg", icondata_si::SiMysql),
+    ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
+    ("icons/engine-sqlite.svg", icondata_si::SiSqlite),
+    ("icons/engine-turso.svg", icondata_si::SiTurso),
+    ("icons/engine-snowflake.svg", icondata_si::SiSnowflake),
+    ("icons/engine-sqlserver.svg", icondata_lu::LuServer),
+    ("icons/engine-mongodb.svg", icondata_si::SiMongodb),
+    ("icons/engine-redis.svg", icondata_si::SiRedis),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
 /// rather than a file.
 pub mod icon {
+    use crate::db::Engine;
+
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
     /// Windows' caption buttons, which dbdelve draws itself there.
     pub const MINIMIZE: &str = "icons/minus.svg";
@@ -145,6 +156,22 @@ pub mod icon {
     pub const REFERENCED_BY: &str = "icons/arrow-down-right.svg";
     pub const PRIMARY_KEY: &str = "icons/key.svg";
     pub const SETTINGS: &str = "icons/settings.svg";
+
+    /// An engine's brand logo. SQL Server's is a generic server glyph, because
+    /// Simple Icons carries no Microsoft logos.
+    pub fn engine(engine: Engine) -> &'static str {
+        match engine {
+            Engine::Postgres => "icons/engine-postgres.svg",
+            Engine::MySql => "icons/engine-mysql.svg",
+            Engine::MariaDb => "icons/engine-mariadb.svg",
+            Engine::Sqlite => "icons/engine-sqlite.svg",
+            Engine::Turso => "icons/engine-turso.svg",
+            Engine::Snowflake => "icons/engine-snowflake.svg",
+            Engine::SqlServer => "icons/engine-sqlserver.svg",
+            Engine::MongoDb => "icons/engine-mongodb.svg",
+            Engine::Redis => "icons/engine-redis.svg",
+        }
+    }
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -190,6 +217,7 @@ fn document(icon: &IconData) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
 
     #[test]
     fn every_named_icon_resolves_to_a_document() {
@@ -236,6 +264,9 @@ mod tests {
             icon::SETTINGS,
         ] {
             assert_draws(path);
+        }
+        for engine in Engine::ALL {
+            assert_draws(icon::engine(engine));
         }
     }
 

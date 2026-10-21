@@ -293,6 +293,7 @@ sqlformat = { version = "=0.5.0", default-features = false }
 keyring = "4"
 guic-gpui-assets = "=0.2.0"
 icondata_lu = "=0.1.0"
+icondata_si = "=0.1.0"
 icondata_core = "=0.1.0"
 # `font-kit` is not in this crate's default features, and without it the macOS
 # backend swaps the text system for `NoopTextSystem` and renders no text at all

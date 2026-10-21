@@ -296,6 +296,7 @@ encoding_rs = "=0.8.35"    # Import Rows' UTF-16 and Windows-1252 files. Already
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
 icondata_lu = "=0.1.0"     # Lucide icon data; gpui-component ships no icon files
+icondata_si = "=0.1.0"     # Simple Icons brand logos for the engines
 icondata_core = "=0.1.0"
 guic-gpui-assets = "=0.2.0"     # the bundled fonts
 

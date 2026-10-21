@@ -578,7 +578,7 @@ fn engine_items(workspace: &Workspace) -> Vec<Item> {
         .map(|engine| Item {
             label: engine.label().to_string(),
             hint: if current == Some(engine) { "current" } else { "" }.into(),
-            icon: icon::DATABASE,
+            icon: icon::engine(engine),
             command: Command::SetEngine(engine),
         })
         .collect()

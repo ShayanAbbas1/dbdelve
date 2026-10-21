@@ -1696,6 +1696,7 @@ dependencies = [
  "hex",
  "icondata_core",
  "icondata_lu",
+ "icondata_si",
  "jsonc-parser",
  "keyring",
  "libc",
@@ -3782,6 +3783,15 @@ name = "icondata_lu"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f25663a6cc5371e9e33c98bab870f4aa2fd68c88853f1467c8fccfaf112782b1"
+dependencies = [
+ "icondata_core",
+]
+
+[[package]]
+name = "icondata_si"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68943eec8a766d8e5213385610aa47bf0bec5ddb76fdcf819721a05fb5c8f6c5"
 dependencies = [
  "icondata_core",
 ]
