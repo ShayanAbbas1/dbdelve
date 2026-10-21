@@ -10,7 +10,7 @@ use crate::{ActiveTheme as _, ThemeStyled as _};
 use crate::{
     Selectable, StyledExt as _,
     animation::ease_out_cubic,
-    styled::{popover_ring, popover_shadow},
+    styled::{POPOVER_BLUR, popover_frosted, popover_ring, popover_shadow},
     v_flex,
 };
 use gpui_base::Placement;
@@ -90,15 +90,21 @@ pub(crate) fn dropdown_popup(
     let travel: f32 = DROPDOWN_ENTER_OFFSET.into();
     // Read out here: the animation runs long after `cx` is gone.
     let ring = popover_ring(cx);
+    let frosted = popover_frosted(cx);
 
     dropdown_positioner(bounds).child(surface.with_animation(
         id,
         Animation::new(DROPDOWN_ENTER_DURATION).with_easing(ease_out_cubic),
         move |surface, delta| {
-            surface
-                .top(px(travel * (1. - delta)))
-                .opacity(delta)
-                .shadow(popover_shadow(ring, delta * delta * delta))
+            let surface = surface.top(px(travel * (1. - delta))).opacity(delta);
+            // dbdelve patch: the blur ignores `opacity`, so a frosted surface
+            // ramps the blur itself; at full strength from the first frame the
+            // frost would land before the tint fading in over it.
+            if frosted {
+                surface.backdrop_blur(POPOVER_BLUR * delta)
+            } else {
+                surface.shadow(popover_shadow(ring, delta * delta * delta))
+            }
         },
     ))
 }

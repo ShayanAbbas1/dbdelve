@@ -1,8 +1,8 @@
 pub use crate::component_traits::{Collapsible, Disableable, Selectable};
 pub use crate::sizing::{Sizable, Size, StyleSized};
 use gpui::{
-    App, BoxShadow, Corners, Edges, Hsla, InteractiveElement as _, ParentElement, Pixels,
-    StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
+    App, Background, BoxShadow, Corners, Edges, Hsla, InteractiveElement as _, ParentElement,
+    Pixels, StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
 };
 pub use gpui_base::{FocusableExt, RoleOverride, StyledExt, box_shadow, h_flex, v_flex};
 
@@ -35,6 +35,34 @@ const POPOVER_RING_INK: f32 = 0.1;
 ///
 pub(crate) fn popover_ring(cx: &App) -> Hsla {
     cx.theme().foreground.alpha(POPOVER_RING_INK)
+}
+
+/// dbdelve patch: the backdrop blur under a frosted popup, as a gaussian sigma.
+/// Heavy enough that a grid's rows behind a menu read as tone, not as text.
+pub const POPOVER_BLUR: Pixels = px(16.);
+
+/// dbdelve patch: whether popups frost. A theme says so by handing over a
+/// translucent `popover` colour: the tint a frosted popup lays over the blur.
+/// An opaque one keeps every popup exactly as upstream draws it.
+pub(crate) fn popover_frosted(cx: &App) -> bool {
+    cx.theme().popover.a < 1.
+}
+
+/// dbdelve patch: the hover and selection fill inside a popup. On frost it has
+/// to be a wash, since an opaque fill punches a solid slab through the glass:
+/// the theme's own `accent` when that already is one, so a menu's highlight
+/// still matches every other hover in the app, and Zeron's menu wash when it
+/// is not. Off frost, the `accent` token upstream paints.
+pub(crate) fn popover_highlight(cx: &App) -> Background {
+    let theme = cx.theme();
+    if !popover_frosted(cx) || theme.accent.a < 1. {
+        return theme.tokens.accent.into();
+    }
+    if theme.mode.is_dark() {
+        hsla(0., 0., 0.92, 0.11).into()
+    } else {
+        hsla(0., 0., 0.10, 0.06).into()
+    }
 }
 
 /// shadcn/ui's popup surface shadow — a hairline `ring` plus `shadow-md` — at
@@ -185,6 +213,18 @@ impl<T: Styled + Sized> ThemeStyled for T {
 
     fn popover_style(self, cx: &App) -> Self {
         let theme = cx.theme();
+        // dbdelve patch: a frosted popup is edged by a hairline border and casts
+        // no shadow. GPUI paints a drop shadow as a filled rect under the whole
+        // element, so through a translucent tint it darkens the frost itself.
+        if popover_frosted(cx) {
+            return self
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(theme.radius)
+                .backdrop_blur(POPOVER_BLUR);
+        }
         // No border: the edge is the ring inside `popover_shadow`, which is how
         // shadcn draws it and the only way the shadow can show through it.
         self.bg(theme.popover)

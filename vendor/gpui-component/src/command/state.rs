@@ -11,7 +11,7 @@ use gpui::{
 use rust_i18n::t;
 
 use crate::{
-    ActiveTheme as _, ElementExt as _, Icon, IconName, IndexPath, StyledExt as _,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, IndexPath, POPOVER_BLUR, StyledExt as _,
     VirtualListScrollHandle,
     actions::{Cancel, Confirm, SelectDown, SelectUp},
     command::{
@@ -22,6 +22,7 @@ use crate::{
     input::{Input, InputEvent, InputState},
     kbd::Kbd,
     scroll::Scrollbar,
+    styled::popover_frosted,
     v_flex, v_virtual_list,
 };
 
@@ -930,6 +931,8 @@ impl Render for CommandState {
             .w_full()
             .overflow_hidden()
             .bg(cx.theme().popover)
+            // dbdelve patch: the popover tint is only a tint on frost.
+            .when(popover_frosted(cx), |this| this.backdrop_blur(POPOVER_BLUR))
             .text_color(cx.theme().popover_foreground)
             .when(self.options.bordered, |this| {
                 this.rounded(cx.theme().radius_lg)

@@ -6,6 +6,7 @@ use gpui::{
 use crate::{
     ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, Size, StyleSized, StyledExt,
     h_flex,
+    styled::{popover_frosted, popover_highlight},
 };
 
 /// A single row element used inside searchable-list dropdowns (Select, ComboBox, MultiComboBox).
@@ -111,10 +112,18 @@ impl RenderOnce for SearchableListItemElement {
             .refine_style(&self.style)
             .when(!self.disabled, |this| {
                 this.when(!self.selected, |this| {
-                    this.hover(|this| this.bg(cx.theme().accent.opacity(0.7)))
+                    // dbdelve patch: on frost the hover is the same wash as the
+                    // selection (see `popover_highlight`).
+                    this.hover(|this| {
+                        if popover_frosted(cx) {
+                            this.bg(popover_highlight(cx))
+                        } else {
+                            this.bg(cx.theme().accent.opacity(0.7))
+                        }
+                    })
                 })
             })
-            .when(self.selected, |this| this.bg(cx.theme().tokens.accent))
+            .when(self.selected, |this| this.bg(popover_highlight(cx)))
             .when(self.disabled, |this| {
                 this.cursor_not_allowed()
                     .text_color(cx.theme().muted_foreground)

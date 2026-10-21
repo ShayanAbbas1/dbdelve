@@ -20,10 +20,11 @@ use gpui_base::{
 };
 
 use crate::{
-    ActiveTheme as _, Edges, Icon, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT,
+    ActiveTheme as _, Edges, Icon, IconName, POPOVER_BLUR, Sizable as _, StyledExt,
+    TITLE_BAR_HEIGHT,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
-    styled::toast_shadow,
+    styled::{popover_frosted, toast_shadow},
     v_flex,
 };
 
@@ -418,6 +419,7 @@ impl Render for Notification {
         };
         let has_icon = icon.is_some();
         let placement = self.placement.unwrap_or(cx.theme().notification.placement);
+        let frosted = popover_frosted(cx);
 
         BaseToast::new("notification")
             .transition_status(transition_status)
@@ -430,7 +432,9 @@ impl Render for Notification {
             .border_color(cx.theme().border)
             .bg(cx.theme().tokens.popover)
             .rounded(cx.theme().radius_lg)
-            .shadow(toast_shadow(1.))
+            // dbdelve patch: frosted like a popup, shadowless for the same
+            // reason (see `popover_style`). The blur is set by the fade below.
+            .when(!frosted, |this| this.shadow(toast_shadow(1.)))
             .py_3p5()
             .px_4()
             .gap_3()
@@ -492,7 +496,8 @@ impl Render for Notification {
                 move |this, delta| {
                     if closing {
                         let opacity = 1. - delta;
-                        let that = this.opacity(opacity).shadow(toast_shadow(opacity.powi(3)));
+                        let that = this.opacity(opacity);
+                        let that = toast_ink(that, frosted, opacity);
                         let y_offset = match placement {
                             Anchor::TopLeft | Anchor::TopRight | Anchor::TopCenter => {
                                 -delta * NOTIFICATION_TRANSITION_OFFSET
@@ -523,12 +528,25 @@ impl Render for Notification {
                         // keeps it out of sight until the card can cover it —
                         // where this used to drop the shadow outright past a
                         // threshold, which popped.
-                        this.top(px(0.) + y_offset)
-                            .opacity(opacity)
-                            .shadow(toast_shadow(opacity.powi(3)))
+                        toast_ink(
+                            this.top(px(0.) + y_offset).opacity(opacity),
+                            frosted,
+                            opacity,
+                        )
                     }
                 },
             )
+    }
+}
+
+/// dbdelve patch: what a fading toast carries at `opacity`. The shadow ramps by
+/// the cube of the fade, as upstream; on frost there is no shadow, and the blur,
+/// which ignores `opacity`, ramps with the fade instead of popping in or out.
+fn toast_ink<E: Styled>(toast: E, frosted: bool, opacity: f32) -> E {
+    if frosted {
+        toast.backdrop_blur(POPOVER_BLUR * opacity)
+    } else {
+        toast.shadow(toast_shadow(opacity.powi(3)))
     }
 }
 

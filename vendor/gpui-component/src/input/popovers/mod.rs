@@ -12,11 +12,12 @@ pub(crate) use hover_popover::*;
 
 use gpui::{
     App, Div, ElementId, InteractiveElement as _, SharedString, Stateful, StyleRefinement,
-    Styled as _, Window, div, px, rems,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px, rems,
 };
 
 use crate::{
     ActiveTheme, ThemeStyled as _,
+    styled::popover_frosted,
     text::{TextView, TextViewStyle},
 };
 
@@ -51,7 +52,8 @@ pub(super) fn editor_popover(id: impl Into<ElementId>, cx: &App) -> Stateful<Div
         .flex_none()
         .occlude()
         .popover_style(cx)
-        .shadow_md()
+        // dbdelve patch: no shadow under frost (see `popover_style`).
+        .when(!popover_frosted(cx), |this| this.shadow_md())
         .text_xs()
         .p_1()
 }

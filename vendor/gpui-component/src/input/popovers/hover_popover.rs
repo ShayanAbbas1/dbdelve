@@ -4,12 +4,13 @@ use gpui::{
     AnyElement, App, AppContext as _, AvailableSpace, Bounds, Element, ElementId, Entity,
     InteractiveElement, IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels,
     Render, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, deferred, div, point,
-    px,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     StyledExt, ThemeStyled as _,
     input::{EditorState, popovers::render_markdown},
+    styled::popover_frosted,
 };
 
 pub struct HoverPopover {
@@ -167,7 +168,8 @@ impl Element for Popover {
                 .p_1()
                 .text_xs()
                 .popover_style(cx)
-                .shadow_md()
+                // dbdelve patch: no shadow under frost (see `popover_style`).
+                .when(!popover_frosted(cx), |this| this.shadow_md())
                 .max_w(max_width)
                 .max_h(max_height)
                 .overflow_y_scroll()

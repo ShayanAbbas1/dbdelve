@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::{
-    ActiveTheme, Disableable, ElementExt, IconName, Selectable, Sizable,
+    ActiveTheme, Disableable, ElementExt, IconName, POPOVER_BLUR, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{
@@ -17,6 +17,7 @@ use crate::{
         Replace,
     },
     label::Label,
+    styled::popover_frosted,
     v_flex,
 };
 
@@ -342,6 +343,8 @@ impl<M: crate::input::overlay::OverlayMode> Render for SearchPanel<M> {
             .w_full()
             .gap_1()
             .bg(cx.theme().tokens.popover)
+            // dbdelve patch: the popover tint is only a tint on frost.
+            .when(popover_frosted(cx), |this| this.backdrop_blur(POPOVER_BLUR))
             .border_b_1()
             .rounded(cx.theme().radius.half())
             .border_color(cx.theme().border)

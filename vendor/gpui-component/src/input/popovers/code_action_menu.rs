@@ -19,6 +19,7 @@ use crate::{
         popovers::{CaretAnchoredPopup, editor_popover},
     },
     list::{List, ListDelegate, ListEvent, ListState},
+    styled::{popover_frosted, popover_highlight},
 };
 
 struct MenuDelegate {
@@ -85,9 +86,17 @@ impl RenderOnce for MenuItem {
             .text_xs()
             .line_height(relative(1.))
             .rounded(cx.theme().radius.half())
-            .hover(|this| this.bg(cx.theme().accent.opacity(0.8)))
+            // dbdelve patch: on frost the hover is the same wash as the
+            // selection (see `popover_highlight`).
+            .hover(|this| {
+                if popover_frosted(cx) {
+                    this.bg(popover_highlight(cx))
+                } else {
+                    this.bg(cx.theme().accent.opacity(0.8))
+                }
+            })
             .when(self.selected, |this| {
-                this.bg(cx.theme().tokens.accent)
+                this.bg(popover_highlight(cx))
                     .text_color(cx.theme().accent_foreground)
             })
             .child(

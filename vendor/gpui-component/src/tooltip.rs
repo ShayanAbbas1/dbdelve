@@ -17,9 +17,10 @@ use gpui_base::{
 };
 
 use crate::{
-    ActiveTheme, Placement, StyledExt,
+    ActiveTheme, POPOVER_BLUR, Placement, StyledExt,
     animation::{EffectTransition, ease_in_out_cubic, ease_out_cubic},
     kbd::Kbd,
+    styled::popover_frosted,
     text::Text,
 };
 
@@ -121,7 +122,15 @@ impl Render for Tooltip {
                 .bg(cx.theme().tokens.popover)
                 .border_1()
                 .border_color(cx.theme().border)
-                .shadow_md()
+                // dbdelve patch: frosted like every other popup, and for the same
+                // reason without the shadow (see `popover_style`).
+                .map(|this| {
+                    if popover_frosted(cx) {
+                        this.backdrop_blur(POPOVER_BLUR)
+                    } else {
+                        this.shadow_md()
+                    }
+                })
                 .rounded(cx.theme().radius)
                 .justify_between()
                 .py_0p5()
@@ -158,8 +167,9 @@ pub(crate) fn render_tooltip(
     content_view: AnyView,
     transition: BaseTooltipTransition,
     _: &mut Window,
-    _: &mut App,
+    cx: &mut App,
 ) -> AnyElement {
+    let frosted = popover_frosted(cx);
     div().child(content_view).map(|element| match transition {
         BaseTooltipTransition::Switch {
             epoch,
@@ -183,7 +193,11 @@ pub(crate) fn render_tooltip(
         BaseTooltipTransition::Enter { epoch } => EffectTransition::new(ENTER_DURATION)
             .ease(ease_out_cubic)
             .slide_y(px(4.), px(0.))
-            .fade(0.0, 1.0)
+            // dbdelve patch: no fade on frost. The blur ignores opacity and sits
+            // inside the tooltip's own view, out of this transition's reach, so
+            // a fade would bring the frost in at full strength under a tint
+            // that is still arriving.
+            .fade(if frosted { 1.0 } else { 0.0 }, 1.0)
             .apply(
                 element,
                 ElementId::NamedInteger("tooltip-enter".into(), epoch as u64),
