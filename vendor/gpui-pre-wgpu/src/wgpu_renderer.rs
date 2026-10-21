@@ -822,7 +822,12 @@ impl WgpuRendererCore {
             },
             alpha: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
+                // dbdelve patch: upstream adds the destination alpha (factor One),
+                // so on a transparent window a path over another translucent layer
+                // overstates the coverage it hands the compositor and darkens the
+                // desktop showing through. OneMinusSrcAlpha is the `over` operator
+                // the colour channels and every other pipeline already use.
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                 operation: wgpu::BlendOperation::Add,
             },
         };
