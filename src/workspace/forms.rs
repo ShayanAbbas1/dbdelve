@@ -2109,20 +2109,17 @@ impl Workspace {
                             false,
                             layout::SIDEBAR_DEFAULT_WIDTH,
                         )
-                        // With a colour the name becomes the label of a pill:
-                        // in its own hue, or a plain chip when the band behind
-                        // it is already wearing that hue. The text keeps the
-                        // normal colour, because the hue at text size on a
-                        // tint of itself is the one arrangement nobody can
-                        // read.
-                        .when_some(active_color, |pill, color| {
-                            pill.bg(if self.settings.color_titlebar {
-                                t.surface
-                            } else {
-                                color.chip(t)
-                            })
-                            .text_color(t.text)
-                            .font_weight(FontWeight::MEDIUM)
+                        // With a colour the name is set off from the rest of
+                        // the path. A coloured band already says which
+                        // connection this is, so there it only reads stronger;
+                        // without one it becomes a pill in its own hue. The
+                        // text keeps the normal colour, because the hue at text
+                        // size on a tint of itself is the one arrangement
+                        // nobody can read.
+                        .when_some(active_color, |name, color| {
+                            name.when(!self.settings.color_titlebar, |pill| pill.bg(color.chip(t)))
+                                .text_color(t.text)
+                                .font_weight(FontWeight::MEDIUM)
                         }),
                     )),
             )
