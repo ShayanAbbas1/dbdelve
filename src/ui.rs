@@ -82,7 +82,7 @@ pub(crate) fn row_icon_tinted(
             .into_iter()
             .find(|engine| engine.logo() == path)
             .map_or(t.text_faint, |engine| {
-                theme::engine_brand(engine, t, &[t.bg, t.panel])
+                theme::engine_brand(engine, t, &t.logo_planes())
             })
     };
     icon(path)

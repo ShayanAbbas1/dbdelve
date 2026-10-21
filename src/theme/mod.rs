@@ -698,6 +698,13 @@ impl Theme {
     /// covers the work rather than sitting beside it, and what shows through
     /// is that work, not the desktop — but not opaque: on a glass theme a
     /// fully solid card is the one surface that stops being the same window.
+    /// What an engine's logo is drawn on outside the titlebar: the panes, and
+    /// the palette and switcher overlays, which on glass are composited over
+    /// the window's background.
+    pub fn logo_planes(self) -> [Srgb; 3] {
+        [self.bg, self.panel, self.overlay_glass().flatten(self.bg)]
+    }
+
     pub fn overlay_glass(self) -> Rgba {
         self.overlay.alpha(self.tint(OVERLAY_ALPHA))
     }
@@ -1752,9 +1759,10 @@ mod tests {
     fn every_engine_logo_stands_off_the_background_in_every_theme() {
         for t in Theme::all() {
             for engine in Engine::ALL {
-                let logo = engine_brand(engine, t, &[t.bg, t.panel]);
-                check(t, engine.label(), logo, t.bg, AA_LARGE);
-                check(t, engine.label(), logo, t.panel, AA_LARGE);
+                let logo = engine_brand(engine, t, &t.logo_planes());
+                for plane in t.logo_planes() {
+                    check(t, engine.label(), logo, plane, AA_LARGE);
+                }
             }
         }
     }
