@@ -91,8 +91,6 @@ const ICONS: [(&str, &IconData); 60] = [
 /// dbdelve's own names for the icons it draws, so a call site names a thing
 /// rather than a file.
 pub mod icon {
-    use crate::db::Engine;
-
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
     /// Windows' caption buttons, which dbdelve draws itself there.
     pub const MINIMIZE: &str = "icons/minus.svg";
@@ -156,22 +154,6 @@ pub mod icon {
     pub const REFERENCED_BY: &str = "icons/arrow-down-right.svg";
     pub const PRIMARY_KEY: &str = "icons/key.svg";
     pub const SETTINGS: &str = "icons/settings.svg";
-
-    /// An engine's brand logo. SQL Server's is a generic server glyph, because
-    /// Simple Icons carries no Microsoft logos.
-    pub fn engine(engine: Engine) -> &'static str {
-        match engine {
-            Engine::Postgres => "icons/engine-postgres.svg",
-            Engine::MySql => "icons/engine-mysql.svg",
-            Engine::MariaDb => "icons/engine-mariadb.svg",
-            Engine::Sqlite => "icons/engine-sqlite.svg",
-            Engine::Turso => "icons/engine-turso.svg",
-            Engine::Snowflake => "icons/engine-snowflake.svg",
-            Engine::SqlServer => "icons/engine-sqlserver.svg",
-            Engine::MongoDb => "icons/engine-mongodb.svg",
-            Engine::Redis => "icons/engine-redis.svg",
-        }
-    }
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -266,7 +248,7 @@ mod tests {
             assert_draws(path);
         }
         for engine in Engine::ALL {
-            assert_draws(icon::engine(engine));
+            assert_draws(engine.logo());
         }
     }
 

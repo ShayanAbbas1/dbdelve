@@ -197,11 +197,7 @@ impl Workspace {
                         .position(|name| Some(name) == databases.current.as_ref())
                 })
                 .unwrap_or_default(),
-            PaletteMode::Engine => self
-                .form
-                .as_ref()
-                .and_then(|form| Engine::ALL.iter().position(|&engine| engine == form.engine))
-                .unwrap_or_default(),
+            PaletteMode::Engine => crate::palette::active_engine_row(self).unwrap_or_default(),
             _ => 0,
         };
         let palette = Palette::new(mode, self, cx);
@@ -290,7 +286,7 @@ impl Workspace {
         }
         self.end_theme_preview(window, cx);
         if let Some(form) = self.form.as_mut() {
-            form.needs_focus = Some(form.url.clone());
+            form.needs_focus = Some(form.lead_field());
         } else {
             self.refocus_front();
         }

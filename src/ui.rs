@@ -80,7 +80,7 @@ pub(crate) fn row_icon_tinted(
     let brand = || {
         Engine::ALL
             .into_iter()
-            .find(|engine| icon::engine(*engine) == path)
+            .find(|engine| engine.logo() == path)
             .map_or(t.text_faint, |engine| theme::engine_brand(engine, t))
     };
     icon(path)

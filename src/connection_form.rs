@@ -92,10 +92,19 @@ pub(crate) struct ConnectionForm {
 }
 
 impl ConnectionForm {
+    /// The first field the form draws for its engine.
+    pub(crate) fn lead_field(&self) -> Entity<InputState> {
+        match self.engine.fields() {
+            Fields::Account => self.account.clone(),
+            _ => self.url.clone(),
+        }
+    }
+
     pub(crate) fn set_engine(&mut self, engine: Engine) {
-        // Only when the field set actually changes: Postgres and
-        // MySQL show the same fields, so switching between them
-        // takes nothing away and must not take focus either.
+        // Only when the field set actually changes: Postgres and MySQL show
+        // the same fields, so a switch between them leaves focus where the
+        // palette hands it back (the lead field). Only a change of field set
+        // moves it, to the new set's first field.
         if self.engine.fields() != engine.fields() {
             self.needs_focus = Some(match engine.fields() {
                 Fields::Server => self.host.clone(),

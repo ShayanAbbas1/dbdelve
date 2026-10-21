@@ -530,7 +530,7 @@ impl Workspace {
     pub(crate) fn engine_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let form = self.form.as_ref().expect("drawn only on the form");
         let t = *theme(cx);
-        let marker = row_icon(t, icon::engine(form.engine)).into_any_element();
+        let marker = row_icon(t, form.engine.logo()).into_any_element();
         Self::field_trigger("engine", Some(marker), form.engine.label().into(), cx)
             .on_click(cx.listener(|workspace, _, window, cx| {
                 workspace.open_palette(PaletteMode::Engine, window, cx);

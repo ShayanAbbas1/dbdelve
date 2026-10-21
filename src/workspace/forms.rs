@@ -1772,7 +1772,7 @@ impl Workspace {
                         .when(selected == Some(index), |row| row.bg(t.element_active))
                         .child(row_icon_tinted(
                             t,
-                            icon::engine(profile.config.engine()),
+                            profile.config.engine().logo(),
                             profile.color,
                         ))
                         .child(ui::status_dot(t, &profile.state))
@@ -2054,9 +2054,9 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
-        let active_icon = self.profile().map_or(icon::DATABASE, |profile| {
-            icon::engine(profile.config.engine())
-        });
+        let active_icon = self
+            .profile()
+            .map_or(icon::DATABASE, |profile| profile.config.engine().logo());
         let project_name = self.current_group().map(str::to_string);
         // While the panel is open its `on_mouse_down_out` already owns closing,
         // and it fires on the press. Carrying a click handler here too would

@@ -22,7 +22,7 @@ use nucleo_matcher::{
 };
 
 use crate::{
-    Workspace,
+    ConnectionColor, Workspace,
     db::{Engine, ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
@@ -30,7 +30,7 @@ use crate::{
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     theme::{FontSlot, Theme, fonts, install_theme, layout, theme, user},
-    ui::{chord_hint, object_icon, one_line, row_icon},
+    ui::{chord_hint, kind_color, object_icon, one_line, row_icon_tinted},
     workspace::opacity_for,
 };
 
@@ -168,6 +168,9 @@ struct Item {
     /// does the same job without the palette.
     hint: SharedString,
     icon: &'static str,
+    /// A connection's own colour, which wins over the icon's own, as in the
+    /// switcher.
+    color: Option<ConnectionColor>,
     command: Command,
 }
 
@@ -182,6 +185,7 @@ impl Item {
             label: label.to_string(),
             hint: hint.into(),
             icon,
+            color: None,
             command,
         }
     }
@@ -296,7 +300,11 @@ impl ListDelegate for Palette {
                         .gap(px(layout::SPACE_SM))
                         .w_full()
                         .min_w_0()
-                        .child(row_icon(t, item.icon))
+                        .child(row_icon_tinted(
+                            t,
+                            item.icon,
+                            item.color.or_else(|| kind_color(item.icon)),
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -370,6 +378,7 @@ fn jump_items(profile: &Profile) -> Vec<Item> {
         label: name.clone(),
         hint: "query".into(),
         icon: icon::SAVED_QUERY,
+        color: None,
         command: Command::OpenQuery(name.clone()),
     }));
 
@@ -390,6 +399,7 @@ fn jump_items(profile: &Profile) -> Vec<Item> {
                         label: format!("{}.{}", schema.name, relation.name),
                         hint: kind_label(kind).into(),
                         icon: object_icon(kind),
+                        color: None,
                         command: Command::OpenObject(ExplorerTarget::Relation {
                             schema_index,
                             relation_index,
@@ -408,6 +418,7 @@ fn jump_items(profile: &Profile) -> Vec<Item> {
                         label: format!("{}.{}", schema.name, routine_name(routine)),
                         hint: kind_label(kind).into(),
                         icon: object_icon(kind),
+                        color: None,
                         command: Command::OpenObject(ExplorerTarget::Routine {
                             schema_index,
                             routine_index,
@@ -434,6 +445,7 @@ fn column_items(profile: &Profile, cx: &App) -> Vec<Item> {
             label: column.name.clone(),
             hint: column.data_type.clone().unwrap_or_default().into(),
             icon: icon::STRUCTURE,
+            color: None,
             command: Command::RevealColumn(index),
         })
         .collect()
@@ -453,6 +465,7 @@ fn history_items(profile: &Profile) -> Vec<Item> {
             label: one_line(sql),
             hint: "".into(),
             icon: icon::HISTORY,
+            color: None,
             command: Command::RecallStatement(sql.clone()),
         })
         .collect()
@@ -485,6 +498,7 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
             }
             .into(),
             icon: icon::FONT,
+            color: None,
             command: Command::SetFont(slot, name.clone()),
             label: name,
         })
@@ -506,6 +520,7 @@ fn theme_items(cx: &App) -> Vec<Item> {
         }
         .into(),
         icon: icon::THEME,
+        color: None,
         command: Command::SetTheme(Box::new(candidate)),
     });
     let imports = user::Source::ALL.into_iter().map(|source| {
@@ -540,6 +555,7 @@ fn import_items(source: user::Source) -> Vec<Item> {
             }
             .into(),
             icon: icon::THEME,
+            color: None,
             command: Command::ImportTheme(source, index),
         })
         .collect()
@@ -565,6 +581,7 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             }
             .into(),
             icon: icon::DATABASE,
+            color: None,
             command: Command::SetDatabase(name.clone()),
         })
         .collect()
@@ -583,10 +600,19 @@ fn engine_items(workspace: &Workspace) -> Vec<Item> {
                 ""
             }
             .into(),
-            icon: icon::engine(engine),
+            icon: engine.logo(),
+            color: None,
             command: Command::SetEngine(engine),
         })
         .collect()
+}
+
+/// Where [`engine_items`] lists the form's current engine, for the palette to
+/// open on.
+pub(crate) fn active_engine_row(workspace: &Workspace) -> Option<usize> {
+    engine_items(workspace)
+        .iter()
+        .position(|item| item.hint.as_ref() == "current")
 }
 
 /// Where [`schema_items`] lists the active schema, for the palette to open on.
@@ -615,6 +641,7 @@ fn schema_items(profile: &Profile) -> Vec<Item> {
             }
             .into(),
             icon: icon::PROJECT,
+            color: None,
             command: Command::SetSchema(schema.name.clone()),
         })
         .collect()
@@ -943,7 +970,8 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             .map(|(index, other)| Item {
                 label: format!("Switch to {}", other.name),
                 hint: "".into(),
-                icon: icon::engine(other.config.engine()),
+                icon: other.config.engine().logo(),
+                color: other.color,
                 command: Command::SwitchProfile(index),
             }),
     );
