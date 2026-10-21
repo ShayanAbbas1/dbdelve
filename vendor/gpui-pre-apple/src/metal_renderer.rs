@@ -3,12 +3,14 @@ use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use core_graphics::geometry::CGSize;
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, PaintSurface,
+    Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
 use objc2::runtime::AnyObject;
+// dbdelve patch: backdrop blur.
+use objc2::{class, msg_send, rc::Retained};
 
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
@@ -38,6 +40,15 @@ const PATH_SAMPLE_COUNT: u32 = 4;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+
+// dbdelve patch: the backdrop blur's gaussian is Apple's MPSImageGaussianBlur.
+#[link(name = "MetalPerformanceShaders", kind = "framework")]
+unsafe extern "C" {}
+
+/// dbdelve patch: frames rendered without a backdrop blur before the scratch
+/// textures and kernels behind it are released. Long enough to ride out a
+/// popover closing and reopening, short enough to reclaim the memory soon.
+const SCRATCH_RELEASE_AFTER_FRAMES: u32 = 30;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 pub type Renderer = MetalRenderer;
@@ -124,6 +135,14 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    // dbdelve patch: backdrop blur. The scratch textures (a drawable snapshot
+    // and its blurred copy) are sized to the padded blur region, not the
+    // drawable, and kept in a small LRU alongside the gaussian kernels, so a
+    // frame with two blurs of different sizes or radii doesn't rebuild either.
+    backdrop_blur_pipeline_state: metal::RenderPipelineState,
+    backdrop_textures: Vec<BackdropTextures>,
+    backdrop_kernels: Vec<(f32, Retained<AnyObject>)>,
+    blur_free_frames: u32,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -136,6 +155,18 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+}
+
+// dbdelve patch: backdrop blur.
+struct BackdropTextures {
+    scratch: metal::Texture,
+    blurred: metal::Texture,
+}
+
+impl BackdropTextures {
+    fn bytes(&self) -> u64 {
+        self.scratch.width() * self.scratch.height() * 8
+    }
 }
 
 #[repr(C)]
@@ -360,6 +391,17 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         );
 
+        // dbdelve patch: blending is off, as the blur replaces its region with
+        // the blurred snapshot (fragments outside the rounded rect discard).
+        let backdrop_blur_pipeline_state = build_pipeline_state_no_blend(
+            &device,
+            &library,
+            "backdrop_blur",
+            "backdrop_blur_vertex",
+            "backdrop_blur_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
+
         let command_queue = device.new_command_queue();
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
@@ -399,6 +441,11 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            // dbdelve patch: backdrop blur.
+            backdrop_blur_pipeline_state,
+            backdrop_textures: Vec::new(),
+            backdrop_kernels: Vec::new(),
+            blur_free_frames: 0,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -504,6 +551,13 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        // dbdelve patch: a backdrop blur blits from the drawable, which Metal
+        // forbids on a framebuffer-only one. Readable drawables can cost the
+        // compositor some bandwidth, so they're only asked for from the first
+        // frame with a blur until its resources are released.
+        if !scene.backdrop_blurs.is_empty() && layer.framebuffer_only() {
+            layer.set_framebuffer_only(false);
+        }
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -721,6 +775,18 @@ impl MetalRenderer {
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
 
+        // dbdelve patch: the blur's scratch textures are only worth holding
+        // while they're in use. Releasing them with frames in flight is safe:
+        // command buffers retain the resources they reference.
+        if scene.backdrop_blurs.is_empty() {
+            self.blur_free_frames = self.blur_free_frames.saturating_add(1);
+            if self.blur_free_frames >= SCRATCH_RELEASE_AFTER_FRAMES {
+                self.release_backdrop_resources();
+            }
+        } else {
+            self.blur_free_frames = 0;
+        }
+
         let mut command_encoder = new_command_encoder_for_texture(
             command_buffer,
             texture,
@@ -728,7 +794,27 @@ impl MetalRenderer {
             Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
         );
 
+        // dbdelve patch: blurs interleave with the batches by draw order. Before
+        // the first batch at or above a blur's order, break the pass, snapshot
+        // what's been drawn, blur it and paint it back.
+        let mut pending_blurs = scene.backdrop_blurs.iter().enumerate().peekable();
         for batch in scene.batches() {
+            let batch_order = batch.first_order(scene);
+            while let Some((index, blur)) =
+                pending_blurs.next_if(|(_, blur)| blur.order <= batch_order)
+            {
+                command_encoder.end_encoding();
+                self.draw_backdrop_blur(
+                    index,
+                    blur,
+                    instance_bindings,
+                    texture,
+                    viewport_size,
+                    command_buffer,
+                );
+                command_encoder =
+                    new_command_encoder_for_texture(command_buffer, texture, viewport_size, None);
+            }
             match batch {
                 PrimitiveBatch::Shadows(range) => {
                     self.draw_shadows(range, instance_bindings, viewport_size, command_encoder)
@@ -799,6 +885,260 @@ impl MetalRenderer {
         command_encoder.end_encoding();
 
         Ok(command_buffer.to_owned())
+    }
+
+    /// dbdelve patch: snapshot the drawable beneath `blur`, gaussian-blur it
+    /// and paint it back inside the blur's rounded bounds, in a render pass of
+    /// its own. The caller ends its encoder first and opens a new one after.
+    fn draw_backdrop_blur(
+        &mut self,
+        index: usize,
+        blur: &BackdropBlur,
+        instance_bindings: &InstanceBindings,
+        texture: &metal::TextureRef,
+        viewport_size: Size<DevicePixels>,
+        command_buffer: &metal::CommandBufferRef,
+    ) {
+        // Only the visible (clipped) bounds are ever sampled, and the gaussian
+        // reaches about 3 sigma past a sampled pixel, so the snapshot needs
+        // just that padded region rather than the whole drawable.
+        let sigma = blur.blur_radius.0.max(1.0);
+        let padding = (sigma * 3.0).ceil() + 2.0;
+        let visible = blur.bounds.intersect(&blur.content_mask.bounds);
+        let drawable_width = texture.width() as i64;
+        let drawable_height = texture.height() as i64;
+        let x0 = ((visible.origin.x.0 - padding).floor() as i64).max(0);
+        let y0 = ((visible.origin.y.0 - padding).floor() as i64).max(0);
+        let x1 = ((visible.origin.x.0 + visible.size.width.0 + padding).ceil() as i64)
+            .min(drawable_width);
+        let y1 = ((visible.origin.y.0 + visible.size.height.0 + padding).ceil() as i64)
+            .min(drawable_height);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (scratch, blurred) = self.ensure_backdrop_scratch(
+            (x1 - x0) as u64,
+            (y1 - y0) as u64,
+            drawable_width as u64,
+            drawable_height as u64,
+            texture.pixel_format(),
+        );
+        // Fill the entire scratch texture, shifting the copy window back inside
+        // the drawable where needed: its edges then always hold real content,
+        // so the gaussian's clamped edges don't bleed in a dark vignette, and a
+        // texture edge meets the window edge only where the blur region does.
+        let copy_x = x0.min(drawable_width - scratch.width() as i64).max(0) as u64;
+        let copy_y = y0.min(drawable_height - scratch.height() as i64).max(0) as u64;
+        let blit = command_buffer.new_blit_command_encoder();
+        blit.copy_from_texture(
+            texture,
+            0,
+            0,
+            metal::MTLOrigin {
+                x: copy_x,
+                y: copy_y,
+                z: 0,
+            },
+            metal::MTLSize {
+                width: scratch.width(),
+                height: scratch.height(),
+                depth: 1,
+            },
+            &scratch,
+            0,
+            0,
+            metal::MTLOrigin { x: 0, y: 0, z: 0 },
+        );
+        blit.end_encoding();
+
+        let kernel = self.ensure_gaussian_kernel(sigma);
+        // Safety: the metal-rs wrappers own live Objective-C objects of the
+        // protocol types MPS expects.
+        unsafe {
+            let command_buffer = &*command_buffer.as_ptr().cast::<AnyObject>();
+            let scratch = &*scratch.as_ptr().cast::<AnyObject>();
+            let blurred = &*blurred.as_ptr().cast::<AnyObject>();
+            let _: () = msg_send![
+                &*kernel,
+                encodeToCommandBuffer: command_buffer,
+                sourceTexture: scratch,
+                destinationTexture: blurred,
+            ];
+        }
+
+        let command_encoder =
+            new_command_encoder_for_texture(command_buffer, texture, viewport_size, None);
+        let source_rect = [
+            copy_x as f32,
+            copy_y as f32,
+            scratch.width() as f32,
+            scratch.height() as f32,
+        ];
+        command_encoder.set_render_pipeline_state(&self.backdrop_blur_pipeline_state);
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::Vertices as u64,
+            Some(&self.unit_vertices),
+            0,
+        );
+        command_encoder.set_vertex_buffer(
+            BackdropBlurInputIndex::Blurs as u64,
+            Some(&instance_bindings.backdrop_blurs.buffer),
+            instance_bindings.backdrop_blurs.offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            BackdropBlurInputIndex::Blurs as u64,
+            Some(&instance_bindings.backdrop_blurs.buffer),
+            instance_bindings.backdrop_blurs.offset as u64,
+        );
+        command_encoder.set_vertex_bytes(
+            BackdropBlurInputIndex::ViewportSize as u64,
+            mem::size_of_val(&viewport_size) as u64,
+            &viewport_size as *const Size<DevicePixels> as *const _,
+        );
+        command_encoder.set_fragment_bytes(
+            BackdropBlurInputIndex::SourceRect as u64,
+            mem::size_of_val(&source_rect) as u64,
+            source_rect.as_ptr() as *const _,
+        );
+        command_encoder
+            .set_fragment_texture(BackdropBlurInputIndex::SourceTexture as u64, Some(&blurred));
+        command_encoder.draw_primitives_instanced_base_instance(
+            metal::MTLPrimitiveType::Triangle,
+            0,
+            6,
+            1,
+            index as u64,
+        );
+        command_encoder.end_encoding();
+    }
+
+    /// dbdelve patch: the backdrop blur's scratch textures, sized to the padded
+    /// blur region. Extents are rounded up to 64px and matched exactly, and at
+    /// most four pairs or 32 MiB (or one oversized pair) are kept. A pair is
+    /// only reused while it fits the drawable: the blit always fills the whole
+    /// texture, which is what keeps reuse free of stale texels.
+    fn ensure_backdrop_scratch(
+        &mut self,
+        needed_width: u64,
+        needed_height: u64,
+        drawable_width: u64,
+        drawable_height: u64,
+        format: MTLPixelFormat,
+    ) -> (metal::Texture, metal::Texture) {
+        const QUANTUM: u64 = 64;
+        let width = (needed_width.div_ceil(QUANTUM) * QUANTUM).min(drawable_width);
+        let height = (needed_height.div_ceil(QUANTUM) * QUANTUM).min(drawable_height);
+        self.backdrop_textures.retain(|pair| {
+            pair.scratch.width() <= drawable_width
+                && pair.scratch.height() <= drawable_height
+                && pair.scratch.pixel_format() == format
+        });
+        if let Some(index) = self
+            .backdrop_textures
+            .iter()
+            .position(|pair| pair.scratch.width() == width && pair.scratch.height() == height)
+        {
+            let pair = self.backdrop_textures.remove(index);
+            self.backdrop_textures.push(pair);
+        } else {
+            let needed = width * height * 8;
+            let budget = (drawable_width * drawable_height * 16)
+                .min(32 * 1024 * 1024)
+                .max(needed);
+            while !self.backdrop_textures.is_empty()
+                && (self.backdrop_textures.len() >= 4
+                    || self
+                        .backdrop_textures
+                        .iter()
+                        .map(BackdropTextures::bytes)
+                        .sum::<u64>()
+                        + needed
+                        > budget)
+            {
+                self.backdrop_textures.remove(0);
+            }
+            let descriptor = metal::TextureDescriptor::new();
+            descriptor.set_texture_type(metal::MTLTextureType::D2);
+            descriptor.set_pixel_format(format);
+            descriptor.set_width(width);
+            descriptor.set_height(height);
+            descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+            descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+            let scratch = self.device.new_texture(&descriptor);
+            // The gaussian kernel writes its output from a compute pass.
+            descriptor.set_usage(
+                metal::MTLTextureUsage::ShaderRead | metal::MTLTextureUsage::ShaderWrite,
+            );
+            let blurred = self.device.new_texture(&descriptor);
+            self.backdrop_textures
+                .push(BackdropTextures { scratch, blurred });
+        }
+        // A smaller drawable can hit an existing extent while lowering the
+        // budget, so enforce it on hits as well as allocations.
+        let budget = (drawable_width * drawable_height * 16)
+            .min(32 * 1024 * 1024)
+            .max(width * height * 8);
+        while self.backdrop_textures.len() > 1
+            && self
+                .backdrop_textures
+                .iter()
+                .map(BackdropTextures::bytes)
+                .sum::<u64>()
+                > budget
+        {
+            self.backdrop_textures.remove(0);
+        }
+        let pair = self.backdrop_textures.last().unwrap();
+        (pair.scratch.clone(), pair.blurred.clone())
+    }
+
+    // dbdelve patch: backdrop blur.
+    fn release_backdrop_resources(&mut self) {
+        self.backdrop_textures.clear();
+        self.backdrop_kernels.clear();
+        // Debug test-support builds keep drawables readable for screenshots.
+        #[cfg(not(all(feature = "test-support", debug_assertions)))]
+        if let Some(layer) = &self.layer
+            && !layer.framebuffer_only()
+        {
+            layer.set_framebuffer_only(true);
+        }
+    }
+
+    /// dbdelve patch: the cached `MPSImageGaussianBlur` for `sigma` (device
+    /// pixels), from an LRU of four: a popover and a menu open together blur
+    /// with different radii in the same frame.
+    fn ensure_gaussian_kernel(&mut self, sigma: f32) -> Retained<AnyObject> {
+        if let Some(index) = self
+            .backdrop_kernels
+            .iter()
+            .position(|(cached, _)| (*cached - sigma).abs() < 0.01)
+        {
+            let entry = self.backdrop_kernels.remove(index);
+            let kernel = entry.1.clone();
+            self.backdrop_kernels.push(entry);
+            return kernel;
+        }
+        if self.backdrop_kernels.len() >= 4 {
+            self.backdrop_kernels.remove(0);
+        }
+        // Safety: MPSImageGaussianBlur's designated initializer, given the live
+        // device this renderer draws with.
+        let kernel: Retained<AnyObject> = unsafe {
+            let device = &*self.device.as_ptr().cast::<AnyObject>();
+            let kernel: Option<Retained<AnyObject>> = msg_send![
+                msg_send![class!(MPSImageGaussianBlur), alloc],
+                initWithDevice: device,
+                sigma: sigma,
+            ];
+            let kernel = kernel.expect("failed to create MPSImageGaussianBlur");
+            // MPSImageEdgeModeClamp: the default, MPSImageEdgeModeZero, bleeds
+            // transparent black into blurs near the window's edge.
+            let _: () = msg_send![&*kernel, setEdgeMode: 1usize];
+            kernel
+        };
+        self.backdrop_kernels.push((sigma, kernel.clone()));
+        kernel
     }
 
     fn draw_paths_to_intermediate(
@@ -1376,6 +1716,35 @@ fn build_pipeline_state(
         .expect("could not create render pipeline state")
 }
 
+// dbdelve patch: backdrop blur.
+fn build_pipeline_state_no_blend(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(false);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
 fn build_path_sprite_pipeline_state(
     device: &metal::DeviceRef,
     library: &metal::LibraryRef,
@@ -1463,6 +1832,8 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
     surfaces: InstanceBinding,
+    // dbdelve patch: backdrop blur.
+    backdrop_blurs: InstanceBinding,
 }
 
 fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
@@ -1476,6 +1847,8 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
             bounds: surface.bounds,
             content_mask: surface.content_mask,
         }))?,
+        // dbdelve patch: backdrop blur.
+        backdrop_blurs: writer.write(&scene.backdrop_blurs)?,
     })
 }
 
@@ -1650,6 +2023,18 @@ enum SurfaceInputIndex {
     CbCrTexture = 5,
 }
 
+// dbdelve patch: backdrop blur.
+#[repr(C)]
+enum BackdropBlurInputIndex {
+    Vertices = 0,
+    Blurs = 1,
+    ViewportSize = 2,
+    SourceTexture = 3,
+    /// The drawable rect the snapshot covers (x, y, width, height in device
+    /// pixels), which maps a fragment's position to snapshot UV.
+    SourceRect = 4,
+}
+
 #[repr(C)]
 enum PathRasterizationInputIndex {
     Vertices = 0,
@@ -1775,5 +2160,261 @@ mod tests {
             assert!(blue.abs_diff(128) <= 2);
             assert_eq!(*alpha, 255);
         }
+    }
+}
+
+// dbdelve patch: backdrop-blur rendering tests, ported from zui.
+#[cfg(test)]
+mod backdrop_blur_tests {
+    use super::*;
+    use gpui::{Corners, Edges, Hsla, Quad, Shadow, solid_background, transparent_black};
+
+    const VIEW_W: i32 = 640;
+    const VIEW_H: i32 = 480;
+
+    fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: size(ScaledPixels(w), ScaledPixels(h)),
+        }
+    }
+
+    fn viewport() -> Bounds<ScaledPixels> {
+        bounds(0., 0., VIEW_W as f32, VIEW_H as f32)
+    }
+
+    fn push_quad(scene: &mut Scene, b: Bounds<ScaledPixels>, lightness: f32) {
+        scene.insert_primitive(Quad {
+            order: 0,
+            border_style: Default::default(),
+            bounds: b,
+            content_mask: ContentMask { bounds: viewport() },
+            background: solid_background(Hsla {
+                h: 0.,
+                s: 0.,
+                l: lightness,
+                a: 1.,
+            }),
+            border_color: transparent_black(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        });
+    }
+
+    /// A per-column (or per-row) linear luminance ramp. A gaussian blur of a
+    /// linear ramp is the same ramp, so a misaligned snapshot region or UV
+    /// mapping shows up as a shifted value.
+    fn push_gradient(scene: &mut Scene, horizontal: bool) {
+        const STEP: f32 = 2.0;
+        let extent = if horizontal { VIEW_W } else { VIEW_H } as f32;
+        let n = (extent / STEP) as i32;
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            let b = if horizontal {
+                bounds(i as f32 * STEP, 0., STEP, VIEW_H as f32)
+            } else {
+                bounds(0., i as f32 * STEP, VIEW_W as f32, STEP)
+            };
+            push_quad(scene, b, 0.15 + 0.7 * t);
+        }
+    }
+
+    /// Mimics `Window::paint_backdrop_blur` inside a layer: the transparent
+    /// shadow splitter shares the blur's order and forces the batch boundary
+    /// the renderer breaks its pass at.
+    fn push_blur(scene: &mut Scene, blur_bounds: Bounds<ScaledPixels>, radius: f32) {
+        scene.push_layer(blur_bounds);
+        scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(0.),
+            bounds: blur_bounds,
+            corner_radii: Corners::default(),
+            content_mask: ContentMask { bounds: viewport() },
+            color: transparent_black(),
+            element_bounds: blur_bounds,
+            element_corner_radii: Corners::default(),
+            inset: 0,
+            pad: 0,
+        });
+        scene.insert_backdrop_blur(BackdropBlur {
+            order: 0,
+            blur_radius: ScaledPixels(radius),
+            bounds: blur_bounds,
+            content_mask: ContentMask { bounds: viewport() },
+            corner_radii: Corners::default(),
+        });
+        scene.pop_layer();
+    }
+
+    fn render(scene: &mut Scene) -> RgbaImage {
+        scene.finish();
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        renderer
+            .render_scene_to_image(scene, size(DevicePixels(VIEW_W), DevicePixels(VIEW_H)))
+            .expect("render_scene_to_image failed")
+    }
+
+    fn max_abs_diff(a: &RgbaImage, b: &RgbaImage, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+        let mut max = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let pa = a.get_pixel(x, y);
+                let pb = b.get_pixel(x, y);
+                for c in 0..3 {
+                    max = max.max((pa[c] as i32 - pb[c] as i32).unsigned_abs());
+                }
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn blur_preserves_linear_gradient() {
+        let mut base = Scene::default();
+        push_gradient(&mut base, true);
+        let a = render(&mut base);
+
+        let mut scene = Scene::default();
+        push_gradient(&mut scene, true);
+        push_blur(&mut scene, bounds(200., 150., 200., 120.), 20.);
+        let b = render(&mut scene);
+
+        // Untouched above the blur region.
+        assert_eq!(max_abs_diff(&a, &b, 0, 0, VIEW_W as u32, 140), 0);
+        // Inside it, inset past the edge, the ramp survives the blur.
+        let diff = max_abs_diff(&a, &b, 208, 158, 392, 262);
+        assert!(diff <= 3, "gradient shifted under blur: max diff {diff}");
+    }
+
+    #[test]
+    fn blur_actually_blurs_sharp_edges() {
+        let mut scene = Scene::default();
+        push_quad(&mut scene, bounds(0., 0., 320., VIEW_H as f32), 0.);
+        push_quad(&mut scene, bounds(320., 0., 320., VIEW_H as f32), 1.);
+        push_blur(&mut scene, bounds(260., 180., 120., 120.), 16.);
+        let b = render(&mut scene);
+
+        // The black/white boundary inside the blur smears to about mid-grey.
+        let p = b.get_pixel(320, 240);
+        assert!(
+            (80..=176).contains(&p[0]),
+            "expected smeared edge, got {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn blur_flush_against_window_edge_has_no_vignette() {
+        let mut base = Scene::default();
+        push_gradient(&mut base, false);
+        let a = render(&mut base);
+
+        // The gradient is vertical, so clamping the horizontal edge must not
+        // change any value; a zero edge mode would darken the left columns.
+        let mut scene = Scene::default();
+        push_gradient(&mut scene, false);
+        push_blur(&mut scene, bounds(0., 160., 160., 160.), 20.);
+        let b = render(&mut scene);
+
+        let diff = max_abs_diff(&a, &b, 0, 168, 152, 312);
+        assert!(
+            diff <= 3,
+            "vignette or shift at window edge: max diff {diff}"
+        );
+    }
+
+    #[test]
+    fn two_blurs_of_different_sizes_in_one_frame() {
+        let mut base = Scene::default();
+        push_gradient(&mut base, true);
+        let a = render(&mut base);
+
+        // The second, larger region needs new scratch textures mid-frame while
+        // the first draw still references the old pair.
+        let mut scene = Scene::default();
+        push_gradient(&mut scene, true);
+        push_blur(&mut scene, bounds(40., 40., 120., 100.), 12.);
+        push_blur(&mut scene, bounds(300., 200., 260., 200.), 24.);
+        let b = render(&mut scene);
+
+        let diff1 = max_abs_diff(&a, &b, 48, 48, 152, 132);
+        let diff2 = max_abs_diff(&a, &b, 308, 208, 552, 392);
+        assert!(
+            diff1 <= 3 && diff2 <= 3,
+            "blur regions shifted: {diff1} / {diff2}"
+        );
+    }
+
+    #[test]
+    fn repeated_blurs_reuse_resources_and_release_them_when_idle() {
+        objc2::rc::autoreleasepool(|_| {
+            let mut renderer =
+                MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+            let dimensions = size(DevicePixels(VIEW_W), DevicePixels(VIEW_H));
+            let mut scene = Scene::default();
+            push_gradient(&mut scene, true);
+            push_blur(&mut scene, bounds(20., 370., 580., 80.), 16.);
+            push_blur(&mut scene, bounds(80., 20., 180., 360.), 44.);
+            // Foreground content, like a popover's labels.
+            push_quad(&mut scene, bounds(100., 100., 1., 1.), 1.);
+            scene.finish();
+            let resources = |renderer: &MetalRenderer| {
+                let textures: Vec<_> = renderer
+                    .backdrop_textures
+                    .iter()
+                    .map(|pair| pair.scratch.as_ptr())
+                    .collect();
+                let kernels: Vec<_> = renderer
+                    .backdrop_kernels
+                    .iter()
+                    .map(|(_, kernel)| Retained::as_ptr(kernel))
+                    .collect();
+                (textures, kernels)
+            };
+            let first = renderer.render_scene_to_image(&scene, dimensions).unwrap();
+            let cached = resources(&renderer);
+            assert_eq!(cached.0.len(), 2);
+            assert_eq!(cached.1.len(), 2);
+            for _ in 0..4 {
+                let warm = renderer.render_scene_to_image(&scene, dimensions).unwrap();
+                assert_eq!(first, warm, "cache reuse must preserve every pixel");
+                assert_eq!(cached, resources(&renderer));
+            }
+
+            let mut plain = Scene::default();
+            push_gradient(&mut plain, true);
+            plain.finish();
+            for _ in 0..SCRATCH_RELEASE_AFTER_FRAMES {
+                renderer.render_scene_to_image(&plain, dimensions).unwrap();
+            }
+            assert!(renderer.backdrop_textures.is_empty());
+            assert!(renderer.backdrop_kernels.is_empty());
+        });
+    }
+
+    #[test]
+    fn backdrop_cache_is_bounded_across_sizes_and_window_shrink() {
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        for side in (256..=3072).step_by(256) {
+            renderer.ensure_backdrop_scratch(side, side, 4096, 4096, MTLPixelFormat::BGRA8Unorm);
+            assert!(renderer.backdrop_textures.len() <= 4);
+            let bytes: u64 = renderer
+                .backdrop_textures
+                .iter()
+                .map(BackdropTextures::bytes)
+                .sum();
+            assert!(bytes <= (32 * 1024 * 1024).max(side * side * 8));
+            renderer.ensure_gaussian_kernel(side as f32 / 64.);
+            assert!(renderer.backdrop_kernels.len() <= 4);
+        }
+        renderer.ensure_backdrop_scratch(120, 100, 640, 480, MTLPixelFormat::BGRA8Unorm);
+        assert!(
+            renderer
+                .backdrop_textures
+                .iter()
+                .all(|pair| pair.scratch.width() <= 640 && pair.scratch.height() <= 480)
+        );
     }
 }

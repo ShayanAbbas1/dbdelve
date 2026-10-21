@@ -63,6 +63,9 @@ mod apple_build {
             "SurfaceInputIndex".into(),
             "SurfaceBounds".into(),
             "TransformationMatrix".into(),
+            // dbdelve patch: backdrop blur.
+            "BackdropBlurInputIndex".into(),
+            "BackdropBlur".into(),
         ]);
         config.no_includes = true;
         config.enumeration.prefix_with_name = true;
@@ -101,7 +104,9 @@ mod apple_build {
     /// build-script runtime against this crate's manifest dir, so no checkout
     /// path is baked into a compiled artifact (which corgi rejects).
     fn find_gpui_crate_dir() -> PathBuf {
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor/gpui")
+        // dbdelve patch: read the vendored gpui-pre beside this crate, which
+        // carries the backdrop-blur types, instead of the copy under `vendor/gpui`.
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../gpui-pre")
     }
 
     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header
