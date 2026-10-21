@@ -335,7 +335,15 @@ winresource = "=0.1.31"
 # desktop's light and goes grey. Opaque windows keep alpha at 1 either way, and
 # Linux's wgpu renderer already composites alpha correctly. Drop these once
 # upstream composites alpha with `over`; re-apply the lines on a gpui bump.
+#
+# gpui-pre itself is vendored for a backdrop blur ported from zui, the gpui fork
+# behind Zeron: `Window::paint_backdrop_blur` and the `backdrop_blur` style,
+# which frost whatever a popover is painted over. The scene records the blur
+# regions and the Metal renderer draws them; Windows and Linux ignore them and
+# show the popover's own fill. Every change is marked `dbdelve patch`, in
+# gpui-pre and gpui-pre-apple alike; re-apply them on a gpui bump.
 [patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 
