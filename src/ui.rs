@@ -289,14 +289,40 @@ pub(crate) fn dialog(t: Theme) -> gpui::Div {
         .flex()
         .flex_col()
         .gap(px(layout::SPACE_MD))
-        .bg(t.overlay_glass())
-        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
         .border_1()
         .border_color(t.border_strong)
         .rounded(px(layout::RADIUS_PANEL))
-        // None under frost: GPUI paints a drop shadow as a filled rect under
-        // the whole card, so through the tint it would darken the frost itself.
-        .when(!t.is_glass, |card| card.shadow_lg())
+        .map(|card| raised_card(card, t))
+}
+
+/// A floating card's fill, frosted when it lets the window through. Decided by
+/// the fill, as gpui-component decides for its own popups, rather than by
+/// `is_glass`: a glass theme whose text only a solid card can hold gets a solid
+/// one, and it is drawn the way every menu beside it is.
+pub(crate) fn frosted_card<E: Styled>(card: E, t: Theme) -> E {
+    let fill = t.overlay_glass();
+    let card = card.bg(fill);
+    if frosts(fill) {
+        card.backdrop_blur(POPOVER_BLUR)
+    } else {
+        card
+    }
+}
+
+/// [`frosted_card`], with a shadow when it is solid. None under frost: GPUI
+/// paints a drop shadow as a filled rect under the whole card, so through the
+/// tint it would darken the frost itself.
+pub(crate) fn raised_card<E: Styled>(card: E, t: Theme) -> E {
+    let card = frosted_card(card, t);
+    if frosts(t.overlay_glass()) {
+        card
+    } else {
+        card.shadow_lg()
+    }
+}
+
+fn frosts(fill: theme::color::Rgba) -> bool {
+    fill.a < 1.0
 }
 
 /// What a button's fill says. Colour is state here as everywhere else: a dbdelve

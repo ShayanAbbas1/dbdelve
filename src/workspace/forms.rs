@@ -3,7 +3,6 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
-use gpui_component::POPOVER_BLUR;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
@@ -939,13 +938,10 @@ impl Workspace {
                         // list grows downwards from a fixed line.
                         .mt(px(layout::TITLEBAR_HEIGHT * 2.))
                         .w(px(layout::PALETTE_WIDTH))
-                        .bg(t.overlay_glass())
-                        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
                         .border_1()
                         .border_color(t.border_strong)
                         .rounded(px(layout::RADIUS_PANEL))
-                        // See `ui::dialog`.
-                        .when(!t.is_glass, |card| card.shadow_lg())
+                        .map(|card| raised_card(card, t))
                         .overflow_hidden()
                         .child(
                             List::new(list)
@@ -1024,8 +1020,7 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .rounded(px(layout::RADIUS_CONTROL))
-                        .bg(t.overlay_glass())
-                        .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
+                        .map(|card| frosted_card(card, t))
                         .border_1()
                         .border_color(t.border)
                         .children(rows)
@@ -1994,13 +1989,10 @@ impl Workspace {
                 .left_0()
                 .w(px(layout::SWITCHER_WIDTH))
                 .p(px(layout::SPACE_XS))
-                .bg(t.overlay_glass())
-                .when(t.is_glass, |card| card.backdrop_blur(POPOVER_BLUR))
                 .border_1()
                 .border_color(t.border_strong)
                 .rounded(px(layout::RADIUS_PANEL))
-                // See `ui::dialog`.
-                .when(!t.is_glass, |card| card.shadow_lg())
+                .map(|card| raised_card(card, t))
                 .flex()
                 .flex_col()
                 .children(self.connection_search.as_ref().map(|input| {
