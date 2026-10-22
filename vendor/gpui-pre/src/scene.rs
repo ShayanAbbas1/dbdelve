@@ -91,6 +91,11 @@ impl Scene {
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
+    // dbdelve patch: lets a backdrop blur tell whether it paints inside a layer.
+    pub(crate) fn in_layer(&self) -> bool {
+        !self.layer_stack.is_empty()
+    }
+
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
         let clipped_bounds = primitive
@@ -146,8 +151,9 @@ impl Scene {
     }
 
     /// dbdelve patch: a blur takes the order of the layer it's painted in, so
-    /// one [`crate::Window::paint_layer`] per frosted panel keeps the blur and
-    /// everything painted over it in one draw order, above the content below.
+    /// a [`crate::Window::paint_layer`] around the blur gives it (and its
+    /// splitter) one order above the content below; whatever is painted over
+    /// it afterwards is ordered above that by the bounds tree.
     pub fn insert_backdrop_blur(&mut self, mut blur: BackdropBlur) {
         let clipped_bounds = blur.bounds.intersect(&blur.content_mask.bounds);
         if clipped_bounds.is_empty() {

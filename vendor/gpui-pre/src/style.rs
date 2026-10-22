@@ -698,17 +698,30 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
-        // dbdelve patch: a frosted element paints in a layer of its own, so the
-        // blur and everything the element paints over it -- shadows, fill,
-        // border, children -- share one draw order. The blur then runs right
-        // before that content, and nothing the element paints (a row repainted
-        // on hover, say) can sort below the blur and be frosted over.
+        // dbdelve patch: only the blur gets a layer of its own. Its order lands
+        // above everything already painted beneath the element, and the bounds
+        // tree orders whatever the element paints next -- shadows, fill,
+        // border, children -- above it. Wrapping the whole element in that
+        // layer would flatten its subtree into one draw order, within which
+        // primitives draw grouped by kind and any nested layer (every text
+        // line opens one) draws over whatever is painted after it.
+        //
+        // Inside an enclosing layer every primitive takes that layer's order,
+        // which a blur-only layer would sit above, frosting over the element's
+        // own content. There the element shares the blur's layer instead.
         if let Some(blur_radius) = self.backdrop_blur.filter(|_| !bounds.is_empty()) {
-            window.paint_layer(bounds, |window| {
-                let corner_radii = self.paint_corner_radii(bounds, window);
-                window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
+            let corner_radii = self.paint_corner_radii(bounds, window);
+            if window.next_frame.scene.in_layer() {
+                window.paint_layer(bounds, |window| {
+                    window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
+                    self.paint_unfrosted(bounds, window, cx, continuation);
+                });
+            } else {
+                window.paint_layer(bounds, |window| {
+                    window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
+                });
                 self.paint_unfrosted(bounds, window, cx, continuation);
-            });
+            }
         } else {
             self.paint_unfrosted(bounds, window, cx, continuation);
         }
@@ -1562,5 +1575,158 @@ mod tests {
             Some(FontWeight::SEMIBOLD),
             style.text_style().unwrap().font_weight
         );
+    }
+}
+
+// dbdelve patch: draw-order tests for a frosted element.
+#[cfg(test)]
+mod backdrop_blur_tests {
+    use crate::{
+        AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, DrawOrder, Element, GlobalElementId,
+        Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Render,
+        Styled as _, TestAppContext, Window, blue, canvas, div, fill, px, red, rgb, rgba,
+    };
+
+    const BACKDROP: u32 = 0x808080;
+    const CARD: u32 = 0xffffff40;
+
+    /// Paints its child inside a layer of its own.
+    struct Layered(AnyElement);
+
+    impl IntoElement for Layered {
+        type Element = Self;
+
+        fn into_element(self) -> Self {
+            self
+        }
+    }
+
+    impl Element for Layered {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<crate::ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, ()) {
+            (self.0.request_layout(window, cx), ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            _: Bounds<Pixels>,
+            _: &mut (),
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            self.0.prepaint(window, cx);
+        }
+
+        fn paint(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            bounds: Bounds<Pixels>,
+            _: &mut (),
+            _: &mut (),
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            window.paint_layer(bounds, |window| self.0.paint(window, cx));
+        }
+    }
+
+    struct FrostedCard {
+        in_enclosing_layer: bool,
+    }
+
+    impl Render for FrostedCard {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let card = div()
+                .absolute()
+                .left(px(20.))
+                .top(px(20.))
+                .size(px(60.))
+                .bg(rgba(CARD))
+                .backdrop_blur(px(16.))
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        |bounds, _, window, _| {
+                            // Like a text line: paints inside a nested layer.
+                            window.paint_layer(bounds, |window| {
+                                window.paint_quad(fill(bounds, red()));
+                            });
+                            window.paint_quad(fill(bounds, blue()));
+                        },
+                    )
+                    .size_full(),
+                );
+            let content = if self.in_enclosing_layer {
+                Layered(div().size_full().bg(rgb(BACKDROP)).child(card).into_any_element())
+                    .into_any_element()
+            } else {
+                div().size_full().bg(rgb(BACKDROP)).child(card).into_any_element()
+            };
+            div().size_full().child(content)
+        }
+    }
+
+    fn paint(cx: &mut TestAppContext, in_enclosing_layer: bool) -> (DrawOrder, Vec<(Hsla, u32)>) {
+        let window = cx.add_window(move |_, _| FrostedCard { in_enclosing_layer });
+        let window = AnyWindowHandle::from(window);
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let scene = &window.rendered_frame.scene;
+            assert_eq!(scene.backdrop_blurs.len(), 1);
+            let quads = scene
+                .quads
+                .iter()
+                .map(|quad| (quad.background.solid, quad.order))
+                .collect();
+            (scene.backdrop_blurs[0].order, quads)
+        })
+        .unwrap()
+    }
+
+    fn order_of(quads: &[(Hsla, u32)], color: impl Into<Hsla>) -> DrawOrder {
+        let color = color.into();
+        quads
+            .iter()
+            .find(|(solid, _)| *solid == color)
+            .unwrap_or_else(|| panic!("no quad painted in {color:?}"))
+            .1
+    }
+
+    #[crate::test]
+    fn frosted_element_keeps_its_paint_order(cx: &mut TestAppContext) {
+        let (blur, quads) = paint(cx, false);
+        assert!(order_of(&quads, rgb(BACKDROP)) < blur, "the blur sees the backdrop");
+        assert!(blur < order_of(&quads, rgba(CARD)), "the fill draws over the blur");
+        assert!(
+            order_of(&quads, red()) < order_of(&quads, blue()),
+            "a quad painted after a nested layer draws over it"
+        );
+    }
+
+    #[crate::test]
+    fn frosted_element_in_an_enclosing_layer_draws_over_its_blur(cx: &mut TestAppContext) {
+        let (blur, quads) = paint(cx, true);
+        assert!(order_of(&quads, rgb(BACKDROP)) < blur, "the blur sees the backdrop");
+        assert!(blur <= order_of(&quads, rgba(CARD)), "the fill draws over the blur");
+        assert!(blur <= order_of(&quads, blue()), "children draw over the blur");
     }
 }

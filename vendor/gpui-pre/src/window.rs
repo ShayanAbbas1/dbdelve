@@ -4640,9 +4640,11 @@ impl Window {
     /// sigma. Every renderer (Metal, DirectX, wgpu) draws blurs; keep a
     /// translucent fill over it, through which the blur shows.
     ///
-    /// A blur takes its layer's draw order: give each frosted panel its own
-    /// [`Self::paint_layer`], so the blur captures what lies beneath its order
-    /// and the panel's own contents land above it.
+    /// A blur takes its layer's draw order: paint it in a [`Self::paint_layer`]
+    /// of its own, so it captures what lies beneath that order, and paint the
+    /// panel's contents after that layer, where the bounds tree orders them
+    /// above it. Inside an enclosing layer, where everything shares one order,
+    /// the panel's contents must go in the blur's layer instead.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_backdrop_blur(
