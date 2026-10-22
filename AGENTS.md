@@ -1552,6 +1552,11 @@ second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
 opens it on Objects, `cmd+shift+p` on Commands and the titlebar's project or
 connection on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
+`tab` and `shift-tab` step through the scopes, and so do `right` and `left`
+once the caret sits bare at the end or the start of the field, an empty one
+included (`palette::arrow`). Anywhere else, and in every picker, the arrows
+are the field's own: the palette's handler propagates, and GPUI hands the
+keystroke to the next binding in line, the input's caret movement.
 A palette open while the catalog loads says so on Objects, and takes the
 objects in when they land (`Workspace::catalog_landed`). One opened from the
 settings panel, or put up by a row confirmed there, hands the keyboard back to

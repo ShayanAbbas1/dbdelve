@@ -29,11 +29,11 @@ use crate::{
         ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, ImportConnections,
         ImportRows, NewConnection, NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile,
         NextTab, OpenSettings, PaletteNext, PaletteNextScope, PalettePrevious,
-        PalettePreviousScope, PaletteRowActions, PreviousEdit, PreviousPage, PreviousProfile,
-        PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom, RunQuery,
-        SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor,
-        SwitchConnection, ToggleComment, ToggleNextJoin, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight, PreviousEdit,
+        PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+        ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
+        SetNull, ShowEditor, SwitchConnection, ToggleComment, ToggleNextJoin, ToggleRowEdit,
+        ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -143,6 +143,10 @@ registry! {
     ("palette_next", "Palette: Next Row", Some("Palette > Input"), ["down"], PaletteNext),
     ("palette_next_scope", "Palette: Next Scope", Some("Palette > Input"), ["tab"], PaletteNextScope),
     ("palette_previous_scope", "Palette: Previous Scope", Some("Palette > Input"), ["shift-tab"], PalettePreviousScope),
+    // The caret's keys too: they move it while it can move, and only at the
+    // field's edge do they reach the scopes (`Palette::arrow`).
+    ("palette_scope_left", "Palette: Arrow to Previous Scope", Some("Palette > Input"), ["left"], PaletteScopeLeft),
+    ("palette_scope_right", "Palette: Arrow to Next Scope", Some("Palette > Input"), ["right"], PaletteScopeRight),
     ("palette_row_actions", "Palette: Row Actions", Some("Palette > Input"), ["shift-enter"], PaletteRowActions),
     ("zoom_editor_in", "Zoom In", None, ["secondary-+", "secondary-="], ZoomEditorIn),
     ("zoom_editor_out", "Zoom Out", None, ["secondary--"], ZoomEditorOut),
@@ -281,6 +285,21 @@ mod tests {
         // `KeyBinding::new` panics on a stroke it cannot parse, so a
         // `profiles.toml` holding one used to take the launch with it.
         assert!(!build_bindings(&overrides).is_empty());
+    }
+
+    #[test]
+    fn no_shipped_default_collides_with_another() {
+        let overrides = HashMap::new();
+        for spec in REGISTRY {
+            for chord in spec.defaults {
+                assert_eq!(
+                    conflict(chord, spec.context, spec.id, &overrides),
+                    None,
+                    "{chord} on {}",
+                    spec.id
+                );
+            }
+        }
     }
 
     #[test]

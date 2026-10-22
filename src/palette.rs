@@ -5,7 +5,8 @@
 //! the other connections -- and the scope pills narrow it to one of those.
 //! `cmd+p` opens on Objects, `cmd+shift+p` on Commands, and the titlebar's
 //! connection name on Connections, every connection by project; `tab` moves
-//! between scopes. The pickers a command opens (themes, fonts, databases,
+//! between scopes, and so do `left` and `right` once the caret is at the
+//! field's edge. The pickers a command opens (themes, fonts, databases,
 //! schemas, columns, projects) are the same card over a list of their own,
 //! and so is what can be done to one connection, which `shift-enter` puts up
 //! from its row.
@@ -35,6 +36,7 @@ use crate::{
     Workspace,
     actions::{
         PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
+        PaletteScopeLeft, PaletteScopeRight,
     },
     db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
@@ -635,6 +637,26 @@ pub fn waits_for_import(scope: Scope, command: &Command) -> bool {
         )
 }
 
+/// What `left` or `right` does in the search field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Arrow {
+    /// Moves the caret, or collapses the selection, as it would in any field.
+    Caret,
+    /// Steps to the neighbouring scope, as `shift-tab` or `tab` would.
+    Scope,
+}
+
+/// Only a bare caret at the edge the key points past switches scope, so
+/// editing what is typed never jumps the list: an empty field is at both.
+fn arrow(selection: Range<usize>, len: usize, delta: isize) -> Arrow {
+    let edge = if delta < 0 { 0 } else { len };
+    if selection.is_empty() && selection.start == edge {
+        Arrow::Scope
+    } else {
+        Arrow::Caret
+    }
+}
+
 /// What a stroke that opens the palette in some mode does to the one up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stroke {
@@ -697,9 +719,9 @@ pub struct Palette {
     highlights: HashMap<usize, Rc<[Range<usize>]>>,
     recents: Vec<(Scope, String)>,
     /// The chords drawn in the footer and the field, read from the keymap so a
-    /// rebind shows up here too: previous row, next row, next scope, close,
-    /// row actions.
-    hint_chords: [Option<String>; 5],
+    /// rebind shows up here too: previous row, next row, scope left, scope
+    /// right, close, row actions.
+    hint_chords: [Option<String>; 6],
     naming: Option<Naming>,
     /// The mode the palette opened in, for [`stroke`].
     opened: Mode,
@@ -800,7 +822,8 @@ impl Palette {
             hint_chords: [
                 "palette_previous",
                 "palette_next",
-                "palette_next_scope",
+                "palette_scope_left",
+                "palette_scope_right",
                 "show_editor",
                 "palette_row_actions",
             ]
@@ -980,6 +1003,18 @@ impl Palette {
     fn cycle_scope(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         if let Mode::Search(scope) = self.mode {
             self.set_scope(scope.step(delta), window, cx);
+        }
+    }
+
+    /// `left` and `right` switch scope from the edge of the field and are the
+    /// caret's keys everywhere else. Handing a keystroke on is what lets the
+    /// field's own binding for it, the next in line, take it.
+    fn arrow(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        let at = arrow(input.selected_range(), input.value().len(), delta);
+        match (self.mode, at) {
+            (Mode::Search(_), Arrow::Scope) => self.cycle_scope(delta, window, cx),
+            _ => cx.propagate(),
         }
     }
 
@@ -1334,7 +1369,7 @@ impl Palette {
     }
 
     fn render_footer(&self, t: Theme) -> impl IntoElement {
-        let [previous, next, scope, close, actions] =
+        let [previous, next, left, right, close, actions] =
             self.hint_chords.each_ref().map(Option::as_deref);
         div()
             .flex()
@@ -1356,7 +1391,7 @@ impl Palette {
                         hints.child(footer_hint(&[actions], "Actions", t))
                     })
                     .when(matches!(self.mode, Mode::Search(_)), |hints| {
-                        hints.child(footer_hint(&[scope], "Scope", t))
+                        hints.child(footer_hint(&[left, right], "Scope", t))
                     }),
             )
             .child(footer_hint(&[close], "Close", t))
@@ -1458,6 +1493,12 @@ impl Render for Palette {
                             palette.cycle_scope(-1, window, cx)
                         }),
                     )
+                    .on_action(cx.listener(|palette, _: &PaletteScopeLeft, window, cx| {
+                        palette.arrow(-1, window, cx)
+                    }))
+                    .on_action(cx.listener(|palette, _: &PaletteScopeRight, window, cx| {
+                        palette.arrow(1, window, cx)
+                    }))
                     .on_action(cx.listener(|palette, _: &PaletteRowActions, _, cx| palette.act(cx)))
                     .child(
                         div()
@@ -1484,7 +1525,7 @@ impl Render for Palette {
                                 ),
                             )
                             .children(
-                                self.hint_chords[3]
+                                self.hint_chords[4]
                                     .as_deref()
                                     .map(|chord| keycaps(chord, t)),
                             ),
@@ -2988,6 +3029,21 @@ mod tests {
         assert_eq!(Scope::All.step(1), Scope::Commands);
         assert_eq!(Scope::All.step(-1), Scope::Connections);
         assert_eq!(Scope::Connections.step(1), Scope::All);
+    }
+
+    #[test]
+    fn the_arrows_switch_scope_only_from_the_edge_the_caret_is_at() {
+        assert_eq!(arrow(0..0, 0, -1), Arrow::Scope);
+        assert_eq!(arrow(0..0, 0, 1), Arrow::Scope);
+        assert_eq!(arrow(0..0, 5, -1), Arrow::Scope);
+        assert_eq!(arrow(0..0, 5, 1), Arrow::Caret);
+        assert_eq!(arrow(5..5, 5, 1), Arrow::Scope);
+        assert_eq!(arrow(5..5, 5, -1), Arrow::Caret);
+        assert_eq!(arrow(2..2, 5, -1), Arrow::Caret);
+        assert_eq!(arrow(2..2, 5, 1), Arrow::Caret);
+        // A selection reaching the edge collapses first, as in any field.
+        assert_eq!(arrow(0..5, 5, -1), Arrow::Caret);
+        assert_eq!(arrow(0..5, 5, 1), Arrow::Caret);
     }
 
     #[test]

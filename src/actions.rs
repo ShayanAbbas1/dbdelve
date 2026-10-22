@@ -197,6 +197,8 @@ actions!(
         PalettePrevious,
         PaletteNextScope,
         PalettePreviousScope,
+        PaletteScopeLeft,
+        PaletteScopeRight,
         PaletteRowActions,
         SwitchConnection,
         CloseTab,
