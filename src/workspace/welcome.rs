@@ -876,15 +876,26 @@ mod tests {
 
     #[test]
     fn a_bare_sqlite_path_is_a_file_and_any_other_path_is_still_being_typed() {
+        // What counts as absolute is the platform's call: `/Users/…` has no
+        // drive, so it is not an absolute path on Windows.
+        #[cfg(windows)]
+        let (absolute, other_absolute, partial) = (
+            r"C:\Users\ana\app.db",
+            r"D:\var\lib\app.db3",
+            r"C:\Users\ana\ap",
+        );
+        #[cfg(not(windows))]
+        let (absolute, other_absolute, partial) =
+            ("/Users/ana/app.db", "/var/lib/app.db3", "/Users/ana/ap");
         for text in [
-            "/Users/ana/app.db",
+            absolute,
             "~/data/app.sqlite",
             "~/data/app.SQLITE3",
-            "/var/lib/app.db3",
+            other_absolute,
         ] {
             assert_eq!(recognise(text), Recognised::File, "{text}");
         }
-        for text in ["/Users/ana/ap", "~/data/app.csv", "~"] {
+        for text in [partial, "~/data/app.csv", "~"] {
             assert_eq!(recognise(text), Recognised::Typing, "{text}");
         }
         // Relative paths are not offered: the form could not say where from.
