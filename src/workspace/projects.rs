@@ -4,18 +4,7 @@
 //! next/previous connection keep to; nothing about a connection itself
 //! changes, so its tabs, saved queries and history come back as they were.
 
-use std::ops::Range;
-
 use super::*;
-use crate::fuzzy::{Fuzzy, Query};
-
-/// The connections the switcher's search keeps, and the characters of each
-/// one's name it matched.
-pub(crate) struct ConnectionMatches {
-    /// Indices into the profiles, in the order the switcher lists them.
-    pub(crate) order: Vec<usize>,
-    pub(crate) names: HashMap<usize, Vec<Range<usize>>>,
-}
 
 impl Workspace {
     /// The project a connection is in, by name, or `None` for No project.
@@ -44,126 +33,24 @@ impl Workspace {
             .collect()
     }
 
-    pub(crate) fn is_expanded(&self, group: Option<&str>) -> bool {
-        self.expanded_groups
-            .iter()
-            .any(|expanded| expanded.as_deref() == group)
+    /// The titlebar's connection name, and `SwitchConnection`: the palette
+    /// over every connection, by project.
+    pub(crate) fn switch_connection(
+        &mut self,
+        _: &SwitchConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_connections(window, cx);
     }
 
-    /// A click on a group's header in the switcher: expands it to look
-    /// inside, or folds it. Nothing is switched to; that takes a click on a
-    /// connection.
-    pub(crate) fn toggle_group(&mut self, group: Option<String>, cx: &mut Context<Self>) {
-        if self.is_expanded(group.as_deref()) {
-            self.expanded_groups.retain(|expanded| expanded != &group);
-        } else {
-            self.expanded_groups.push(group);
-        }
-        cx.notify();
-    }
-
-    /// Opens the switcher with only the group in front expanded, and its
-    /// search field focused so typing filters straight away.
-    pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The panel is deferred, so it would draw over the import's question
-        // and let the project it picked be renamed or deleted under it.
+    pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The palette draws over the import's question, and would let the
+        // project it picked be renamed or deleted under it.
         if self.pending_import.is_some() {
             return;
         }
-        self.switcher_open = true;
-        self.pending_removal = None;
-        self.pending_project_deletion = None;
-        self.assigning_project = None;
-        self.expanded_groups = vec![self.current_group().map(str::to_string)];
-        self.search_selection = 0;
-        self.connection_matches = None;
-        let input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe_in(
-            &input,
-            window,
-            |workspace, _, event: &InputEvent, _, cx| match event {
-                InputEvent::Change => {
-                    workspace.search_selection = 0;
-                    workspace.match_connections(cx);
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => {
-                    if let Some(index) = workspace.selected_connection() {
-                        workspace.activate(index, cx);
-                    }
-                }
-                _ => {}
-            },
-        )
-        .detach();
-        self.connection_search = Some(input);
-        self.connection_search_needs_focus = true;
-        cx.notify();
-    }
-
-    /// Puts the search field away, handing focus back for the reason
-    /// `drop_project_name` gives. Not when the switcher closed for a form: the
-    /// tab's focus is applied after the form's, and would take it.
-    pub(crate) fn drop_connection_search(&mut self) {
-        self.connection_matches = None;
-        if self.connection_search.take().is_some()
-            && self.form.is_none()
-            && let Some(profile) = self.profile_mut()
-        {
-            profile.session.editor_needs_focus = true;
-        }
-    }
-
-    /// The match up and down have moved to, held inside the matches as they
-    /// narrow.
-    pub(crate) fn selected_connection(&self) -> Option<usize> {
-        let matches = &self.connection_matches.as_ref()?.order;
-        matches
-            .get(self.search_selection.min(matches.len().saturating_sub(1)))
-            .copied()
-    }
-
-    pub(crate) fn step_search_selection(&mut self, step: isize, cx: &mut Context<Self>) {
-        let Some(matches) = &self.connection_matches else {
-            return;
-        };
-        let last = matches.order.len().saturating_sub(1);
-        self.search_selection = self
-            .search_selection
-            .min(last)
-            .saturating_add_signed(step)
-            .min(last);
-        cx.notify();
-    }
-
-    /// Runs the switcher's search again, for a query or a set of connections
-    /// or projects that changed. A no-op while there is no search.
-    pub(crate) fn match_connections(&mut self, cx: &App) {
-        self.connection_matches = self.searched_connections(cx);
-    }
-
-    fn searched_connections(&self, cx: &App) -> Option<ConnectionMatches> {
-        let query = Query::new(&self.connection_search.as_ref()?.read(cx).value());
-        if query.is_empty() {
-            return None;
-        }
-        let connections = self
-            .profiles
-            .iter()
-            .map(|profile| {
-                let host = match &profile.config {
-                    ConnectionConfig::Snowflake(snowflake) => snowflake.host(),
-                    // A SQLite path has no host, and every one under a home
-                    // directory would match its folder names.
-                    config => config
-                        .server()
-                        .map(|server| server.host.clone())
-                        .unwrap_or_default(),
-                };
-                (profile.id.as_str(), profile.name.as_str(), host)
-            })
-            .collect::<Vec<_>>();
-        Some(matching_connections(&connections, &self.projects, &query))
+        self.open_palette(PaletteMode::Search(Scope::Connections), window, cx);
     }
 
     /// Opens the name field: for a new project with `renaming` empty, or in
@@ -202,29 +89,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Names a new project where projects are listed: the switcher, or the
-    /// welcome surface while there is no connection to have one.
+    /// Names a new project: in the palette, or on the welcome surface while
+    /// there is no connection to have one.
     pub(crate) fn new_project(
         &mut self,
         _: &NewProject,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // As `open_switcher`: nothing is named while the import is asking.
+        // As `open_connections`: nothing is named while the import is asking.
         if self.pending_import.is_some() {
             return;
         }
-        self.close_settings(window, cx);
-        // Opened afresh even when open, since a search hides the field.
         if !self.profiles.is_empty() {
-            self.open_switcher(window, cx);
+            self.open_palette(PaletteMode::NameProject(None), window, cx);
+            return;
         }
-        // The name field is what was asked for, not the search, nor the
-        // editor a palette that ran this hands focus back to.
-        self.connection_search_needs_focus = false;
-        if let Some(profile) = self.profile_mut() {
-            profile.session.editor_needs_focus = false;
-        }
+        self.close_settings(window, cx);
         self.start_naming_project(None, window, cx);
     }
 
@@ -253,12 +134,11 @@ impl Workspace {
     /// cannot. `keeping` is the project's current name on a rename, which it
     /// may keep.
     fn name_refused(&mut self, name: &str, keeping: Option<&str>, cx: &mut Context<Self>) -> bool {
-        let message = if name.is_empty() {
-            "A project needs a name.".to_string()
-        } else if Some(name) != keeping && self.projects.iter().any(|project| project.name == name)
-        {
-            format!("A project named {name} already exists.")
-        } else {
+        let Some(message) = project_name_refusal(
+            name,
+            keeping,
+            self.projects.iter().map(|project| project.name.as_str()),
+        ) else {
             return false;
         };
         if self.profiles.is_empty() && self.form.is_none() {
@@ -270,14 +150,9 @@ impl Workspace {
         true
     }
 
-    fn rename_project(&mut self, old: &str, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn rename_project(&mut self, old: &str, name: String, cx: &mut Context<Self>) {
         if self.name_refused(&name, Some(old), cx) {
             return;
-        }
-        for expanded in self.expanded_groups.iter_mut().flatten() {
-            if expanded == old {
-                *expanded = name.clone();
-            }
         }
         if let Some(project) = self.projects.iter_mut().find(|project| project.name == old) {
             project.name = name;
@@ -292,7 +167,6 @@ impl Workspace {
             return;
         }
         self.drop_project_name();
-        self.expanded_groups.push(Some(name.clone()));
         self.projects.push(store::StoredProject {
             name,
             ..Default::default()
@@ -301,37 +175,37 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Puts the name field away. It held focus while open, and a field
-    /// unmounted with focus in it takes every keybinding with it, so focus
-    /// goes back to the search field if the switcher stays open, else to
-    /// whatever is in front -- unless that is a form, which hands focus to a
-    /// field of its own that the tab's focus, applied after it, would take.
+    /// Puts the welcome surface's name field away. It held focus while open,
+    /// and a field unmounted with focus in it takes every keybinding with it,
+    /// so focus goes back to whatever is in front -- unless that is a form,
+    /// which hands focus to a field of its own that the tab's focus, applied
+    /// after it, would take.
     pub(crate) fn drop_project_name(&mut self) {
         self.renaming_project = None;
         if self.project_name.take().is_none() {
             return;
         }
         self.project_name_error = None;
-        if self.switcher_open && self.connection_search.is_some() {
-            self.connection_search_needs_focus = true;
-        } else if self.form.is_none() {
+        if self.form.is_none() {
             self.refocus_front();
         }
     }
 
-    /// The project goes; its connections stay, under No project. The first
-    /// click only arms it, as removing a connection does: a project's
-    /// membership is not something to lose to a click aimed at its header.
+    /// The welcome surface's delete button. The first click only arms it: a
+    /// project is not something to lose to a click aimed at its row.
     pub(crate) fn delete_project(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.pending_project_deletion.as_deref() != Some(name) {
             self.pending_project_deletion = Some(name.to_string());
             cx.notify();
             return;
         }
+        self.remove_project(name, cx);
+    }
+
+    /// The project goes; its connections stay, under No project.
+    pub(crate) fn remove_project(&mut self, name: &str, cx: &mut Context<Self>) {
         self.pending_project_deletion = None;
         self.projects.retain(|project| project.name != name);
-        self.expanded_groups
-            .retain(|expanded| expanded.as_deref() != Some(name));
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -353,13 +227,29 @@ impl Workspace {
                 each.connections.push(id.clone());
             }
         }
-        self.assigning_project = None;
         self.remember_profiles(cx);
         cx.notify();
     }
 }
 
-/// Projects as read from disk, held to what the switcher assumes: names are
+/// Why `name` cannot be given to a project, if it cannot: it is empty, or
+/// another project in `taken` has it. `keeping` is the project's current name
+/// on a rename, which it may keep.
+pub(crate) fn project_name_refusal<'a>(
+    name: &str,
+    keeping: Option<&str>,
+    mut taken: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    if name.is_empty() {
+        Some("A project needs a name.".to_string())
+    } else if Some(name) != keeping && taken.any(|other| other == name) {
+        Some(format!("A project named {name} already exists."))
+    } else {
+        None
+    }
+}
+
+/// Projects as read from disk, held to what the palette assumes: names are
 /// unique, every id names a live connection, and each connection is in one
 /// project at most, the first that lists it. A hand-edited file, or one an
 /// earlier build wrote, can break any of them, and a stale id would quietly
@@ -402,54 +292,9 @@ pub(crate) fn chosen_project(
     }
 }
 
-/// The `(id, name, host)` connections whose name, host or project the query
-/// matches, in the order the switcher lists them: No project first, then each
-/// project's. Not ranked, since the switcher is grouped by project.
-fn matching_connections(
-    connections: &[(&str, &str, String)],
-    projects: &[store::StoredProject],
-    query: &Query,
-) -> ConnectionMatches {
-    let mut fuzzy = Fuzzy::new();
-    let mut names = HashMap::new();
-    let mut matches = connections
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (id, name, host))| {
-            let project = projects
-                .iter()
-                .position(|project| project.connections.iter().any(|member| member == id));
-            let name_matches = fuzzy.matches(query, name);
-            if name_matches {
-                let ranges = fuzzy.highlights(query, name);
-                if !ranges.is_empty() {
-                    names.insert(index, ranges);
-                }
-            }
-            (name_matches
-                || fuzzy.matches(query, host)
-                || project.is_some_and(|at| fuzzy.matches(query, &projects[at].name)))
-            .then_some((project.map_or(0, |at| at + 1), index))
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|&(group, _)| group);
-    ConnectionMatches {
-        order: matches.into_iter().map(|(_, index)| index).collect(),
-        names,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn matched(
-        connections: &[(&str, &str, String)],
-        projects: &[store::StoredProject],
-        query: &str,
-    ) -> Vec<usize> {
-        matching_connections(connections, projects, &Query::new(query)).order
-    }
 
     fn project(name: &str, connections: &[&str]) -> store::StoredProject {
         store::StoredProject {
@@ -513,51 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn a_search_matches_names_in_any_case_and_lists_them_as_the_switcher_does() {
-        let connections = [
-            ("billing-prod", "Billing prod", String::new()),
-            ("scratch", "Scratch", String::new()),
-            ("analytics-prod", "Analytics PROD", String::new()),
-            ("local-prod", "local prod", String::new()),
-        ];
-        let projects = [
-            project("Analytics", &["analytics-prod"]),
-            project("Billing", &["billing-prod"]),
-        ];
-        assert_eq!(matched(&connections, &projects, "Prod"), [3, 2, 0]);
-    }
-
-    #[test]
-    fn a_search_matches_a_connection_by_its_host_or_its_project() {
-        let connections = [
-            ("orders", "Orders", "db.internal".to_string()),
-            ("ledger", "Ledger", "localhost".to_string()),
-            ("scratch", "Scratch", "localhost".to_string()),
-        ];
-        let projects = [project("Billing", &["ledger"])];
-        assert_eq!(matched(&connections, &projects, "INTERNAL"), [0]);
-        assert_eq!(matched(&connections, &projects, "bill"), [1]);
-    }
-
-    #[test]
-    fn a_search_matches_a_subsequence_and_marks_only_the_name_it_matched() {
-        let connections = [
-            ("analytics-prod", "Analytics PROD", "localhost".to_string()),
-            ("orders", "Orders", "db.internal".to_string()),
-            ("scratch", "Scratch", "localhost".to_string()),
-        ];
-        let matches = matching_connections(&connections, &[], &Query::new("anprd"));
-        assert_eq!(matches.order, [0]);
-        let name = connections[0].1;
-        let marked = matches.names[&0]
-            .iter()
-            .map(|range| &name[range.clone()])
-            .collect::<String>();
-        assert_eq!(marked.to_lowercase(), "anprd");
-
-        // Kept for its host, so nothing in its name is marked.
-        let matches = matching_connections(&connections, &[], &Query::new("dbint"));
-        assert_eq!(matches.order, [1]);
-        assert!(matches.names.is_empty());
+    fn a_project_name_is_refused_when_empty_or_taken_but_may_be_kept() {
+        let taken = ["Billing", "Analytics"];
+        assert!(project_name_refusal("", None, taken.into_iter()).is_some());
+        assert!(project_name_refusal("Billing", None, taken.into_iter()).is_some());
+        assert_eq!(
+            project_name_refusal("Billing", Some("Billing"), taken.into_iter()),
+            None
+        );
+        assert!(project_name_refusal("Analytics", Some("Billing"), taken.into_iter()).is_some());
+        assert_eq!(project_name_refusal("Ops", None, taken.into_iter()), None);
     }
 }

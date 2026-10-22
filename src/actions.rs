@@ -197,6 +197,8 @@ actions!(
         PalettePrevious,
         PaletteNextScope,
         PalettePreviousScope,
+        PaletteRowActions,
+        SwitchConnection,
         CloseTab,
         ToggleSidebar,
         ToggleRowPanel,

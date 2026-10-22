@@ -1665,418 +1665,70 @@ impl Workspace {
     }
 
     /// The connection switcher: the titlebar's name for the database in front
-    /// of you, which drops a floating panel below itself rather than an
-    /// accordion that shoves the tree around. It is the one place the
-    /// connection is named, so it stays reachable with the sidebar folded.
+    /// of you, which opens the palette over every connection. It is the one
+    /// place the connection is named, so it stays reachable with the sidebar
+    /// folded.
     pub(crate) fn render_profile_switcher(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = *theme(cx);
-        let workspace = cx.entity().downgrade();
-        let panel = self.switcher_open.then(|| {
-            let t = popup_theme(cx);
-            let add_workspace = workspace.clone();
-            let dismiss_workspace = workspace.clone();
-            let searched = self.connection_matches.as_ref();
-            let selected = self.selected_connection();
-            let mut profile_rows = HashMap::<Option<String>, Vec<AnyElement>>::new();
-            for (index, profile) in
-                self.profiles
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, profile)| match searched {
-                        Some(matches) => matches.order.contains(index),
-                        None => {
-                            self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
-                        }
-                    })
-            {
-                let group = self.group_of(&profile.id).map(str::to_string);
-                let row = {
-                    let in_project = self.group_of(&profile.id).is_some();
-                    let activate_workspace = workspace.clone();
-                    let leave_workspace = workspace.clone();
-                    let assign_workspace = workspace.clone();
-                    let joinable = self
-                        .projects
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, project)| !project.connections.contains(&profile.id))
-                        .collect::<Vec<_>>();
-                    let assigning = self.assigning_project.as_deref() == Some(&profile.id);
-                    let edit_workspace = workspace.clone();
-                    let duplicate_workspace = workspace.clone();
-                    let remove_workspace = workspace.clone();
-                    let pending = self.pending_removal.as_deref() == Some(&profile.id);
-                    let active = index == self.active;
-                    let row = div()
-                        .id(("profile", index))
-                        .group(format!("profile-row-{index}"))
-                        .h(px(layout::chrome(30.)))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(layout::SPACE_SM))
-                        .px(px(layout::SPACE_SM))
-                        .rounded(px(layout::RADIUS_CONTROL))
-                        .hover(|style| style.bg(t.element_hover))
-                        .when(selected == Some(index), |row| row.bg(t.element_active))
-                        .child(row_icon_tinted(t, icon::DATABASE, profile.color))
-                        .child(ui::status_dot(t, &profile.state))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(highlighted(
-                                    profile.name.clone(),
-                                    searched
-                                        .and_then(|matches| matches.names.get(&index))
-                                        .map_or(&[][..], Vec::as_slice),
-                                    t,
-                                )),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(layout::SPACE_XS))
-                                .when(!pending, |actions| {
-                                    actions
-                                        .opacity(0.)
-                                        .group_hover(format!("profile-row-{index}"), |style| {
-                                            style.opacity(1.)
-                                        })
-                                })
-                                .when(!joinable.is_empty(), |actions| {
-                                    let id = profile.id.clone();
-                                    actions.child(
-                                        icon_button(
-                                            ("assign-project", index),
-                                            icon::ADD_TO_PROJECT,
-                                            Tone::Quiet,
-                                            Control::Inline,
-                                            t,
-                                        )
-                                        .tooltip("Move to project")
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                _ = assign_workspace.update(cx, |workspace, cx| {
-                                                    workspace.assigning_project =
-                                                        (!assigning).then(|| id.clone());
-                                                    cx.notify();
-                                                });
-                                            },
-                                        ),
-                                    )
-                                })
-                                .when(in_project, |actions| {
-                                    actions.child(
-                                        icon_button(
-                                            ("leave-project", index),
-                                            icon::LEAVE_PROJECT,
-                                            Tone::Quiet,
-                                            Control::Inline,
-                                            t,
-                                        )
-                                        .tooltip("Remove from project")
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                _ = leave_workspace.update(cx, |workspace, cx| {
-                                                    workspace.move_to_project(index, None, cx);
-                                                });
-                                            },
-                                        ),
-                                    )
-                                })
-                                .child(
-                                    icon_button(
-                                        ("edit-profile", index),
-                                        icon::RENAME,
-                                        Tone::Quiet,
-                                        Control::Inline,
-                                        t,
-                                    )
-                                    .tooltip("Edit connection")
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            // The row activates on click, and
-                                            // activating clears `form` — so
-                                            // without this the form opens and
-                                            // is thrown away in the same click.
-                                            cx.stop_propagation();
-                                            _ = edit_workspace.update(cx, |workspace, cx| {
-                                                let Some(profile) = workspace.profiles.get(index)
-                                                else {
-                                                    return;
-                                                };
-                                                let mut form =
-                                                    ConnectionForm::editing(profile, window, cx);
-                                                form.project = workspace
-                                                    .group_of(&profile.id)
-                                                    .map(str::to_string);
-                                                workspace.form = Some(form);
-                                                workspace.switcher_open = false;
-                                                cx.notify();
-                                            });
-                                        },
-                                    ),
-                                )
-                                .child(
-                                    icon_button(
-                                        ("duplicate-profile", index),
-                                        icon::COPY,
-                                        Tone::Quiet,
-                                        Control::Inline,
-                                        t,
-                                    )
-                                    .tooltip("Duplicate connection")
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            _ = duplicate_workspace.update(cx, |workspace, cx| {
-                                                workspace.duplicate_profile(index, window, cx);
-                                            });
-                                        },
-                                    ),
-                                )
-                                .child(
-                                    // Armed, it says the word and takes the
-                                    // danger fill: the icon alone asks, the
-                                    // red confirms.
-                                    icon_button(
-                                        ("remove-profile", index),
-                                        icon::DELETE,
-                                        if pending { Tone::Danger } else { Tone::Quiet },
-                                        Control::Inline,
-                                        t,
-                                    )
-                                    .when(pending, |armed| {
-                                        armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                                            "Remove?",
-                                            Tone::Danger,
-                                            Control::Inline,
-                                            t,
-                                        ))
-                                    })
-                                    .tooltip("Remove connection")
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            // Likewise: activating clears
-                                            // `pending_removal`, so the first
-                                            // click would never leave it armed.
-                                            cx.stop_propagation();
-                                            _ = remove_workspace.update(cx, |workspace, cx| {
-                                                workspace.remove_profile(index, cx);
-                                            });
-                                        },
-                                    ),
-                                ),
-                        )
-                        // The mark sits at the trailing edge like a menu's
-                        // checkmark, after the affordances, where the eye ends.
-                        .children(active.then(|| {
-                            icon(icon::CHECK)
-                                .size(px(layout::chrome(layout::ICON_SIZE)))
-                                .text_color(t.text_muted)
-                        }))
-                        .on_click(move |_, _, cx| {
-                            _ = activate_workspace.update(cx, |workspace, cx| {
-                                workspace.activate(index, cx);
-                            });
-                        });
-                    let choices = assigning.then(|| {
-                        joinable
-                            .iter()
-                            .map(|(choice, project)| {
-                                let join_workspace = workspace.clone();
-                                let name = project.name.clone();
-                                switcher_row(("assign-to", *choice), t)
-                                    .pl(px(layout::SPACE_LG))
-                                    .text_color(t.text_muted)
-                                    .child(row_icon(t, icon::PROJECT))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .child(project.name.clone()),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        _ = join_workspace.update(cx, |workspace, cx| {
-                                            workspace.move_to_project(index, Some(&name), cx);
-                                        });
-                                    })
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(row)
-                        .children(choices.into_iter().flatten())
-                        .into_any_element()
-                };
-                profile_rows.entry(group).or_default().push(row);
-            }
-            let groups = self.render_project_groups(profile_rows, searched.is_some(), t, cx);
-
-            div()
-                .absolute()
-                .occlude()
-                .on_mouse_down_out(move |_, _, cx| {
-                    _ = dismiss_workspace.update(cx, |workspace, cx| {
-                        workspace.switcher_open = false;
-                        cx.notify();
-                    });
-                    // `occlude` only covers what the panel is drawn over. The
-                    // press that dismisses lands everywhere else, so swallow it
-                    // rather than let it open a table in the tree on the way
-                    // out.
-                    cx.stop_propagation();
-                })
-                .top_full()
-                .mt(px(layout::SPACE_XS))
-                .left_0()
-                .w(px(layout::SWITCHER_WIDTH))
-                .p(px(layout::SPACE_XS))
-                .border_1()
-                .border_color(t.border_strong)
-                .rounded(px(layout::RADIUS_PANEL))
-                .map(|card| raised_card(card, t))
-                .flex()
-                .flex_col()
-                .children(self.connection_search.as_ref().map(|input| {
-                    let up_workspace = workspace.clone();
-                    let down_workspace = workspace.clone();
-                    // Captured: a single-line input swallows `up` and `down`
-                    // without doing anything with them.
-                    div()
-                        .capture_action(move |_: &gpui_component::input::MoveUp, _, cx| {
-                            _ = up_workspace.update(cx, |workspace, cx| {
-                                workspace.step_search_selection(-1, cx);
-                            });
-                        })
-                        .capture_action(move |_: &gpui_component::input::MoveDown, _, cx| {
-                            _ = down_workspace.update(cx, |workspace, cx| {
-                                workspace.step_search_selection(1, cx);
-                            });
-                        })
-                        .px(px(layout::SPACE_XS))
-                        .py(px(layout::SPACE_XS))
-                        .child(gpui_component::Sizable::small(
-                            Input::new(input).prefix(row_icon(t, icon::SEARCH)),
-                        ))
-                }))
-                .children(groups)
-                .child(div().my(px(layout::SPACE_XS)).h(px(1.)).bg(t.border))
-                .child(
-                    div()
-                        .id("new-connection")
-                        .h(px(layout::chrome(30.)))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(layout::SPACE_SM))
-                        .px(px(layout::SPACE_SM))
-                        .rounded(px(layout::RADIUS_CONTROL))
-                        .text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover).text_color(t.text))
-                        .child(row_icon(t, icon::PLUS))
-                        .child("Add connection")
-                        .on_click(move |_, window, cx| {
-                            _ = add_workspace.update(cx, |workspace, cx| {
-                                let project = match workspace.expanded_groups.last() {
-                                    Some(group) => group.clone(),
-                                    None => workspace.current_group().map(str::to_string),
-                                };
-                                workspace.new_connection_in(project, window, cx);
-                            });
-                        }),
-                )
-        });
         let active_name = self
             .profile()
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
         let project_name = self.current_group().map(str::to_string);
-        let toggle_workspace = workspace.clone();
 
         div()
-            .relative()
+            .id("profile-switcher")
             .flex_shrink_0()
-            // An overlay is not a layer to gpui: it hit-tests every hitbox the
-            // cursor lands in, in tree order, so the explorer under this panel
-            // answers the same click. `deferred` puts the panel in front,
-            // `occlude` stops what is behind it from answering at all.
-            .children(panel.map(deferred))
-            .child(
-                div()
-                    .id("profile-switcher")
-                    .flex()
-                    .items_center()
-                    .gap(px(layout::SPACE_XS))
-                    .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
-                    .px(px(layout::SPACE_SM))
-                    .rounded(px(layout::RADIUS_CONTROL))
-                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                    .text_color(t.text_faint)
-                    .hover(|style| style.bg(t.element_hover).text_color(t.text))
-                    .when_some(project_name, |trigger, name| {
-                        trigger
-                            .child(row_icon(t, icon::PROJECT))
-                            .child(
-                                div()
-                                    .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(name),
-                            )
-                            .child("/")
-                    })
-                    .child(row_icon_tinted(t, icon::DATABASE, active_color))
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
+            .px(px(layout::SPACE_SM))
+            .rounded(px(layout::RADIUS_CONTROL))
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+            .text_color(t.text_faint)
+            .hover(|style| style.bg(t.element_hover).text_color(t.text))
+            .when_some(project_name, |trigger, name| {
+                trigger
+                    .child(row_icon(t, icon::PROJECT))
                     .child(
                         div()
-                            .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                            .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(active_name),
+                            .child(name),
                     )
-                    .child(row_icon(t, icon::CHEVRON_DOWN))
-                    // With a colour the name becomes the label of a pill: in
-                    // its own hue, or a plain chip when the band behind it is
-                    // already wearing that hue. The text keeps the normal
-                    // colour, because the hue at text size on a tint of itself
-                    // is the one arrangement nobody can read.
-                    .when_some(active_color, |pill, color| {
-                        pill.bg(if self.settings.color_titlebar {
-                            t.surface
-                        } else {
-                            color.chip(t)
-                        })
-                        .text_color(t.text)
-                        .font_weight(FontWeight::MEDIUM)
-                    })
-                    // While the panel is open its `on_mouse_down_out` already
-                    // owns closing, and it fires on the press. Carrying a click
-                    // handler here too would reopen on the release, so the open
-                    // panel leaves the trigger without one: no handler, no
-                    // click recorded, no reopen.
-                    .when(!self.switcher_open, |trigger| {
-                        trigger.on_click(move |_, window, cx| {
-                            _ = toggle_workspace.update(cx, |workspace, cx| {
-                                workspace.open_switcher(window, cx);
-                            });
-                        })
-                    }),
+                    .child("/")
+            })
+            .child(row_icon_tinted(t, icon::DATABASE, active_color))
+            .child(
+                div()
+                    .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(active_name),
             )
+            .child(row_icon(t, icon::CHEVRON_DOWN))
+            // With a colour the name becomes the label of a pill: in
+            // its own hue, or a plain chip when the band behind it is
+            // already wearing that hue. The text keeps the normal
+            // colour, because the hue at text size on a tint of itself
+            // is the one arrangement nobody can read.
+            .when_some(active_color, |pill, color| {
+                pill.bg(if self.settings.color_titlebar {
+                    t.surface
+                } else {
+                    color.chip(t)
+                })
+                .text_color(t.text)
+                .font_weight(FontWeight::MEDIUM)
+            })
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.open_connections(window, cx);
+            }))
             .into_any_element()
     }
 
@@ -2152,167 +1804,6 @@ impl Workspace {
             );
         }
         steps
-    }
-
-    /// No project, then each project, as groups any of which may be
-    /// expanded, each holding its `members`. The group of the connection in front is
-    /// marked, but looking inside another switches nothing. With no projects
-    /// there is nothing to group, and the members are listed bare. While
-    /// `searching`, `members` holds only the matches: a group with one is
-    /// shown open, and one without is not shown.
-    fn render_project_groups(
-        &self,
-        mut members: HashMap<Option<String>, Vec<AnyElement>>,
-        searching: bool,
-        t: Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let workspace = cx.entity().downgrade();
-        let current = self.current_group().map(str::to_string);
-        let mut rows = Vec::new();
-        if searching && members.is_empty() {
-            rows.push(
-                switcher_row("no-match", t)
-                    .text_color(t.text_faint)
-                    .child("No matching connections")
-                    .into_any_element(),
-            );
-            return rows;
-        }
-        if self.projects.is_empty() {
-            rows.push(
-                div()
-                    .px(px(layout::SPACE_SM))
-                    .py(px(layout::SPACE_XS))
-                    .child(section_label(t, "Connections"))
-                    .into_any_element(),
-            );
-            rows.extend(members.remove(&None).unwrap_or_default());
-        } else {
-            let matched = members
-                .keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>();
-            let mut group_body = |group: Option<&str>, id: usize| {
-                let members = members
-                    .remove(&group.map(str::to_string))
-                    .unwrap_or_default();
-                div()
-                    .pl(px(layout::SPACE_MD))
-                    .flex()
-                    .flex_col()
-                    .when(members.is_empty(), |body| {
-                        let add_workspace = workspace.clone();
-                        let project = group.map(str::to_string);
-                        body.child(
-                            switcher_row(("empty-group", id), t)
-                                .text_color(t.text_muted)
-                                .child(row_icon(t, icon::PLUS))
-                                .child("Add connection")
-                                .on_click(move |_, window, cx| {
-                                    _ = add_workspace.update(cx, |workspace, cx| {
-                                        workspace.new_connection_in(project.clone(), window, cx);
-                                    });
-                                }),
-                        )
-                    })
-                    .children(members)
-                    .into_any_element()
-            };
-
-            let expanded = searching || self.is_expanded(None);
-            let ungrouped = if searching {
-                matched.contains(&None)
-            } else {
-                self.profiles
-                    .iter()
-                    .any(|profile| self.group_of(&profile.id).is_none())
-            };
-            if ungrouped {
-                let all_workspace = workspace.clone();
-                rows.push(
-                    group_header("no-project", current.is_none(), expanded, t)
-                        .child(row_icon(t, icon::DATABASE))
-                        .child(div().flex_1().child("No project"))
-                        .on_click(move |_, _, cx| {
-                            _ = all_workspace.update(cx, |workspace, cx| {
-                                workspace.toggle_group(None, cx);
-                            });
-                        })
-                        .into_any_element(),
-                );
-                if expanded {
-                    rows.push(group_body(None, usize::MAX));
-                }
-            }
-
-            for (index, project) in self.projects.iter().enumerate() {
-                if searching && !matched.contains(&Some(project.name.clone())) {
-                    continue;
-                }
-                let expanded = searching || self.is_expanded(Some(&project.name));
-                let is_current = current.as_deref() == Some(project.name.as_str());
-                if self.renaming_project.as_deref() == Some(project.name.as_str())
-                    && let Some(input) = &self.project_name
-                {
-                    rows.push(name_field(input));
-                } else {
-                    rows.push(self.project_header(index, project, is_current, expanded, t, cx));
-                }
-                if expanded {
-                    rows.push(group_body(Some(&project.name), index));
-                }
-            }
-        }
-        if searching {
-            return rows;
-        }
-        rows.push(match &self.project_name {
-            Some(input) if self.renaming_project.is_none() => name_field(input),
-            _ => switcher_row("new-project", t)
-                .text_color(t.text_muted)
-                .child(row_icon(t, icon::PLUS))
-                .child("New project")
-                .on_click(move |_, window, cx| {
-                    _ = workspace.update(cx, |workspace, cx| {
-                        workspace.start_naming_project(None, window, cx);
-                    });
-                })
-                .into_any_element(),
-        });
-        rows
-    }
-
-    fn project_header(
-        &self,
-        index: usize,
-        project: &store::StoredProject,
-        selected: bool,
-        expanded: bool,
-        t: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let workspace = cx.entity().downgrade();
-        let name = project.name.clone();
-        group_header(("project", index), selected, expanded, t)
-            .group(format!("project-row-{index}"))
-            .child(row_icon(t, icon::PROJECT))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(project.name.clone()),
-            )
-            .child(self.project_actions(index, &project.name, t, cx))
-            .on_click(move |_, _, cx| {
-                _ = workspace.update(cx, |workspace, cx| {
-                    workspace.toggle_group(Some(name.clone()), cx);
-                });
-            })
-            .into_any_element()
     }
 
     /// Rename and delete, revealed by hovering a row grouped as
@@ -2653,7 +2144,7 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-/// A row in the switcher's panel, the shape every one of its rows shares.
+/// A row in the welcome surface's list of projects.
 fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -2665,27 +2156,6 @@ fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
         .hover(|style| style.bg(t.element_hover))
-}
-
-/// A group's header: a chevron saying whether it is expanded, and weight
-/// saying whether it holds the connection in front.
-fn group_header(
-    id: impl Into<gpui::ElementId>,
-    current: bool,
-    expanded: bool,
-    t: Theme,
-) -> gpui::Stateful<gpui::Div> {
-    switcher_row(id, t)
-        .text_color(if current { t.text } else { t.text_muted })
-        .when(current, |row| row.font_weight(FontWeight::MEDIUM))
-        .child(row_icon(
-            t,
-            if expanded {
-                icon::CHEVRON_DOWN
-            } else {
-                icon::CHEVRON_RIGHT
-            },
-        ))
 }
 
 /// The mark a card leads with: its icon, in the accent, on a tile.

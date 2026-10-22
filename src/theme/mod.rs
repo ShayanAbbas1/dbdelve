@@ -115,7 +115,6 @@ pub mod layout {
     pub const INSPECTOR_MIN_WIDTH: f32 = 200.0;
     pub const INSPECTOR_MAX_WIDTH: f32 = 900.0;
     pub const SIDEBAR_DEFAULT_WIDTH: f32 = 220.0;
-    pub const SWITCHER_WIDTH: f32 = 320.0;
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
@@ -603,8 +602,8 @@ pub struct Theme {
     pub panel: Srgb,
     /// Chrome, furthest back: sidebar, titlebar, status bar, table headers.
     pub surface: Srgb,
-    /// The floating plane: the connection switcher and anything else that sits
-    /// over chrome. One step past `surface` in dark themes; in light themes it
+    /// The floating plane: the palette and anything else that sits over
+    /// chrome. One step past `surface` in dark themes; in light themes it
     /// stays white and earns its elevation from a border and shadow instead,
     /// because "lighter than white" does not exist.
     pub overlay: Srgb,
@@ -743,7 +742,7 @@ impl Theme {
         })
     }
 
-    /// Every floating card — a modal, the palette, the switcher, and each
+    /// Every floating card — a modal, the palette, and each
     /// menu, select, tooltip and completion list gpui-component draws. On glass
     /// it is a tint over a backdrop blur of the window beneath it, and that is
     /// all it covers: the blur only sees what the window drew, and the desktop
@@ -2299,7 +2298,7 @@ mod tests {
 
     #[test]
     fn a_floating_card_is_the_same_card_whichever_theme_asks_for_it() {
-        // The switcher and the reference popup ask on the theme `for_popup`
+        // The palette and the reference popup ask on the theme `for_popup`
         // returns, gpui-component's popups on the installed one, and they sit
         // side by side.
         for t in Theme::all() {

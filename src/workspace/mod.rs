@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use gpui_component::menu::DropdownMenu;
 
 pub(crate) use import_dialog::PreviewGrid;
+pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
 use crate::connection_form::{Origin, password_to_persist};
@@ -132,21 +133,11 @@ pub(crate) struct Workspace {
     pub(crate) settings: Settings,
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
-    pub(crate) switcher_open: bool,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
-    /// The switcher's search field, there while the switcher is open.
-    pub(crate) connection_search: Option<Entity<InputState>>,
-    pub(crate) connection_search_needs_focus: bool,
-    /// What the search matches, worked out when the query or the
-    /// connections change rather than every frame. `None` while the field is
-    /// empty or put away.
-    pub(crate) connection_matches: Option<projects::ConnectionMatches>,
-    /// Which of the search's matches up and down have moved to, and Enter
-    /// opens.
-    pub(crate) search_selection: usize,
     pub(crate) projects: Vec<store::StoredProject>,
-    /// The switcher's project name field, while a project is being named.
+    /// The welcome surface's project name field, while a project is being
+    /// named there.
     pub(crate) project_name: Option<Entity<InputState>>,
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
@@ -158,13 +149,6 @@ pub(crate) struct Workspace {
     /// The project whose delete button has been clicked once and is waiting
     /// for the second.
     pub(crate) pending_project_deletion: Option<String>,
-    /// The groups expanded in the switcher, `None` being No project, in the
-    /// order they were expanded. Looking inside a group switches nothing, so
-    /// this is apart from the group of the connection in front.
-    pub(crate) expanded_groups: Vec<Option<String>>,
-    /// The connection whose "Add to a project" choices are unfolded in the
-    /// switcher, by id.
-    pub(crate) assigning_project: Option<String>,
     /// Whether the settings panel is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
@@ -217,7 +201,6 @@ pub(crate) struct Workspace {
     /// tick the way `row_panel.copied` does. One flag rather than a keyed
     /// slot: only one plan pane is ever on screen at a time.
     pub(crate) plan_copied: bool,
-    pub(crate) pending_removal: Option<String>,
     /// An import's read is still out, so a second click doesn't start another
     /// round of Keychain prompts whose summary would say all were duplicates.
     pub(crate) importing: bool,
@@ -313,12 +296,7 @@ impl Workspace {
             settings: Settings::default(),
             active: 0,
             form: None,
-            switcher_open: false,
             menu_imports_rows: false,
-            connection_search: None,
-            connection_search_needs_focus: false,
-            connection_matches: None,
-            search_selection: 0,
             projects: Vec::new(),
             project_name: None,
             renaming_project: None,
@@ -326,8 +304,6 @@ impl Workspace {
             custom_limit: None,
             custom_limit_needs_focus: false,
             pending_project_deletion: None,
-            expanded_groups: Vec::new(),
-            assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
             settings_search,
@@ -358,7 +334,6 @@ impl Workspace {
                 revealed: Default::default(),
             },
             plan_copied: false,
-            pending_removal: None,
             importing: false,
             pending_import: None,
             importable: crate::import::Source::ALL
@@ -982,14 +957,11 @@ impl Render for Workspace {
         }
         self.row_panel.on_screen.set(false);
         self.row_panel.searched.set(false);
-        // Every way the switcher closes ends here, so this is the one place
-        // its name field is put away -- before the focus handoff below. The
-        // welcome surface has the field too, and keeps it while in front.
-        if !self.switcher_open {
-            if !(self.profiles.is_empty() && self.form.is_none()) {
-                self.drop_project_name();
-            }
-            self.drop_connection_search();
+        // The name field is the welcome surface's, and whatever replaces that
+        // surface ends here, so this is the one place it is put away --
+        // before the focus handoff below.
+        if !(self.profiles.is_empty() && self.form.is_none()) {
+            self.drop_project_name();
         }
         // Every way the connection form opens ends here too. Its branch below
         // returns before painting the panel, so one left open would come back
@@ -1106,11 +1078,6 @@ impl Render for Workspace {
         }
         if std::mem::take(&mut self.project_name_needs_focus)
             && let Some(input) = &self.project_name
-        {
-            input.focus_handle(cx).focus(window, cx);
-        }
-        if std::mem::take(&mut self.connection_search_needs_focus)
-            && let Some(input) = &self.connection_search
         {
             input.focus_handle(cx).focus(window, cx);
         }
@@ -1826,6 +1793,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reset_editor_zoom))
             .on_action(cx.listener(Self::fuzzy_open))
             .on_action(cx.listener(Self::command_palette))
+            .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_settings))
             // Unregistered under the import dialog, which stops only the

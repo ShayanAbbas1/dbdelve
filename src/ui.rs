@@ -98,16 +98,37 @@ pub(crate) fn row_icon_tinted(
         .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
 }
 
+/// A connection's state, apart from the connection itself, for a list built
+/// once and drawn after.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Status {
+    Idle,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+impl From<&ProfileState> for Status {
+    fn from(state: &ProfileState) -> Self {
+        match state {
+            ProfileState::Idle => Status::Idle,
+            ProfileState::Connecting => Status::Connecting,
+            ProfileState::Connected(_) => Status::Connected,
+            ProfileState::Failed(_) => Status::Failed,
+        }
+    }
+}
+
 /// A connection's state as one dot, the same in the status bar and the
-/// switcher: faint idle, muted while connecting, green connected, red failed
+/// palette: faint idle, muted while connecting, green connected, red failed
 /// or lost. Never the connection's own colour: a red one would read as lost,
 /// and a gray one as idle.
-pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
-    let fill = match state {
-        ProfileState::Idle => t.text_faint,
-        ProfileState::Connecting => t.text_muted,
-        ProfileState::Connected(_) => t.success,
-        ProfileState::Failed(_) => t.danger,
+pub(crate) fn status_dot(t: Theme, status: impl Into<Status>) -> Div {
+    let fill = match status.into() {
+        Status::Idle => t.text_faint,
+        Status::Connecting => t.text_muted,
+        Status::Connected => t.success,
+        Status::Failed => t.danger,
     };
     div()
         .flex_shrink_0()

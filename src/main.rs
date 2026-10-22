@@ -41,7 +41,7 @@ use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
     Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render,
     StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowDecorations, WindowOptions,
-    deferred, div, point, prelude::FluentBuilder, px,
+    div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     Disableable, Root,
@@ -64,9 +64,9 @@ use actions::{
     RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
     SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn,
     SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns,
-    ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
-    TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
-    ZoomEditorOut,
+    ShowEditor, ShowReferences, SortColumn, SwitchConnection, ToggleComment, ToggleFilterJoin,
+    ToggleNextJoin, TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure,
+    ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -82,7 +82,7 @@ use filter::{
     sort_columns, sort_expression, value_placeholder,
 };
 use icons::{Icons, icon};
-use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke};
+use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke, Target};
 use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,
@@ -94,8 +94,8 @@ use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};
 use ui::{
     Control, Tone, button, button_label, dialog, frosted_card, group_thousands, highlighted,
-    human_bytes, icon_button, object_icon, one_line, raised_card, relative_age, row_icon,
-    row_icon_tinted, row_readout, section_label, segment, titlebar,
+    human_bytes, icon_button, object_icon, one_line, relative_age, row_icon, row_icon_tinted,
+    row_readout, section_label, segment, titlebar,
 };
 use workspace::Workspace;
 

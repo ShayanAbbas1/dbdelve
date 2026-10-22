@@ -579,7 +579,7 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
 }
 
 /// Checks display names rather than ids: `store::profile_id` already dedupes
-/// the id, but two rows with the same name in the switcher are ambiguous.
+/// the id, but two rows with the same name in the palette are ambiguous.
 pub(crate) fn duplicate_profile_name(name: &str, existing: &[String]) -> String {
     (1..)
         .map(|n| match n {

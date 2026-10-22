@@ -1,6 +1,6 @@
 //! The one matcher every list that narrows as it is typed into goes through:
-//! the palette, the explorer's filter, the connection switcher's search, the
-//! settings search and the editor's completions.
+//! the palette, the explorer's filter, the settings search and the editor's
+//! completions.
 //!
 //! One matcher rather than one per surface, because a query that finds a table
 //! in the palette and not in the sidebar reads as the sidebar being broken.

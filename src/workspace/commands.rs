@@ -139,6 +139,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The palette draws over the import's question, and would let the
+        // project it picked be renamed or deleted under it.
+        let names_projects = matches!(
+            mode,
+            PaletteMode::NameProject(_)
+                | PaletteMode::Projects(_)
+                | PaletteMode::MoveToProject(_)
+                | PaletteMode::Confirm(Target::Project(_))
+        );
+        if names_projects && self.pending_import.is_some() {
+            return;
+        }
         let stroke = self
             .palette
             .as_ref()
@@ -186,6 +198,9 @@ impl Workspace {
                 .iter()
                 .position(|candidate| candidate.name == theme(cx).name),
             PaletteMode::Schema => self.profile().and_then(crate::palette::active_schema_row),
+            PaletteMode::MoveToProject(index) => self.profiles.get(index).and_then(|profile| {
+                crate::palette::current_project_row(index, &profile.id, &self.projects)
+            }),
             PaletteMode::Database => self.profile().and_then(|profile| {
                 let databases = &profile.databases;
                 databases
@@ -264,6 +279,7 @@ impl Workspace {
         let searching = matches!(palette.read(cx).mode(), PaletteMode::Search(_));
         let command = match event {
             PaletteEvent::Dismiss => None,
+            PaletteEvent::Act(command) => Some(command.clone()),
             PaletteEvent::Confirm {
                 command,
                 scope,
@@ -516,6 +532,28 @@ impl Workspace {
             Command::CopyRow => self.copy_row(&CopyRow, window, cx),
             Command::CopyResults(format) => self.copy_results_as(format, cx),
             Command::SwitchProfile(index) => self.activate(index, cx),
+            Command::SwitchConnection => self.open_connections(window, cx),
+            Command::ConnectionActions(index) => {
+                self.open_palette(PaletteMode::ConnectionActions(index), window, cx)
+            }
+            Command::EditConnection(index) => self.edit_profile(index, window, cx),
+            Command::DuplicateConnection(index) => self.duplicate_profile(index, window, cx),
+            Command::ChooseProject(index) => {
+                self.open_palette(PaletteMode::MoveToProject(index), window, cx)
+            }
+            Command::MoveToProject(index, project) => {
+                self.move_to_project(index, project.as_deref(), cx)
+            }
+            Command::Confirm(target) => self.open_palette(PaletteMode::Confirm(target), window, cx),
+            Command::RemoveConnection(index) => self.remove_profile(index, cx),
+            Command::NewConnectionIn(project) => self.new_connection_in(project, window, cx),
+            Command::PickProject(verb) => {
+                self.open_palette(PaletteMode::Projects(verb), window, cx)
+            }
+            Command::NameProject(at) => self.open_palette(PaletteMode::NameProject(at), window, cx),
+            Command::CreateProject(name) => self.create_project(name, cx),
+            Command::RenameProject(old, name) => self.rename_project(&old, name, cx),
+            Command::DeleteProject(name) => self.remove_project(&name, cx),
             Command::NextProfile => self.cycle_profile(1, cx),
             Command::PreviousProfile => self.cycle_profile(-1, cx),
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),

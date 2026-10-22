@@ -15,9 +15,6 @@ use std::path::Path;
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
-        // Every change to the connections or projects passes through here,
-        // and the switcher's search holds indices into them.
-        self.match_connections(cx);
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
@@ -307,8 +304,6 @@ impl Workspace {
                 .map(|profile| profile.name.clone())
                 .collect::<Vec<_>>(),
         );
-        self.switcher_open = false;
-        cx.notify();
 
         let password_task = {
             let id = id.clone();
@@ -318,7 +313,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let password = password_task.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
-                // Removed from the switcher while the Keychain answered --
+                // Removed while the Keychain answered --
                 // nothing left to seed a form from.
                 let Some(profile) = workspace.profiles.iter().find(|profile| profile.id == id)
                 else {
@@ -850,7 +845,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Removed from the switcher while the form sat open: there is nothing
+        // Removed while the form sat open: there is nothing
         // left to save onto, and the id is the only handle the form kept.
         let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
             cx.notify();
@@ -1224,7 +1219,22 @@ impl Workspace {
         form.project = project;
         self.form = Some(form);
         self.pending_project_deletion = None;
-        self.switcher_open = false;
+        cx.notify();
+    }
+
+    /// Opens the form over a saved connection, in its own project.
+    pub(crate) fn edit_profile(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        let mut form = ConnectionForm::editing(profile, window, cx);
+        form.project = self.group_of(&profile.id).map(str::to_string);
+        self.form = Some(form);
         cx.notify();
     }
 
@@ -1275,7 +1285,6 @@ impl Workspace {
                 // The question takes the reading line's place, as a summary
                 // would.
                 workspace.clear_notice();
-                workspace.switcher_open = false;
                 workspace.pending_import = Some(PendingImport {
                     source,
                     report,
@@ -1758,8 +1767,6 @@ impl Workspace {
         }
         self.active = index;
         self.form = None;
-        self.switcher_open = false;
-        self.pending_removal = None;
         // Written here rather than at quit, so the profile in front survives a
         // crash as well as a close.
         self.remember_profiles(cx);
@@ -1803,17 +1810,13 @@ impl Workspace {
         self.cycle_profile(-1, cx);
     }
 
+    /// Asked about first, in the palette's confirmation (`Mode::Confirm`).
     pub(crate) fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.get(index) else {
             return;
         };
         let id = profile.id.clone();
         let name = profile.name.clone();
-        if self.pending_removal.as_deref() != Some(&id) {
-            self.pending_removal = Some(id);
-            cx.notify();
-            return;
-        }
         if index == self.active
             && let Err(message) = self.persist_buffer(cx)
         {
@@ -1843,15 +1846,12 @@ impl Workspace {
         store::delete_password(&id);
         let removed_queries = store::delete_queries(&id);
         let _ = store::delete_grids(&id);
-        self.pending_removal = None;
         for project in &mut self.projects {
             project.connections.retain(|member| member != &id);
         }
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
-        // The switcher lives in a titlebar the welcome surface does not have.
         if self.profiles.is_empty() {
-            self.switcher_open = false;
             self.refocus_front();
         }
         self.connect_active(cx);

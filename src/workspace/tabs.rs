@@ -17,9 +17,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_hidden = !self.sidebar_hidden;
-        // A folded sidebar takes the open switcher panel with it: the panel is
-        // anchored to a row that is no longer on screen.
-        self.switcher_open = false;
         cx.notify();
     }
 
@@ -619,12 +616,6 @@ impl Workspace {
         // is scoped to the active tab's own form, so one left open elsewhere
         // falls through to the steps below instead of eating this keystroke.
         if self.close_new_row(cx) {
-            return;
-        }
-        // Below the modals and prompts, which paint over the switcher.
-        if self.switcher_open {
-            self.switcher_open = false;
-            cx.notify();
             return;
         }
         let Some(profile) = self.profile_mut() else {
