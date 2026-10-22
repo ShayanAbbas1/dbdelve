@@ -15,6 +15,7 @@ use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A query, parsed once per keystroke rather than once per candidate.
 pub struct Query {
@@ -111,6 +112,7 @@ impl Fuzzy {
         }
         self.indices.clear();
         let haystack = Utf32Str::new(text, &mut self.chars);
+        let by_byte = matches!(haystack, Utf32Str::Ascii(_));
         if query
             .pattern
             .indices(haystack, &mut self.matcher, &mut self.indices)
@@ -120,23 +122,36 @@ impl Fuzzy {
         }
         self.indices.sort_unstable();
         self.indices.dedup();
-        char_ranges(text, &self.indices)
+        grapheme_ranges(text, &self.indices, by_byte)
     }
 }
 
-/// Character indices, sorted and unique, as merged byte ranges of `text`.
-fn char_ranges(text: &str, indices: &[u32]) -> Vec<Range<usize>> {
+/// Match indices, sorted and unique, as merged byte ranges of `text`, each
+/// covering the whole grapheme cluster its index lands in.
+///
+/// nucleo indexes text by grapheme cluster, matching the first char of each,
+/// so an index is a cluster's position -- except where every cluster starts
+/// with an ASCII char (`e` and a combining accent, say, or `\r\n`), when it
+/// matches the text's bytes and an index is a byte offset.
+fn grapheme_ranges(text: &str, indices: &[u32], by_byte: bool) -> Vec<Range<usize>> {
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    let mut wanted = indices.iter().copied().peekable();
-    for (position, (start, ch)) in text.char_indices().enumerate() {
-        let Some(&next) = wanted.peek() else {
+    let mut wanted = indices.iter().map(|&index| index as usize).peekable();
+    for (position, (start, grapheme)) in text.grapheme_indices(true).enumerate() {
+        if wanted.peek().is_none() {
             break;
+        }
+        let end = start + grapheme.len();
+        let lands = |index: &usize| {
+            if by_byte {
+                *index < end
+            } else {
+                *index == position
+            }
         };
-        if next as usize != position {
+        if wanted.next_if(lands).is_none() {
             continue;
         }
-        wanted.next();
-        let end = start + ch.len_utf8();
+        while wanted.next_if(lands).is_some() {}
         match ranges.last_mut() {
             Some(last) if last.end == start => last.end = end,
             _ => ranges.push(start..end),
@@ -221,5 +236,37 @@ mod tests {
     #[test]
     fn the_highlights_are_byte_ranges_on_text_that_is_not_ascii() {
         assert_eq!(marked("Café orders", "fe o"), "Ca[fé] [o]rders");
+    }
+
+    #[test]
+    fn a_letter_and_its_combining_accent_are_marked_as_one() {
+        assert_eq!(
+            marked("Cafe\u{301} orders", "fe o"),
+            "Ca[fe\u{301}] [o]rders"
+        );
+    }
+
+    #[test]
+    fn an_emoji_sequence_counts_as_one_character() {
+        assert_eq!(
+            marked("👩\u{200d}💻 dev notes", "dev"),
+            "👩\u{200d}💻 [dev] notes"
+        );
+        assert_eq!(
+            marked("👩\u{200d}💻 dev notes", "👩"),
+            "[👩\u{200d}💻] dev notes"
+        );
+    }
+
+    #[test]
+    fn a_crlf_counts_as_one_character() {
+        assert_eq!(
+            marked("café\r\nfrom accounts", "from"),
+            "café\r\n[from] accounts"
+        );
+        assert_eq!(
+            marked("SELECT 1;\r\nFROM t", "from"),
+            "SELECT 1;\r\n[FROM] t"
+        );
     }
 }

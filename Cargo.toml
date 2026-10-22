@@ -229,6 +229,10 @@ percent-encoding = "=2.3.2"
 # as obvious (whole words, word starts, runs of adjacent characters) is not a
 # few lines. This is Helix's matcher, and it pulls in memchr and nothing else.
 nucleo-matcher = "=0.3.1"
+# The grapheme clusters nucleo-matcher indexes a match by, to turn its indices
+# back into the text they cover. Already in the graph through it; pinned to the
+# locked version so naming it links no second copy.
+unicode-segmentation = "=1.13.3"
 
 serde = { version = "1", features = ["derive"] }
 # `raw_value` lets Import Rows keep a JSON number's own text (`import_rows::Json`),

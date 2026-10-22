@@ -1904,6 +1904,7 @@ dependencies = [
  "tree-sitter-sequel",
  "turso_core",
  "turso_sdk_kit",
+ "unicode-segmentation",
  "ureq",
  "url",
  "windows-sys 0.61.2",
