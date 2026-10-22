@@ -42,7 +42,7 @@ use crate::{
         ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme, theme, user,
     },
     ui::{
-        chord_for, highlighted, key_chip, keycap_parts, kind_color, object_icon, one_line,
+        chord_for, highlighted, key_chip, keycap_parts, keycaps, kind_color, object_icon, one_line,
         raised_card, row_icon_tinted,
     },
     workspace::opacity_for,
@@ -1033,16 +1033,6 @@ fn scope_pill(
             }
         })
         .child(label)
-}
-
-/// A chord as a keycap per key, the way the platform draws one in a menu.
-fn keycaps(chord: &str, t: Theme) -> impl IntoElement {
-    div()
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(layout::KEYCAP_GAP))
-        .children(keycap_parts(chord).into_iter().map(|key| key_chip(key, t)))
 }
 
 fn footer_hint(strokes: &[&str], label: &'static str, t: Theme) -> impl IntoElement {

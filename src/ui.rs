@@ -625,6 +625,16 @@ pub(crate) fn key_chip(label: impl Into<gpui::SharedString>, t: Theme) -> Div {
         .child(label.into())
 }
 
+/// A chord as a keycap per key, the way the platform draws one in a menu.
+pub(crate) fn keycaps(chord: &str, t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::KEYCAP_GAP))
+        .children(keycap_parts(chord).into_iter().map(|key| key_chip(key, t)))
+}
+
 /// A shortcut hint and what it does, in the app face rather than the editor's
 /// monospace -- these are sentences about the UI, not query output.
 pub(crate) fn key_hint(
