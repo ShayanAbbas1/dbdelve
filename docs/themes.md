@@ -89,7 +89,7 @@ other form is ignored, and that colour falls back to DBDelve's.
 | `bg` | The brightest plane: the results grid. |
 | `panel` | One step behind `bg`: the editor and the active tab. |
 | `surface` | Chrome, furthest back: sidebar, titlebar, status bar, table headers. |
-| `overlay` | Floating panels such as the palette and the connection switcher. |
+| `overlay` | Floating panels such as the palette. |
 | `control` | Buttons at rest. |
 | `text`, `text_muted`, `text_faint` | Body text, secondary text, and the faintest text, such as hints. |
 | `accent` | The highlight colour: focus, links and active items. |
