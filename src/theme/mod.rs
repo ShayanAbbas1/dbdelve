@@ -2183,12 +2183,18 @@ mod tests {
         // A glass card is a tint over a blur of the window beneath it, and the
         // blur softens what is under it without darkening it, so the raw-tint
         // checks say nothing here. At every opacity the setting allows, since
-        // the card is searched for at the one in force.
+        // the card is searched for at the one in force. Asked for on the
+        // installed theme, as gpui-component does, and on `for_popup`'s, as
+        // the app's own cards do.
         for t in Theme::all().into_iter().filter(|t| t.is_glass) {
-            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
-                let card = t.overlay_glass();
+            for (asker, t, asked) in opacities()
+                .map(|opacity| t.with_opacity(opacity))
+                .flat_map(|t| [("installed", t, t), ("popup", t, t.for_popup())])
+            {
+                let card = asked.overlay_glass();
                 let under = card.flatten(t.popup_backdrop());
-                let at = |what: &str| format!("{what} at {:.2}", t.opacity);
+                let at =
+                    |what: &str| format!("{what} at {:.2}, asked on the {asker} theme", t.opacity);
                 check(t, &at("text on a floating card"), t.text, under, AA_TEXT);
                 check(
                     t,
@@ -2262,10 +2268,11 @@ mod tests {
 
     #[test]
     fn a_floating_card_is_backed_by_the_worst_fill_it_can_cover() {
-        // The card's backdrop is the window, not the desktop: nothing the
-        // window paints is brighter than the frost over white under dark glass,
-        // or darker than it over black under light, and nothing a card can
-        // cover is worse for its text than the backdrop the search used.
+        // Built here from the tokens the way the window stacks them, rather
+        // than taken from `popup_backdrop`'s own list, so a fill that list
+        // misses fails here. Each plane under each wash a block of rows can
+        // wear, a table's header, and a button at rest. Not a hovered or
+        // pressed one: the pointer doing that is on the card instead.
         for t in Theme::all().into_iter().filter(|t| t.is_glass) {
             for t in opacities().map(|opacity| t.with_opacity(opacity)) {
                 let backdrop = t.popup_backdrop().relative_luminance();
@@ -2274,15 +2281,33 @@ mod tests {
                     Appearance::Light => (BLACK, |a, b| a < b),
                 };
                 let chrome = t.frost().flatten(desktop);
+                let editor = t.panel_glass().flatten(chrome);
                 let results = t.data_glass().flatten(chrome);
-                for (name, fill) in [
+                let mut fills = vec![
+                    ("chrome".to_string(), chrome),
+                    ("the editor".to_string(), editor),
+                    ("the results".to_string(), results),
+                    (
+                        "a table's header".to_string(),
+                        t.panel_glass().flatten(results),
+                    ),
+                    ("a button".to_string(), t.control),
+                ];
+                for (plane, under) in [
                     ("chrome", chrome),
-                    ("the editor", t.panel_glass().flatten(chrome)),
+                    ("the editor", editor),
                     ("the results", results),
-                    ("a block of selected rows", t.selection.flatten(results)),
-                    ("a block of edited cells", t.edited.flatten(results)),
-                    ("a button", t.control),
                 ] {
+                    for (wash, over) in [
+                        ("selected", t.selection),
+                        ("edited", t.edited),
+                        ("hovered", t.element_hover),
+                        ("highlighted", t.element_active),
+                    ] {
+                        fills.push((format!("{wash} rows on {plane}"), over.flatten(under)));
+                    }
+                }
+                for (name, fill) in fills {
                     assert!(
                         !worse(fill.relative_luminance(), backdrop),
                         "{} at {:.2}: {name} is worse than the card's backdrop",
@@ -2333,21 +2358,24 @@ mod tests {
 
     #[test]
     fn a_floating_cards_muted_text_never_reads_worse_than_the_themes_own() {
+        // On the card as it is drawn over the worst backdrop, not on its
+        // opaque tone, which is what `popup_ink` already chose by.
         for t in Theme::all() {
-            let popup = t.for_popup();
-            for (name, own, card) in [
-                ("muted", t.text_muted, popup.text_muted),
-                ("faint", t.text_faint, popup.text_faint),
-            ] {
-                let (own, card) = (
-                    contrast_ratio(own, t.overlay),
-                    contrast_ratio(card, t.overlay),
-                );
-                assert!(
-                    card >= own,
-                    "{}: {name} on a floating card at {card:.2}, the theme's own at {own:.2}",
-                    t.name
-                );
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                let card = t.overlay_glass().flatten(t.popup_backdrop());
+                for (name, own, on_card) in [
+                    ("muted", t.text_muted, popup.text_muted),
+                    ("faint", t.text_faint, popup.text_faint),
+                ] {
+                    let (own, on_card) = (contrast_ratio(own, card), contrast_ratio(on_card, card));
+                    assert!(
+                        on_card >= own,
+                        "{} at {:.2}: {name} on a floating card at {on_card:.2}, the theme's own at {own:.2}",
+                        t.name,
+                        t.opacity
+                    );
+                }
             }
         }
     }
