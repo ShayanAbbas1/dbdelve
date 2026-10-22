@@ -2519,8 +2519,9 @@ impl Workspace {
         }
     }
 
-    /// Rewrite the buffer as formatted SQL. Invoked by hand only -- running,
-    /// saving and leaving the buffer all leave what was typed alone.
+    /// Rewrite the selection as formatted SQL, or the whole buffer when
+    /// nothing is selected. Invoked by hand only -- running, saving and
+    /// leaving the buffer all leave what was typed alone.
     pub(crate) fn format_query(
         &mut self,
         _: &FormatQuery,
@@ -2537,24 +2538,42 @@ impl Workspace {
             return;
         };
         let editor = tab.editor.clone();
-        let (text, cursor) = {
+        let (text, selection, cursor) = {
             let editor = editor.read(cx);
-            (editor.value().to_string(), editor.cursor())
+            (
+                editor.value().to_string(),
+                editor.selected_range(),
+                editor.cursor(),
+            )
         };
-        if text.trim().is_empty() {
+        let span = match selection.is_empty() {
+            true => 0..text.len(),
+            false => selection,
+        };
+        let source = &text[span.clone()];
+        if source.trim().is_empty() {
             return;
         }
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let formatted = match crate::sql::format(self.engine(), &text) {
+        let formatted = match crate::sql::format(self.engine(), source) {
             Ok(formatted) => formatted,
             Err(refusal) => {
                 self.note(refusal.into(), cx);
                 return;
             }
         };
-        if formatted == text {
+        if formatted == source {
+            return;
+        }
+
+        if span.len() < text.len() {
+            let after = span.start..span.start + formatted.len();
+            editor.update(cx, |editor, cx| {
+                replace_range(editor, span, &formatted, window, cx);
+                editor.set_selected_range(after, cx);
+            });
             return;
         }
 
@@ -2582,7 +2601,7 @@ impl Workspace {
         });
 
         editor.update(cx, |editor, cx| {
-            editor.set_value(formatted, window, cx);
+            rewrite(editor, &formatted, window, cx);
             editor.set_cursor_position(position, window, cx);
         });
     }
@@ -2613,12 +2632,7 @@ impl Workspace {
             // read them all. Undo reselects the whole lines, not the caret, for
             // the same lack of API.
             //
-            // An IME composition in progress would otherwise be what `replace`
-            // overwrites, ahead of the selection.
-            gpui::EntityInputHandler::unmark_text(editor, window, cx);
-            // Through `replace`, not `set_value`: that one wipes the undo stack.
-            editor.set_selected_range(lines, cx);
-            editor.replace(toggled, window, cx);
+            replace_range(editor, lines, &toggled, window, cx);
             editor.set_selected_range(after, cx);
         });
     }
@@ -2671,6 +2685,59 @@ impl Workspace {
                 .map(|()| (range.start, sql[range].to_string())),
         )
     }
+}
+
+/// Replace `range` of the buffer with `text` as one step Undo takes back,
+/// leaving the cursor after it. Through `replace`, not `set_value`: that one
+/// wipes the undo stack.
+pub(crate) fn replace_range(
+    editor: &mut EditorState,
+    range: Range<usize>,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    // An IME composition in progress would otherwise be what `replace`
+    // overwrites, ahead of the selection.
+    gpui::EntityInputHandler::unmark_text(editor, window, cx);
+    editor.set_selected_range(range, cx);
+    editor.replace(text.to_string(), window, cx);
+}
+
+/// Make the buffer read `text` as one step Undo takes back, replacing only the
+/// span between what the two share at either end, so Undo reselects what
+/// changed rather than the whole buffer.
+pub(crate) fn rewrite(
+    editor: &mut EditorState,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let old = editor.value().to_string();
+    let (changed, with) = changed_span(&old, text);
+    if changed.is_empty() && with.is_empty() {
+        return;
+    }
+    replace_range(editor, changed, &text[with], window, cx);
+}
+
+/// The span of `old` that differs from `new`, and the span of `new` that
+/// replaces it, both on char boundaries.
+fn changed_span(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+    let prefix: usize = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    let suffix: usize = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
 }
 
 /// The whole lines `selection` touches, without the final newline. A
@@ -2939,6 +3006,19 @@ mod tests {
             out.insert(after.start, '[');
         }
         Some(out)
+    }
+
+    #[test]
+    fn a_rewrite_replaces_only_what_changed() {
+        assert_eq!(
+            changed_span("select 1;", "select 1;\nselect 2;"),
+            (9..9, 9..19)
+        );
+        assert_eq!(changed_span("a b c", "a x c"), (2..3, 2..3));
+        assert_eq!(changed_span("same", "same"), (4..4, 4..4));
+        // A repeated letter at the seam is shared once, not by both ends.
+        assert_eq!(changed_span("aa", "aaa"), (2..2, 2..3));
+        assert_eq!(changed_span("é1", "é2é"), (2..3, 2..5));
     }
 
     #[test]
