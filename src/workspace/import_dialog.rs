@@ -195,7 +195,7 @@ impl TableDelegate for PreviewGrid {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let t = theme(cx);
+        let t = popup_theme(cx);
         let name: SharedString = match col_ix {
             0 => "Line".into(),
             k => self.checked.columns[k - 1].0.clone().into(),
@@ -224,7 +224,7 @@ impl TableDelegate for PreviewGrid {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let t = theme(cx);
+        let t = popup_theme(cx);
         let text = self.text(row_ix, col_ix);
         let null = col_ix > 0 && text.as_ref() == Some(&NULL_LABEL);
         let problem = self.problems.get(&(self.start + row_ix, col_ix)).cloned();
@@ -293,7 +293,7 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let profile = self.profile()?;
         let dialog = profile.session.import_rows.as_ref()?;
         let engine = profile.config.engine();
@@ -345,7 +345,7 @@ impl Workspace {
         loading: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let dialog = editing.dialog;
         let options = frozen(
             div()
@@ -411,7 +411,7 @@ impl Workspace {
     /// The options, a group per section, each read from the dialog and
     /// written back through `edit_import`.
     fn import_options(&self, editing: &Editing, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let dialog = editing.dialog;
         let options = &dialog.options;
         let mut groups = Vec::new();
@@ -685,7 +685,7 @@ fn segments<T: Copy + PartialEq + 'static>(
     write: fn(&mut Options, T),
     cx: &mut Context<Workspace>,
 ) -> gpui::Div {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     div()
         .flex()
         .flex_wrap()
@@ -880,7 +880,7 @@ fn import_mapping(
     targets: &Rc<Vec<TargetColumn>>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let dialog = editing.dialog;
     // Read from the dialog's own mappings, which an edit changes at once,
     // over the columns of the check they came from.
@@ -970,7 +970,7 @@ fn mapping_row(
     targets: &Rc<Vec<TargetColumn>>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let focused = editing.dialog.focused_mapping == Some(i);
 
     let mut choices = vec![
@@ -1166,7 +1166,7 @@ fn set_rule(
 }
 
 fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let dialog = editing.dialog;
     let view = |id: &'static str, label: &'static str, sql: bool| {
         let profile = editing.profile.clone();
@@ -1286,7 +1286,7 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
 }
 
 fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let workspace = cx.entity().downgrade();
     let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
     let name = dialog
@@ -1412,7 +1412,7 @@ fn problem_navigation(
     at: usize,
     cx: &mut Context<Workspace>,
 ) -> gpui::Div {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let summary = div()
         .id("import-problem-summary")
         .child(problem_summary(problems, at));
@@ -1460,7 +1460,7 @@ fn problem_navigation(
 }
 
 fn import_footer(profile: &str, dialog: &ImportDialog, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let cancel_workspace = cx.entity().downgrade();
     let import_workspace = cancel_workspace.clone();
     let summary = match &dialog.prepared {
@@ -1552,7 +1552,7 @@ fn import_footer(profile: &str, dialog: &ImportDialog, cx: &mut Context<Workspac
 
 /// Drawn by hand: gpui-component's progress bar tweens its value.
 fn import_progress(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let workspace = cx.entity().downgrade();
     let ImportPhase::Running {
         plan,

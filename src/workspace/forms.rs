@@ -766,7 +766,7 @@ impl Workspace {
     /// Where an import's connections go, asked before any is added: a new
     /// project named for the client by default, one already made, or none.
     pub(crate) fn render_import_choice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let pending = self.pending_import.as_ref()?;
         let source = pending.source.label();
         let known = self
@@ -913,7 +913,7 @@ impl Workspace {
     /// `Palette > Input`, which is the only predicate deep enough to win the
     /// keystroke back from the search field. See `move_palette_selection`.
     pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let list = self.palette.as_ref()?;
         let placeholder = list.read(cx).delegate().placeholder();
         let workspace = cx.entity().downgrade();
@@ -964,7 +964,7 @@ impl Workspace {
 
     /// What `cmd+w` asks before it takes unapplied cell edits with the tab.
     pub(crate) fn render_reference_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = theme(cx).for_popup();
+        let t = popup_theme(cx);
         let popup = self.reference_popup.as_ref()?;
         let rows: Vec<AnyElement> = match &popup.choices {
             None => vec![note(t, "Checking…")],
@@ -1042,7 +1042,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_discard_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         self.profile()?.session.pending_discard.as_ref()?;
         let cancel_workspace = cx.entity().downgrade();
         let discard_workspace = cancel_workspace.clone();
@@ -1115,7 +1115,7 @@ impl Workspace {
 
     /// What `cmd+w` asks before it takes a saved query with the tab.
     pub(crate) fn render_close_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let name = self.profile()?.session.pending_close.clone()?;
         let cancel_workspace = cx.entity().downgrade();
         let delete_workspace = cancel_workspace.clone();
@@ -1195,7 +1195,7 @@ impl Workspace {
     /// verdict behind it cannot disagree about what they are asking (spec
     /// §5).
     pub(crate) fn render_pending_run(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let profile = self.profile()?;
         let pending = profile.session.pending_run.as_ref()?;
         // Re-derived rather than trusted from when the prompt was raised: the
@@ -1359,7 +1359,7 @@ impl Workspace {
     /// A queue's statement failed with more of the queue left to run, so the
     /// rest waits here until the user says whether it still runs.
     pub(crate) fn render_queue_failure(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let profile = self.profile()?;
         let Tab::Query(id) = profile.session.queue_failure? else {
             return None;
@@ -1455,7 +1455,7 @@ impl Workspace {
     /// Asked before the first edit on rows restored from an earlier session,
     /// which may no longer be what the database holds.
     pub(crate) fn render_stale_edit(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let profile = self.profile()?;
         let stale = profile.session.stale_edit.as_ref()?;
         let dont_ask = stale.dont_ask;
@@ -1618,7 +1618,7 @@ impl Workspace {
     /// starts and the pending edits go with it, so after a failure this is the
     /// only remaining copy of what was attempted.
     pub(crate) fn render_apply_review(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let code = fonts(cx).editor.clone();
         let profile = self.profile()?;
         let review = profile.session.apply_review.as_ref()?;
@@ -1728,7 +1728,7 @@ impl Workspace {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let panel = self.switcher_open.then(|| {
-            let t = t.for_popup();
+            let t = popup_theme(cx);
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
             let searched = self.searched_connections(cx);

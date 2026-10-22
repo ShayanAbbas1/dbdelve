@@ -29,7 +29,7 @@ use crate::{
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
-    theme::{FontSlot, Theme, fonts, install_theme, layout, theme, user},
+    theme::{FontSlot, Theme, fonts, install_theme, layout, popup_theme, theme, user},
     ui::{chord_hint, object_icon, one_line, row_icon},
     workspace::opacity_for,
 };
@@ -275,7 +275,7 @@ impl ListDelegate for Palette {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let item = self.items.get(*self.matched.get(ix.row)?)?;
 
         Some(
@@ -325,7 +325,7 @@ impl ListDelegate for Palette {
         };
         div()
             .p(px(layout::SPACE_MD))
-            .text_color(theme(cx).text_muted)
+            .text_color(popup_theme(cx).text_muted)
             .child(message)
     }
 

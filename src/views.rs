@@ -50,7 +50,9 @@ use crate::{
     },
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
-    theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, theme},
+    theme::{
+        FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, popup_theme, theme,
+    },
     ui::{
         Control, Tone, button, button_label, compact_count, dialog, group_thousands, icon_button,
         key_hint, keycap_for, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
@@ -3373,7 +3375,7 @@ fn relation_controls(
 /// the change to `profiles.toml` by the time this repaints — so Cancel would
 /// have to undo a file, and Done only takes the card away.
 pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let tab = workspace.settings_tab;
     let tabs = div()
         .flex()
@@ -3427,7 +3429,7 @@ pub fn render_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> An
 /// The Theme / Opacity / Fonts / Default limit sections -- unchanged from
 /// before the Keybindings tab existed, just no longer the whole modal.
 fn render_general_settings(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let families = fonts(cx).clone();
     let row_limit = workspace.settings.row_limit;
     let check_for_updates = workspace.settings.check_for_updates;
@@ -3779,7 +3781,7 @@ fn render_keybinding_row(
     rebinding: Option<&'static str>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let t = *theme(cx);
+    let t = popup_theme(cx);
     let id = spec.id;
     let has_override = overrides.contains_key(id);
 

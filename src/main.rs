@@ -89,7 +89,7 @@ use session::{
     matching_tab, relation_kind, restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
-use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
+use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};
 use ui::{
     Control, Tone, button, button_label, dialog, group_thousands, human_bytes, icon_button,
     object_icon, one_line, relative_age, row_icon, row_icon_tinted, row_readout, section_label,

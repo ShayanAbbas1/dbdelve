@@ -179,6 +179,18 @@ pub fn theme(cx: &gpui::App) -> &Theme {
     cx.global::<Theme>()
 }
 
+/// The active theme as [`Theme::for_popup`] sets it. Kept beside the theme by
+/// [`Theme::apply_to_components`] rather than derived where it is read: a
+/// preview grid or a palette list reading it once a row would search for the
+/// card once a row.
+struct PopupTheme(Theme);
+
+impl gpui::Global for PopupTheme {}
+
+pub fn popup_theme(cx: &gpui::App) -> Theme {
+    cx.global::<PopupTheme>().0
+}
+
 /// Which of the three faces a family is being set for. dbdelve's type does three
 /// different jobs: chrome labels itself, the editor is code, and the grid is
 /// columns of values that only line up in a monospaced face.
@@ -356,8 +368,10 @@ const DATA_ALPHA: f32 = 0.14;
 /// fill. A floor, not the fill — see [`Theme::overlay_glass`].
 const OVERLAY_ALPHA_FLOOR: f32 = 0.15;
 /// What a floating card's text holds against the worst backdrop the card can
-/// be shown over: WCAG AA for body text, and AA large for muted text, which on
-/// a card is a shortcut, a detail or a hint beside the body rather than body.
+/// be shown over: WCAG AA for body text, `danger` included, since on a card it
+/// says what went wrong; and AA large for muted, faint and accent text, which
+/// on a card is a shortcut, a heading, a hint or a match beside the body
+/// rather than body.
 const POPUP_TEXT_CONTRAST: f32 = 4.5;
 const POPUP_MUTED_CONTRAST: f32 = 3.0;
 /// Muted and faint text on a glass card, as shares of the body text: Zeron's.
@@ -745,15 +759,41 @@ impl Theme {
 
     /// This theme as text is set on a floating card. On glass, muted and faint
     /// may be Zeron's fixed shares of the body text instead of the theme's own
-    /// greys — see [`Theme::popup_ink`]. An opaque theme comes back unchanged.
+    /// greys — see [`Theme::popup_ink`] — and each ink is moved in Oklch
+    /// lightness, away from the card, only as far as it takes to hold over
+    /// [`Theme::popup_backdrop`]. The inks move rather than the card: a thin
+    /// card is what makes it frosted, and a faint heading is not worth giving
+    /// that up for. Lightness only, so an error still reads red and a match
+    /// still reads as the accent. An opaque theme comes back unchanged.
     pub fn for_popup(self) -> Self {
         if !self.is_glass || self.popup_card.is_some() {
             return self;
         }
+        let fill = self.overlay_glass();
+        let card = fill.flatten(self.popup_backdrop());
+        let toward = match self.appearance {
+            Appearance::Dark => 1.0,
+            Appearance::Light => 0.0,
+        };
+        let legible = |ink: Srgb, minimum: f32| {
+            let own = Oklch::from_srgb(ink);
+            let moved = (1..=40).map(|step| {
+                let lightness = own.l + (toward - own.l) * step as f32 / 40.0;
+                Oklch::new(lightness, own.c, own.h).to_srgb()
+            });
+            std::iter::once(ink)
+                .chain(moved)
+                .find(|&ink| contrast_ratio(ink, card) >= minimum)
+                .unwrap_or(self.text)
+        };
+        let muted = self.popup_ink(self.text_muted, POPUP_MUTED_INK);
+        let faint = self.popup_ink(self.text_faint, POPUP_FAINT_INK);
         Self {
-            text_muted: self.popup_ink(self.text_muted, POPUP_MUTED_INK),
-            text_faint: self.popup_ink(self.text_faint, POPUP_FAINT_INK),
-            popup_card: Some(self.overlay_glass()),
+            text_muted: legible(muted, POPUP_MUTED_CONTRAST),
+            text_faint: legible(faint, POPUP_MUTED_CONTRAST),
+            accent: legible(self.accent, POPUP_MUTED_CONTRAST),
+            danger: legible(self.danger, POPUP_TEXT_CONTRAST),
+            popup_card: Some(fill),
             ..self
         }
     }
@@ -795,6 +835,8 @@ impl Theme {
     /// and `Workspace::new` sets it again from disk before the first frame.
     pub fn apply_to_components(self, cx: &mut gpui::App) {
         let fonts = fonts(cx).clone();
+        let popup = self.for_popup();
+        cx.set_global(PopupTheme(popup));
         gpui_component::Theme::update(cx, |component| {
             component.shadow = false;
             component.radius = gpui::px(layout::RADIUS_CONTROL);
@@ -828,8 +870,9 @@ impl Theme {
             component.colors.ring = self.accent.into();
             // Only the completion popup reads this, for the matched prefix of a
             // suggestion. Left at the library default it is a blue belonging to no
-            // palette dbdelve ships.
-            component.colors.blue = self.accent.into();
+            // palette dbdelve ships. The card's accent, since the card is the
+            // only place it is painted.
+            component.colors.blue = popup.accent.into();
             component.colors.muted = self.surface.into();
             component.colors.muted_foreground = self.text_muted.into();
             // Translucent on glass only, and that is what tells gpui-component
@@ -2170,6 +2213,22 @@ mod tests {
                     card.a,
                     t.opacity
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_cards_inks_hold_over_the_worst_backdrop() {
+        // The card is searched for its body and muted text only; faint, danger
+        // and accent are moved to hold on whatever card that leaves.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                let under = popup.overlay_glass().flatten(t.popup_backdrop());
+                let at = |what: &str| format!("{what} on a floating card at {:.2}", t.opacity);
+                check(t, &at("faint"), popup.text_faint, under, AA_LARGE);
+                check(t, &at("accent"), popup.accent, under, AA_LARGE);
+                check(t, &at("danger"), popup.danger, under, AA_TEXT);
             }
         }
     }
