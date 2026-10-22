@@ -1514,8 +1514,8 @@ nothing stacked to close, or the completion popup cannot be dismissed.
 It does **not** provide a fuzzy matcher, and its `command` palette filters by
 substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
 (`nucleo-matcher`) every list that narrows as it is typed into goes through --
-the palette, completions, the explorer's filter and the connection switcher's
-search -- so a query that finds something in one finds it in the others, and
+the palette, completions, the explorer's filter, the connection switcher's
+search and the settings search -- so a query that finds something in one finds it in the others, and
 each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
 second implementation of anything.

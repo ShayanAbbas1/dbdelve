@@ -241,6 +241,7 @@ chore(release): bump version to 0.3.8
 | `import`      | Importing connections from other tools                                  |
 | `export`      | Exporting results                                                       |
 | `update`      | The in-app updater                                                      |
+| `settings`    | The settings panel                                                      |
 | `release`     | Packaging and release scripts                                           |
 | `dev`         | `compose.yaml`, seeds and scripts under `dev/`                          |
 

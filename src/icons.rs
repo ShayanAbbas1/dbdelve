@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 51] = [
+const ICONS: [(&str, &IconData); 53] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -77,6 +77,11 @@ const ICONS: [(&str, &IconData); 51] = [
     ("icons/folder.svg", icondata_lu::LuFolder),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
+    (
+        "icons/sliders-horizontal.svg",
+        icondata_lu::LuSlidersHorizontal,
+    ),
+    ("icons/keyboard.svg", icondata_lu::LuKeyboard),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
@@ -144,6 +149,8 @@ pub mod icon {
     pub const REFERENCED_BY: &str = "icons/arrow-down-right.svg";
     pub const PRIMARY_KEY: &str = "icons/key.svg";
     pub const SETTINGS: &str = "icons/settings.svg";
+    pub const SLIDERS: &str = "icons/sliders-horizontal.svg";
+    pub const KEYBOARD: &str = "icons/keyboard.svg";
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -232,6 +239,9 @@ mod tests {
             icon::REFERENCED_BY,
             icon::PRIMARY_KEY,
             icon::SETTINGS,
+            icon::SLIDERS,
+            icon::KEYBOARD,
+            icon::THEME,
         ] {
             assert_draws(path);
         }

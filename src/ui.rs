@@ -521,13 +521,6 @@ pub(crate) fn keycap(stroke: &'static str) -> Kbd {
     Kbd::new(Keystroke::parse(stroke).expect("keycap strokes are compile-time constants"))
 }
 
-/// The same keycap for a stroke only known at runtime -- a rebound chord read
-/// back off disk, which [`keycap`]'s constant cannot cover. One GPUI cannot
-/// parse draws nothing rather than a cap with garbage on it.
-pub(crate) fn keycap_for(stroke: &str) -> Option<Kbd> {
-    Keystroke::parse(stroke).ok().map(Kbd::new)
-}
-
 /// The same cap as plain text, for the readouts that run as a sentence rather
 /// than carrying a chip of their own. `Kbd`'s own formatter, so a cap written
 /// into a string reads the way the drawn ones do -- `⌘0` on macOS, `Ctrl+0`

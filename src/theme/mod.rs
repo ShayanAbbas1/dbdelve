@@ -66,6 +66,8 @@ pub mod layout {
     /// the settings panel.
     pub const RADIUS_CARD: f32 = 14.0;
     pub const RADIUS_KEYCAP: f32 = 5.0;
+    /// The cards a settings group's rows sit on, inside the settings panel.
+    pub const RADIUS_SETTINGS_CARD: f32 = 12.0;
 
     /// The three heights a button is drawn at. Standard is for the dialogs and
     /// the connection form, where it sits beside a field and is the thing the
@@ -138,6 +140,25 @@ pub mod layout {
     pub const PALETTE_TILE_SIZE: f32 = 26.0;
     pub const PALETTE_ACCENT_BAR_WIDTH: f32 = 3.0;
     pub const PALETTE_ACCENT_BAR_HEIGHT: f32 = 16.0;
+    /// The settings panel, docked at the window's right edge. Not scaled with
+    /// the chrome: a row too narrow for its control puts it under the text.
+    pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
+    pub const SETTINGS_HEADER_HEIGHT: f32 = 52.0;
+    pub const SETTINGS_TAB_SIZE: f32 = 32.0;
+    pub const SETTINGS_TAB_UNDERLINE_WIDTH: f32 = 16.0;
+    pub const SETTINGS_TAB_UNDERLINE_HEIGHT: f32 = 2.0;
+    pub const SETTINGS_ROW_HEIGHT: f32 = 56.0;
+    /// Between a settings row's title and the description under it.
+    pub const SETTINGS_DESCRIPTION_GAP: f32 = 2.0;
+    /// A row with no description under its title: the keyboard's, sixty of
+    /// them, which at the full height would be a list to scroll for ever.
+    pub const SETTINGS_ROW_COMPACT_HEIGHT: f32 = 44.0;
+    /// How narrow a row's title and description get before its control
+    /// wraps under them.
+    pub const SETTINGS_TEXT_MIN_WIDTH: f32 = 200.0;
+    pub const SWITCH_WIDTH: f32 = 32.0;
+    pub const SWITCH_HEIGHT: f32 = 18.0;
+    pub const SWITCH_THUMB_SIZE: f32 = 14.0;
     pub const KEYCAP_HEIGHT: f32 = 20.0;
     pub const KEYCAP_GAP: f32 = 2.0;
     /// How far the window behind a modal surface is blurred.

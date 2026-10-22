@@ -569,14 +569,18 @@ impl Workspace {
             return;
         }
         // Whatever is in front, in the order it is stacked: the palette paints
-        // over the settings modal, which paints over the stale-edit prompt,
+        // over the settings panel, which goes ahead of the stale-edit prompt,
         // the stopped-run prompt and the run prompt, which paint over the
         // discard-close confirmation, which paints over the close
         // confirmation, which paints over the new-row form, which paints over
         // the apply review, which paints over the surface -- so `escape`
         // backs out of them in that order, one at a time. The palette stays
         // first so that picking a font from inside settings closes the font
-        // list and leaves the modal it was opened from standing.
+        // list and leaves the panel it was opened from standing, and the
+        // panel's search is emptied before the panel closes.
+        if self.settings_open && self.clear_settings_search(window, cx) {
+            return;
+        }
         if self.close_settings(window, cx) {
             return;
         }

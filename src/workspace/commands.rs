@@ -1,4 +1,4 @@
-//! The command palette and the settings surface it can open.
+//! The command palette and the settings panel it can open.
 //!
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
@@ -194,6 +194,10 @@ impl Workspace {
             }),
             _ => None,
         };
+        if showing.is_none() {
+            self.palette_from_settings =
+                self.settings_open && self.settings_focus.contains_focused(window, cx);
+        }
         let palette = cx.new(|cx| Palette::new(mode, self, window, cx));
         if let Some(first) = first {
             palette.update(cx, |palette, cx| palette.select_item(first, window, cx));
@@ -284,6 +288,8 @@ impl Workspace {
         self.end_theme_preview(window, cx);
         if let Some(form) = self.form.as_mut() {
             form.needs_focus = Some(form.url.clone());
+        } else if std::mem::take(&mut self.palette_from_settings) && self.settings_open {
+            self.settings_search_needs_focus = true;
         } else {
             self.refocus_front();
         }
@@ -291,19 +297,29 @@ impl Workspace {
         true
     }
 
+    /// `cmd+,` and the titlebar's gear: open settings, or put them away.
     pub(crate) fn open_settings(
         &mut self,
         _: &OpenSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Seeded on the way in rather than at startup: the opacity is restored
-        // from disk well after the workspace is built, and this is the only
-        // moment the field is about to be looked at.
-        let percent = opacity_percent(theme::theme(cx).opacity).to_string();
-        self.opacity_input
-            .update(cx, |input, cx| input.set_value(percent, window, cx));
-        self.settings_open = true;
+        if !self.close_settings(window, cx) {
+            self.show_settings(window, cx);
+        }
+    }
+
+    pub(crate) fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            // Seeded on the way in rather than at startup: the opacity is
+            // restored from disk well after the workspace is built, and this
+            // is the only moment the field is about to be looked at.
+            let percent = opacity_percent(theme::theme(cx).opacity).to_string();
+            self.opacity_input
+                .update(cx, |input, cx| input.set_value(percent, window, cx));
+            self.settings_open = true;
+        }
+        self.settings_search_needs_focus = true;
         cx.notify();
     }
 
@@ -311,7 +327,16 @@ impl Workspace {
         if !self.settings_open {
             return false;
         }
-        // Backing out of the modal is not a way to set the opacity: the field
+        self.drop_settings(window, cx);
+        self.refocus_front();
+        cx.notify();
+        true
+    }
+
+    /// Takes the panel down without handing the keyboard anywhere, for a
+    /// caller putting something else in front that takes it.
+    pub(crate) fn drop_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Backing out of the panel is not a way to set the opacity: the field
         // leaves the tree on the next frame, which blurs it, and a blur
         // commits. Put the live value back first so that commit is a no-op --
         // otherwise escaping out of a half-typed `5` on the way to `50` leaves
@@ -320,15 +345,50 @@ impl Workspace {
         self.opacity_input
             .update(cx, |input, cx| input.set_value(percent, window, cx));
         self.settings_open = false;
+        self.settings_search_needs_focus = false;
         self.rebinding = None;
-        self.refocus_front();
-        cx.notify();
-        true
+        self.clear_settings_search(window, cx);
     }
 
-    pub(crate) fn set_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+    pub(crate) fn set_settings_tab(
+        &mut self,
+        tab: SettingsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.settings_tab = tab;
         self.rebinding = None;
+        self.clear_settings_search(window, cx);
+        crate::scroller::scroll_to("settings-body", "", 0, cx);
+        cx.notify();
+    }
+
+    /// Empties the settings search, saying whether there was anything in it.
+    pub(crate) fn clear_settings_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let typed = !self.settings_search.read(cx).value().is_empty();
+        if typed {
+            // `set_value` does not report a change, so the matches go by hand.
+            self.settings_search
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.settings_matches = None;
+            crate::scroller::scroll_to("settings-body", "", 0, cx);
+            cx.notify();
+        }
+        typed
+    }
+
+    /// Filters the rows once per keystroke, never per frame. A capture in
+    /// progress is called off: its row may be about to be filtered away.
+    pub(crate) fn search_settings(&mut self, cx: &mut Context<Self>) {
+        let typed = self.settings_search.read(cx).value();
+        self.settings_matches = (!typed.trim().is_empty())
+            .then(|| filter_settings(&typed, &self.settings.custom_keybindings));
+        self.rebinding = None;
+        crate::scroller::scroll_to("settings-body", "", 0, cx);
         cx.notify();
     }
 
@@ -456,7 +516,7 @@ impl Workspace {
             // Explicit, because the palette still holds focus here and would
             // read as the chrome.
             Command::ResetEditorZoom => self.set_zoom(FontSlot::Editor, 100, cx),
-            Command::OpenSettings => self.open_settings(&OpenSettings, window, cx),
+            Command::OpenSettings => self.show_settings(window, cx),
             Command::GoToColumn => self.go_to_column(&GoToColumn, window, cx),
             Command::RevealColumn(col) => self.reveal_column(col, window, cx),
         }

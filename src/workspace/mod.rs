@@ -26,6 +26,7 @@ pub(crate) use queries::error_in_buffer;
 
 use crate::connection_form::{Origin, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
+use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
 use crate::*;
@@ -115,16 +116,6 @@ pub(crate) fn opacity_for(
     })
 }
 
-/// Which section of the Settings modal is in front. Transient like
-/// `sidebar_hidden` -- which tab was open is not a preference worth
-/// remembering across launches.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SettingsTab {
-    #[default]
-    General,
-    Keybindings,
-}
-
 /// Connections read from another client, held while the user picks the
 /// project they go into.
 pub(crate) struct PendingImport {
@@ -174,15 +165,26 @@ pub(crate) struct Workspace {
     /// The connection whose "Add to a project" choices are unfolded in the
     /// switcher, by id.
     pub(crate) assigning_project: Option<String>,
-    /// Whether the settings modal is up. On the workspace rather than a
+    /// Whether the settings panel is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
-    /// Which tab the settings modal is showing. Not persisted -- see
+    /// Which category the settings panel is showing. Not persisted -- see
     /// [`SettingsTab`].
     pub(crate) settings_tab: SettingsTab,
-    /// The action id currently listening for its next keystroke, if the
-    /// Keybindings tab has one mid-capture. Not persisted: a capture in
-    /// progress does not survive the modal closing, let alone a relaunch.
+    pub(crate) settings_search: Entity<InputState>,
+    /// What the settings search finds, worked out as it is typed into rather
+    /// than every frame. `None` while it is empty.
+    pub(crate) settings_matches: Option<Vec<SettingMatch>>,
+    /// The panel's own focus, so zoom can tell the panel being read from the
+    /// pane beside it.
+    pub(crate) settings_focus: FocusHandle,
+    pub(crate) settings_search_needs_focus: bool,
+    /// Whether the palette was opened from inside the settings panel -- a
+    /// theme or a font being picked -- and so hands the keyboard back there.
+    pub(crate) palette_from_settings: bool,
+    /// The action id currently listening for its next keystroke, if a
+    /// keyboard row has one mid-capture. Not persisted: a capture in progress
+    /// does not survive the panel closing, let alone a relaunch.
     pub(crate) rebinding: Option<&'static str>,
     /// Whether the explorer column is folded away. Not persisted: a hidden
     /// sidebar is a thing done for the next minute, not a preference.
@@ -253,7 +255,7 @@ pub(crate) struct Workspace {
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
-    /// The opacity field in the settings modal. Kept here rather than built
+    /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
     pub(crate) opacity_input: Entity<InputState>,
@@ -282,6 +284,14 @@ impl Workspace {
                 }
             },
         )
+        .detach();
+        let settings_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        cx.subscribe(&settings_search, |workspace, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                workspace.search_settings(cx);
+            }
+        })
         .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
@@ -320,6 +330,11 @@ impl Workspace {
             assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
+            settings_search,
+            settings_matches: None,
+            settings_focus: cx.focus_handle(),
+            settings_search_needs_focus: false,
+            palette_from_settings: false,
             rebinding: None,
             sidebar_hidden: false,
             chrome_zoom: 100,
@@ -502,59 +517,54 @@ impl Workspace {
             .detach();
         }
 
-        // The settings modal owns the keyboard while it is up, and an
-        // interceptor is the only place that can give it to it: GPUI matches a
+        // A rebind capture takes the next keystroke whatever it is, and an
+        // interceptor is the only place that can give it one: GPUI matches a
         // keystroke against the keymap and dispatches the action *before* any
-        // element listener runs, so a capture handler on the modal would see
-        // `cmd+enter` only after it had already run the query underneath. It is
-        // also the only place early enough to read back a chord the app already
-        // has bound, which is most of what a rebind is for.
+        // element listener runs, so a capture handler on the row would see
+        // `cmd+enter` only after it had already run the query. It is also the
+        // only place early enough to read back a chord the app already has
+        // bound, which is most of what a rebind is for. With no capture in
+        // progress the panel is just another surface, and keys go where focus
+        // sends them.
         let this = cx.weak_entity();
-        cx.intercept_keystrokes(move |event, window, cx| {
+        cx.intercept_keystrokes(move |event, _, cx| {
             let keystroke = event.keystroke.clone();
             this.update(cx, |workspace, cx| {
-                // The palette opens over the modal (a font is picked from it) and
-                // holds the keyboard while it does.
-                if !workspace.settings_open
-                    || workspace.palette.is_some()
-                    || keybindings::is_modifier(&keystroke.key)
-                {
+                // The palette opens over the panel and holds the keyboard
+                // while it does.
+                let Some(id) = workspace
+                    .rebinding
+                    .filter(|_| workspace.settings_open && workspace.palette.is_none())
+                else {
+                    return;
+                };
+                if keybindings::is_modifier(&keystroke.key) {
                     return;
                 }
-                match (workspace.rebinding, keystroke.key.as_str()) {
-                    // Passed on: with nothing mid-capture, escape is what
-                    // closes the modal.
-                    (None, "escape") => return,
-                    (Some(_), "escape") => workspace.cancel_rebind(cx),
-                    // `unparse`, not `to_string` -- the latter is the glyphs a
-                    // menu draws, and nothing reads those back.
-                    (Some(id), _) => workspace.apply_rebind(id, keystroke.unparse(), cx),
-                    // Owning the keyboard was written when nothing in the
-                    // modal could be typed into, and a field that cannot see
-                    // a keystroke is a field nobody can fill. A capture in
-                    // progress still outranks it -- that is the arm above.
-                    //
-                    // Only what the field can actually consume, though: every
-                    // chord the app binds is `secondary-`, so passing those on
-                    // too would close the tab behind the modal on `cmd-w`. The
-                    // clipboard keys are the exception -- the input binds them
-                    // in its own context, which dispatch reaches before
-                    // anything global.
-                    (None, _)
-                        if workspace.opacity_input.focus_handle(cx).is_focused(window)
-                            && (!keystroke.modifiers.secondary()
-                                || matches!(
-                                    keystroke.key.as_str(),
-                                    "a" | "c" | "v" | "x" | "z"
-                                )) =>
-                    {
-                        return;
-                    }
-                    (None, _) => {}
+                if keystroke.key == "escape" {
+                    workspace.cancel_rebind(cx);
+                } else {
+                    // `unparse`, not `to_string` -- the latter is the glyphs
+                    // a menu draws, and nothing reads those back.
+                    workspace.apply_rebind(id, keystroke.unparse(), cx);
                 }
                 cx.stop_propagation();
             })
             .ok();
+        })
+        .detach();
+
+        // A button takes the keyboard when clicked, and in the settings panel
+        // one can be gone the next frame -- Reset once there is nothing left to
+        // reset, Edit while its row waits for a key, a row the search no longer
+        // finds. A window focused on nothing has every binding dead, so the
+        // panel takes the keyboard back for it.
+        cx.on_focus_lost(window, |workspace, window, cx| {
+            if workspace.settings_open
+                && window.focus_lost_restore_target(cx).as_ref() == Some(&workspace.settings_focus)
+            {
+                workspace.settings_focus.focus(window, cx);
+            }
         })
         .detach();
 
@@ -736,9 +746,12 @@ impl Workspace {
     /// one holds focus, a cell being edited included, and the chrome
     /// everywhere else.
     fn zoom_target(&self, window: &Window, cx: &App) -> FontSlot {
-        // Settings and the palette float over the panes, and what is being
-        // read then is them, whichever pane kept focus underneath.
-        if self.settings_open || self.palette.is_some() {
+        // The palette floats over the panes, and what is being read then is
+        // it, whichever pane kept focus underneath. The settings panel sits
+        // beside them, and counts only while it holds the keyboard.
+        if self.palette.is_some()
+            || (self.settings_open && self.settings_focus.contains_focused(window, cx))
+        {
             return FontSlot::Chrome;
         }
         let Some(session) = self.profile().map(|profile| &profile.session) else {
@@ -911,6 +924,22 @@ impl Workspace {
             }
         });
     }
+
+    /// The surface under the titlebar, with the settings panel docked beside
+    /// it while open. Beside rather than over: the surface narrows, so a
+    /// setting is changed with what it changes still in view. The sidebar
+    /// keeps its width through that: its panel is `flex_none`, so the content
+    /// beside it is what gives way, and `settle_sidebar` puts it back at
+    /// `sidebar_width` if a squeeze ever moved it.
+    fn beside_settings(&self, surface: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(div().flex_1().min_w_0().h_full().child(surface))
+            .children(self.settings_open.then(|| render_settings_panel(self, cx)))
+            .into_any_element()
+    }
 }
 
 impl Render for Workspace {
@@ -1066,6 +1095,9 @@ impl Render for Workspace {
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
+        if std::mem::take(&mut self.settings_search_needs_focus) && self.settings_open {
+            self.settings_search.focus_handle(cx).focus(window, cx);
+        }
 
         // Last, and unconditionally: the palette is modal, and it holds the
         // keyboard against anything above that just claimed it. One a modal
@@ -1128,8 +1160,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
-                .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
-                .children(self.settings_open.then(|| views::render_settings(self, cx)))
+                .child(self.beside_settings(self.render_welcome(cx).into_any_element(), cx))
                 .children(self.render_import_choice(cx))
                 .children(self.palette.clone());
         };
@@ -1904,7 +1935,7 @@ impl Render for Workspace {
                     .into_any_element(),
                 ],
             ))
-            .child(div().flex_1().min_h_0().child(main_pane))
+            .child(self.beside_settings(main_pane, cx))
             .children(self.render_apply_review(cx))
             .children(self.render_import_rows(window, cx))
             .children(self.render_close_confirmation(cx))
@@ -1912,7 +1943,6 @@ impl Render for Workspace {
             .children(self.render_pending_run(cx))
             .children(self.render_queue_failure(cx))
             .children(self.render_stale_edit(cx))
-            .children(self.settings_open.then(|| views::render_settings(self, cx)))
             .children(self.render_import_choice(cx))
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))

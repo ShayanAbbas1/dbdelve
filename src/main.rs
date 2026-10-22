@@ -20,6 +20,7 @@ mod redis_cmd;
 mod result_grid;
 mod scroller;
 mod session;
+mod settings_panel;
 mod sql;
 mod store;
 mod structure_grid;

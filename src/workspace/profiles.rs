@@ -1225,9 +1225,11 @@ impl Workspace {
         self.form = Some(form);
         self.pending_project_deletion = None;
         self.switcher_open = false;
-        // The form branch of `Render` returns before painting the modal, so a
-        // flag left set would reappear the moment the form closes.
-        self.settings_open = false;
+        // The form branch of `Render` returns before painting the panel, so
+        // one left open would reappear the moment the form closes. Dropped
+        // rather than closed: the form takes the keyboard, and the tab's focus
+        // is applied after the form's.
+        self.drop_settings(window, cx);
         cx.notify();
     }
 
