@@ -28,6 +28,13 @@ on:
       - "dev/**"
       - ".github/workflows/ci.yml"
 
+# Only main saves: the repository gets 10 GB of cache, and every job on every
+# branch saving its own 0.5-2 GB copy evicted main's within the hour, so most
+# runs started cold. PRs still restore main's.
+#
+# cache-workspace-crates: the vendored gpui crates live under vendor/, inside
+# the workspace root, and rust-cache drops workspace crates by default, so the
+# heaviest crates in the build were recompiled on every run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -38,8 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       - run: |
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev
@@ -67,10 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       # Started before the apt step so the databases boot while it runs.
       - run: docker compose up -d
       - run: |
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev sqlite3 \
@@ -95,6 +108,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       - run: cargo clippy --all-targets -- -D warnings
 
   macos-build:
@@ -102,6 +118,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       - run: cargo build
 
   windows-lint:
@@ -109,6 +128,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       - run: cargo clippy --all-targets -- -D warnings
 
   # Tests too, not only the build: the storage tests are what exercise the
@@ -118,6 +140,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
       - run: cargo build
       - run: cargo test
       # The backdrop blur's Direct3D WARP pixel tests live in the vendored
