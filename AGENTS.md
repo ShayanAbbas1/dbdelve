@@ -183,7 +183,7 @@ require it, stop and raise it instead.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
    `boolean_literal`, `skips_duplicates`, `all_or_nothing`, `takes_new_fields`,
-   `fields`, `syntax`, `edits_query_rows`, `takes_imports`, and `filter::Operator::on` for the filter dropdown) and never
+   `fields`, `syntax`, `edits_query_rows`, `takes_imports`, `logo`, `brand`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
    SQL writers in `sql.rs` and `filter.rs`, and the code that builds a
@@ -296,6 +296,7 @@ encoding_rs = "=0.8.35"    # Import Rows' UTF-16 and Windows-1252 files. Already
 lsp-types = "=0.97.0"      # the completion provider's vocabulary. No server is started
 nucleo-matcher = "=0.3.1"  # fuzzy scoring; gpui-component ships no scorer
 icondata_lu = "=0.1.0"     # Lucide icon data; gpui-component ships no icon files
+icondata_si = "=0.1.0"     # Simple Icons brand logos for the engines
 icondata_core = "=0.1.0"
 guic-gpui-assets = "=0.2.0"     # the bundled fonts
 
@@ -430,7 +431,7 @@ The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
 `DBDELVE_MARIADB_PORT`, `DBDELVE_MSSQL_PORT` and `DBDELVE_REDIS_PORT`. The SQL Server image is
 `linux/amd64` only, so on Apple silicon it runs under emulation and takes a
 while to come up.
-Pick the engine in the form's Engine dropdown first; it decides which fields exist.
+Pick the engine first, from the searchable picker the form's Engine field opens; it decides which fields exist.
 Then paste a URL and choose **Use URL**, or fill the fields in. **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
@@ -1243,7 +1244,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`ConnectionForm::project`), an edited one in its own, and "New project…"
   names one that saving makes, or joins if the name is taken
   (`projects::chosen_project`).
-- **The titlebar's connection name opens the palette on Connections**
+- **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope lists every connection
   grouped by project in the order projects are kept, No project first
@@ -1544,12 +1545,12 @@ nothing stacked to close, or the completion popup cannot be dismissed.
 It does **not** provide a fuzzy matcher, and its `command` palette filters by
 substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
 (`nucleo-matcher`) every list that narrows as it is typed into goes through --
-the palette, completions, the explorer's filter and the settings search -- so a query that finds something in one finds it in the others, and
+the palette and its pickers (the connection form's engine among them), completions, the explorer's filter and the settings search -- so a query that finds something in one finds it in the others, and
 each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
 second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
-opens it on Objects, `cmd+shift+p` on Commands and the titlebar's connection
-name on Connections; the stroke that opened it, or the one for the scope it
+opens it on Objects, `cmd+shift+p` on Commands and the titlebar's project or
+connection on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
 A palette open while the catalog loads says so on Objects, and takes the
 objects in when they land (`Workspace::catalog_landed`). One opened from the

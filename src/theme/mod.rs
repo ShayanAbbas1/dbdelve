@@ -26,7 +26,7 @@ mod zed;
 
 use gpui::{App, Window};
 
-use crate::store;
+use crate::{db::Engine, store};
 
 use color::{Oklch, Rgba, Srgb, contrast_ratio};
 use gpui_component::{
@@ -552,6 +552,41 @@ impl ConnectionColor {
     }
 }
 
+/// An engine's logo colour on `planes`: its brand hue, not its brand
+/// lightness, since brands like SQLite's are near-black and would vanish on a
+/// dark theme. It takes the lightness closest to the swatches' that clears 3:1
+/// against every plane, trying the side away from the theme first on a tie, so
+/// an imported theme or a coloured titlebar gets a legible logo too. When no
+/// lightness clears, the best-contrasting one is the closest it can get.
+pub fn engine_brand(engine: Engine, theme: Theme, planes: &[Srgb]) -> Srgb {
+    let brand = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
+    let away = match theme.appearance {
+        Appearance::Dark => 1.0,
+        Appearance::Light => -1.0,
+    };
+    let worst = |color: Srgb| {
+        planes
+            .iter()
+            .map(|plane| color::contrast_ratio(color, *plane))
+            .fold(f32::INFINITY, f32::min)
+    };
+    let candidates = (0..=22)
+        .flat_map(|step| [away, -away].map(|side| SWATCH_LIGHTNESS + side * step as f32 * 0.02))
+        .filter(|lightness| (0.20..=0.95).contains(lightness))
+        .map(|lightness| Oklch::new(lightness, brand.c, brand.h).to_srgb());
+    let mut best = (f32::MIN, Srgb::from_hex(engine.brand()));
+    for color in candidates {
+        let contrast = worst(color);
+        if contrast >= 3.0 {
+            return color;
+        }
+        if contrast > best.0 {
+            best = (contrast, color);
+        }
+    }
+    best.1
+}
+
 const SWATCH_LIGHTNESS: f32 = 0.65;
 const BAND_LIGHTNESS_DARK: f32 = 0.35;
 const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
@@ -740,6 +775,17 @@ impl Theme {
             Appearance::Dark => SCRIM_DARK,
             Appearance::Light => SCRIM_LIGHT,
         })
+    }
+
+    /// What an engine's logo is drawn on outside the titlebar: the panes, and
+    /// the palette's card. On glass the card is frosted over
+    /// [`Theme::popup_backdrop`], the worst its contents are shown over.
+    pub fn logo_planes(self) -> [Srgb; 3] {
+        [
+            self.bg,
+            self.panel,
+            self.overlay_glass().flatten(self.popup_backdrop()),
+        ]
     }
 
     /// Every floating card — a modal, the palette, and each
@@ -1924,6 +1970,63 @@ mod tests {
     }
 
     #[test]
+    fn every_engine_logo_stands_off_the_background_in_every_theme() {
+        for t in Theme::all() {
+            for engine in Engine::ALL {
+                let logo = engine_brand(engine, t, &t.logo_planes());
+                for plane in t.logo_planes() {
+                    check(t, engine.label(), logo, plane, AA_LARGE);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_titlebar_logo_stands_off_every_band_and_chip() {
+        for t in Theme::all() {
+            for color in ConnectionColor::ALL {
+                for (name, plane) in [
+                    ("band", color.band(t).flatten(t.surface)),
+                    ("chip", color.chip(t)),
+                ] {
+                    for engine in Engine::ALL {
+                        let logo = engine_brand(engine, t, &[plane]);
+                        let what = format!("{} on a {} {name}", engine.label(), color.label());
+                        check(t, &what, logo, plane, AA_LARGE);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_awkward_theme_still_gets_the_best_logo_available() {
+        let grey = |v: f32| Srgb { r: v, g: v, b: v };
+        let t = Theme {
+            bg: grey(0.45),
+            panel: grey(0.55),
+            ..Theme::dark()
+        };
+        for engine in Engine::ALL {
+            let logo = engine_brand(engine, t, &[t.bg, t.panel]);
+            let hue = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
+            let worst = |color: Srgb| {
+                color::contrast_ratio(color, t.bg).min(color::contrast_ratio(color, t.panel))
+            };
+            let best = (10..=47)
+                .map(|n| Oklch::new(n as f32 * 0.02, hue.c, hue.h).to_srgb())
+                .map(worst)
+                .fold(0.0, f32::max);
+            assert!(
+                worst(logo) >= best.min(3.0) - 0.01,
+                "{}: {:.2} when {best:.2} was on offer",
+                engine.label(),
+                worst(logo)
+            );
+        }
+    }
+
+    #[test]
     fn text_contrast_clears_wcag_in_every_theme() {
         for t in Theme::all() {
             check(t, "text on bg", t.text, t.bg, AAA_TEXT);
@@ -1998,9 +2101,7 @@ mod tests {
 
     #[test]
     fn a_titlebar_pill_stands_off_every_band() {
-        // What sits on a band: the mode pill in its own hue, and the switcher
-        // as a plain chip, since the band is already wearing its colour. The
-        // floor is set from the weakest pair that still reads as a separate
+        // What sits on a band: the mode pill, in its own hue. The floor is set from the weakest pair that still reads as a separate
         // shape at a glance: a Green mode pill on a Gray band, light theme.
         let distance = |a: Srgb, b: Srgb| {
             let d = |x: f32, y: f32| ((x - y) * 255.0).powi(2);
@@ -2010,7 +2111,6 @@ mod tests {
             for band_color in ConnectionColor::ALL {
                 let band = band_color.band(t).flatten(t.surface);
                 let pills = [
-                    ("the switcher", t.surface),
                     ("a Green mode", ConnectionColor::Green.chip(t)),
                     ("a Yellow mode", ConnectionColor::Yellow.chip(t)),
                     ("a Red mode", ConnectionColor::Red.chip(t)),

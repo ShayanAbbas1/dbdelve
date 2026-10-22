@@ -36,7 +36,7 @@ use crate::{
     actions::{
         PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
     },
-    db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind},
+    db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
     fuzzy::{Fuzzy, Query},
@@ -137,6 +137,8 @@ pub enum Mode {
     Schema,
     /// The columns of the grid in front, to jump to one of them.
     Columns,
+    /// Every engine, to pick the connection form's.
+    Engine,
     /// What can be done to one connection, by index into the profiles, and to
     /// the project it is in.
     ConnectionActions(usize),
@@ -182,6 +184,7 @@ impl Mode {
             Mode::Database => "Switch database…",
             Mode::Schema => "Switch schema…",
             Mode::Columns => "Go to a column…",
+            Mode::Engine => "Pick an engine…",
             Mode::ConnectionActions(_) => "Pick an action…",
             Mode::MoveToProject(_) => "Move to a project…",
             Mode::NameProject(None) => "Name the new project…",
@@ -205,6 +208,7 @@ impl Mode {
             Mode::Database => "Databases",
             Mode::Schema => "Schemas",
             Mode::Columns => "Columns",
+            Mode::Engine => "Engines",
             Mode::ConnectionActions(_) => "Connection",
             Mode::MoveToProject(_) => "Move to project",
             Mode::NameProject(None) => "New project",
@@ -241,6 +245,7 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     OpenQuery(String),
+    SetEngine(Engine),
     OpenScratch,
     NewQuery,
     RunQuery,
@@ -751,6 +756,7 @@ impl Palette {
             (Mode::Database, Some(profile)) => database_items(profile),
             (Mode::Schema, Some(profile)) => schema_items(profile),
             (Mode::Columns, Some(profile)) => column_items(profile, cx),
+            (Mode::Engine, _) => engine_items(workspace),
             (_, None) => Vec::new(),
         };
         let import_pending = workspace.pending_import.is_some();
@@ -2115,6 +2121,30 @@ fn database_items(profile: &Profile) -> Vec<Item> {
             .hint(hint)
         })
         .collect()
+}
+
+/// Every engine, the one the connection form is set to marked as current.
+fn engine_items(workspace: &Workspace) -> Vec<Item> {
+    let current = workspace.form.as_ref().map(|form| form.engine);
+    Engine::ALL
+        .into_iter()
+        .map(|engine| {
+            let hint = if current == Some(engine) {
+                "current"
+            } else {
+                ""
+            };
+            Item::new(engine.label(), engine.logo(), Command::SetEngine(engine)).hint(hint)
+        })
+        .collect()
+}
+
+/// Where [`engine_items`] lists the form's current engine, for the palette to
+/// open on.
+pub(crate) fn active_engine_row(workspace: &Workspace) -> Option<usize> {
+    engine_items(workspace)
+        .iter()
+        .position(|item| item.hint.as_ref() == "current")
 }
 
 /// Where [`schema_items`] lists the active schema, for the palette to open on.

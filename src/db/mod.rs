@@ -199,6 +199,38 @@ impl ExplainMode {
 }
 
 impl Engine {
+    /// The engine's brand logo. SQL Server's is a generic server glyph, because
+    /// Simple Icons carries no Microsoft logos.
+    pub fn logo(self) -> &'static str {
+        match self {
+            Self::Postgres => "icons/engine-postgres.svg",
+            Self::MySql => "icons/engine-mysql.svg",
+            Self::MariaDb => "icons/engine-mariadb.svg",
+            Self::Sqlite => "icons/engine-sqlite.svg",
+            Self::Turso => "icons/engine-turso.svg",
+            Self::Snowflake => "icons/engine-snowflake.svg",
+            Self::SqlServer => "icons/engine-sqlserver.svg",
+            Self::MongoDb => "icons/engine-mongodb.svg",
+            Self::Redis => "icons/engine-redis.svg",
+        }
+    }
+
+    /// The engine's brand colour as 0xRRGGBB. The theme reads only its hue.
+    pub fn brand(self) -> u32 {
+        match self {
+            Self::Postgres => 0x4169E1,
+            Self::MySql => 0x4479A1,
+            // The sea lion's colour rather than the wordmark's near-black teal.
+            Self::MariaDb => 0xC0765A,
+            Self::Sqlite => 0x003B57,
+            Self::Turso => 0x4FF8D2,
+            Self::Snowflake => 0x29B5E8,
+            Self::SqlServer => 0xCC2927,
+            Self::MongoDb => 0x47A248,
+            Self::Redis => 0xFF4438,
+        }
+    }
+
     /// Presentation order, which is the order the form's chips appear in.
     pub const ALL: [Self; 9] = [
         Self::Postgres,
