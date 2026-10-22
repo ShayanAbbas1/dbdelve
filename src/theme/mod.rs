@@ -245,6 +245,16 @@ pub enum Appearance {
     Light,
 }
 
+impl Appearance {
+    /// The system's light or dark, whatever its vibrancy.
+    pub fn of_system(appearance: gpui::WindowAppearance) -> Self {
+        match appearance {
+            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => Self::Light,
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Self::Dark,
+        }
+    }
+}
+
 impl gpui::Global for Theme {}
 
 impl Default for Theme {
@@ -732,9 +742,11 @@ impl Theme {
         all
     }
 
-    /// Every theme dbdelve ships: every dark theme, then every light one. The
-    /// first is the default, and opaque: a blurred window reads as noise among
-    /// a desktop full of others, so glass is something to pick, not a start.
+    /// Every theme dbdelve ships: every dark theme, then every light one. A
+    /// first run starts on the first or on DBDelve Light, by the system's
+    /// appearance (`starting_theme`), and both are opaque: a blurred window
+    /// reads as noise among a desktop full of others, so glass is something to
+    /// pick, not a start.
     fn built_in() -> [Self; 29] {
         [
             Self::black(),
@@ -1916,11 +1928,21 @@ const RENAMED_THEMES: [(&str, &str); 4] = [
     ("GitHub Glass", "GitHub Dark Glass"),
 ];
 
+/// Where someone who has never picked a theme starts: the opaque DBDelve theme
+/// on the system's side. Only a start; once one is saved the system's
+/// appearance no longer matters.
+pub(crate) fn starting_theme(system: Appearance) -> Theme {
+    match system {
+        Appearance::Dark => Theme::black(),
+        Appearance::Light => Theme::light(),
+    }
+}
+
 /// A theme read back from disk, by name. An absent or unknown name is the
-/// default: a palette dropped from `all` between launches must not strand the
-/// app on a name nothing answers to. Case-blind because the names were
-/// once spelled "dbdelve Dark" and profiles written then still say so.
-pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
+/// starting theme: a palette dropped from `all` between launches must not
+/// strand the app on a name nothing answers to. Case-blind because the names
+/// were once spelled "dbdelve Dark" and profiles written then still say so.
+pub(crate) fn restored_theme(name: Option<&str>, system: Appearance) -> Theme {
     name.and_then(|name| {
         let name = RENAMED_THEMES
             .iter()
@@ -1930,7 +1952,7 @@ pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
             .into_iter()
             .find(|theme| theme.name.eq_ignore_ascii_case(name))
     })
-    .unwrap_or_default()
+    .unwrap_or_else(|| starting_theme(system))
 }
 
 /// Push a theme everywhere it is read from. Only a glass theme wants the
@@ -2691,18 +2713,53 @@ mod tests {
         // so restoring it alone proves nothing.
         for (old, new) in RENAMED_THEMES {
             assert!(Theme::all().iter().any(|t| t.name == new), "{new}");
-            assert_eq!(restored_theme(Some(old)).name, new);
+            assert_eq!(restored_theme(Some(old), Appearance::Dark).name, new);
         }
         assert_eq!(
-            restored_theme(Some("gruvbox glass")).name,
+            restored_theme(Some("gruvbox glass"), Appearance::Dark).name,
             "Gruvbox Dark Glass"
         );
-        assert_eq!(restored_theme(Some("Dracula Glass")).name, "Dracula Glass");
+        assert_eq!(
+            restored_theme(Some("Dracula Glass"), Appearance::Dark).name,
+            "Dracula Glass"
+        );
+    }
+
+    #[test]
+    fn a_first_run_starts_on_the_systems_side_and_a_saved_theme_wins() {
+        assert_eq!(
+            restored_theme(None, Appearance::Light).name,
+            "DBDelve Light"
+        );
+        assert_eq!(restored_theme(None, Appearance::Dark).name, "DBDelve Black");
+        for system in [Appearance::Light, Appearance::Dark] {
+            assert!(!restored_theme(None, system).is_glass);
+            assert_eq!(
+                restored_theme(Some("Dracula"), system).name,
+                "Dracula",
+                "{system:?}"
+            );
+            assert_eq!(
+                restored_theme(Some("DBDelve Black"), system).name,
+                "DBDelve Black"
+            );
+        }
+        assert_eq!(
+            Appearance::of_system(gpui::WindowAppearance::VibrantLight),
+            Appearance::Light
+        );
+        assert_eq!(
+            Appearance::of_system(gpui::WindowAppearance::VibrantDark),
+            Appearance::Dark
+        );
     }
 
     #[test]
     fn a_theme_stored_under_its_old_lowercase_name_is_still_restored() {
-        assert_eq!(restored_theme(Some("dbdelve Dark")).name, "DBDelve Dark");
+        assert_eq!(
+            restored_theme(Some("dbdelve Dark"), Appearance::Dark).name,
+            "DBDelve Dark"
+        );
     }
 
     #[test]

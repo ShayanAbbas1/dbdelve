@@ -258,7 +258,7 @@ fn main() {
             // global rather than naming a family itself.
             cx.set_global(Fonts::default());
             theme::user::load();
-            let theme = Theme::default();
+            let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
             theme.apply_to_components(cx);
             cx.set_global(theme);
             // The keymap is built from `keybindings::REGISTRY` plus whatever

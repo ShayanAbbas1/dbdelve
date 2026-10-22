@@ -411,7 +411,10 @@ impl Workspace {
                     .flatten()
                     .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
                     .collect();
-                let restored = restored_theme(stored_settings.theme.as_deref());
+                let restored = restored_theme(
+                    stored_settings.theme.as_deref(),
+                    theme::Appearance::of_system(cx.window_appearance()),
+                );
                 install_theme(
                     restored.with_opacity(workspace.settings.opacity_for(&restored)),
                     window,
