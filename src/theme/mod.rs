@@ -66,8 +66,9 @@ pub mod layout {
     /// the settings panel.
     pub const RADIUS_CARD: f32 = 14.0;
     pub const RADIUS_KEYCAP: f32 = 5.0;
-    /// The cards a settings group's rows sit on, inside the settings panel.
-    pub const RADIUS_SETTINGS_CARD: f32 = 12.0;
+    /// The wells rows sit in: a settings group's, and each section of the
+    /// connection form's.
+    pub const RADIUS_WELL: f32 = 12.0;
 
     /// The three heights a button is drawn at. Standard is for the dialogs and
     /// the connection form, where it sits beside a field and is the thing the

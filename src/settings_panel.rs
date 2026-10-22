@@ -10,9 +10,8 @@
 use std::{collections::HashMap, ops::Range};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, div,
-    prelude::FluentBuilder, px, relative,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::{Disableable, Sizable, input::Input, tooltip::Tooltip};
 
@@ -27,7 +26,7 @@ use crate::{
     theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, popup_theme},
     ui::{
         Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
-        raised_card, segment,
+        option_row, picker, raised_card, segment, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, font_size_range, opacity_percent},
@@ -626,22 +625,14 @@ fn render_section(
         .into_any_element()
 }
 
-/// A group's label over a card of its rows, a hairline between each two.
+/// A group's label over a well of its rows.
 fn render_group(workspace: &Workspace, rows: &[Shown], cx: &mut Context<Workspace>) -> AnyElement {
     let t = popup_theme(cx);
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .rounded(px(layout::RADIUS_SETTINGS_CARD))
-        .border_1()
-        .border_color(t.border)
-        .bg(t.element_hover);
-    for (index, row) in rows.iter().enumerate() {
-        if index > 0 {
-            card = card.child(div().mx(px(layout::SPACE_LG)).h(px(1.)).bg(t.border));
-        }
-        card = card.child(render_row(workspace, row.row, row.matched, cx));
-    }
+    let label = rows[0].row.group;
+    let rows: Vec<AnyElement> = rows
+        .iter()
+        .map(|row| render_row(workspace, row.row, row.matched, cx))
+        .collect();
     div()
         .flex()
         .flex_col()
@@ -651,14 +642,12 @@ fn render_group(workspace: &Workspace, rows: &[Shown], cx: &mut Context<Workspac
                 .text_size(px(layout::chrome(layout::TEXT_XS)))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(t.text_muted)
-                .child(rows[0].row.group),
+                .child(label),
         )
-        .child(card)
+        .child(well(t, rows))
         .into_any_element()
 }
 
-/// A row's title and description, its control beside them or, when the two
-/// do not fit across the panel, under them.
 fn render_row(
     workspace: &Workspace,
     row: &SettingRow,
@@ -674,47 +663,13 @@ fn render_row(
             SharedString::from(description)
         }
     });
-    let height = if description.is_some() {
-        layout::SETTINGS_ROW_HEIGHT
-    } else {
-        layout::SETTINGS_ROW_COMPACT_HEIGHT
-    };
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(layout::SPACE_LG))
-        .gap_y(px(layout::SPACE_SM))
-        .min_h(px(layout::chrome(height)))
-        .px(px(layout::SPACE_LG))
-        .py(px(layout::SPACE_MD))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(layout::SETTINGS_TEXT_MIN_WIDTH))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(highlighted(row.title, matched, t)),
-                )
-                .children(description.map(|description| {
-                    div()
-                        .mt(px(layout::SETTINGS_DESCRIPTION_GAP))
-                        .text_size(px(layout::chrome(layout::TEXT_SM)))
-                        .text_color(t.text_muted)
-                        .child(description)
-                })),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .child(render_control(workspace, row.id, t, cx)),
-        )
-        .into_any_element()
+    option_row(
+        highlighted(row.title, matched, t),
+        description,
+        render_control(workspace, row.id, t, cx),
+        t,
+    )
+    .into_any_element()
 }
 
 fn render_control(
@@ -783,66 +738,6 @@ fn render_control(
             None => div().into_any_element(),
         },
     }
-}
-
-/// A choice made from a list somewhere else -- the palette, a menu -- dressed
-/// as the row limit's menu button, so every picker in the panel reads alike.
-/// The one control in a row that gives way when the row is too narrow, its
-/// label cut short: a long family name at a large chrome scale.
-fn picker(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    t: Theme,
-) -> gpui_component::button::Button {
-    button(id, label, Tone::Quiet, Control::Compact, t)
-        .min_w_0()
-        .flex_initial()
-        .child(
-            icon(icon::CHEVRON_DOWN)
-                .flex_none()
-                .size(px(layout::chrome(layout::ICON_SIZE)))
-                .text_color(t.text_faint),
-        )
-}
-
-/// An on/off setting. Drawn here rather than taken from gpui-component, whose
-/// switch springs its thumb across: nothing in DBDelve moves on a click (see
-/// AGENTS.md, "Animation").
-fn switch(id: &'static str, on: bool, t: Theme) -> Stateful<Div> {
-    let width = layout::chrome(layout::SWITCH_WIDTH);
-    let height = layout::chrome(layout::SWITCH_HEIGHT);
-    let thumb = layout::chrome(layout::SWITCH_THUMB_SIZE);
-    let inset = (height - thumb) / 2.;
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .relative()
-        .w(px(width))
-        .h(px(height))
-        .rounded_full()
-        .cursor_pointer()
-        .map(|track| {
-            if on {
-                track.bg(t.accent)
-            } else {
-                track.bg(t.border_strong)
-            }
-        })
-        .child(
-            div()
-                .absolute()
-                .top(px(inset))
-                .left(px(if on { width - thumb - inset } else { inset }))
-                .size(px(thumb))
-                .rounded_full()
-                .map(|knob| {
-                    if on {
-                        knob.bg(t.on_accent)
-                    } else {
-                        knob.bg(t.text_muted)
-                    }
-                }),
-        )
 }
 
 fn render_opacity(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) -> AnyElement {

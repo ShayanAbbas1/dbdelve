@@ -574,6 +574,123 @@ pub(crate) fn segment(
         .child(label)
 }
 
+/// Rows set into the surface they sit on rather than raised off it, a
+/// hairline between each two: a settings group, a section of the connection
+/// form.
+pub(crate) fn well(t: Theme, rows: impl IntoIterator<Item = AnyElement>) -> Div {
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .rounded(px(layout::RADIUS_WELL))
+        .border_1()
+        .border_color(t.border)
+        .bg(t.element_hover);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            card = card.child(div().mx(px(layout::SPACE_LG)).h(px(1.)).bg(t.border));
+        }
+        card = card.child(row);
+    }
+    card
+}
+
+/// One choice in a well: its title, what it does under that, and its control
+/// beside them or, when the two do not fit across, under them.
+pub(crate) fn option_row(
+    title: impl IntoElement,
+    description: Option<SharedString>,
+    control: impl IntoElement,
+    t: Theme,
+) -> Div {
+    let height = if description.is_some() {
+        layout::SETTINGS_ROW_HEIGHT
+    } else {
+        layout::SETTINGS_ROW_COMPACT_HEIGHT
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(layout::SPACE_LG))
+        .gap_y(px(layout::SPACE_SM))
+        .min_h(px(layout::chrome(height)))
+        .px(px(layout::SPACE_LG))
+        .py(px(layout::SPACE_MD))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(layout::SETTINGS_TEXT_MIN_WIDTH))
+                .flex()
+                .flex_col()
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .children(description.map(|description| {
+                    div()
+                        .mt(px(layout::SETTINGS_DESCRIPTION_GAP))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                        .text_color(t.text_muted)
+                        .child(description)
+                })),
+        )
+        .child(div().min_w_0().flex().items_center().child(control))
+}
+
+/// An on/off choice. Drawn here rather than taken from gpui-component, whose
+/// switch springs its thumb across: nothing in DBDelve moves on a click (see
+/// AGENTS.md, "Animation"). A button underneath, so Tab reaches it and Space
+/// or Enter flips it.
+pub(crate) fn switch(id: impl Into<gpui::ElementId>, on: bool, t: Theme) -> Button {
+    let width = layout::chrome(layout::SWITCH_WIDTH);
+    let height = layout::chrome(layout::SWITCH_HEIGHT);
+    let thumb = layout::chrome(layout::SWITCH_THUMB_SIZE);
+    let inset = (height - thumb) / 2.;
+    control(id, Tone::Quiet, Control::Inline)
+        .flex_shrink_0()
+        .w(px(width))
+        .h(px(height))
+        .p_0()
+        .rounded_full()
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .rounded_full()
+                .bg(if on {
+                    t.accent.opaque()
+                } else {
+                    t.border_strong
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(inset))
+                        .left(px(if on { width - thumb - inset } else { inset }))
+                        .size(px(thumb))
+                        .rounded_full()
+                        .bg(if on { t.on_accent } else { t.text_muted }),
+                ),
+        )
+}
+
+/// A choice made from a list somewhere else -- the palette, a menu -- dressed
+/// as the row limit's menu button, so every picker reads alike. The one
+/// control in a row that gives way when the row is too narrow, its label cut
+/// short: a long family name at a large chrome scale.
+pub(crate) fn picker(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    t: Theme,
+) -> Button {
+    button(id, label, Tone::Quiet, Control::Compact, t)
+        .min_w_0()
+        .flex_initial()
+        .child(
+            icon(icon::CHEVRON_DOWN)
+                .flex_none()
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.text_faint),
+        )
+}
+
 /// The quietest thing on screen: small, uppercase, and dim enough that the
 /// names under it are what the eye lands on first.
 pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {
