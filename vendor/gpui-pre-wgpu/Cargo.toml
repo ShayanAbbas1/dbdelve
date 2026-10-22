@@ -26,7 +26,7 @@ description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@93d7456)"
 readme = false
 license = "Apache-2.0"
 repository = "https://github.com/zed-industries/zed"
-resolver = "2"
+# dbdelve patch: no `resolver`; as a workspace member it takes the root's.
 
 [package.metadata.gpui-pre]
 zed-crate = "gpui_wgpu"
