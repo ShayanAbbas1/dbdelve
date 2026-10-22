@@ -103,6 +103,10 @@ pub struct RowPanel {
 /// is no longer the one selected.
 pub struct RowInputs {
     pub grid: Entity<TableState<ResultGrid>>,
+    /// Whose grid `grid` is. A blur from switching tabs or profiles commits
+    /// after the switch, when the one in front is no longer the owner.
+    pub profile: String,
+    pub tab: Tab,
     pub row: usize,
     /// The grid's `rows_id` when these were built: a refresh or a sort puts
     /// another record at `row`, and text typed against the old one must not
@@ -1132,9 +1136,9 @@ fn render_new_row_panel(
                         Control::Standard,
                         t,
                     )
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         _ = review_workspace.update(cx, |workspace, cx| {
-                            workspace.confirm_new_row(cx);
+                            workspace.confirm_new_row(window, cx);
                         });
                     }),
                 ),

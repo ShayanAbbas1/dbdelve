@@ -1217,7 +1217,7 @@ impl Workspace {
         let code = fonts(cx).editor.clone();
         let profile = self.profile()?;
         let review = profile.session.apply_review.as_ref()?;
-        if review.tab != profile.session.active {
+        if !review.covers(profile.session.active) {
             return None;
         }
         let scope = review.tab.scroll_scope(&profile.id);
