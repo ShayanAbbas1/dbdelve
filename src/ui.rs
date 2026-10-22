@@ -798,6 +798,11 @@ pub(crate) fn accent_button(
                 .hover(t.accent.alpha(layout::ACCENT_HOVER).into())
                 .active(t.accent.alpha(layout::ACCENT_PRESSED).into()),
         )
+        // A custom variant rests at a 20% wash of its colour
+        // (`mix_oklab(transparent, 0.2)`), which leaves the on-accent label
+        // unreadable. The caller's style is applied after the variant's, so this
+        // fills it; hover and press still layer over it.
+        .bg(t.accent)
         .h(px(size.height()))
         .px(px(size.padding()))
         .min_w(px(layout::CONTROL_MIN_WIDTH))
