@@ -1771,6 +1771,13 @@ impl WgpuRendererCore {
             // Before the first batch at or above a blur's order, break the pass,
             // snapshot what's been drawn, blur it and paint it back. Blurs past
             // the uniform buffer's slots are left undrawn.
+            if scene.backdrop_blurs.len() > BACKDROP_MAX_BLURS {
+                warn!(
+                    "dropping {} of {} backdrop blurs; a frame draws at most {BACKDROP_MAX_BLURS}",
+                    scene.backdrop_blurs.len() - BACKDROP_MAX_BLURS,
+                    scene.backdrop_blurs.len(),
+                );
+            }
             let mut pending_blurs = scene
                 .backdrop_blurs
                 .iter()
