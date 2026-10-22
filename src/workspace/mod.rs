@@ -17,7 +17,7 @@ mod projects;
 mod queries;
 mod tabs;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_component::menu::DropdownMenu;
 
@@ -235,6 +235,9 @@ pub(crate) struct Workspace {
     /// The rows last confirmed in the palette, by scope and label, newest
     /// first, for its Recent group. Kept for the session only.
     pub(crate) palette_recents: Vec<(Scope, String)>,
+    /// The projects folded in the palette's Connections scope, by name. Kept
+    /// for the session only, and never the one in front as a palette opens.
+    pub(crate) collapsed_projects: HashSet<String>,
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
@@ -348,6 +351,7 @@ impl Workspace {
             next_generation: 0,
             palette: None,
             palette_recents: Vec::new(),
+            collapsed_projects: HashSet::new(),
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),

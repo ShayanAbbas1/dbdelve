@@ -149,6 +149,7 @@ impl Workspace {
                 | PaletteMode::Projects(_)
                 | PaletteMode::MoveToProject(_)
                 | PaletteMode::ConnectionActions(_)
+                | PaletteMode::ProjectActions(_)
                 | PaletteMode::Confirm(_)
         );
         if names_projects && self.pending_import.is_some() {
@@ -227,6 +228,9 @@ impl Workspace {
         // The palette takes the keyboard, and a capture left listening behind
         // it would take the first key typed after it closes.
         self.cancel_rebind(cx);
+        if let Some(current) = self.current_group().map(str::to_string) {
+            self.collapsed_projects.remove(&current);
+        }
         let handle = cx.weak_entity();
         let palette = cx.new(|cx| Palette::new(mode, self, handle, window, cx));
         if let Some(first) = first {
@@ -295,6 +299,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let PaletteEvent::Confirm {
+            command: Command::ToggleProject(at),
+            ..
+        } = event
+        {
+            self.toggle_project(*at, cx);
+            let collapsed = self.collapsed_projects.clone();
+            palette.update(cx, |palette, cx| palette.set_collapsed(collapsed, cx));
+            return;
+        }
         let searching = matches!(palette.read(cx).mode(), PaletteMode::Search(_));
         let (command, scope) = match event {
             PaletteEvent::Dismiss => {
@@ -600,6 +614,10 @@ impl Workspace {
             Command::SwitchConnection => self.open_connections(window, cx),
             Command::ConnectionActions(index) => {
                 self.open_palette(PaletteMode::ConnectionActions(index), window, cx)
+            }
+            Command::ToggleProject(at) => self.toggle_project(at, cx),
+            Command::ProjectActions(at) => {
+                self.open_palette(PaletteMode::ProjectActions(at), window, cx)
             }
             Command::EditConnection(index) => self.edit_profile(index, window, cx),
             Command::DuplicateConnection(index) => self.duplicate_profile(index, window, cx),

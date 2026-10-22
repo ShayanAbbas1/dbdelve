@@ -1246,24 +1246,39 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`projects::chosen_project`).
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
-  there is no switcher panel of its own. That scope lists every connection
-  grouped by project in the order projects are kept, No project first
-  (`palette::listed_connections`), the one in front marked current, each with
-  its engine's logo (in its colour when it has one) and a status dot read as the row is drawn; an empty project
-  keeps its header with a "New connection in…" row, and with no projects the
-  connections are headed "Connections" whenever another group stands beside
-  them. Groups are told apart by what they are (`palette::Group`), never by
-  the header's text, so a project called "Manage" is its own group. A
-  connection also matches on its host and on its project (`Item::also`), each
-  scored apart so a match never runs from one into the next, but highlights
-  only in its name. Under All only the other connections in the project in
-  front appear. Whatever is done to one connection or project is a follow-up
-  list, never a panel of its own: `shift-enter` on a connection's row
-  (`palette_row_actions`), its trailing actions button or a right click puts
-  up `Mode::ConnectionActions` (switch, edit, duplicate, move to a project,
-  leave its project, remove, and its project's new connection, rename and
-  delete), and the Commands scope offers the same for the connection in
-  front plus Rename/Delete project over `Mode::Projects`. On a row with no
+  there is no switcher panel of its own. That scope is a tree
+  (`palette::tree`, over the rows `palette::listed_connections` builds): the
+  connections in no project first, under No project ("Connections" when
+  there are no projects and another group stands beside them), then under
+  Projects each project as a row of its own -- folder tile, name, connection
+  count, chevron -- with its connections indented beneath it on a hairline
+  guide, then Manage (New connection…, New project…) at the bottom whatever
+  is typed. Connection rows carry their engine's logo (in their colour when
+  they have one), a status dot read as the row is drawn, and the one in
+  front is marked current; an empty project holds one "New connection in…"
+  row. `enter` on a project's row folds or unfolds it
+  (`Command::ToggleProject`, the one row the palette stays up for); what is
+  folded is `Workspace::collapsed_projects`, by name, kept for the session,
+  starting unfolded, and the project in front is unfolded whenever a palette
+  opens. With something typed nothing is folded: a connection that matches
+  brings its project's row above it as context (highlighted only where the
+  project's own name matched), a project that matches brings every
+  connection it holds, the project holding the best match comes first, and
+  the list opens on the best match rather than on the context row above it.
+  Rows are told apart by what they are (`palette::Group`, and a project's row
+  by its command), never by the header's text, so a project called "Manage"
+  is its own project. A connection also matches on its host (`Item::also`),
+  scored apart so a match never runs from its name into it, but highlights
+  only in its name. Under All the tree is not drawn: only the other
+  connections in the project in front appear, as a flat group. Whatever is
+  done to one connection or project is a follow-up list, never a panel of
+  its own: `shift-enter` on a connection's row (`palette_row_actions`), its
+  trailing actions button or a right click puts up `Mode::ConnectionActions`
+  (switch, edit, duplicate, move to a project, leave its project, remove,
+  and its project's new connection, rename and delete), the same on a
+  project's row puts up `Mode::ProjectActions` (new connection in it,
+  rename, delete), and the Commands scope offers the same for the connection
+  in front plus Rename/Delete project over `Mode::Projects`. On a row with no
   actions `shift-enter` is `enter`. Removing a connection or deleting a
   project goes through a one-row `Mode::Confirm`, which is the only arming
   they get: it opens with nothing selected, and a click there only selects,

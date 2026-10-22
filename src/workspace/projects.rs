@@ -44,6 +44,17 @@ impl Workspace {
         self.open_connections(window, cx);
     }
 
+    /// Folds or unfolds a project in the palette's Connections scope.
+    pub(crate) fn toggle_project(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.get(at) else {
+            return;
+        };
+        if !self.collapsed_projects.remove(&project.name) {
+            self.collapsed_projects.insert(project.name.clone());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_palette(PaletteMode::Search(Scope::Connections), window, cx);
     }
@@ -150,6 +161,9 @@ impl Workspace {
         if self.name_refused(&name, Some(old), cx) {
             return;
         }
+        if self.collapsed_projects.remove(old) {
+            self.collapsed_projects.insert(name.clone());
+        }
         if let Some(project) = self.projects.iter_mut().find(|project| project.name == old) {
             project.name = name;
         }
@@ -201,6 +215,7 @@ impl Workspace {
     /// The project goes; its connections stay, under No project.
     pub(crate) fn remove_project(&mut self, name: &str, cx: &mut Context<Self>) {
         self.pending_project_deletion = None;
+        self.collapsed_projects.remove(name);
         self.projects.retain(|project| project.name != name);
         self.remember_profiles(cx);
         cx.notify();
