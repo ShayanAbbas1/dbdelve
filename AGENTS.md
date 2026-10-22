@@ -1258,7 +1258,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   only in its name. Under All only the other connections in the project in
   front appear. Whatever is done to one connection or project is a follow-up
   list, never a panel of its own: `shift-enter` on a connection's row
-  (`palette_row_actions`) puts up `Mode::ConnectionActions` (switch, edit, duplicate, move to a project,
+  (`palette_row_actions`), its trailing actions button or a right click puts
+  up `Mode::ConnectionActions` (switch, edit, duplicate, move to a project,
   leave its project, remove, and its project's new connection, rename and
   delete), and the Commands scope offers the same for the connection in
   front plus Rename/Delete project over `Mode::Projects`. On a row with no

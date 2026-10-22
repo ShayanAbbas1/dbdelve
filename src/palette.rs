@@ -20,7 +20,7 @@
 use std::{collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, ParentElement,
     Pixels, Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Subscription,
     WeakEntity, Window, div, prelude::FluentBuilder, px, size,
@@ -48,8 +48,8 @@ use crate::{
         ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme, theme, user,
     },
     ui::{
-        chord_for, highlighted, key_chip, keycap_parts, keycaps, kind_color, object_icon,
-        one_line, raised_card, row_icon_tinted, status_dot,
+        Control, Tone, chord_for, highlighted, icon_button, key_chip, keycap_parts, keycaps,
+        kind_color, object_icon, one_line, raised_card, row_icon_tinted, status_dot,
     },
     workspace::opacity_for,
 };
@@ -62,6 +62,8 @@ const RECENT_ROWS: usize = 5;
 /// How many confirmed rows the workspace remembers for the Recent group.
 pub const RECENTS_KEPT: usize = 8;
 const RECENT_GROUP: &str = "Recent";
+/// The hover group of every row, for its actions button to show by.
+const ROW_GROUP: &str = "palette-row";
 
 /// What the search palette is narrowed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1095,6 +1097,7 @@ impl Palette {
         };
         let ranges = self.highlights(index);
         let selected = self.selected == Some(at);
+        let acts = self.action_at(at).is_some();
         let item = &self.items[index];
         let status = item.status.and_then(|profile| {
             let workspace = self.workspace.upgrade()?;
@@ -1108,6 +1111,7 @@ impl Palette {
 
         div()
             .id(("palette-row", at))
+            .group(ROW_GROUP)
             .h(px(row_height))
             .px(px(layout::SPACE_SM))
             .child(
@@ -1185,7 +1189,33 @@ impl Palette {
                                 .child(item.hint.clone()),
                         )
                     })
-                    .children(item.keys.as_deref().map(|chord| keycaps(chord, t))),
+                    .children(item.keys.as_deref().map(|chord| keycaps(chord, t)))
+                    .when(acts, |row| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .when(!selected, |more| {
+                                    more.opacity(0.)
+                                        .group_hover(ROW_GROUP, |style| style.opacity(1.))
+                                })
+                                .child(
+                                    icon_button(
+                                        ("palette-row-actions", at),
+                                        icon::MORE,
+                                        Tone::Quiet,
+                                        Control::Inline,
+                                        t,
+                                    )
+                                    .tooltip("Actions")
+                                    .on_click(cx.listener(
+                                        move |palette, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            palette.act_on(at, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                    }),
             )
             .on_mouse_move(cx.listener(move |palette, _, window, cx| {
                 // Hover moves the selection only when the pointer does, so a
@@ -1201,6 +1231,15 @@ impl Palette {
                     palette.select(Some(at), false, window, cx);
                 }
             }))
+            .when(acts, |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |palette, _, _, cx| {
+                        cx.stop_propagation();
+                        palette.act_on(at, cx);
+                    }),
+                )
+            })
             .on_click(cx.listener(move |palette, _, window, cx| palette.click(at, window, cx)))
             .into_any_element()
     }

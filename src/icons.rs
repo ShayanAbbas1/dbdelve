@@ -128,6 +128,8 @@ pub mod icon {
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
     pub const COPY: &str = "icons/copy.svg";
+    /// What else can be done to a row, beside it.
+    pub const MORE: &str = "icons/ellipsis.svg";
     /// A floppy disk, which is what "save" looks like everywhere else.
     pub const SAVE: &str = "icons/save.svg";
     pub const RENAME: &str = "icons/pencil.svg";
