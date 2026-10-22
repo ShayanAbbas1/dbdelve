@@ -2546,7 +2546,8 @@ impl Workspace {
                 editor.cursor(),
             )
         };
-        let span = match selection.is_empty() {
+        let whole = selection.is_empty();
+        let span = match whole {
             true => 0..text.len(),
             false => selection,
         };
@@ -2557,9 +2558,9 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let formatted = match span.len() < text.len() {
-            true => crate::sql::format_selection(self.engine(), &text, span.clone()),
-            false => crate::sql::format(self.engine(), source),
+        let formatted = match whole {
+            true => crate::sql::format(self.engine(), source),
+            false => crate::sql::format_selection(self.engine(), &text, span.clone()),
         };
         let formatted = match formatted {
             Ok(formatted) => formatted,
@@ -2572,7 +2573,7 @@ impl Workspace {
             return;
         }
 
-        if span.len() < text.len() {
+        if !whole {
             let after = span.start..span.start + formatted.len();
             editor.update(cx, |editor, cx| {
                 replace_range(editor, span, &formatted, window, cx);
