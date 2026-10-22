@@ -2860,9 +2860,19 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // Generic splits `[my col]` into `[ my col ]`, another name. Postgres's dialect
 // is the upgrade path if its output ever looks wrong there.
 ///
+/// Each statement is reflowed on its own, and the text between statements --
+/// blank lines, comments, the `;`s and SQL Server's `GO` lines -- is kept as
+/// written. Reflowed with its batch, `GO 5` becomes a `GO` and a stray `5` on
+/// the next line: a count the refusal no longer sees.
+///
 /// Err is the refusal, said to the user as it stands. A MongoDB buffer is not
 /// SQL, and sqlformat over it splits regexes and turns comment text into code,
 /// so `mql::format` lays it out instead.
+//
+// ponytail: a statement that does not start its line comes back with its later
+// lines at column 0, not under its first. Indenting them is not a plain prefix
+// per line here, as it is in `mql::format`: sqlformat carries a multi-line
+// string literal through as one token, and a prefix would edit its value.
 pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
     let dialect = match engine {
         Engine::MongoDb => return crate::mql::format(sql),
@@ -2882,26 +2892,18 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
         dialect,
         ..sqlformat::FormatOptions::default()
     };
-    let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
-    if engine != Engine::SqlServer {
-        return Ok(reflow(sql));
+    let mut formatted = String::with_capacity(sql.len());
+    let mut written = 0;
+    for statement in Buffer::for_engine(engine, sql).statements() {
+        formatted += &sql[written..statement.start];
+        formatted += &sqlformat::format(
+            &sql[statement.clone()],
+            &sqlformat::QueryParams::default(),
+            &options,
+        );
+        written = statement.end;
     }
-    // A `GO` line is not T-SQL, and reflowed with its batch `GO 5` becomes a
-    // `GO` and a stray `5` on the next line: a count the refusal no longer
-    // sees. So each batch is reflowed alone and the lines kept as written.
-    let mut formatted = String::new();
-    let mut start = 0;
-    for (line, _) in go_lines(sql) {
-        let batch = reflow(&sql[start..line.start]);
-        if !batch.trim().is_empty() {
-            formatted += batch.trim();
-            formatted.push('\n');
-        }
-        formatted += sql[line.clone()].trim();
-        formatted.push('\n');
-        start = line.end;
-    }
-    formatted += reflow(&sql[start..]).trim();
+    formatted += &sql[written..];
     Ok(formatted)
 }
 
@@ -6075,6 +6077,17 @@ mod tests {
         assert!(formatted.contains("\nGO 5\n"), "{formatted}");
         assert_eq!(go_lines(&formatted).len(), 2, "{formatted}");
         assert_eq!(format(Engine::SqlServer, &formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn formatting_keeps_the_text_between_statements_as_written() {
+        let sql = "\n  select a,b from t;  -- why\n\n\n-- next\nselect 2;\n";
+        let formatted = format(Engine::Postgres, sql).unwrap();
+
+        assert_eq!(
+            formatted,
+            "\n  select\n  a,\n  b\nfrom\n  t;  -- why\n\n\n-- next\nselect\n  2;\n"
+        );
     }
 
     #[test]
