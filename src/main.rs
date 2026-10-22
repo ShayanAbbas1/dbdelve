@@ -64,9 +64,9 @@ use actions::{
     RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
     SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
     SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
-    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, SwitchConnection, ToggleComment,
-    ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit, ToggleRowPanel,
-    ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, SubmitConnection, SwitchConnection,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};

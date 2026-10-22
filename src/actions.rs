@@ -211,6 +211,7 @@ actions!(
         AcceptCompletion,
         OpenSettings,
         ResetConfirmations,
+        SubmitConnection,
         Quit,
     ]
 );

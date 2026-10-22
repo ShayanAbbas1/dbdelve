@@ -259,6 +259,7 @@ fn keyboard_group(context: Option<&'static str>) -> &'static str {
         Some("Palette > Input") => "Palette",
         Some("DataTable") => "Results grid",
         Some("Editor > Input") => "Editor",
+        Some("ConnectionForm") => "Connection form",
         Some(other) => other,
     }
 }
@@ -1045,7 +1046,16 @@ mod tests {
             .chunk_by(|a, b| a.group == b.group)
             .map(|group| group[0].group)
             .collect();
-        assert_eq!(groups, ["Everywhere", "Palette", "Results grid", "Editor"]);
+        assert_eq!(
+            groups,
+            [
+                "Everywhere",
+                "Palette",
+                "Results grid",
+                "Editor",
+                "Connection form"
+            ]
+        );
     }
 
     #[test]

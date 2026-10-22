@@ -593,7 +593,14 @@ impl Workspace {
                 button("cancel", "Cancel", Tone::Quiet, Control::Standard, t)
                     .on_click(cx.listener(|workspace, _, _, cx| workspace.close_form(cx))),
             )
-            .child(ui::accent_button("connect", commit, t, cx).on_click(cx.listener(Self::connect)))
+            .child(
+                ui::accent_button("connect", commit, t, cx)
+                    .children(
+                        ui::chord_for("submit_connection", &self.settings.custom_keybindings)
+                            .map(|chord| ui::keycaps_on_accent(&chord, t)),
+                    )
+                    .on_click(cx.listener(Self::connect)),
+            )
     }
 
     fn sslmode_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {

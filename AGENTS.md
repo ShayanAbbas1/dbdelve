@@ -438,7 +438,11 @@ The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
 while to come up.
 Pick the engine first, from the searchable picker the engine pill in the form's header opens; it decides which fields exist.
 Then paste a URL into the form's URL row, which fills the fields as it lands (one
-typed rather than pasted fills them on Enter), or fill the fields in. **Test** opens
+typed rather than pasted fills them on Enter), or fill the fields in.
+`secondary-enter` connects, or saves an edit (`submit_connection`, scoped to
+`ConnectionForm`): it is Run Query's chord, and the unscoped Run Query reaches
+the form first, finds no handler there and lets it through
+(`keybindings::INERT_IN` is what tells the conflict check so). **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
 

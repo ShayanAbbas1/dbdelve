@@ -1169,6 +1169,7 @@ impl Render for Workspace {
                 // has: without it the form's bindings dispatch nowhere the
                 // moment no field holds focus.
                 .track_focus(&self.focus)
+                .key_context("ConnectionForm")
                 // Chrome, so the form's card is the raised plane on it.
                 .text_color(t.text)
                 .text_size(px(layout::chrome(layout::TEXT_MD)))
@@ -1176,6 +1177,7 @@ impl Render for Workspace {
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
+                .on_action(cx.listener(Self::submit_connection))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))

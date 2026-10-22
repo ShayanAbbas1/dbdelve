@@ -192,6 +192,8 @@ pub mod layout {
     /// little of the card through.
     pub const ACCENT_HOVER: f32 = 0.9;
     pub const ACCENT_PRESSED: f32 = 0.8;
+    /// A keycap on the accent: its ink, faint.
+    pub const KEYCAP_ON_ACCENT: f32 = 0.16;
 
     pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
     /// The most of a narrow window's width the panel takes, so the window's

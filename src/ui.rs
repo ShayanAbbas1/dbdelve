@@ -812,6 +812,21 @@ pub(crate) fn accent_button(
         )
 }
 
+/// [`keycaps`], for a chord drawn on the accent.
+pub(crate) fn keycaps_on_accent(chord: &str, t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::KEYCAP_GAP))
+        .children(keycap_parts(chord).into_iter().map(|key| {
+            key_chip(key, t)
+                .border_color(t.on_accent.alpha(0.))
+                .bg(t.on_accent.alpha(layout::KEYCAP_ON_ACCENT))
+                .text_color(t.on_accent)
+        }))
+}
+
 /// The quietest thing on screen: small, uppercase, and dim enough that the
 /// names under it are what the eye lands on first.
 pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {

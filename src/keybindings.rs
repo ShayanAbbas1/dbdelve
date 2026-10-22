@@ -32,9 +32,9 @@ use crate::{
         PalettePrevious, PalettePreviousScope, PaletteRowActions, PaletteScopeLeft,
         PaletteScopeRight, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
         RefreshConnection, RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything,
-        SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor, SwitchConnection,
-        ToggleComment, ToggleNextJoin, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
-        ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor, SubmitConnection,
+        SwitchConnection, ToggleComment, ToggleNextJoin, ToggleRowEdit, ToggleRowPanel,
+        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -163,6 +163,9 @@ registry! {
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
     ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
     ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
+    // Run Query's chord, which reaches the form first and finds nothing to
+    // run there: see `INERT_IN`.
+    ("submit_connection", "Connect or Save Connection", Some("ConnectionForm"), ["secondary-enter"], SubmitConnection),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("toggle_row_edit", "Toggle Row Panel Edit Mode", None, ["secondary-shift-e"], ToggleRowEdit),
@@ -203,6 +206,18 @@ fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
     }
 }
 
+/// Global actions with no handler inside a context, so a binding scoped there
+/// may take their chord. GPUI tries the unscoped binding first (AGENTS.md,
+/// "GPUI hazards"), nothing on the connection form handles Run Query, and the
+/// keystroke goes on to the form's own binding.
+const INERT_IN: &[(&str, &str)] = &[("run_query", "ConnectionForm")];
+
+fn inert(id: &str, context: Option<&str>) -> bool {
+    INERT_IN
+        .iter()
+        .any(|&(action, within)| action == id && Some(within) == context)
+}
+
 /// The chords currently in force for `spec`: its override if it has one,
 /// its shipped defaults otherwise.
 pub(crate) fn chords_for<'a>(
@@ -230,6 +245,8 @@ pub(crate) fn conflict(
         .find(|spec| {
             spec.id != exclude_id
                 && contexts_overlap(spec.context, context)
+                && !inert(spec.id, context)
+                && !inert(exclude_id, spec.context)
                 && chords_for(spec, overrides).contains(&chord)
         })
         .map(|spec| spec.label)
@@ -303,6 +320,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_form_shares_run_querys_chord_and_nothing_else_does() {
+        let mut overrides = HashMap::new();
+        assert_eq!(
+            conflict(
+                "secondary-enter",
+                Some("ConnectionForm"),
+                "submit_connection",
+                &overrides
+            ),
+            None
+        );
+        assert_eq!(
+            conflict("secondary-enter", None, "run_query", &overrides),
+            None
+        );
+        // Any other global action there would take the keystroke from the
+        // form, Run Query moved off it or not.
+        overrides.insert("run_query".to_string(), "secondary-k r".to_string());
+        assert_eq!(
+            conflict("secondary-enter", None, "quit", &overrides),
+            Some("Connect or Save Connection")
+        );
     }
 
     #[test]

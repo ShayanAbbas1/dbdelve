@@ -633,6 +633,20 @@ impl Workspace {
     }
 
     pub(crate) fn connect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_form(window, cx);
+    }
+
+    /// The form's Connect, or its Save when editing, from the keyboard.
+    pub(crate) fn submit_connection(
+        &mut self,
+        _: &SubmitConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_form(window, cx);
+    }
+
+    fn save_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &self.form else {
             return;
         };
