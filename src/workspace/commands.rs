@@ -131,6 +131,15 @@ impl Workspace {
         self.open_palette(PaletteMode::Search(Scope::Commands), window, cx);
     }
 
+    pub(crate) fn search_everything(
+        &mut self,
+        _: &SearchEverything,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(PaletteMode::Search(Scope::All), window, cx);
+    }
+
     /// Over a palette already up, the stroke does what [`Palette::stroke`]
     /// says.
     pub(crate) fn open_palette(

@@ -3236,6 +3236,8 @@ mod tests {
             stroke(objects, objects, commands),
             Stroke::Rescope(Scope::Commands)
         );
+        assert_eq!(stroke(commands, objects, all), Stroke::Rescope(Scope::All));
+        assert_eq!(stroke(objects, all, all), Stroke::Close);
     }
 
     #[test]

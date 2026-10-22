@@ -1808,6 +1808,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reset_editor_zoom))
             .on_action(cx.listener(Self::fuzzy_open))
             .on_action(cx.listener(Self::command_palette))
+            .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_settings))

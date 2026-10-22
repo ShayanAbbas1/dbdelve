@@ -1564,7 +1564,7 @@ the palette and its pickers (the connection form's engine among them), completio
 each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
 second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
-opens it on Objects, `cmd+shift+p` on Commands and the titlebar's project or
+opens it on Objects, `cmd+shift+p` on Commands, `SearchEverything` (no default chord) on All and the titlebar's project or
 connection on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
 `tab` and `shift-tab` step through the scopes, and so do `right` and `left`
