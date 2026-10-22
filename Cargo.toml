@@ -343,6 +343,12 @@ winresource = "=0.1.31"
 # regions and every renderer (Metal, DirectX, wgpu) draws them. Every change is
 # marked `dbdelve patch`, in gpui-pre and its renderer crates alike; re-apply
 # them on a gpui bump.
+# dbdelve patch: a member so CI can run the vendored wgpu renderer's tests;
+# default-members stays the root package, so plain cargo commands are unchanged.
+[workspace]
+members = ["vendor/gpui-pre-wgpu"]
+default-members = ["."]
+
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

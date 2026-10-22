@@ -73,7 +73,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libdbus-1-dev sqlite3
+            libwayland-dev libdbus-1-dev sqlite3 \
+            mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
       - run: sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
       - run: dev/ssh/setup.sh
       - run: docker compose up -d --wait
@@ -83,6 +84,11 @@ jobs:
       # provider is linked at run time.
       - run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_
       - run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
+      # The backdrop blur's pixel tests live in the vendored wgpu renderer,
+      # which isn't a workspace member, so `cargo test` alone never runs them.
+      # Mesa's lavapipe (Vulkan) and llvmpipe (GL) give the runner a software
+      # adapter. One thread: each test builds its own device.
+      - run: cargo test -p gpui-pre-wgpu --features test-support -- --test-threads=1
 
   macos-lint:
     runs-on: macos-latest
