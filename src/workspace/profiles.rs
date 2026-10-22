@@ -643,6 +643,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The engine and project pickers open over the form, inside its key
+        // context, and do not take the chord themselves.
+        if self.palette.is_some() {
+            return;
+        }
         self.save_form(window, cx);
     }
 
