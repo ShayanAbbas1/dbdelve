@@ -1001,7 +1001,16 @@ impl Render for Workspace {
 
         // Deferred for the same reason plus one: an element has to be mounted
         // before it can take focus.
+        //
+        // Never while the form is up, which is drawn in the tab's place: the
+        // form's field is focused first, and the tab's focus after it would
+        // take it -- which is what closing the palette asks for just before a
+        // row of it opens the form. The ask waits for the form to close.
+        let form_open = self.form.is_some();
         let take_focus = self.profile_mut().and_then(|profile| {
+            if form_open {
+                return None;
+            }
             if profile.session.naming {
                 let wanted = profile.session.save_name_needs_focus;
                 return wanted.then(|| {
@@ -1914,7 +1923,7 @@ impl Render for Workspace {
                         workspace.toggle_sidebar(&ToggleSidebar, window, cx);
                     }))
                     .into_any_element(),
-                    self.render_profile_switcher(cx),
+                    self.render_connection_name(cx),
                 ]
                 .into_iter()
                 .chain(self.render_breadcrumb(cx))

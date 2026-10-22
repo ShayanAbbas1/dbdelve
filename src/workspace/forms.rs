@@ -630,7 +630,7 @@ impl Workspace {
             };
             let add_from_row = add.clone();
             projects.push(
-                switcher_row(("welcome-project", index), t)
+                welcome_row(("welcome-project", index), t)
                     .group(format!("project-row-{index}"))
                     .child(row_icon(t, icon::PROJECT))
                     .child(
@@ -1664,11 +1664,10 @@ impl Workspace {
         )
     }
 
-    /// The connection switcher: the titlebar's name for the database in front
-    /// of you, which opens the palette over every connection. It is the one
-    /// place the connection is named, so it stays reachable with the sidebar
-    /// folded.
-    pub(crate) fn render_profile_switcher(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The titlebar's name for the database in front of you, which opens the
+    /// palette over every connection. It is the one place the connection is
+    /// named, so it stays reachable with the sidebar folded.
+    pub(crate) fn render_connection_name(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = *theme(cx);
         let active_name = self
             .profile()
@@ -2145,7 +2144,7 @@ fn note(t: Theme, text: &'static str) -> AnyElement {
 }
 
 /// A row in the welcome surface's list of projects.
-fn switcher_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui::Div> {
+fn welcome_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(px(layout::chrome(30.)))

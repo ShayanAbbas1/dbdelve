@@ -77,14 +77,18 @@ impl Fuzzy {
 
     /// The candidates that match, best first, each with its score.
     ///
-    /// Equal scores go to the shorter text, which is the one more of whose
-    /// characters the query accounted for, and then to the order the
-    /// candidates came in. An empty query keeps every candidate in that order.
+    /// A candidate is found by its `text` and by each of the texts in `also`,
+    /// scored on its own with the best counting, so no match runs from the
+    /// end of one into the next. Equal scores go to the shorter `text`, which
+    /// is the one more of whose characters the query accounted for, and then
+    /// to the order the candidates came in. An empty query keeps every
+    /// candidate in that order.
     pub fn rank<T>(
         &mut self,
         query: &Query,
         candidates: impl IntoIterator<Item = T>,
         text: impl Fn(&T) -> &str,
+        also: impl Fn(&T) -> &[String],
     ) -> Vec<(T, u32)> {
         if query.empty {
             return candidates.into_iter().map(|item| (item, 0)).collect();
@@ -92,7 +96,10 @@ impl Fuzzy {
         let mut scored = candidates
             .into_iter()
             .filter_map(|item| {
-                let score = self.score(query, text(&item))?;
+                let score = std::iter::once(text(&item))
+                    .chain(also(&item).iter().map(String::as_str))
+                    .filter_map(|field| self.score(query, field))
+                    .max()?;
                 Some((item, score))
             })
             .collect::<Vec<_>>();
@@ -167,7 +174,12 @@ mod tests {
     fn ranked(labels: &[&str], query: &str) -> Vec<String> {
         let mut fuzzy = Fuzzy::new();
         fuzzy
-            .rank(&Query::new(query), labels.iter().copied(), |label| label)
+            .rank(
+                &Query::new(query),
+                labels.iter().copied(),
+                |label| label,
+                |_| &[],
+            )
             .into_iter()
             .map(|(label, _)| label.to_string())
             .collect()

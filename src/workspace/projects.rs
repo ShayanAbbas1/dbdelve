@@ -45,11 +45,6 @@ impl Workspace {
     }
 
     pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The palette draws over the import's question, and would let the
-        // project it picked be renamed or deleted under it.
-        if self.pending_import.is_some() {
-            return;
-        }
         self.open_palette(PaletteMode::Search(Scope::Connections), window, cx);
     }
 
@@ -97,7 +92,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // As `open_connections`: nothing is named while the import is asking.
+        // Nothing is named while the import is asking which project it joins,
+        // and the welcome surface's field below is not the palette's to stop.
         if self.pending_import.is_some() {
             return;
         }
@@ -221,6 +217,11 @@ impl Workspace {
         let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;
         };
+        // Moving it where it is would put it last among its project's members
+        // and write the file for nothing.
+        if self.group_of(&id) == project {
+            return;
+        }
         for each in &mut self.projects {
             each.connections.retain(|member| member != &id);
             if Some(each.name.as_str()) == project {

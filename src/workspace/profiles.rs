@@ -1499,6 +1499,7 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            self.catalog_landed(id, cx);
             return;
         };
         let catalog_task = cx
@@ -1538,6 +1539,7 @@ impl Workspace {
                     profile.session.completion_columns.borrow_mut().clear();
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
+                    workspace.catalog_landed(&id, cx);
                     cx.notify();
                     workspace.load_routines(&id, generation, cx);
                     workspace.load_sizes(&id, generation, cx);
@@ -1598,6 +1600,7 @@ impl Workspace {
                     }
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
+                    workspace.catalog_landed(&id, cx);
                     cx.notify();
                 })
                 .ok();

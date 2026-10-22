@@ -1248,24 +1248,31 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   there is no switcher panel of its own. That scope lists every connection
   grouped by project in the order projects are kept, No project first
   (`palette::listed_connections`), the one in front marked current, each with
-  its colour and status dot; an empty project keeps its header with a "New
-  connection in…" row. A connection also matches on its host and its project
-  (`Item::haystack`) but highlights only in its name. Under All only the other
-  connections in the project in front appear. Whatever is done to one
-  connection or project is a follow-up list, never a panel of its own:
-  `shift-enter` on a connection's row (`palette_row_actions`) puts up
-  `Mode::ConnectionActions` (switch, edit, duplicate, move to a project,
+  its colour and a status dot read as the row is drawn; an empty project
+  keeps its header with a "New connection in…" row, and with no projects the
+  connections are headed "Connections" whenever another group stands beside
+  them. Groups are told apart by what they are (`palette::Group`), never by
+  the header's text, so a project called "Manage" is its own group. A
+  connection also matches on its host and on its project (`Item::also`), each
+  scored apart so a match never runs from one into the next, but highlights
+  only in its name. Under All only the other connections in the project in
+  front appear. Whatever is done to one connection or project is a follow-up
+  list, never a panel of its own: `shift-enter` on a connection's row
+  (`palette_row_actions`) puts up `Mode::ConnectionActions` (switch, edit, duplicate, move to a project,
   leave its project, remove, and its project's new connection, rename and
   delete), and the Commands scope offers the same for the connection in
-  front plus Rename/Delete project over `Mode::Projects`. Removing a
-  connection or deleting a project goes through a one-row `Mode::Confirm`,
-  which is the only arming they get. New Project and renames take the name in
-  the palette's own field (`Mode::NameProject`, checked by
-  `projects::project_name_refusal` as it is typed). File → New Project
-  (`NewProject`, no default chord) opens that, or the welcome surface's name
-  field while there is no connection. While an import asks where its
-  connections go, the palette refuses every list that names or moves a
-  project.
+  front plus Rename/Delete project over `Mode::Projects`. On a row with no
+  actions `shift-enter` is `enter`. Removing a connection or deleting a
+  project goes through a one-row `Mode::Confirm`, which is the only arming
+  they get: it opens with nothing selected, and a click there only selects,
+  so neither a held `enter` nor a double click goes through it. Nothing that
+  removes or deletes, and no connection, is remembered under Recent
+  (`palette::remembered`). New Project and renames take the name in the
+  palette's own field (`Mode::NameProject`, checked by
+  `projects::project_name_refusal` as it is typed, and offering no row for a
+  rename to the name it has). File → New Project (`NewProject`, no default
+  chord) opens that, or the welcome surface's name field while there is no
+  connection.
 - **No connection is a state, not a prompt.** With no profiles and no form
   open, the window is the welcome surface (`Workspace::render_welcome`): New
   project, New connection, each project with an Add connection of its own, and
@@ -1278,8 +1285,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `render_import_choice` asks which project the new connections join
   (`PendingImport`): "Imported from <client>" by default, made if it is new
   and joined if not, an existing project, or none. While it asks, the
-  Connections scope and New Project stay shut, since the palette draws over
-  it.
+  palette draws over it, so it lists nothing that could change the answer or
+  take away the project it names (`palette::waits_for_import`): the
+  Connections scope is empty and says why, and the rows for New Project,
+  Rename and Delete project, moving a connection to or out of a project,
+  New connection in a project, and Remove connection are left out, as are
+  the lists they open. A palette opened before the question came up is
+  checked again when a row is confirmed. The welcome surface's New Project
+  is refused too.
   Nothing forces a connection on a first launch, the form can always be
   cancelled, and removing the last connection lands back there. Settings opens
   there too. `note` writes to `welcome_notice` while it is in front, and a
@@ -1537,10 +1550,11 @@ second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
 opens it on Objects, `cmd+shift+p` on Commands and the titlebar's connection
 name on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
-A palette opened from the settings panel, or put up by a row confirmed there,
-hands the keyboard back to the panel's search when it is dismissed or a theme
-or font is picked from it; any other row it confirms leaves focus where its
-command put it.
+A palette open while the catalog loads says so on Objects, and takes the
+objects in when they land (`Workspace::catalog_landed`). One opened from the
+settings panel, or put up by a row confirmed there, hands the keyboard back to
+the panel's search when it is dismissed or a theme or font is picked from it;
+any other row it confirms leaves focus where its command put it.
 
 It also does **not** ship the icons its `IconName` names: those are Lucide file
 paths with no files behind them. `src/icons.rs` is DBDelve's `AssetSource`: it

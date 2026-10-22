@@ -140,13 +140,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // The palette draws over the import's question, and would let the
-        // project it picked be renamed or deleted under it.
+        // project it picked be renamed or deleted under it. Its own rows for
+        // these are left out meanwhile (`palette::waits_for_import`); this
+        // stops the keystrokes and menus that open them directly.
         let names_projects = matches!(
             mode,
             PaletteMode::NameProject(_)
                 | PaletteMode::Projects(_)
                 | PaletteMode::MoveToProject(_)
-                | PaletteMode::Confirm(Target::Project(_))
+                | PaletteMode::ConnectionActions(_)
+                | PaletteMode::Confirm(_)
         );
         if names_projects && self.pending_import.is_some() {
             return;
@@ -221,7 +224,8 @@ impl Workspace {
         // The palette takes the keyboard, and a capture left listening behind
         // it would take the first key typed after it closes.
         self.cancel_rebind(cx);
-        let palette = cx.new(|cx| Palette::new(mode, self, window, cx));
+        let handle = cx.weak_entity();
+        let palette = cx.new(|cx| Palette::new(mode, self, handle, window, cx));
         if let Some(first) = first {
             palette.update(cx, |palette, cx| palette.select_item(first, window, cx));
         }
@@ -229,6 +233,17 @@ impl Workspace {
             .detach();
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// A palette opened before this profile's catalog arrived lists its
+    /// objects once they do.
+    pub(crate) fn catalog_landed(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (Some(palette), Some(profile)) = (self.palette.clone(), self.profile()) else {
+            return;
+        };
+        if profile.id == id {
+            palette.update(cx, |palette, cx| palette.catalog_changed(profile, cx));
+        }
     }
 
     /// Waiting for a source's scan off the UI thread, with no list up meanwhile
@@ -278,29 +293,34 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let searching = matches!(palette.read(cx).mode(), PaletteMode::Search(_));
-        let command = match event {
-            PaletteEvent::Dismiss => None,
-            PaletteEvent::Act(command) => Some(command.clone()),
+        let (command, scope) = match event {
+            PaletteEvent::Dismiss => {
+                self.close_palette(window, cx);
+                return;
+            }
+            PaletteEvent::Act { command, scope } => (command.clone(), *scope),
             PaletteEvent::Confirm {
                 command,
                 scope,
                 label,
             } => {
-                if searching {
+                if searching && palette::remembered(*scope, command) {
                     let recent = (*scope, label.clone());
                     self.palette_recents.retain(|kept| *kept != recent);
                     self.palette_recents.insert(0, recent);
                     self.palette_recents.truncate(palette::RECENTS_KEPT);
                 }
-                Some(command.clone())
+                (command.clone(), *scope)
             }
-        };
-        let Some(command) = command else {
-            self.close_palette(window, cx);
-            return;
         };
         let from_settings = self.palette_from_settings;
         self.take_palette(true, window, cx);
+        // The palette leaves out these rows while an import asks, but this
+        // one may have opened before the import began asking.
+        if self.pending_import.is_some() && palette::waits_for_import(scope, &command) {
+            self.note("Choose where the imported connections go first.".into(), cx);
+            return;
+        }
         self.palette_from_settings = from_settings;
         self.run_command(command, window, cx);
         // Kept only for a list the command put up in the palette's place.

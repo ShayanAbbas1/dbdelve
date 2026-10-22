@@ -20,10 +20,10 @@
 use std::{collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, ParentElement, Pixels,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
-    div, prelude::FluentBuilder, px, size,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, ParentElement,
+    Pixels, Render, ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    WeakEntity, Window, div, prelude::FluentBuilder, px, size,
 };
 use gpui_component::{
     VirtualListScrollHandle,
@@ -48,7 +48,7 @@ use crate::{
         ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme, theme, user,
     },
     ui::{
-        Status, chord_for, highlighted, key_chip, keycap_parts, keycaps, kind_color, object_icon,
+        chord_for, highlighted, key_chip, keycap_parts, keycaps, kind_color, object_icon,
         one_line, raised_card, row_icon_tinted, status_dot,
     },
     workspace::opacity_for,
@@ -353,10 +353,10 @@ struct Item {
     /// What the matcher scores, and what the row reads as. One string for both,
     /// so nothing can be found by text that is not on screen.
     label: String,
-    /// What the matcher scores in place of the label, for a row also found by
+    /// What else the matcher scores, each on its own, for a row also found by
     /// what is drawn around it: a connection by its host, which its detail
     /// shows, and by its project, which heads its group. Built once per open.
-    haystack: Option<String>,
+    also: Vec<String>,
     /// Muted and monospaced, inline after the label: where a connection points.
     detail: Option<SharedString>,
     /// Muted, at the far end: what kind of object this is, or which row is the
@@ -366,23 +366,38 @@ struct Item {
     keys: Option<String>,
     icon: &'static str,
     tint: Option<ConnectionColor>,
-    /// A connection's state, as the dot the status bar draws for it.
-    status: Option<Status>,
+    /// The profile, by index, whose state the row draws as the dot the status
+    /// bar draws for it. Read as the row is drawn, so a connection that comes
+    /// up while the palette is open says so.
+    status: Option<usize>,
     /// A statement, drawn in the editor's face.
     mono: bool,
     scope: Scope,
     /// Listed under All as well as in its own scope.
     in_all: bool,
-    /// The header the row sits under. Empty for a list that has one group.
-    group: SharedString,
+    /// The header the row sits under.
+    group: Group,
     command: Command,
+}
+
+/// Which group a row is in. Told apart by what the group is, never by what its
+/// header reads, so a project called "Manage" is not the Manage group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Group {
+    /// The list's one group, which needs no header of its own -- until another
+    /// group stands beside it, when it is headed by its scope.
+    Bare,
+    /// A header the palette names itself.
+    Named(&'static str),
+    /// A project, by its index, under its name.
+    Project(usize, SharedString),
 }
 
 impl Item {
     fn new(label: impl Into<String>, icon: &'static str, command: Command) -> Self {
         Self {
             label: label.into(),
-            haystack: None,
+            also: Vec::new(),
             detail: None,
             hint: SharedString::default(),
             keys: None,
@@ -392,7 +407,7 @@ impl Item {
             mono: false,
             scope: Scope::Commands,
             in_all: true,
-            group: SharedString::default(),
+            group: Group::Bare,
             command,
         }
     }
@@ -427,18 +442,18 @@ impl Item {
         self
     }
 
-    fn group(mut self, group: impl Into<SharedString>) -> Self {
-        self.group = group.into();
+    fn group(mut self, group: Group) -> Self {
+        self.group = group;
         self
     }
 
-    fn haystack(mut self, haystack: String) -> Self {
-        self.haystack = Some(haystack);
+    fn also(mut self, also: Vec<String>) -> Self {
+        self.also = also;
         self
     }
 
-    fn status(mut self, status: Status) -> Self {
-        self.status = Some(status);
+    fn status(mut self, profile: usize) -> Self {
+        self.status = Some(profile);
         self
     }
 
@@ -465,6 +480,9 @@ enum Row {
 /// recently lead under Recent, and are not repeated further down -- except
 /// where the list is already in an order of its own: History is newest first,
 /// and Connections is grouped by project.
+///
+/// A row is scored on its label and on each of its other texts apart, the
+/// best of them counting, so a match never runs from one into the next.
 fn arrange(
     items: &[Item],
     scope: Option<Scope>,
@@ -478,7 +496,8 @@ fn arrange(
             None | Some(Scope::All) => item.in_all,
             Some(scope) => item.scope == scope,
         }),
-        |(_, item)| item.haystack.as_deref().unwrap_or(&item.label),
+        |(_, item)| &item.label,
+        |(_, item)| &item.also,
     );
 
     let recent: Vec<usize> = if query.is_empty()
@@ -498,32 +517,38 @@ fn arrange(
         Vec::new()
     };
 
-    let mut groups: Vec<(SharedString, Vec<usize>)> = Vec::new();
+    let mut groups: Vec<(Group, Vec<usize>)> = Vec::new();
     if !recent.is_empty() {
-        groups.push((RECENT_GROUP.into(), recent.clone()));
+        groups.push((Group::Named(RECENT_GROUP), recent.clone()));
     }
     for ((index, item), _) in ranked {
         if recent.contains(&index) {
             continue;
         }
         let group = match scope {
-            Some(Scope::All) => item.scope.title().into(),
+            Some(Scope::All) => Group::Named(item.scope.title()),
             _ => item.group.clone(),
         };
-        match groups.iter_mut().find(|(name, _)| *name == group) {
+        match groups.iter_mut().find(|(key, _)| *key == group) {
             Some((_, members)) => members.push(index),
             None => groups.push((group, vec![index])),
         }
     }
 
+    // Rows with no header under another group's would read as that group's.
+    let alone = groups.len() == 1;
     let mut rows = Vec::new();
-    for (name, mut members) in groups {
+    for (group, mut members) in groups {
         if scope == Some(Scope::All) {
             members.truncate(ALL_SCOPE_GROUP_ROWS);
         }
-        if !name.is_empty() {
-            rows.push(Row::Header(name));
-        }
+        let header = match group {
+            Group::Bare if alone => None,
+            Group::Bare => scope.map(|scope| scope.title().into()),
+            Group::Named(name) => Some(name.into()),
+            Group::Project(_, name) => Some(name),
+        };
+        rows.extend(header.map(Row::Header));
         rows.extend(members.into_iter().map(Row::Item));
     }
     rows
@@ -551,6 +576,56 @@ fn step(rows: &[Row], from: Option<usize>, delta: isize) -> Option<usize> {
 
 fn first_item(rows: &[Row]) -> Option<usize> {
     rows.iter().position(|row| matches!(row, Row::Item(_)))
+}
+
+/// Where the selection starts: on the first row, except over the one row that
+/// removes something, which opens with nothing selected so that an `enter`
+/// held down, or pressed once too often, to get there does not also confirm
+/// it. `down` or a click selects it.
+fn opening_selection(mode: Mode, rows: &[Row]) -> Option<usize> {
+    match mode {
+        Mode::Confirm(_) => None,
+        _ => first_item(rows),
+    }
+}
+
+/// Whether a confirmed row leads the next palette under Recent. Never one
+/// that removes or deletes, which would sit selected there an `enter` or two
+/// from doing it again. Nor a connection: Recent lists one only under All and
+/// only from the project in front, so most would push out rows it does show.
+pub fn remembered(scope: Scope, command: &Command) -> bool {
+    scope != Scope::Connections
+        && !matches!(
+            command,
+            Command::Confirm(_)
+                | Command::PickProject(ProjectVerb::Delete)
+                | Command::RemoveConnection(_)
+                | Command::DeleteProject(_)
+        )
+}
+
+/// Whether a row is left out while an import asks which project its
+/// connections join: every connection's row, and whatever names, moves or
+/// removes a project or a connection, which would change the answer under it
+/// or take away the project it names.
+pub fn waits_for_import(scope: Scope, command: &Command) -> bool {
+    scope == Scope::Connections
+        || matches!(
+            command,
+            Command::SwitchConnection
+                | Command::ConnectionActions(_)
+                | Command::ChooseProject(_)
+                | Command::MoveToProject(..)
+                | Command::Confirm(_)
+                | Command::RemoveConnection(_)
+                | Command::NewConnectionIn(_)
+                | Command::NewProject
+                | Command::PickProject(_)
+                | Command::NameProject(_)
+                | Command::CreateProject(_)
+                | Command::RenameProject(..)
+                | Command::DeleteProject(_)
+        )
 }
 
 /// What a stroke that opens the palette in some mode does to the one up.
@@ -584,7 +659,10 @@ pub enum PaletteEvent {
     },
     /// A row's secondary action was asked for. Not a confirmation, so it
     /// leads nothing under Recent.
-    Act(Command),
+    Act {
+        command: Command,
+        scope: Scope,
+    },
     Dismiss,
 }
 
@@ -618,6 +696,15 @@ pub struct Palette {
     naming: Option<Naming>,
     /// The mode the palette opened in, for [`stroke`].
     opened: Mode,
+    /// Where each connection row reads its state from as it is drawn.
+    workspace: WeakEntity<Workspace>,
+    /// Whether the catalog was still on its way the last time it was read, so
+    /// an empty Objects scope can say it is coming rather than that there is
+    /// nothing.
+    catalog_loading: bool,
+    /// Whether an import was asking where its connections go as the palette
+    /// opened, which leaves the Connections scope empty.
+    import_pending: bool,
     input: Entity<InputState>,
     scroll: VirtualListScrollHandle,
     /// The theme in force when a theme list opened, for a filter that
@@ -641,10 +728,11 @@ impl Palette {
     pub fn new(
         mode: Mode,
         workspace: &Workspace,
+        handle: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let items = match (mode, workspace.profile()) {
+        let mut items = match (mode, workspace.profile()) {
             (Mode::Theme, _) => theme_items(cx),
             (Mode::ImportTheme(source), _) => import_items(source),
             (Mode::ConnectionActions(index), _) => connection_action_items(workspace, index),
@@ -663,6 +751,10 @@ impl Palette {
             (Mode::Columns, Some(profile)) => column_items(profile, cx),
             (_, None) => Vec::new(),
         };
+        let import_pending = workspace.pending_import.is_some();
+        if import_pending {
+            items.retain(|item| !waits_for_import(item.scope, &item.command));
+        }
         let naming = match mode {
             Mode::NameProject(renaming) => Some(Naming {
                 renaming: renaming
@@ -707,6 +799,11 @@ impl Palette {
             .map(|id| chord_for(id, &workspace.settings.custom_keybindings)),
             naming,
             opened: mode,
+            workspace: handle,
+            catalog_loading: workspace
+                .profile()
+                .is_some_and(|profile| matches!(profile.catalog, CatalogState::Loading)),
+            import_pending,
             input,
             scroll: VirtualListScrollHandle::new(),
             unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
@@ -783,8 +880,43 @@ impl Palette {
                 .collect(),
         );
         self.highlights.clear();
-        self.selected = first_item(&self.rows);
+        self.selected = opening_selection(self.mode, &self.rows);
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    /// The catalog's objects as they stand now, for a palette opened before
+    /// they arrived. The row selected stays selected.
+    pub fn catalog_changed(&mut self, profile: &Profile, cx: &mut Context<Self>) {
+        if !matches!(self.mode, Mode::Search(_)) {
+            return;
+        }
+        let selected = self
+            .selected
+            .and_then(|row| match self.rows.get(row) {
+                Some(&Row::Item(index)) => Some(&self.items[index]),
+                _ => None,
+            })
+            .map(|item| (item.scope, item.label.clone()));
+        self.items.retain(|item| item.scope != Scope::Objects);
+        // Where `search_items` puts them: after the queries.
+        let at = self
+            .items
+            .iter()
+            .take_while(|item| item.scope == Scope::Queries)
+            .count();
+        self.items.splice(at..at, object_items(profile));
+        self.catalog_loading = matches!(profile.catalog, CatalogState::Loading);
+        self.rearrange();
+        if let Some((scope, label)) = selected
+            && let Some(row) = self.rows.iter().position(|row| {
+                matches!(row, Row::Item(index)
+                    if self.items[*index].scope == scope && self.items[*index].label == label)
+            })
+        {
+            self.selected = Some(row);
+            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+        cx.notify();
     }
 
     fn on_input_event(
@@ -855,12 +987,23 @@ impl Palette {
         });
     }
 
-    /// The selected row's secondary action, if it has one.
-    fn row_action(&self) -> Option<Command> {
+    /// Over the one row that removes something, a click on it unselected only
+    /// selects it, for the reason it opens unselected: the click that opened
+    /// the list lands where its row is, and a second one would confirm it.
+    fn click(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Confirm(_)) && self.selected != Some(at) {
+            self.select(Some(at), false, window, cx);
+        } else {
+            self.confirm(Some(at), cx);
+        }
+    }
+
+    /// A row's secondary action, if it has one.
+    fn action_at(&self, row: usize) -> Option<Command> {
         if !matches!(self.mode, Mode::Search(_)) {
             return None;
         }
-        let &Row::Item(index) = self.rows.get(self.selected?)? else {
+        let &Row::Item(index) = self.rows.get(row)? else {
             return None;
         };
         match self.items[index].command {
@@ -869,9 +1012,27 @@ impl Palette {
         }
     }
 
+    fn row_action(&self) -> Option<Command> {
+        self.action_at(self.selected?)
+    }
+
+    fn act_on(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(command) = self.action_at(row) else {
+            return;
+        };
+        let &Row::Item(index) = &self.rows[row] else {
+            return;
+        };
+        let scope = self.items[index].scope;
+        cx.emit(PaletteEvent::Act { command, scope });
+    }
+
+    /// `shift-enter` on a row with no actions, and in the name field, is the
+    /// `enter` the field would have taken it for.
     fn act(&mut self, cx: &mut Context<Self>) {
-        if let Some(command) = self.row_action() {
-            cx.emit(PaletteEvent::Act(command));
+        match self.selected.filter(|&row| self.action_at(row).is_some()) {
+            Some(row) => self.act_on(row, cx),
+            None => self.confirm(self.selected, cx),
         }
     }
 
@@ -935,6 +1096,11 @@ impl Palette {
         let ranges = self.highlights(index);
         let selected = self.selected == Some(at);
         let item = &self.items[index];
+        let status = item.status.and_then(|profile| {
+            let workspace = self.workspace.upgrade()?;
+            let state = &workspace.read(cx).profiles.get(profile)?.state;
+            Some(status_dot(t, state))
+        });
         let mono = fonts(cx).family(FontSlot::Editor).clone();
         let row_height = layout::chrome(layout::PALETTE_ROW_HEIGHT);
         let tile = layout::chrome(layout::PALETTE_TILE_SIZE);
@@ -982,7 +1148,7 @@ impl Palette {
                                 item.tint.or_else(|| kind_color(item.icon)),
                             )),
                     )
-                    .children(item.status.map(|status| status_dot(t, status)))
+                    .children(status)
                     .child(
                         div()
                             .flex()
@@ -1025,12 +1191,17 @@ impl Palette {
                 // Hover moves the selection only when the pointer does, so a
                 // list scrolling under a resting pointer keeps the keyboard's.
                 // Never over a theme list, where selecting repaints the window
-                // and a pointer crossing it would flash every theme it passed.
-                if palette.selected != Some(at) && palette.unpreviewed.is_none() {
+                // and a pointer crossing it would flash every theme it passed,
+                // nor over the row that removes something, which a click only
+                // selects while it is not selected.
+                if palette.selected != Some(at)
+                    && palette.unpreviewed.is_none()
+                    && !matches!(palette.mode, Mode::Confirm(_))
+                {
                     palette.select(Some(at), false, window, cx);
                 }
             }))
-            .on_click(cx.listener(move |palette, _, _, cx| palette.confirm(Some(at), cx)))
+            .on_click(cx.listener(move |palette, _, window, cx| palette.click(at, window, cx)))
             .into_any_element()
     }
 
@@ -1074,8 +1245,16 @@ impl Palette {
                 "No themes found".to_string(),
                 format!("{} has no themes on this machine.", source.name()),
             ),
-            // `cmd+p` opens on Objects, which is empty until the catalog loads
-            // and on a connection that has none.
+            Mode::Search(Scope::Objects) if self.catalog_loading => (
+                "Loading database objects…".to_string(),
+                "They are listed here as soon as they arrive.".to_string(),
+            ),
+            Mode::Search(Scope::Connections) if self.import_pending => (
+                "Connections are on hold".to_string(),
+                "Choose where the imported connections go first.".to_string(),
+            ),
+            // `cmd+p` opens on Objects, which is empty on a connection that
+            // has none.
             Mode::Search(scope) if self.query.is_empty() && scope != Scope::All => (
                 format!("No {} here", scope.title().to_lowercase()),
                 "Press Tab to search another scope.".to_string(),
@@ -1426,7 +1605,6 @@ struct Listed<'a> {
     host: String,
     endpoint: String,
     color: Option<ConnectionColor>,
-    status: Status,
 }
 
 /// Every connection, by project, then the ways to add one or a project.
@@ -1446,7 +1624,6 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
             },
             endpoint: profile.config.endpoint(),
             color: profile.color,
-            status: Status::from(&profile.state),
         })
         .collect();
     let overrides = &workspace.settings.custom_keybindings;
@@ -1455,24 +1632,24 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
         Item::new("New connection…", icon::PLUS, Command::NewConnection)
             .keys(chord_for("new_connection", overrides))
             .scope(Scope::Connections)
-            .group(MANAGE)
+            .group(Group::Named(MANAGE))
             .beyond_all(),
     );
     items.push(
         Item::new("New project…", icon::ADD_TO_PROJECT, Command::NewProject)
             .keys(chord_for("new_project", overrides))
             .scope(Scope::Connections)
-            .group(MANAGE)
+            .group(Group::Named(MANAGE))
             .beyond_all(),
     );
     items
 }
 
-/// The connections grouped by project: No project first, then each project in its order, each holding its members
-/// in the order the profiles are kept. An empty project keeps its place with
-/// a row that adds a connection to it. Under All only the other connections
-/// in the project in front are listed, which is all the palette ever offered
-/// there.
+/// The connections grouped by project: No project first, then each project
+/// in its order, each holding its members in the order the profiles are kept.
+/// An empty project keeps its place with a row that adds a connection to it.
+/// Under All only the other connections in the project in front are listed,
+/// which is all the palette ever offered there.
 fn listed_connections(
     connections: &[Listed],
     projects: &[StoredProject],
@@ -1492,21 +1669,19 @@ fn listed_connections(
     let current = project_of.get(active).copied().flatten();
     let mut items = Vec::new();
     for group in std::iter::once(None).chain((0..projects.len()).map(Some)) {
-        let header: SharedString = match group {
-            Some(at) => projects[at].name.clone().into(),
-            None if projects.is_empty() => SharedString::default(),
-            None => NO_PROJECT.into(),
+        let header = match group {
+            Some(at) => Group::Project(at, projects[at].name.clone().into()),
+            None if projects.is_empty() => Group::Bare,
+            None => Group::Named(NO_PROJECT),
         };
         let before = items.len();
         for (index, connection) in connections.iter().enumerate() {
             if project_of[index] != group {
                 continue;
             }
-            let mut haystack = format!("{} {}", connection.name, connection.host);
-            if let Some(at) = group {
-                haystack.push(' ');
-                haystack.push_str(&projects[at].name);
-            }
+            let also = std::iter::once(connection.host.clone())
+                .chain(group.map(|at| projects[at].name.clone()))
+                .collect();
             let item = Item::new(
                 connection.name,
                 icon::DATABASE,
@@ -1514,9 +1689,9 @@ fn listed_connections(
             )
             .detail(connection.endpoint.clone())
             .tint(connection.color)
-            .status(connection.status)
+            .status(index)
             .hint(if index == active { "current" } else { "" })
-            .haystack(haystack)
+            .also(also)
             .scope(Scope::Connections)
             .group(header.clone());
             items.push(if index == active || group != current {
@@ -1556,7 +1731,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
         .iter()
         .position(|project| project.connections.contains(&profile.id));
     let row = |label: String, icon: &'static str, command: Command, group: &'static str| {
-        Item::new(label, icon, command).group(group)
+        Item::new(label, icon, command).group(Group::Named(group))
     };
     let mut items = Vec::new();
     if index != workspace.active {
@@ -1718,7 +1893,8 @@ fn confirm_items(workspace: &Workspace, target: Target) -> Vec<Item> {
 }
 
 /// The one row that names the project what is typed, or why there is none:
-/// nothing typed yet, or a name another project has.
+/// nothing typed yet, a name another project has, or on a rename the name it
+/// has now, which would rename it to itself.
 fn naming_items(typed: &str, naming: &Naming) -> (Vec<Item>, Option<String>) {
     let name = typed.trim();
     if name.is_empty() {
@@ -1730,6 +1906,9 @@ fn naming_items(typed: &str, naming: &Naming) -> (Vec<Item>, Option<String>) {
         naming.taken.iter().map(String::as_str),
     ) {
         return (Vec::new(), Some(refusal));
+    }
+    if naming.renaming.as_deref() == Some(name) {
+        return (Vec::new(), Some(format!("Type a new name for {name}.")));
     }
     let item = match &naming.renaming {
         Some(old) => Item::new(
@@ -1836,7 +2015,7 @@ fn theme_items(cx: &App) -> Vec<Item> {
             Command::SetTheme(Box::new(candidate)),
         )
         .hint(hint)
-        .group("Themes")
+        .group(Group::Named("Themes"))
     });
     let imports = user::Source::ALL.into_iter().map(|source| {
         Item::new(
@@ -1844,7 +2023,7 @@ fn theme_items(cx: &App) -> Vec<Item> {
             icon::PLUS,
             Command::BrowseThemes(source),
         )
-        .group("Import")
+        .group(Group::Named("Import"))
     });
     themes.chain(imports).collect()
 }
@@ -1951,7 +2130,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // up in the palette rather than only in settings.
     let overrides = &workspace.settings.custom_keybindings;
     let command = |label: &str, icon: &'static str, command: Command, group: &'static str| {
-        Item::new(label, icon, command).group(group)
+        Item::new(label, icon, command).group(Group::Named(group))
     };
     let bound = |item: Item, id: &str| item.keys(chord_for(id, overrides));
     let runnable = session.editor(session.active).is_some();
@@ -2513,7 +2692,10 @@ mod tests {
     fn item(label: &str, scope: Scope, group: &'static str) -> Item {
         Item::new(label, icon::TABLE, Command::NewQuery)
             .scope(scope)
-            .group(group)
+            .group(match group {
+                "" => Group::Bare,
+                name => Group::Named(name),
+            })
     }
 
     fn labels(items: &[Item], rows: &[Row]) -> Vec<String> {
@@ -2686,6 +2868,7 @@ mod tests {
             [
                 "# Recent",
                 "public.events",
+                "# Objects",
                 "public.accounts",
                 "analytics.events"
             ]
@@ -2769,7 +2952,6 @@ mod tests {
             host: host.to_string(),
             endpoint: host.to_string(),
             color: None,
-            status: Status::Idle,
         }
     }
 
@@ -2900,14 +3082,158 @@ mod tests {
         );
         let (items, _) = naming_items(" Ops ", &naming(None));
         assert!(matches!(&items[0].command, Command::CreateProject(name) if name == "Ops"));
-        let (items, refusal) = naming_items("Billing", &naming(Some("Billing")));
-        assert!(refusal.is_none());
-        let (items_renamed, _) = naming_items("Ops", &naming(Some("Billing")));
+        let (items, _) = naming_items("Ops", &naming(Some("Billing")));
         assert!(matches!(
-            &items_renamed[0].command,
+            &items[0].command,
             Command::RenameProject(old, new) if old == "Billing" && new == "Ops"
         ));
-        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn a_rename_to_the_name_it_has_offers_no_row() {
+        let naming = Naming {
+            renaming: Some("Billing".into()),
+            taken: vec!["Billing".into()],
+            refusal: None,
+        };
+        let (items, refusal) = naming_items(" Billing ", &naming);
+        assert!(items.is_empty());
+        assert_eq!(refusal.as_deref(), Some("Type a new name for Billing."));
+    }
+
+    #[test]
+    fn rows_that_remove_or_switch_connections_are_not_remembered() {
+        assert!(remembered(Scope::Commands, &Command::NewQuery));
+        assert!(remembered(
+            Scope::Commands,
+            &Command::PickProject(ProjectVerb::Rename)
+        ));
+        assert!(!remembered(Scope::Connections, &Command::SwitchProfile(1)));
+        assert!(!remembered(Scope::Connections, &Command::NewConnection));
+        for command in [
+            Command::Confirm(Target::Connection(0)),
+            Command::Confirm(Target::Project(0)),
+            Command::PickProject(ProjectVerb::Delete),
+            Command::RemoveConnection(0),
+            Command::DeleteProject("Billing".into()),
+        ] {
+            assert!(!remembered(Scope::Commands, &command));
+        }
+    }
+
+    #[test]
+    fn the_row_that_removes_something_opens_unselected() {
+        let rows = [Row::Item(0)];
+        assert_eq!(
+            opening_selection(Mode::Confirm(Target::Connection(0)), &rows),
+            None
+        );
+        assert_eq!(
+            opening_selection(Mode::Projects(ProjectVerb::Delete), &rows),
+            Some(0)
+        );
+        assert_eq!(step(&rows, None, 1), Some(0));
+    }
+
+    #[test]
+    fn with_no_projects_the_connections_get_a_header_beside_manage() {
+        let (mut listed, _) = connections();
+        listed.push(listed_newsroom());
+        let mut items = listed_connections(&listed, &[], 0);
+        items.push(item("New connection…", Scope::Connections, MANAGE));
+        assert_eq!(
+            arranged(&items, Some(Scope::Connections), "new", &[]),
+            ["# Connections", "Newsroom", "# Manage", "New connection…"]
+        );
+        assert_eq!(
+            arranged(&items, Some(Scope::Connections), "newsroom", &[]),
+            ["Newsroom"]
+        );
+    }
+
+    fn listed_newsroom() -> Listed<'static> {
+        listed("newsroom", "Newsroom", "localhost")
+    }
+
+    #[test]
+    fn a_project_named_like_a_group_stays_a_group_of_its_own() {
+        let (listed, _) = connections();
+        let projects = [
+            project(NO_PROJECT, &["ledger"]),
+            project(MANAGE, &["warehouse"]),
+        ];
+        let mut items = listed_connections(&listed, &projects, 0);
+        items.push(item("New connection…", Scope::Connections, MANAGE));
+        assert_eq!(
+            arranged(&items, Some(Scope::Connections), "", &[]),
+            [
+                "# No project",
+                "Orders",
+                "Scratch",
+                "# No project",
+                "Ledger",
+                "# Manage",
+                "Warehouse",
+                "# Manage",
+                "New connection…"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_match_never_runs_from_a_connections_name_into_its_host() {
+        let (listed, projects) = connections();
+        let items = listed_connections(&listed, &projects, 1);
+        // "Ledger localhost" as one text would take the r, then the l and o.
+        assert!(arranged(&items, Some(Scope::Connections), "rlo", &[]).is_empty());
+        assert_eq!(
+            arranged(&items, Some(Scope::Connections), "ledg", &[]),
+            ["# Billing", "Ledger"]
+        );
+    }
+
+    #[test]
+    fn while_an_import_asks_nothing_that_names_a_project_or_a_connection_is_listed() {
+        let (listed, projects) = connections();
+        let mut items = listed_connections(&listed, &projects, 0);
+        items.extend([
+            Item::new("Run query", icon::RUN, Command::RunQuery),
+            Item::new("New connection…", icon::PLUS, Command::NewConnection),
+            Item::new("New project…", icon::PLUS, Command::NewProject),
+            Item::new(
+                "Switch connection…",
+                icon::DATABASE,
+                Command::SwitchConnection,
+            ),
+            Item::new(
+                "Remove connection…",
+                icon::DELETE,
+                Command::Confirm(Target::Connection(0)),
+            ),
+            Item::new(
+                "Delete project…",
+                icon::DELETE,
+                Command::PickProject(ProjectVerb::Delete),
+            ),
+            Item::new(
+                "Remove Orders from Billing",
+                icon::LEAVE_PROJECT,
+                Command::MoveToProject(0, None),
+            ),
+            Item::new(
+                "New connection in Billing…",
+                icon::PLUS,
+                Command::NewConnectionIn(Some("Billing".into())),
+            ),
+            Item::new(
+                "Rename Billing…",
+                icon::RENAME,
+                Command::NameProject(Some(0)),
+            ),
+        ]);
+        items.retain(|item| !waits_for_import(item.scope, &item.command));
+        let left: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(left, ["Run query", "New connection…"]);
     }
 
     #[test]
