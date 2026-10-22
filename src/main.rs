@@ -82,7 +82,7 @@ use filter::{
     sort_columns, sort_expression, value_placeholder,
 };
 use icons::{Icons, icon};
-use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope};
+use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke};
 use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,

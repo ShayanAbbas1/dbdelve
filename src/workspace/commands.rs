@@ -131,18 +131,19 @@ impl Workspace {
         self.open_palette(PaletteMode::Search(Scope::Commands), window, cx);
     }
 
-    /// The same stroke again closes the palette; the other one moves it to
-    /// its own scope, keeping what was typed, so the two are one keystroke
-    /// apart.
+    /// Over a palette already up, the stroke does what [`Palette::stroke`]
+    /// says.
     pub(crate) fn open_palette(
         &mut self,
         mode: PaletteMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let showing = self.palette.as_ref().map(|palette| palette.read(cx).mode());
-        if let (Some(PaletteMode::Search(_)), PaletteMode::Search(scope)) = (showing, mode)
-            && showing != Some(mode)
+        let stroke = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.read(cx).stroke(mode));
+        if let Some(Stroke::Rescope(scope)) = stroke
             && let Some(palette) = self.palette.clone()
         {
             palette.update(cx, |palette, cx| palette.set_scope(scope, window, cx));
@@ -154,7 +155,7 @@ impl Workspace {
         // The theme lists are the only ones reachable before any connection
         // exists, from the welcome surface or the connection form.
         let picks_theme = matches!(mode, PaletteMode::Theme | PaletteMode::ImportTheme(_));
-        if showing == Some(mode) || (self.profile().is_none() && !picks_theme) {
+        if stroke == Some(Stroke::Close) || (self.profile().is_none() && !picks_theme) {
             self.close_palette(window, cx);
             return;
         }
@@ -194,7 +195,7 @@ impl Workspace {
             }),
             _ => None,
         };
-        if showing.is_none() {
+        if stroke.is_none() {
             self.palette_from_settings =
                 self.settings_open && self.settings_focus.contains_focused(window, cx);
         }
@@ -257,10 +258,15 @@ impl Workspace {
         let searching = matches!(palette.read(cx).mode(), PaletteMode::Search(_));
         let command = match event {
             PaletteEvent::Dismiss => None,
-            PaletteEvent::Confirm { command, label } => {
+            PaletteEvent::Confirm {
+                command,
+                scope,
+                label,
+            } => {
                 if searching {
-                    self.palette_recents.retain(|recent| recent != label);
-                    self.palette_recents.insert(0, label.clone());
+                    let recent = (*scope, label.clone());
+                    self.palette_recents.retain(|kept| *kept != recent);
+                    self.palette_recents.insert(0, recent);
                     self.palette_recents.truncate(palette::RECENTS_KEPT);
                 }
                 Some(command.clone())

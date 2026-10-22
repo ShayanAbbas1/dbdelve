@@ -249,9 +249,9 @@ pub(crate) struct Workspace {
     /// can move underneath it — so it is thrown away on the way out rather
     /// than kept and refreshed.
     pub(crate) palette: Option<Entity<Palette>>,
-    /// The labels of the rows last confirmed in the palette, newest first, for
-    /// its Recent group. Kept for the session only.
-    pub(crate) palette_recents: Vec<String>,
+    /// The rows last confirmed in the palette, by scope and label, newest
+    /// first, for its Recent group. Kept for the session only.
+    pub(crate) palette_recents: Vec<(Scope, String)>,
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,

@@ -577,11 +577,14 @@ impl Workspace {
         // backs out of them in that order, one at a time. The palette stays
         // first so that picking a font from inside settings closes the font
         // list and leaves the panel it was opened from standing, and the
-        // panel's search is emptied before the panel closes.
-        if self.settings_open && self.clear_settings_search(window, cx) {
+        // panel's search is emptied before the panel closes. Only from inside
+        // the panel: it sits beside the workspace rather than over it, and an
+        // `escape` in the editor is for the editor's completions.
+        let in_settings = self.settings_open && self.settings_focus.contains_focused(window, cx);
+        if in_settings && self.clear_settings_search(window, cx) {
             return;
         }
-        if self.close_settings(window, cx) {
+        if in_settings && self.close_settings(window, cx) {
             return;
         }
         if self.cancel_stale_edit(cx) {

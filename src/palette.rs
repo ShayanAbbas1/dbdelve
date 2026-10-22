@@ -365,7 +365,7 @@ fn arrange(
     scope: Option<Scope>,
     query: &Query,
     fuzzy: &mut Fuzzy,
-    recents: &[String],
+    recents: &[(Scope, String)],
 ) -> Vec<Row> {
     let across = matches!(scope, None | Some(Scope::All));
     let ranked = fuzzy.rank(
@@ -381,11 +381,11 @@ fn arrange(
         if query.is_empty() && matches!(scope, Some(Scope::All | Scope::Commands)) {
             recents
                 .iter()
-                .filter_map(|label| {
+                .filter_map(|(scope, label)| {
                     ranked
                         .iter()
                         .map(|((index, _), _)| *index)
-                        .find(|&index| items[index].label == *label)
+                        .find(|&index| items[index].scope == *scope && items[index].label == *label)
                 })
                 .take(RECENT_ROWS)
                 .collect()
@@ -448,11 +448,33 @@ fn first_item(rows: &[Row]) -> Option<usize> {
     rows.iter().position(|row| matches!(row, Row::Item(_)))
 }
 
+/// What a stroke that opens the palette in some mode does to the one up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stroke {
+    Close,
+    /// Narrow to that scope, keeping what was typed.
+    Rescope(Scope),
+    /// Put up that list in its place.
+    Replace,
+}
+
+/// The stroke the palette opened with closes it even after `tab` has moved
+/// it on, as does the one for the scope it shows; the other search stroke
+/// moves it to that stroke's scope, so the two are one keystroke apart.
+fn stroke(opened: Mode, showing: Mode, mode: Mode) -> Stroke {
+    match (showing, mode) {
+        _ if mode == opened || mode == showing => Stroke::Close,
+        (Mode::Search(_), Mode::Search(scope)) => Stroke::Rescope(scope),
+        _ => Stroke::Replace,
+    }
+}
+
 pub enum PaletteEvent {
     /// A row was confirmed. The label goes with it so the workspace can lead
     /// the next palette with it under Recent.
     Confirm {
         command: Command,
+        scope: Scope,
         label: String,
     },
     Dismiss,
@@ -471,7 +493,12 @@ pub struct Palette {
     /// The matched characters of each item drawn so far under this query, so a
     /// repaint draws them rather than matching again.
     highlights: HashMap<usize, Rc<[Range<usize>]>>,
-    recents: Vec<String>,
+    recents: Vec<(Scope, String)>,
+    /// The chords drawn in the footer and the field, read from the keymap so a
+    /// rebind shows up here too: previous row, next row, next scope, close.
+    hint_chords: [Option<String>; 4],
+    /// The mode the palette opened in, for [`stroke`].
+    opened: Mode,
     input: Entity<InputState>,
     scroll: VirtualListScrollHandle,
     /// The theme in force when a theme list opened, for a filter that
@@ -520,6 +547,14 @@ impl Palette {
             fuzzy: Fuzzy::new(),
             highlights: HashMap::new(),
             recents: workspace.palette_recents.clone(),
+            hint_chords: [
+                "palette_previous",
+                "palette_next",
+                "palette_next_scope",
+                "show_editor",
+            ]
+            .map(|id| chord_for(id, &workspace.settings.custom_keybindings)),
+            opened: mode,
             input,
             scroll: VirtualListScrollHandle::new(),
             unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
@@ -528,11 +563,16 @@ impl Palette {
             _input_events: input_events,
         };
         palette.rearrange();
+        palette.preview(window, cx);
         palette
     }
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn stroke(&self, mode: Mode) -> Stroke {
+        stroke(self.opened, self.mode, mode)
     }
 
     /// Narrow to another scope, keeping what has been typed.
@@ -606,14 +646,18 @@ impl Palette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let upwards = matches!((self.selected, row), (Some(from), Some(to)) if to < from);
         self.selected = row;
         if let Some(row) = row.filter(|_| reveal) {
-            // The first row of a group brings its header into view with it.
-            let top = match row.checked_sub(1).map(|above| self.rows[above]) {
-                Some(Row::Header(_)) => row - 1,
+            // Going up, the first row of a group brings its header into view
+            // with it. Going down, the row is what has to show: `Nearest` lines
+            // the target up with the bottom edge, and a header there would
+            // leave the row it heads just below it.
+            let target = match row.checked_sub(1).map(|above| self.rows[above]) {
+                Some(Row::Header(_)) if upwards => row - 1,
                 _ => row,
             };
-            self.scroll.scroll_to_item(top, ScrollStrategy::Nearest);
+            self.scroll.scroll_to_item(target, ScrollStrategy::Nearest);
         }
         self.preview(window, cx);
         cx.notify();
@@ -637,6 +681,7 @@ impl Palette {
         let item = &self.items[index];
         cx.emit(PaletteEvent::Confirm {
             command: item.command.clone(),
+            scope: item.scope,
             label: item.label.clone(),
         });
     }
@@ -784,7 +829,9 @@ impl Palette {
             .on_mouse_move(cx.listener(move |palette, _, window, cx| {
                 // Hover moves the selection only when the pointer does, so a
                 // list scrolling under a resting pointer keeps the keyboard's.
-                if palette.selected != Some(at) {
+                // Never over a theme list, where selecting repaints the window
+                // and a pointer crossing it would flash every theme it passed.
+                if palette.selected != Some(at) && palette.unpreviewed.is_none() {
                     palette.select(Some(at), false, window, cx);
                 }
             }))
@@ -855,6 +902,7 @@ impl Palette {
     }
 
     fn render_footer(&self, t: Theme) -> impl IntoElement {
+        let [previous, next, scope, close] = self.hint_chords.each_ref().map(Option::as_deref);
         div()
             .flex()
             .items_center()
@@ -869,13 +917,13 @@ impl Palette {
                     .flex()
                     .items_center()
                     .gap(px(layout::SPACE_LG))
-                    .child(footer_hint(&["up", "down"], "Navigate", t))
-                    .child(footer_hint(&["enter"], self.mode.verb(), t))
+                    .child(footer_hint(&[previous, next], "Navigate", t))
+                    .child(footer_hint(&[Some("enter")], self.mode.verb(), t))
                     .when(matches!(self.mode, Mode::Search(_)), |hints| {
-                        hints.child(footer_hint(&["tab"], "Scope", t))
+                        hints.child(footer_hint(&[scope], "Scope", t))
                     }),
             )
-            .child(footer_hint(&["escape"], "Close", t))
+            .child(footer_hint(&[close], "Close", t))
     }
 }
 
@@ -887,8 +935,9 @@ impl Render for Palette {
         let width = layout::PALETTE_WIDTH
             .min(viewport.width.as_f32() - 2. * layout::SPACE_LG)
             .max(0.);
-        let list_height = (viewport.height.as_f32() - top - layout::PALETTE_CHROME_HEIGHT)
-            .clamp(layout::PALETTE_MIN_HEIGHT, layout::PALETTE_MAX_HEIGHT);
+        let list_height =
+            (viewport.height.as_f32() - top - layout::chrome(layout::PALETTE_CHROME_HEIGHT))
+                .clamp(layout::PALETTE_MIN_HEIGHT, layout::PALETTE_MAX_HEIGHT);
 
         let list = if self.rows.is_empty() {
             self.render_empty(t).into_any_element()
@@ -931,6 +980,10 @@ impl Render for Palette {
             .items_start()
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
                 cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)),
             )
             .child(
@@ -993,7 +1046,11 @@ impl Render for Palette {
                                         .text_size(px(layout::chrome(layout::TEXT_LG))),
                                 ),
                             )
-                            .child(keycaps("escape", t)),
+                            .children(
+                                self.hint_chords[3]
+                                    .as_deref()
+                                    .map(|chord| keycaps(chord, t)),
+                            ),
                     )
                     .child(self.render_scopes(t, cx))
                     .child(list)
@@ -1035,7 +1092,7 @@ fn scope_pill(
         .child(label)
 }
 
-fn footer_hint(strokes: &[&str], label: &'static str, t: Theme) -> impl IntoElement {
+fn footer_hint(chords: &[Option<&str>], label: &'static str, t: Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -1048,9 +1105,10 @@ fn footer_hint(strokes: &[&str], label: &'static str, t: Theme) -> impl IntoElem
                 .items_center()
                 .gap(px(layout::KEYCAP_GAP))
                 .children(
-                    strokes
+                    chords
                         .iter()
-                        .flat_map(|stroke| keycap_parts(stroke))
+                        .flatten()
+                        .flat_map(|chord| keycap_parts(chord))
                         .map(|key| key_chip(key, t)),
                 ),
         )
@@ -1061,22 +1119,24 @@ fn footer_hint(strokes: &[&str], label: &'static str, t: Theme) -> impl IntoElem
 /// with nothing typed: what somebody wrote first, then the database's own
 /// objects, then the verbs, the other connections and the history.
 fn search_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item> {
-    let overrides = &workspace.settings.custom_keybindings;
-    let mut items = query_items(profile, overrides);
+    let mut items = query_items(profile);
     items.extend(object_items(profile));
     items.extend(command_items(workspace, profile, cx));
     items.extend(connection_items(workspace));
-    items.extend(history_items(profile));
+    // Recalling a statement writes it into a buffer, which the import dialog
+    // covers, for the reason `beside_import` keeps the commands it does.
+    if profile.session.import_rows.is_none() {
+        items.extend(history_items(profile));
+    }
     items
 }
 
 /// The scratch buffer and every saved query.
-fn query_items(profile: &Profile, overrides: &HashMap<String, String>) -> Vec<Item> {
-    let new = Item::new("New query", icon::SCRATCH_QUERY, Command::OpenScratch)
+fn query_items(profile: &Profile) -> Vec<Item> {
+    let scratch = Item::new("Scratch query", icon::SCRATCH_QUERY, Command::OpenScratch)
         .hint("scratch")
-        .keys(chord_for("new_query", overrides))
         .scope(Scope::Queries);
-    std::iter::once(new)
+    std::iter::once(scratch)
         .chain(profile.session.saved_queries.iter().map(|name| {
             Item::new(
                 name.clone(),
@@ -1886,7 +1946,10 @@ mod tests {
         query: &str,
         recents: &[&str],
     ) -> Vec<String> {
-        let recents: Vec<String> = recents.iter().map(|label| label.to_string()).collect();
+        let recents: Vec<(Scope, String)> = recents
+            .iter()
+            .map(|label| (Scope::Commands, label.to_string()))
+            .collect();
         let rows = arrange(
             items,
             scope,
@@ -1899,7 +1962,7 @@ mod tests {
 
     fn sample() -> Vec<Item> {
         vec![
-            item("New query", Scope::Queries, ""),
+            item("Scratch query", Scope::Queries, ""),
             item("public.accounts", Scope::Objects, ""),
             item("public.events", Scope::Objects, ""),
             item("analytics.events", Scope::Objects, ""),
@@ -1940,11 +2003,11 @@ mod tests {
         assert_eq!(
             arranged(&sample(), Some(Scope::All), "query", &[]),
             [
-                "# Queries",
-                "New query",
                 "# Commands",
                 "Run query",
-                "Format query"
+                "Format query",
+                "# Queries",
+                "Scratch query"
             ]
         );
         assert_eq!(
@@ -1985,6 +2048,42 @@ mod tests {
             arranged(&items, Some(Scope::Commands), "tab", &["Close tab"]),
             ["# Tab", "Close tab"]
         );
+    }
+
+    #[test]
+    fn a_recent_row_comes_back_from_the_scope_it_was_run_in() {
+        let items = [
+            item("New query", Scope::Queries, ""),
+            item("New query", Scope::Commands, QUERY),
+        ];
+        let recents = [(Scope::Commands, "New query".to_string())];
+        let rows = arrange(
+            &items,
+            Some(Scope::All),
+            &Query::new(""),
+            &mut Fuzzy::new(),
+            &recents,
+        );
+        assert_eq!(rows[..2], [Row::Header(RECENT_GROUP), Row::Item(1)]);
+    }
+
+    #[test]
+    fn the_stroke_that_opened_the_palette_closes_it_from_any_scope() {
+        let all = Mode::Search(Scope::All);
+        let commands = Mode::Search(Scope::Commands);
+        let objects = Mode::Search(Scope::Objects);
+        assert_eq!(stroke(all, all, all), Stroke::Close);
+        assert_eq!(stroke(all, objects, all), Stroke::Close);
+        assert_eq!(
+            stroke(all, objects, commands),
+            Stroke::Rescope(Scope::Commands)
+        );
+        assert_eq!(stroke(all, commands, commands), Stroke::Close);
+        assert_eq!(stroke(commands, all, commands), Stroke::Close);
+        assert_eq!(stroke(all, all, commands), Stroke::Rescope(Scope::Commands));
+        assert_eq!(stroke(Mode::Theme, Mode::Theme, all), Stroke::Replace);
+        assert_eq!(stroke(all, objects, Mode::Theme), Stroke::Replace);
+        assert_eq!(stroke(Mode::Theme, Mode::Theme, Mode::Theme), Stroke::Close);
     }
 
     #[test]
