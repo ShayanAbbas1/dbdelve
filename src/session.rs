@@ -324,11 +324,42 @@ pub(crate) struct ApplyReview {
 }
 
 impl ApplyReview {
-    /// Whether this review is in front of `active`, the only tab it is drawn
-    /// over and so the only one it may hold up.
-    pub(crate) fn covers(&self, active: Tab) -> bool {
-        self.tab == active
+    /// Whether this review was written from `tab`'s rows: the one tab it is
+    /// drawn over, and the one grid whose edits it holds up.
+    pub(crate) fn covers(&self, tab: Tab) -> bool {
+        self.tab == tab
     }
+}
+
+/// What a new review from `from` finds in the session's one review slot.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReviewSlot {
+    Free,
+    /// Held by `from`'s own review, already on screen.
+    Held,
+    /// Held by another tab's review, out of sight behind `from`.
+    HeldBy(Tab),
+}
+
+impl ReviewSlot {
+    pub(crate) fn for_review_from(held: Option<&ApplyReview>, from: Tab) -> Self {
+        match held {
+            None => Self::Free,
+            Some(review) if review.covers(from) => Self::Held,
+            Some(review) => Self::HeldBy(review.tab),
+        }
+    }
+}
+
+/// Whether `slot` holds a review written from `grid`'s rows, which an edit
+/// to that grid would leave describing something it no longer holds.
+pub(crate) fn review_holds_up(slot: Option<&ApplyReview>, grid: Tab) -> bool {
+    slot.is_some_and(|review| review.covers(grid))
+}
+
+/// Put away the review written from `tab`'s rows, leaving another tab's be.
+pub(crate) fn drop_review_of(slot: &mut Option<ApplyReview>, tab: Tab) {
+    slot.take_if(|review| review.covers(tab));
 }
 
 /// The row a table has not got yet, one field per column (spec §4).
@@ -604,21 +635,21 @@ impl Session {
         {
             self.insert_form = None;
         }
-        if self
-            .apply_review
-            .as_ref()
-            .is_some_and(|review| review.tab == tab)
-        {
-            self.apply_review = None;
-        }
+        self.drop_apply_review_of(tab);
     }
 
-    /// Whether an apply review is open over the active tab. One left on
-    /// another tab is hidden, so it must not refuse this tab's edits.
-    pub(crate) fn apply_review_blocks_active(&self) -> bool {
-        self.apply_review
-            .as_ref()
-            .is_some_and(|review| review.covers(self.active))
+    /// Asked of the tab whose grid is being edited, which a blur can make a
+    /// tab other than the active one.
+    pub(crate) fn apply_review_covers(&self, tab: Tab) -> bool {
+        review_holds_up(self.apply_review.as_ref(), tab)
+    }
+
+    pub(crate) fn review_slot(&self, from: Tab) -> ReviewSlot {
+        ReviewSlot::for_review_from(self.apply_review.as_ref(), from)
+    }
+
+    pub(crate) fn drop_apply_review_of(&mut self, tab: Tab) {
+        drop_review_of(&mut self.apply_review, tab);
     }
 
     /// The query buffer in front, or `None` when an object tab is.
@@ -2269,16 +2300,67 @@ mod tests {
     use super::*;
     use crate::sql;
 
-    #[test]
-    fn a_review_on_another_tab_does_not_block_the_active_one() {
-        let review = ApplyReview {
-            tab: Tab::Query(1),
+    fn review_from(tab: Tab) -> ApplyReview {
+        ApplyReview {
+            tab,
             title: "Apply edits",
             sql: "UPDATE t SET a = 1".into(),
-        };
+        }
+    }
+
+    #[test]
+    fn a_review_covers_only_the_tab_it_was_written_from() {
+        let review = review_from(Tab::Query(1));
         assert!(review.covers(Tab::Query(1)));
         assert!(!review.covers(Tab::Query(2)));
         assert!(!review.covers(Tab::Object(1)));
+    }
+
+    #[test]
+    fn a_new_review_is_refused_while_another_tab_holds_the_slot() {
+        let held = review_from(Tab::Object(1));
+        assert_eq!(
+            ReviewSlot::for_review_from(Some(&held), Tab::Object(2)),
+            ReviewSlot::HeldBy(Tab::Object(1))
+        );
+        assert_eq!(
+            ReviewSlot::for_review_from(Some(&held), Tab::Object(1)),
+            ReviewSlot::Held
+        );
+        assert_eq!(
+            ReviewSlot::for_review_from(None, Tab::Object(2)),
+            ReviewSlot::Free
+        );
+    }
+
+    #[test]
+    fn staging_into_a_reviewed_grid_behind_the_active_tab_is_refused() {
+        // Typed into tab 1's row panel, then tab 2 brought forward: the blur
+        // stages into tab 1's grid, which its review is holding.
+        let (blurred, active) = (Tab::Object(1), Tab::Object(2));
+        let held = review_from(blurred);
+        assert!(review_holds_up(Some(&held), blurred));
+        assert!(!review_holds_up(Some(&held), active));
+    }
+
+    #[test]
+    fn staging_into_an_unreviewed_grid_is_allowed_while_another_tab_has_a_review() {
+        let held = review_from(Tab::Object(1));
+        assert!(!review_holds_up(Some(&held), Tab::Object(2)));
+        assert!(!review_holds_up(Some(&held), Tab::Query(1)));
+        assert!(!review_holds_up(None, Tab::Object(1)));
+    }
+
+    #[test]
+    fn discarding_one_tab_leaves_another_tabs_review_in_place() {
+        let mut slot = Some(review_from(Tab::Object(1)));
+        drop_review_of(&mut slot, Tab::Object(2));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|review| review.tab == Tab::Object(1))
+        );
+        drop_review_of(&mut slot, Tab::Object(1));
+        assert!(slot.is_none());
     }
 
     #[test]

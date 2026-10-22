@@ -927,10 +927,7 @@ impl Workspace {
         // result is on screen when it runs.
         if switched && let Some(profile) = self.profile_mut() {
             profile.session.insert_form.take_if(|form| form.tab == tab);
-            profile
-                .session
-                .apply_review
-                .take_if(|review| review.tab == tab);
+            profile.session.drop_apply_review_of(tab);
         }
         cx.notify();
     }
@@ -2335,9 +2332,9 @@ impl Workspace {
                             tab.showing_plan = true;
                         }
                         // Nothing left to read once the batch it was showing has
-                        // run.
+                        // run. Only this tab's: another tab's is still unread.
                         if refresh.is_some() {
-                            profile.session.apply_review = None;
+                            profile.session.drop_apply_review_of(tab);
                         }
                     }
                     // The other side of the pair in `load_structure`: a run

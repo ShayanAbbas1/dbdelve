@@ -122,20 +122,21 @@ impl Workspace {
             .is_some_and(|(folded, editing, _)| *editing && !*folded);
         let target = editing
             .then(|| {
-                let results = self.profile()?.session.active_results()?.clone();
+                let profile = self.profile()?;
+                let results = profile.session.active_results()?.clone();
                 let row = results.read(cx).delegate().selected_row()?;
-                Some((results, row))
+                Some((results, row, profile.id.clone(), profile.session.active))
             })
             .flatten();
         if self.row_panel.inputs.as_ref().is_some_and(|inputs| {
             !target
                 .as_ref()
-                .is_some_and(|(results, row)| inputs.name(results, *row, cx))
+                .is_some_and(|(results, row, ..)| inputs.name(results, *row, cx))
         }) {
             self.drop_row_inputs(window, cx);
         }
         self.row_panel.typing = None;
-        let Some((results, row)) = target else {
+        let Some((results, row, profile, tab)) = target else {
             return;
         };
         let rows = results.read(cx).delegate().rows_id();
@@ -144,6 +145,8 @@ impl Workspace {
             .inputs
             .get_or_insert_with(|| views::RowInputs {
                 grid: results.clone(),
+                profile,
+                tab,
                 row,
                 rows,
                 fields: Vec::new(),
