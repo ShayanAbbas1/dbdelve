@@ -12,7 +12,7 @@ use std::{collections::HashMap, ops::Range};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement, IntoElement,
     ParentElement, SharedString, Stateful, StatefulInteractiveElement, Styled, div,
-    prelude::FluentBuilder, px,
+    prelude::FluentBuilder, px, relative,
 };
 use gpui_component::{Disableable, Sizable, input::Input, tooltip::Tooltip};
 
@@ -26,7 +26,8 @@ use crate::{
     scroller::{SmoothScrollable, smooth},
     theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, popup_theme},
     ui::{
-        Control, Tone, button, highlighted, icon_button, keycap_text, keycaps, raised_card, segment,
+        Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
+        raised_card, segment,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, font_size_range, opacity_percent},
@@ -400,6 +401,8 @@ pub(crate) fn render_settings_panel(
     // as a sheet set down beside the workspace rather than a column of it.
     div()
         .flex_shrink_0()
+        .w(px(layout::SETTINGS_PANEL_WIDTH + layout::SPACE_SM))
+        .max_w(relative(layout::SETTINGS_PANEL_MAX_SHARE))
         .h_full()
         .pt(px(layout::SPACE_SM))
         .pr(px(layout::SPACE_SM))
@@ -408,8 +411,7 @@ pub(crate) fn render_settings_panel(
             div()
                 .id("settings-panel")
                 .track_focus(&workspace.settings_focus)
-                .w(px(layout::SETTINGS_PANEL_WIDTH))
-                .h_full()
+                .size_full()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -419,7 +421,7 @@ pub(crate) fn render_settings_panel(
                 .border_color(t.border_strong)
                 .rounded(px(layout::RADIUS_CARD))
                 .map(|card| raised_card(card, t))
-                .child(render_header(t, cx))
+                .child(render_header(workspace, t, cx))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -455,8 +457,12 @@ pub(crate) fn render_settings_panel(
         .into_any_element()
 }
 
-fn render_header(t: Theme, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn render_header(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) -> impl IntoElement {
     let tile = layout::chrome(layout::PALETTE_TILE_SIZE);
+    let close = match chord_hint("show_editor", &workspace.settings.custom_keybindings) {
+        hint if hint.is_empty() => "Close".to_string(),
+        hint => format!("Close ({hint})"),
+    };
     div()
         .flex_shrink_0()
         .flex()
@@ -494,7 +500,7 @@ fn render_header(t: Theme, cx: &mut Context<Workspace>) -> impl IntoElement {
                 Control::Compact,
                 t,
             )
-            .tooltip("Close (esc)")
+            .tooltip(close)
             .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                 workspace.close_settings(window, cx);
             })),
@@ -703,7 +709,7 @@ fn render_row(
         )
         .child(
             div()
-                .flex_shrink_0()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .child(render_control(workspace, row.id, t, cx)),
@@ -781,16 +787,22 @@ fn render_control(
 
 /// A choice made from a list somewhere else -- the palette, a menu -- dressed
 /// as the row limit's menu button, so every picker in the panel reads alike.
+/// The one control in a row that gives way when the row is too narrow, its
+/// label cut short: a long family name at a large chrome scale.
 fn picker(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     t: Theme,
 ) -> gpui_component::button::Button {
-    button(id, label, Tone::Quiet, Control::Compact, t).child(
-        icon(icon::CHEVRON_DOWN)
-            .size(px(layout::chrome(layout::ICON_SIZE)))
-            .text_color(t.text_faint),
-    )
+    button(id, label, Tone::Quiet, Control::Compact, t)
+        .min_w_0()
+        .flex_initial()
+        .child(
+            icon(icon::CHEVRON_DOWN)
+                .flex_none()
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.text_faint),
+        )
 }
 
 /// An on/off setting. Drawn here rather than taken from gpui-component, whose
@@ -950,6 +962,7 @@ fn render_font(
             })),
         );
     div()
+        .min_w_0()
         .flex()
         .items_center()
         .gap(px(layout::SPACE_SM))
@@ -1076,6 +1089,15 @@ mod tests {
             ids(filter_settings(&chord, &overrides)).contains(&SettingId::Keybinding("run_query"))
         );
         assert!(!found(&chord).contains(&SettingId::Keybinding("run_query")));
+    }
+
+    #[test]
+    fn a_rebound_action_gives_up_its_old_chord() {
+        let shipped = keycap_text(keybinding("run_query").unwrap().defaults[0]);
+        let run_query = SettingId::Keybinding("run_query");
+        assert!(found(&shipped).contains(&run_query));
+        let overrides = HashMap::from([("run_query".to_string(), "secondary-shift-j".to_string())]);
+        assert!(!ids(filter_settings(&shipped, &overrides)).contains(&run_query));
     }
 
     #[test]

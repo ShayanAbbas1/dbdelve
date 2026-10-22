@@ -249,7 +249,11 @@ impl Workspace {
                             // left with nothing holding it takes every
                             // keybinding with it.
                             workspace.custom_limit = None;
-                            workspace.refocus_front();
+                            if target == LimitTarget::Default && workspace.settings_open {
+                                workspace.settings_focus.focus(window, cx);
+                            } else {
+                                workspace.refocus_front();
+                            }
                             workspace.apply_row_limit(target, rows, window, cx);
                         }
                         Ok(1..) | Err(std::num::IntErrorKind::PosOverflow) => workspace.note(

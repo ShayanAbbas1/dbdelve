@@ -143,6 +143,9 @@ pub mod layout {
     /// The settings panel, docked at the window's right edge. Not scaled with
     /// the chrome: a row too narrow for its control puts it under the text.
     pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
+    /// The most of a narrow window's width the panel takes, so the window's
+    /// own edge never cuts it off.
+    pub const SETTINGS_PANEL_MAX_SHARE: f32 = 0.6;
     pub const SETTINGS_HEADER_HEIGHT: f32 = 52.0;
     pub const SETTINGS_TAB_SIZE: f32 = 32.0;
     pub const SETTINGS_TAB_UNDERLINE_WIDTH: f32 = 16.0;

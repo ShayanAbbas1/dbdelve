@@ -3364,12 +3364,6 @@ fn relation_controls(
         }))
 }
 
-/// The app-wide settings, on the card every other modal is drawn on.
-///
-/// There is no Cancel and no OK. Every control here calls the same method the
-/// keystroke or the palette row calls, and each of those has already written
-/// the change to `profiles.toml` by the time this repaints — so Cancel would
-/// have to undo a file, and Done only takes the card away.
 /// One choice of a handful, in the row-limit chips' clothes: all of them on
 /// screen, the one in force filled in.
 fn choice_chip(

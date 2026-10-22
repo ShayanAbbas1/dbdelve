@@ -527,17 +527,28 @@ impl Workspace {
         // progress the panel is just another surface, and keys go where focus
         // sends them.
         let this = cx.weak_entity();
-        cx.intercept_keystrokes(move |event, _, cx| {
+        cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = event.keystroke.clone();
             this.update(cx, |workspace, cx| {
                 // The palette opens over the panel and holds the keyboard
-                // while it does.
-                let Some(id) = workspace
-                    .rebinding
-                    .filter(|_| workspace.settings_open && workspace.palette.is_none())
-                else {
+                // while it does, as the connection form does in its place.
+                let Some(id) = workspace.rebinding.filter(|_| {
+                    workspace.settings_open
+                        && workspace.palette.is_none()
+                        && workspace.form.is_none()
+                }) else {
                     return;
                 };
+                // A click elsewhere is a change of mind, and the key is for
+                // whatever took focus. A window focused on nothing is not
+                // elsewhere: that is the Edit button unmounted under the
+                // pointer, which `on_focus_lost` hands back to the panel.
+                if window.focused(cx).is_some()
+                    && !workspace.settings_focus.contains_focused(window, cx)
+                {
+                    workspace.cancel_rebind(cx);
+                    return;
+                }
                 if keybindings::is_modifier(&keystroke.key) {
                     return;
                 }
@@ -930,13 +941,22 @@ impl Workspace {
     /// setting is changed with what it changes still in view. The sidebar
     /// keeps its width through that: its panel is `flex_none`, so the content
     /// beside it is what gives way, and `settle_sidebar` puts it back at
-    /// `sidebar_width` if a squeeze ever moved it.
+    /// `sidebar_width` if a squeeze ever moved it, and on a window too narrow
+    /// for both what does not fit is cut off rather than drawn under the
+    /// panel's frost.
     fn beside_settings(&self, surface: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_1()
             .min_h_0()
             .flex()
-            .child(div().flex_1().min_w_0().h_full().child(surface))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(surface),
+            )
             .children(self.settings_open.then(|| render_settings_panel(self, cx)))
             .into_any_element()
     }
@@ -970,6 +990,13 @@ impl Render for Workspace {
                 self.drop_project_name();
             }
             self.drop_connection_search();
+        }
+        // Every way the connection form opens ends here too. Its branch below
+        // returns before painting the panel, so one left open would come back
+        // when the form closes, a capture in progress still listening.
+        // Dropped rather than closed: the form takes the keyboard.
+        if self.form.is_some() && self.settings_open {
+            self.drop_settings(window, cx);
         }
         // Deferred to render for the `&mut Window` a background task does not
         // have: the catalog that names these tabs resolves off-thread, and a
@@ -1156,6 +1183,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(cx.listener(Self::set_default_row_limit_action))
+                .on_action(cx.listener(Self::custom_row_limit))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))

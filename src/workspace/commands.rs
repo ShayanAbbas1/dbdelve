@@ -195,10 +195,16 @@ impl Workspace {
             }),
             _ => None,
         };
-        if stroke.is_none() {
-            self.palette_from_settings =
-                self.settings_open && self.settings_focus.contains_focused(window, cx);
-        }
+        // Only the lists the panel opens hand the keyboard back to it. Any
+        // other command puts focus where it wants it -- a table opened, a new
+        // query tab -- and the panel taking it back would leave that dead.
+        // The theme list's import rows open their list as the theme list
+        // closes, while the panel's search waits to be focused.
+        let picks_setting = picks_theme || matches!(mode, PaletteMode::Font(_));
+        let from_settings = self.settings_search_needs_focus
+            || self.settings_focus.contains_focused(window, cx)
+            || (stroke.is_some() && self.palette_from_settings);
+        self.palette_from_settings = picks_setting && self.settings_open && from_settings;
         let palette = cx.new(|cx| Palette::new(mode, self, window, cx));
         if let Some(first) = first {
             palette.update(cx, |palette, cx| palette.select_item(first, window, cx));
@@ -333,8 +339,12 @@ impl Workspace {
         if !self.settings_open {
             return false;
         }
+        // Left alone when the panel never had it: `cmd+,` from the explorer's
+        // filter puts the panel away without moving the caret out of it.
+        if self.settings_focus.contains_focused(window, cx) {
+            self.refocus_front();
+        }
         self.drop_settings(window, cx);
-        self.refocus_front();
         cx.notify();
         true
     }
@@ -390,12 +400,18 @@ impl Workspace {
     /// Filters the rows once per keystroke, never per frame. A capture in
     /// progress is called off: its row may be about to be filtered away.
     pub(crate) fn search_settings(&mut self, cx: &mut Context<Self>) {
-        let typed = self.settings_search.read(cx).value();
-        self.settings_matches = (!typed.trim().is_empty())
-            .then(|| filter_settings(&typed, &self.settings.custom_keybindings));
+        self.refilter_settings(cx);
         self.rebinding = None;
         crate::scroller::scroll_to("settings-body", "", 0, cx);
         cx.notify();
+    }
+
+    /// Run again whenever a chord changes: the search matches the chords bound
+    /// today, not the ones bound when it was typed.
+    fn refilter_settings(&mut self, cx: &mut Context<Self>) {
+        let typed = self.settings_search.read(cx).value();
+        self.settings_matches = (!typed.trim().is_empty())
+            .then(|| filter_settings(&typed, &self.settings.custom_keybindings));
     }
 
     /// Put a row into "press a key" mode. Only one at a time -- starting a
@@ -432,6 +448,7 @@ impl Workspace {
         self.settings
             .custom_keybindings
             .insert(id.to_string(), chord.clone());
+        self.refilter_settings(cx);
         self.remember_profiles(cx);
         self.note(
             format!("Bound to {chord}. Restart dbdelve for it to take effect."),
@@ -445,6 +462,7 @@ impl Workspace {
         if self.settings.custom_keybindings.remove(id).is_none() {
             return;
         }
+        self.refilter_settings(cx);
         self.remember_profiles(cx);
         self.note(
             "Reset to default. Restart dbdelve for it to take effect.".into(),

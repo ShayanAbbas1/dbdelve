@@ -523,9 +523,10 @@ impl Workspace {
     }
 
     /// A step is a step from what the field says, not from whatever was last
-    /// committed: the step buttons do not take focus, so typing 79 and
-    /// pressing + never blurs the field, and stepping the committed 72 would
-    /// land on 77 and drop the 79 on the way.
+    /// committed. The click on + does blur the field, but a blur is reported
+    /// only once the next frame is drawn and the click can arrive first:
+    /// stepping the committed 72 would then land on 77 and drop the 79 typed
+    /// on the way.
     pub(crate) fn step_opacity(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_opacity_input(window, cx);
         let theme = theme::theme(cx);
@@ -569,24 +570,14 @@ impl Workspace {
             return;
         }
         // Whatever is in front, in the order it is stacked: the palette paints
-        // over the settings panel, which goes ahead of the stale-edit prompt,
-        // the stopped-run prompt and the run prompt, which paint over the
-        // discard-close confirmation, which paints over the close
-        // confirmation, which paints over the new-row form, which paints over
-        // the apply review, which paints over the surface -- so `escape`
-        // backs out of them in that order, one at a time. The palette stays
-        // first so that picking a font from inside settings closes the font
-        // list and leaves the panel it was opened from standing, and the
-        // panel's search is emptied before the panel closes. Only from inside
-        // the panel: it sits beside the workspace rather than over it, and an
-        // `escape` in the editor is for the editor's completions.
-        let in_settings = self.settings_open && self.settings_focus.contains_focused(window, cx);
-        if in_settings && self.clear_settings_search(window, cx) {
-            return;
-        }
-        if in_settings && self.close_settings(window, cx) {
-            return;
-        }
+        // over the stale-edit prompt, the stopped-run prompt and the run
+        // prompt, which paint over the discard-close confirmation, which
+        // paints over the close confirmation, which paints over the import
+        // dialog, which paints over the apply review, which paints over the
+        // surface and the settings panel beside it -- so `escape` backs out
+        // of them in that order, one at a time. The palette stays first so
+        // that picking a font from inside settings closes the font list and
+        // leaves the panel it was opened from standing.
         if self.cancel_stale_edit(cx) {
             return;
         }
@@ -607,19 +598,27 @@ impl Workspace {
         if self.cancel_close_tab(cx) {
             return;
         }
-        // The import dialog paints over the new row form and the apply review.
         if self.close_import(cx) {
             return;
         }
-        // Before the apply review, though confirming a row clears the form in
-        // the same step that opens the review, so the two are never both open
-        // on one tab. `close_new_row` is scoped to the active tab's own form,
-        // so one left open elsewhere falls through to the steps below instead
-        // of eating this keystroke.
-        if self.close_new_row(cx) {
+        if self.close_apply_review(cx) {
             return;
         }
-        if self.close_apply_review(cx) {
+        // Only from inside the panel: it sits beside the workspace rather than
+        // over it, and an `escape` in the editor is for the editor's
+        // completions, or for the new-row form beside the grid. The search is
+        // emptied before the panel closes.
+        if self.settings_open && self.settings_focus.contains_focused(window, cx) {
+            if !self.clear_settings_search(window, cx) {
+                self.close_settings(window, cx);
+            }
+            return;
+        }
+        // Confirming a row clears the form in the same step that opens the
+        // review, so the two are never both open on one tab. `close_new_row`
+        // is scoped to the active tab's own form, so one left open elsewhere
+        // falls through to the steps below instead of eating this keystroke.
+        if self.close_new_row(cx) {
             return;
         }
         // Below the modals and prompts, which paint over the switcher.
