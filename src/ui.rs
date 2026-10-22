@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_component::{
     InteractiveElementExt, POPOVER_BLUR,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     input::{Input, InputState},
     kbd::Kbd,
 };
@@ -688,6 +688,127 @@ pub(crate) fn picker(
                 .flex_none()
                 .size(px(layout::chrome(layout::ICON_SIZE)))
                 .text_color(t.text_faint),
+        )
+}
+
+/// A track of segments, one picked: either-or-or that reads as one control.
+/// Hold [`segmented_choice`]s.
+pub(crate) fn segmented(t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .p(px(layout::SEGMENT_INSET))
+        .rounded(px(layout::RADIUS_CONTROL + layout::SEGMENT_INSET))
+        .bg(t.element_hover)
+}
+
+/// One segment of a [`segmented`] track. A button underneath, so Tab reaches
+/// it and Space or Enter picks it; the caller adds the click.
+pub(crate) fn segmented_choice(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    selected: bool,
+    t: Theme,
+) -> Button {
+    control(id, Tone::Quiet, Control::Compact)
+        .p_0()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .px(px(layout::SPACE_MD))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .whitespace_nowrap()
+                .map(|segment| {
+                    if selected {
+                        segment
+                            .bg(t.element_active)
+                            .text_color(t.text)
+                            .font_weight(FontWeight::MEDIUM)
+                    } else {
+                        segment.text_color(t.text_muted)
+                    }
+                })
+                .child(label),
+        )
+}
+
+/// A connection colour as a dot to pick, or None as a struck-out ring; the
+/// one picked is ringed in the text colour. A button underneath, so Tab
+/// reaches it and Space or Enter picks it; the caller adds the click.
+pub(crate) fn swatch(
+    id: impl Into<gpui::ElementId>,
+    color: Option<ConnectionColor>,
+    selected: bool,
+    t: Theme,
+) -> Button {
+    let dot = layout::chrome(layout::SWATCH_SIZE);
+    let ring = dot + 2. * (layout::SWATCH_RING_GAP + 1.);
+    control(id, Tone::Quiet, Control::Inline)
+        .size(px(ring))
+        .p_0()
+        .rounded_full()
+        .tooltip(color.map_or("None", ConnectionColor::label))
+        .child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(if selected {
+                    t.text.opaque()
+                } else {
+                    t.text.alpha(0.)
+                })
+                .child(match color {
+                    Some(color) => div()
+                        .size(px(dot))
+                        .rounded_full()
+                        .bg(color.swatch())
+                        .into_any_element(),
+                    None => icon(icon::NO_COLOR)
+                        .size(px(dot))
+                        .text_color(t.border_strong)
+                        .into_any_element(),
+                }),
+        )
+}
+
+/// The one action a surface exists to take, in the accent: the connection
+/// form's Connect. Everywhere else the primary button is the neutral control
+/// tone (see [`Tone`]).
+pub(crate) fn accent_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    t: Theme,
+    cx: &gpui::App,
+) -> Button {
+    let size = Control::Standard;
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(t.accent.into())
+                .foreground(t.on_accent.into())
+                .hover(t.accent.alpha(layout::ACCENT_HOVER).into())
+                .active(t.accent.alpha(layout::ACCENT_PRESSED).into()),
+        )
+        .h(px(size.height()))
+        .px(px(size.padding()))
+        .min_w(px(layout::CONTROL_MIN_WIDTH))
+        .child(
+            div()
+                .whitespace_nowrap()
+                .line_height(gpui::relative(1.))
+                .text_size(px(size.text_size()))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(t.on_accent)
+                .child(label.into()),
         )
 }
 

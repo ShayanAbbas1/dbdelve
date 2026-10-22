@@ -1151,6 +1151,11 @@ impl Render for Workspace {
             }
         }
 
+        if let Some(form) = &mut self.form {
+            // Opened from the welcome surface, whose contours are already up.
+            form.backdrop_shown |= self.welcome_entrance.is_some();
+            form.sync_placeholders(window, cx);
+        }
         if self.form.is_some() || self.profile().is_some() {
             self.welcome_entrance = None;
         } else {
@@ -1183,7 +1188,7 @@ impl Render for Workspace {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .child(self.render_connection_form(cx)),
+                        .child(self.render_connection_form(window, cx)),
                 )
                 .children(self.render_import_choice(cx))
                 .children(self.palette.clone());

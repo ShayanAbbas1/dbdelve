@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 64] = [
+const ICONS: [(&str, &IconData); 65] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -84,6 +84,7 @@ const ICONS: [(&str, &IconData); 64] = [
     ("icons/keyboard.svg", icondata_lu::LuKeyboard),
     ("icons/link.svg", icondata_lu::LuLink),
     ("icons/import.svg", icondata_lu::LuImport),
+    ("icons/ban.svg", icondata_lu::LuBan),
     ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
     ("icons/engine-mysql.svg", icondata_si::SiMysql),
     ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
@@ -120,6 +121,10 @@ pub mod icon {
     pub const SORT_UP: &str = "icons/sort-ascending.svg";
     pub const SORT_DOWN: &str = "icons/sort-descending.svg";
     pub const SORTABLE: &str = "icons/chevrons-up-down.svg";
+    /// A picker that opens a list to choose from rather than a menu under it.
+    pub const CHOOSE: &str = "icons/chevrons-up-down.svg";
+    /// No connection colour.
+    pub const NO_COLOR: &str = "icons/ban.svg";
     pub const SAVED_QUERY: &str = "icons/file-code.svg";
     pub const DELETE: &str = "icons/trash.svg";
     pub const SEARCH: &str = "icons/search.svg";
@@ -149,9 +154,6 @@ pub mod icon {
     pub const PLAN: &str = "icons/git-fork.svg";
     pub const SCRATCH_QUERY: &str = "icons/square-pen.svg";
     pub const HISTORY: &str = "icons/history.svg";
-    /// The connection form's "fill the fields from this URL" action: the URL
-    /// flows down into the fields below it.
-    pub const FILL_DOWN: &str = "icons/arrow-down.svg";
     /// Import Rows: a file column flows into the table column beside it.
     pub const MAPS_TO: &str = "icons/arrow-right.svg";
     pub const FONT: &str = "icons/type.svg";
@@ -296,7 +298,6 @@ mod tests {
             icon::RUN,
             icon::PLAN,
             icon::SCRATCH_QUERY,
-            icon::FILL_DOWN,
             icon::FONT,
             icon::FOLLOW_KEY,
             icon::REFERENCED_BY,
@@ -307,6 +308,8 @@ mod tests {
             icon::THEME,
             icon::LINK,
             icon::IMPORT,
+            icon::CHOOSE,
+            icon::NO_COLOR,
         ] {
             assert_draws(path);
         }

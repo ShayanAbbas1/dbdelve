@@ -7,8 +7,10 @@
 //! This was a plain type at the crate root. It moved out whole; nothing changed
 //! but its visibility.
 
-use gpui::{App, AppContext, Context, Entity, Task, Window};
-use gpui_component::input::InputState;
+use std::time::Instant;
+
+use gpui::{App, AppContext, Context, Entity, SharedString, Subscription, Task, TextAlign, Window};
+use gpui_component::input::{InputEvent, InputState};
 
 use crate::{
     Workspace,
@@ -89,14 +91,26 @@ pub(crate) struct ConnectionForm {
     /// when the form is saved, rather than the list of existing ones.
     pub(crate) naming_project: bool,
     pub(crate) project_name: Entity<InputState>,
+    /// When the form came up, for its card's entrance.
+    pub(crate) opened: Instant,
+    /// The welcome surface's contours were already on screen, so the form's,
+    /// the same ones, are there from the start rather than fading in again.
+    pub(crate) backdrop_shown: bool,
+    /// The engine the engine-dependent placeholders were last written for.
+    pub(crate) placeholders_for: Option<Engine>,
+    /// The URL field as of its last change, to tell a URL pasted whole from
+    /// one being typed.
+    pub(crate) last_url: SharedString,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ConnectionForm {
     /// The first field the form draws for its engine.
     pub(crate) fn lead_field(&self) -> Entity<InputState> {
         match self.engine.fields() {
+            Fields::Server => self.url.clone(),
+            Fields::File => self.path.clone(),
             Fields::Account => self.account.clone(),
-            _ => self.url.clone(),
         }
     }
 
@@ -140,70 +154,59 @@ impl ConnectionForm {
             _ => None,
         };
 
-        let url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("postgresql://…  or  sqlite://…"));
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a connection URL"));
         let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Display name")
-                .default_value(value(
-                    server
-                        .map(|server| server.database.as_str())
-                        .or_else(|| account.map(|account| account.database.as_str()))
-                        .or_else(|| file.map(file_stem)),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.database.as_str())
+                    .or_else(|| account.map(|account| account.database.as_str()))
+                    .or_else(|| file.map(file_stem)),
+            ))
         });
         let path = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Database file")
+                .placeholder("/path/to/app.sqlite")
                 .default_value(value(file))
         });
         let host = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Host (optional)")
-                .default_value(value(
-                    server
-                        .map(|server| server.host.as_str())
-                        .or_else(|| account.and_then(|account| account.host.as_deref())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.host.as_str())
+                    .or_else(|| account.and_then(|account| account.host.as_deref())),
+            ))
         });
         let port = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Port (optional)")
-                .default_value(
-                    server
-                        .and_then(|server| server.port)
-                        .map(|port| port.to_string())
-                        .unwrap_or_default(),
-                )
+            InputState::new(window, cx).default_value(
+                server
+                    .and_then(|server| server.port)
+                    .map(|port| port.to_string())
+                    .unwrap_or_default(),
+            )
         });
         let database = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Database")
-                .default_value(value(
-                    server
-                        .map(|server| server.database.as_str())
-                        .or_else(|| account.map(|account| account.database.as_str())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.database.as_str())
+                    .or_else(|| account.map(|account| account.database.as_str())),
+            ))
         });
         let user = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Username")
-                .default_value(value(
-                    server
-                        .map(|server| server.user.as_str())
-                        .or_else(|| account.map(|account| account.user.as_str())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.user.as_str())
+                    .or_else(|| account.map(|account| account.user.as_str())),
+            ))
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Password (optional)")
+                .placeholder("Optional")
                 .default_value(value(server.map(|server| server.password.as_str())))
                 .masked(true)
         });
 
         let root_certificate = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Root certificate file (optional)")
+                .placeholder("System trust store")
                 .default_value(value(
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
@@ -218,9 +221,9 @@ impl ConnectionForm {
             })
         };
         let ssh_host = input("Host or ~/.ssh/config alias", ssh_host);
-        let ssh_port = input("Port (optional)", ssh_port);
-        let ssh_user = input("Username (optional)", ssh_user);
-        let ssh_identity_file = input("Identity file (optional)", ssh_identity_file);
+        let ssh_port = input("22", ssh_port);
+        let ssh_user = input("Optional", ssh_user);
+        let ssh_identity_file = input("SSH agent", ssh_identity_file);
         let account_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Account identifier")
@@ -228,30 +231,30 @@ impl ConnectionForm {
         });
         let private_key = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Absolute path to the private key file")
+                .placeholder("/absolute/path/to/key.p8")
                 .default_value(value(account.map(|account| account.private_key.as_str())))
         });
         let warehouse = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Warehouse (optional)")
+                .placeholder("Optional")
                 .default_value(value(
                     account.and_then(|account| account.warehouse.as_deref()),
                 ))
         });
         let role = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Role (optional)")
+                .placeholder("Optional")
                 .default_value(value(account.and_then(|account| account.role.as_deref())))
         });
         let options = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("authSource=admin&replicaSet=rs0 (optional)")
+                .placeholder("authSource=admin&replicaSet=rs0")
                 .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
         });
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Seconds (0 for no limit)")
+                .placeholder("No limit")
                 .default_value(
                     config
                         .map(ConnectionConfig::statement_timeout)
@@ -261,17 +264,43 @@ impl ConnectionForm {
                 )
         });
 
-        Self {
-            // The form is the whole window while it is open, and a window
-            // with nothing focused has no dispatch path -- every binding is
-            // dead until a field is clicked. So the field the user is meant to
-            // start in asks for focus the moment it is mounted.
-            needs_focus: Some(url.clone()),
+        statement_timeout.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
+
+        let mut subscriptions = vec![cx.subscribe_in(
+            &url,
+            window,
+            |workspace, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => workspace.url_changed(window, cx),
+                InputEvent::PressEnter { .. } => workspace.fill_from_url(window, cx),
+                _ => {}
+            },
+        )];
+        // What the header reads: its title and the line saying where the
+        // form points.
+        for input in [
+            &name,
+            &path,
+            &host,
+            &port,
+            &database,
+            &user,
+            &ssh_host,
+            &account_name,
+        ] {
+            subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
+
+        let mut form = Self {
+            needs_focus: None,
             url,
             engine: config.map(ConnectionConfig::engine).unwrap_or_default(),
             name,
             color: None,
-            mode: Mode::default(),
+            mode: starting_mode(None),
             path,
             host,
             port,
@@ -299,7 +328,18 @@ impl ConnectionForm {
             project: None,
             naming_project: false,
             project_name,
-        }
+            opened: Instant::now(),
+            backdrop_shown: false,
+            placeholders_for: None,
+            last_url: SharedString::default(),
+            _subscriptions: subscriptions,
+        };
+        // The form is the whole window while it is open, and a window with
+        // nothing focused has no dispatch path -- every binding is dead until
+        // a field is clicked. So the field the user is meant to start in asks
+        // for focus the moment it is mounted.
+        form.needs_focus = Some(form.lead_field());
+        form
     }
 
     /// The same form, pointed at a profile that already exists.
@@ -322,8 +362,10 @@ impl ConnectionForm {
         form.name.update(cx, |name, cx| {
             name.set_value(profile.name.clone(), window, cx);
         });
-        form.password
-            .update(cx, |password, cx| password.set_value("", window, cx));
+        form.password.update(cx, |password, cx| {
+            password.set_value("", window, cx);
+            password.set_placeholder("Unchanged", window, cx);
+        });
         form
     }
 
@@ -345,7 +387,7 @@ impl ConnectionForm {
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
-        form.mode = profile.mode;
+        form.mode = starting_mode(Some(profile.mode));
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });
@@ -354,11 +396,6 @@ impl ConnectionForm {
 
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        let name = read(&self.name);
-        if name.is_empty() {
-            return Err("Display name is required.".into());
-        }
-
         let statement_timeout = self.statement_timeout(cx)?;
         let file = || match read(&self.path) {
             path if path.is_empty() => Err("Database file is required.".to_string()),
@@ -396,7 +433,55 @@ impl ConnectionForm {
             Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
         };
 
+        let name = match read(&self.name) {
+            name if name.is_empty() => default_profile_name(&config),
+            name => name,
+        };
+        if name.is_empty() {
+            return Err("Display name is required.".into());
+        }
         Ok((name, config))
+    }
+
+    /// The placeholders that say what a blank field means, which is the
+    /// engine's to say: its port, whether it asks for a user, what it names
+    /// a connection after. Written whenever the engine has changed since.
+    pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
+        if self.placeholders_for == Some(self.engine) {
+            return;
+        }
+        self.placeholders_for = Some(self.engine);
+        let blank = placeholders(self.engine);
+        for (input, placeholder) in [
+            (&self.name, SharedString::from(blank.name)),
+            (&self.host, blank.host.into()),
+            (&self.port, blank.port.into()),
+            (&self.database, blank.database.into()),
+            (&self.user, blank.user.into()),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+    }
+
+    /// Where the form points, for the line under its title.
+    pub(crate) fn summary(&self, cx: &App) -> Option<String> {
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        let tunnel = read(&self.ssh_host);
+        summary(
+            self.engine,
+            self.srv,
+            &Typed {
+                host: &read(&self.host),
+                port: &read(&self.port),
+                database: &read(&self.database),
+                user: &read(&self.user),
+                path: &read(&self.path),
+                account: &read(&self.account),
+                tunnel: self.ssh.then_some(tunnel.as_str()),
+            },
+        )
     }
 
     /// Blank is 0 is no limit, so a user who never had an opinion about it is
@@ -518,6 +603,104 @@ pub(crate) fn keep_schema(config: &mut ConnectionConfig, current: &ConnectionCon
         && config.database_name() == current.database_name()
     {
         config.set_schema(Some(schema.to_string()));
+    }
+}
+
+/// What a new connection may do until told otherwise: read. A copy keeps the
+/// mode of the connection it was copied from.
+pub(crate) fn starting_mode(copied_from: Option<Mode>) -> Mode {
+    copied_from.unwrap_or(Mode::ReadOnly)
+}
+
+/// What a blank field means, field by field.
+pub(crate) struct Placeholders {
+    pub(crate) name: &'static str,
+    pub(crate) host: &'static str,
+    pub(crate) port: String,
+    pub(crate) database: &'static str,
+    pub(crate) user: &'static str,
+}
+
+/// Read against `ConnectionConfig::server`, `account` and
+/// `default_profile_name`, which decide what blank actually does.
+pub(crate) fn placeholders(engine: Engine) -> Placeholders {
+    let name = match engine {
+        _ if engine.fields() == Fields::File => "Named after the file",
+        Engine::Redis => "Named after the host",
+        _ => "Named after the database",
+    };
+    let (host, database) = match engine {
+        Engine::Snowflake => ("Implied by the account", "Required"),
+        // What a blank database connects to (`ConnectionConfig::database_name`);
+        // elsewhere it leaves the server to pick.
+        Engine::Postgres => ("localhost", "postgres"),
+        Engine::Redis => ("localhost", "0"),
+        _ => ("localhost", "Optional"),
+    };
+    let user = match engine {
+        Engine::MongoDb | Engine::Redis => "Optional",
+        _ => "Required",
+    };
+    Placeholders {
+        name,
+        host,
+        port: engine
+            .default_port()
+            .map(|port| port.to_string())
+            .unwrap_or_default(),
+        database,
+        user,
+    }
+}
+
+/// The fields `summary` reads, as typed and trimmed.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Typed<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) port: &'a str,
+    pub(crate) database: &'a str,
+    pub(crate) user: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) account: &'a str,
+    /// The SSH host, while the tunnel is on.
+    pub(crate) tunnel: Option<&'a str>,
+}
+
+/// Where a form points, in one line: `user@host:port/database` and the SSH
+/// host it goes through, the file for a file, the account for an account.
+/// `None` until there is somewhere: a user on its own points nowhere.
+pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String> {
+    let signed_in = |place: String| match typed.user {
+        "" => place,
+        user => format!("{user}@{place}"),
+    };
+    let database = |place: String| match typed.database {
+        "" => place,
+        database => format!("{place}/{database}"),
+    };
+    match engine.fields() {
+        Fields::File => Some(typed.path.to_string()).filter(|path| !path.is_empty()),
+        Fields::Account => {
+            (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
+        }
+        Fields::Server => {
+            if typed.host.is_empty() {
+                return None;
+            }
+            // An SRV name takes no port, so whatever the hidden field holds
+            // is not where it points.
+            let place = match typed.port {
+                port if !port.is_empty() && !(srv && engine.resolves_srv()) => {
+                    format!("{}:{port}", typed.host)
+                }
+                _ => typed.host.to_string(),
+            };
+            let line = signed_in(database(place));
+            Some(match typed.tunnel {
+                Some(tunnel) if !tunnel.is_empty() => format!("{line} via {tunnel}"),
+                _ => line,
+            })
+        }
     }
 }
 
@@ -741,6 +924,136 @@ mod tests {
             identity_file: Some("~/.ssh/id_ed25519".into()),
         };
         assert_eq!(ssh_tunnel(true, ssh_fields(Some(&saved))), Ok(Some(saved)));
+    }
+
+    #[test]
+    fn the_summary_says_where_the_form_points_once_it_points_somewhere() {
+        let at = |engine, srv, typed: &Typed| summary(engine, srv, typed);
+        let server = Typed {
+            host: "db.internal",
+            port: "5432",
+            database: "orders",
+            user: "ada",
+            ..Typed::default()
+        };
+        assert_eq!(
+            at(Engine::Postgres, false, &server).as_deref(),
+            Some("ada@db.internal:5432/orders")
+        );
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    tunnel: Some("bastion.internal"),
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("ada@db.internal:5432/orders via bastion.internal")
+        );
+        // Switched on before its host is typed, the tunnel names nothing yet.
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    tunnel: Some(""),
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("ada@db.internal:5432/orders")
+        );
+        // Only what was typed: a blank port is the default, not "".
+        assert_eq!(
+            at(
+                Engine::MySql,
+                false,
+                &Typed {
+                    host: "localhost",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("localhost")
+        );
+        // The port an SRV name hides is not where it points.
+        assert_eq!(
+            at(
+                Engine::MongoDb,
+                true,
+                &Typed {
+                    host: "cluster0.example.net",
+                    port: "27017",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("cluster0.example.net")
+        );
+        assert_eq!(
+            at(
+                Engine::Sqlite,
+                false,
+                &Typed {
+                    path: "~/Projects/app/data.sqlite",
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("~/Projects/app/data.sqlite")
+        );
+        assert_eq!(
+            at(
+                Engine::Snowflake,
+                false,
+                &Typed {
+                    account: "acme-prod",
+                    user: "ada",
+                    database: "ANALYTICS",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("ada@acme-prod/ANALYTICS")
+        );
+        for engine in Engine::ALL {
+            assert_eq!(at(engine, false, &Typed::default()), None, "{engine:?}");
+        }
+        // A user on its own points nowhere.
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    user: "ada",
+                    ..Typed::default()
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_connection_starts_read_only_and_a_copy_keeps_its_mode() {
+        assert_eq!(starting_mode(None), Mode::ReadOnly);
+        for mode in Mode::ALL {
+            assert_eq!(starting_mode(Some(mode)), mode);
+        }
+    }
+
+    #[test]
+    fn a_blank_field_says_what_blank_means_for_the_engine() {
+        let postgres = placeholders(Engine::Postgres);
+        assert_eq!(postgres.port, "5432");
+        assert_eq!(postgres.database, "postgres");
+        // `server` asks for a user here, and `server_requiring(&[])` there.
+        assert_eq!(postgres.user, "Required");
+        assert_eq!(placeholders(Engine::MongoDb).user, "Optional");
+        assert_eq!(placeholders(Engine::Redis).name, "Named after the host");
+        assert_eq!(placeholders(Engine::Turso).name, "Named after the file");
+        assert_eq!(placeholders(Engine::Snowflake).port, "");
     }
 
     #[test]

@@ -329,29 +329,27 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn apply_connection_url(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.fill_from_url(window, cx);
-    }
-
     /// Fills the open form from the URL in its URL field. Shared by the form's
-    /// own fill button and the welcome surface's field, so a URL pasted into
-    /// either lands the same way.
+    /// own field, pasted into or entered, and the welcome surface's, so a URL
+    /// given to either lands the same way.
     pub(crate) fn fill_from_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &self.form else {
+        let Some(form) = &mut self.form else {
             return;
         };
         let url = form.url.read(cx).value();
-        let config = match ConnectionConfig::from_url(url.trim()) {
+        form.last_url = url.clone();
+        let text = url.trim();
+        let parsed = match super::welcome::recognise(text) {
+            super::welcome::Recognised::File => Ok(ConnectionConfig::Sqlite {
+                path: text.to_string(),
+                statement_timeout: 0,
+            }),
+            _ => ConnectionConfig::from_url(text),
+        };
+        let config = match parsed {
             Ok(config) => config,
             Err(error) => {
-                if let Some(form) = &mut self.form {
-                    form.error = Some(error);
-                }
+                form.error = Some(error);
                 cx.notify();
                 return;
             }
@@ -404,7 +402,9 @@ impl Workspace {
         let sslmode = config.server().map(|server| server.sslmode);
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
-            form.engine = engine;
+            // A URL for another kind of engine unmounts the field it was
+            // pasted into, and `set_engine` hands focus on.
+            form.set_engine(engine);
             form.srv = srv;
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
@@ -416,7 +416,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A dropdown on the connection form: `pick` writes the choice into it.
+    /// An edit to the connection form's URL field. A URL that arrives whole
+    /// fills the fields at once; one typed a character at a time waits for
+    /// Enter, or every keystroke would fill them from half a URL.
+    pub(crate) fn url_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let now = form.url.read(cx).value();
+        let before = std::mem::replace(&mut form.last_url, now.clone());
+        if pasted_url(&before, &now) {
+            self.fill_from_url(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A compact dropdown at the end of a row of the connection form: `pick`
+    /// writes the choice into it.
     pub(crate) fn form_dropdown<T: Clone + PartialEq + 'static>(
         id: &'static str,
         selected: T,
@@ -426,8 +442,12 @@ impl Workspace {
         pick: impl Fn(&mut ConnectionForm, T) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        Self::dropdown(
-            id,
+        let t = popup_theme(cx);
+        let trigger = ui::picker(id, label(&selected), t)
+            .border_1()
+            .border_color(t.border);
+        Self::with_menu(
+            trigger,
             selected,
             groups,
             label,
@@ -489,11 +509,25 @@ impl Workspace {
         pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let trigger = Self::field_trigger(id, marker(&selected), label(&selected), cx);
+        Self::with_menu(trigger, selected, groups, label, marker, pick, cx)
+    }
+
+    /// The menu of `groups` hung off `trigger`, whatever it is dressed as.
+    fn with_menu<T: Clone + PartialEq + 'static>(
+        trigger: gpui_component::button::Button,
+        selected: T,
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let workspace = cx.entity().downgrade();
         let label = Rc::new(label);
         let marker = Rc::new(marker);
         let pick = Rc::new(pick);
-        Self::field_trigger(id, marker(&selected), label(&selected), cx)
+        trigger
             .dropdown_menu(move |menu, _, _| {
                 groups.iter().enumerate().fold(
                     menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
@@ -530,92 +564,25 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The engine decides which fields the form even has, so it is the first
-    /// thing on it. There are too many to scan in a menu, so it opens the
-    /// searchable palette instead.
-    pub(crate) fn engine_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        let t = *theme(cx);
-        let marker = row_icon(t, form.engine.logo()).into_any_element();
-        Self::field_trigger("engine", Some(marker), form.engine.label().into(), cx)
-            .on_click(cx.listener(|workspace, _, window, cx| {
-                workspace.open_palette(PaletteMode::Engine, window, cx);
-            }))
-            .into_any_element()
-    }
-
-    /// Weakest first.
-    ///
-    /// Read only while a connection already exists: past creation,
-    /// `Workspace::set_mode` is the one door a mode changes through, and it
-    /// pushes the change into that connection's live grids -- something a
-    /// profile still being typed into has none of yet. `render_connection_form`
-    /// draws this only when there is no `editing` id, for exactly that reason.
-    pub(crate) fn mode_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "mode",
-            form.mode,
-            vec![Mode::ALL.to_vec()],
-            |mode| mode.label().into(),
-            |_| None,
-            |form, mode| {
-                form.mode = mode;
-                // A pass without the Read-only hold did not test it.
-                form.test = None;
-            },
-            cx,
-        )
-    }
-
-    /// The colour only ever labels a connection, so nothing here can make the
-    /// form invalid and nothing has to move focus.
-    pub(crate) fn color_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "color",
-            form.color,
-            vec![
-                std::iter::once(None)
-                    .chain(ConnectionColor::ALL.map(Some))
-                    .collect(),
-            ],
-            |color| color.map_or("None", ConnectionColor::label).into(),
-            |color| {
-                color.map(|color| {
-                    div()
-                        .size(px(layout::SPACE_SM))
-                        .rounded_full()
-                        .bg(color.swatch())
-                        .into_any_element()
-                })
-            },
-            |form, color| form.color = color,
-            cx,
-        )
-    }
-
     /// The project is made when the form is saved, so "New project…" only
     /// swaps the list for a field to name it in.
     pub(crate) fn project_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let form = self.form.as_ref().expect("drawn only on the form");
         if form.naming_project {
             return div()
                 .flex()
-                .gap(px(layout::SPACE_SM))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&form.project_name).w_full()),
-                )
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .child(div().w(px(layout::FORM_PROJECT_NAME_WIDTH)).child(
+                    gpui_component::Sizable::small(Input::new(&form.project_name)),
+                ))
                 .child(
                     icon_button(
                         "choose-project",
                         icon::CLOSE,
                         Tone::Quiet,
-                        Control::Standard,
+                        Control::Compact,
                         t,
                     )
                     .tooltip("Choose an existing project")
@@ -663,41 +630,6 @@ impl Workspace {
             },
             cx,
         )
-    }
-
-    pub(crate) fn sslmode_chip(&self, mode: SslMode, cx: &mut Context<Self>) -> AnyElement {
-        let t = *theme(cx);
-        let selected = self.form.as_ref().is_some_and(|form| form.sslmode == mode);
-        div()
-            .id(mode.as_str())
-            .flex()
-            .items_center()
-            .h(px(layout::chrome(24.)))
-            .px(px(layout::SPACE_SM))
-            .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::chrome(layout::TEXT_SM)))
-            .whitespace_nowrap()
-            .map(|chip| {
-                if selected {
-                    chip.bg(t.element_active).text_color(t.text)
-                } else {
-                    chip.text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover))
-                }
-            })
-            .child(mode.label())
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-                if let Some(form) = &mut workspace.form {
-                    // Stepping down from a verifying mode unmounts the
-                    // certificate field, which may be the one holding focus.
-                    if form.sslmode.checks_certificate() && !mode.checks_certificate() {
-                        form.needs_focus = Some(form.password.clone());
-                    }
-                    form.sslmode = mode;
-                    cx.notify();
-                }
-            }))
-            .into_any_element()
     }
 
     pub(crate) fn connect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1962,9 +1894,54 @@ fn stored_buffers(
     }
 }
 
+/// Whether an edit to the URL field brought a URL in whole -- pasted rather
+/// than typed -- that names an engine the fields can be filled for. Read off
+/// what the edit inserted rather than the length, so a paste over a selection
+/// counts and deleting part of a URL does not.
+pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
+    let before: Vec<char> = before.chars().collect();
+    let after_chars: Vec<char> = after.chars().collect();
+    let prefix = before
+        .iter()
+        .zip(&after_chars)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after_chars[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let inserted = after_chars.len() - prefix - suffix;
+    let fills = match super::welcome::recognise(after) {
+        super::welcome::Recognised::Url(engine) => engine.fields() != Fields::Account,
+        super::welcome::Recognised::File => true,
+        _ => false,
+    };
+    inserted > 1 && fills
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_recognised_url_arriving_whole_fills_the_form() {
+        let url = "postgresql://ada@db.internal:5432/orders";
+        assert!(pasted_url("", url));
+        // Pasted over another URL, or over a selection in one.
+        assert!(pasted_url("mysql://root@localhost/shop", url));
+        assert!(pasted_url("postgresql://ada@/orders", url));
+        assert!(pasted_url("", "~/data/app.sqlite"));
+        // Typed a character at a time, it waits for Enter.
+        assert!(!pasted_url("postgresql://ada@db.internal:5432/order", url));
+        // Cutting part of one away is not a URL arriving.
+        assert!(!pasted_url(url, "postgresql://ada@db.internal:5432"));
+        // Not a URL, or one with no fields here to fill.
+        assert!(!pasted_url("", "hello world"));
+        assert!(!pasted_url("", "nope://db/app"));
+        assert!(!pasted_url("", "snowflake://acme-prod"));
+    }
 
     #[test]
     fn a_database_switch_is_a_no_op_only_onto_the_configured_one() {

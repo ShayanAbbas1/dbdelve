@@ -164,6 +164,35 @@ pub mod layout {
     /// A card narrower than this has no room for three engine names a row.
     pub const WELCOME_NARROW: f32 = 420.0;
 
+    /// The connection form: one card, its sections set into it as wells.
+    pub const FORM_WIDTH: f32 = 600.0;
+    /// Its distance below the titlebar, and the most it scrolls its body
+    /// rather than come closer to the window's bottom edge.
+    pub const FORM_TOP: f32 = 44.0;
+    /// Its inset from the card's edge, the header's and the footer's alike.
+    pub const FORM_PADDING: f32 = 20.0;
+    pub const FORM_LOGO_TILE: f32 = 40.0;
+    pub const FORM_LOGO_SIZE: f32 = 20.0;
+    pub const FORM_TITLE_SIZE: f32 = 17.0;
+    pub const FORM_TITLE_LINE: f32 = 22.0;
+    pub const FORM_SECTION_GAP: f32 = 18.0;
+    /// A field's label, so every field in a section starts at the same x.
+    pub const FORM_LABEL_WIDTH: f32 = 120.0;
+    pub const FORM_ROW_HEIGHT: f32 = 44.0;
+    pub const FORM_PORT_WIDTH: f32 = 84.0;
+    pub const FORM_TIMEOUT_WIDTH: f32 = 104.0;
+    pub const FORM_PROJECT_NAME_WIDTH: f32 = 200.0;
+    /// A connection colour's dot, and the gap between it and the ring that
+    /// marks the one picked.
+    pub const SWATCH_SIZE: f32 = 18.0;
+    pub const SWATCH_RING_GAP: f32 = 2.0;
+    /// Between a segmented control's track and the segments inside it.
+    pub const SEGMENT_INSET: f32 = 2.0;
+    /// The accent button under the pointer and pressed: the accent, letting a
+    /// little of the card through.
+    pub const ACCENT_HOVER: f32 = 0.9;
+    pub const ACCENT_PRESSED: f32 = 0.8;
+
     pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
     /// The most of a narrow window's width the panel takes, so the window's
     /// own edge never cuts it off.

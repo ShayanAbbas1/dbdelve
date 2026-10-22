@@ -240,6 +240,9 @@ an upgrade, or ask for confirmation.
   a bare subquery) as whatever `sql::classify` would give that query; a
   function call or anything else it does not recognise still needs Full.
   Before this a bare `IF` needed Full everywhere, whatever it held.
+- A new connection starts Read-only (`connection_form::starting_mode`); a
+  duplicate keeps the mode of the one it copies. The connection form offers
+  the mode only while creating: editing never changes one.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
   mode into every open grid, which caches it. `CycleMode` (no default chord,
   "Cycle Access Level") steps Read-only, Read-write, Full and back through
@@ -433,8 +436,9 @@ The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
 `DBDELVE_MARIADB_PORT`, `DBDELVE_MSSQL_PORT` and `DBDELVE_REDIS_PORT`. The SQL Server image is
 `linux/amd64` only, so on Apple silicon it runs under emulation and takes a
 while to come up.
-Pick the engine first, from the searchable picker the form's Engine field opens; it decides which fields exist.
-Then paste a URL and choose **Use URL**, or fill the fields in. **Test** opens
+Pick the engine first, from the searchable picker the engine pill in the form's header opens; it decides which fields exist.
+Then paste a URL into the form's URL row, which fills the fields as it lands (one
+typed rather than pasted fills them on Enter), or fill the fields in. **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
 
@@ -1666,6 +1670,13 @@ curves, and hover states are instant. These things move:
   surface comes on screen, never on a re-render, and `reduce_motion` skips it.
   The URL field's engine logo fades in once over 160ms, keyed by the engine.
   Neither repeats, so neither is the redraw hazard.
+- **The connection form's card** (`workspace/forms.rs`) rises in on the same
+  clock and curve (`Part::Form`, read off `ConnectionForm::opened`), over the
+  same contours, which fade in only when the welcome surface was not already
+  showing them (`ConnectionForm::backdrop_shown`). It stops asking for frames
+  at `form_entrance_ms`, and `reduce_motion` skips it. Its SSH rows settle in
+  once over 220ms when the tunnel is switched on (`revealed`, keyed by the
+  row, so they replay only on remounting). Neither repeats.
 
 Anything else that moves needs raising first, and a second repeating animation
 means building the shared throttled clock and moving both onto it.

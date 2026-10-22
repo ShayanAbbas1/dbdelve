@@ -3,415 +3,648 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
-use gpui::StyledText;
+use std::time::Duration;
+
+use gpui::{Animation, AnimationExt, StyledText, ease_out_quint};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
+use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
+use crate::ui::Status;
 
 impl Workspace {
-    pub(crate) fn render_connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = *theme(cx);
+    pub(crate) fn render_connection_form(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = popup_theme(cx);
         let form = self
             .form
             .as_ref()
             .expect("form is rendered only while open");
-        let message = form.error.clone();
-        let editing = form.editing.is_some();
         // Scoped to the profile being edited, or "new", so switching from
         // editing one profile to another (or to a fresh connection) doesn't
         // open on the last profile's scroll offset.
         let scope = form.editing.as_deref().unwrap_or("new");
-        let hairline = || div().h(px(1.)).flex_1().bg(t.border);
-        let labelled = |label: &'static str, control: AnyElement| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(layout::SPACE_XS))
-                .child(
-                    div()
-                        .text_size(px(layout::chrome(layout::TEXT_SM)))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.text_muted)
-                        .child(label),
-                )
-                .child(control)
+        let viewport = window.viewport_size();
+        let width = layout::FORM_WIDTH
+            .min(viewport.width.as_f32() - 2. * layout::SPACE_LG)
+            .max(0.);
+        let tallest =
+            (viewport.height.as_f32() - layout::TITLEBAR_HEIGHT - 2. * layout::FORM_TOP).max(0.);
+        let elapsed = if cx.reduce_motion() {
+            f32::INFINITY
+        } else {
+            form.opened.elapsed().as_secs_f32() * 1000.
+        };
+        if elapsed < welcome::form_entrance_ms(form.backdrop_shown) {
+            window.request_animation_frame();
+        }
+        let backdrop = if form.backdrop_shown {
+            Pose {
+                opacity: 1.,
+                offset: 0.,
+            }
+        } else {
+            welcome::pose(Part::Backdrop, false, elapsed)
         };
 
         div()
-            .id("connection-form-scroll")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .smooth_scroll(&smooth_scoped("connection-form-scroll", scope, cx))
-            .p(px(layout::SPACE_LG))
-            .flex()
-            .flex_col()
-            .items_center()
+            .children(welcome::backdrop(*theme(cx), viewport, backdrop))
             .child(
                 div()
-                    // Centred by auto margins rather than `justify_center`,
-                    // which pushes a form taller than the window (an SSH
-                    // tunnel under a verifying mode) off the top, where
-                    // scrolling cannot reach.
-                    .my_auto()
-                    .flex_shrink_0()
-                    .w(px(layout::DIALOG_WIDTH))
-                    .p(px(layout::SPACE_LG))
-                    .bg(t.panel)
-                    .border_1()
-                    .border_color(t.border)
-                    .rounded(px(layout::RADIUS_PANEL))
-                    .shadow_lg()
+                    .absolute()
+                    .inset_0()
                     .flex()
                     .flex_col()
-                    .gap(px(layout::SPACE_MD))
+                    .items_center()
+                    .pt(px(layout::FORM_TOP))
+                    .child(
+                        welcome::posed(div().relative(), welcome::pose(Part::Form, false, elapsed))
+                            .flex_shrink_0()
+                            .w(px(width))
+                            .max_h(px(tallest))
+                            .flex()
+                            .flex_col()
+                            .text_size(px(layout::chrome(layout::TEXT_MD)))
+                            .text_color(t.text)
+                            .border_1()
+                            .border_color(t.border_strong)
+                            .rounded(px(layout::RADIUS_CARD))
+                            .map(|card| ui::raised_card(card, t))
+                            .overflow_hidden()
+                            .child(self.render_form_header(t, cx))
+                            // The header and the footer stay put; only the
+                            // sections scroll, once the window is too short for
+                            // them.
+                            .child(
+                                div()
+                                    .id("connection-form-scroll")
+                                    .flex_shrink(1.)
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .smooth_scroll(&smooth_scoped(
+                                        "connection-form-scroll",
+                                        scope,
+                                        cx,
+                                    ))
+                                    .child(self.render_form_sections(t, cx)),
+                            )
+                            .child(self.render_form_footer(t, cx)),
+                    ),
+            )
+    }
+
+    /// The engine's logo, what the connection is called, where it points, and
+    /// the way to another engine or out.
+    fn render_form_header(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        let engine = form.engine;
+        let brand = theme::engine_brand(engine, t, &t.logo_planes());
+        let title = match form.name.read(cx).value().trim() {
+            "" if form.editing.is_some() => "Edit connection".to_string(),
+            "" => "New connection".to_string(),
+            name => name.to_string(),
+        };
+        let mono = fonts(cx).family(FontSlot::Editor).clone();
+        let close = match ui::chord_hint("show_editor", &self.settings.custom_keybindings) {
+            hint if hint.is_empty() => "Close".to_string(),
+            hint => format!("Close ({hint})"),
+        };
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_MD))
+            .pl(px(layout::FORM_PADDING))
+            .pr(px(layout::SPACE_LG))
+            .py(px(layout::SPACE_LG))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(layout::chrome(layout::FORM_LOGO_TILE)))
+                    .rounded(px(layout::RADIUS_PANEL))
+                    .bg(brand.alpha(layout::ACCENT_WASH))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(engine.logo())
+                            .size(px(layout::chrome(layout::FORM_LOGO_SIZE)))
+                            .text_color(brand),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SETTINGS_DESCRIPTION_GAP))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(layout::chrome(layout::FORM_TITLE_SIZE)))
+                            .line_height(px(layout::chrome(layout::FORM_TITLE_LINE)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .children(form.summary(cx).map(|summary| {
+                        div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_family(mono)
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(t.text_faint)
+                            .child(summary)
+                    })),
+            )
+            // The engine decides which fields the form even has. There are
+            // too many to scan in a menu, so it opens the searchable palette.
+            .child(
+                ui::control("form-engine", Tone::Quiet, Control::Standard)
+                    .px(px(layout::SPACE_SM))
+                    .border_1()
+                    .border_color(t.border)
+                    .tooltip("Change engine")
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(layout::SPACE_MD))
-                            .child(icon_tile(t, icon::DATABASE))
+                            .gap(px(layout::SPACE_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_MD)))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(t.text)
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_LG)))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(if editing {
-                                                "Edit connection"
-                                            } else {
-                                                "Connect to a database"
-                                            }),
-                                    )
-                                    // Snowflake has no connection URL to paste,
-                                    // so a fresh form for it says nothing about
-                                    // one; editing keeps the generic subtitle,
-                                    // which never mentioned a URL either.
-                                    .children(
-                                        (editing || form.engine.fields() != Fields::Account).then(
-                                            || {
-                                                div()
-                                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                                    .text_color(t.text_muted)
-                                                    .child(if editing {
-                                                        "Change where this connection points."
-                                                    } else {
-                                                        "Paste a URL, or fill in the fields."
-                                                    })
-                                            },
-                                        ),
-                                    ),
+                                icon(engine.logo())
+                                    .size(px(layout::chrome(layout::ICON_SIZE)))
+                                    .text_color(brand),
+                            )
+                            .child(engine.label())
+                            .child(
+                                icon(icon::CHOOSE)
+                                    .size(px(layout::chrome(layout::ICON_SIZE)))
+                                    .text_color(t.text_faint),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(layout::SPACE_SM))
-                            .child(labelled("Engine", self.engine_dropdown(cx)))
-                            // Only while creating: past that,
-                            // `Workspace::set_mode` is the one door a mode
-                            // changes through, from the titlebar, and it pushes
-                            // the change into live grids this form has no
-                            // route to.
-                            .when(!editing, |row| {
-                                row.child(labelled("Mode", self.mode_dropdown(cx)))
-                            })
-                            .child(labelled("Color", self.color_dropdown(cx))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .child(labelled("Project", self.project_dropdown(cx))),
-                    )
-                    // Snowflake has no connection URL: `Engine::fields()` is
-                    // where that is decided, not a match on the engine here.
-                    .when(form.engine.fields() != Fields::Account, |form_div| {
-                        form_div
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(layout::SPACE_XS))
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(t.text_muted)
-                                            .child("Connection URL"),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap(px(layout::SPACE_SM))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(Input::new(&form.url).w_full()),
-                                            )
-                                            .child(
-                                                icon_button(
-                                                    "apply-connection-url",
-                                                    icon::FILL_DOWN,
-                                                    Tone::Primary,
-                                                    Control::Standard,
-                                                    t,
-                                                )
-                                                .tooltip("Fill the fields from this URL")
-                                                .on_click(cx.listener(Self::apply_connection_url)),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(layout::SPACE_SM))
-                                    .child(hairline())
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                            .text_color(t.text_faint)
-                                            .child("OR"),
-                                    )
-                                    .child(hairline()),
-                            )
-                    })
-                    .child(self.form_field("Display name", &form.name, cx))
-                    // An engine that is a file has no host, no credentials and
-                    // no transport, so those fields are absent rather than
-                    // present and inert. A disabled field still reads as
-                    // something the connection has.
-                    .children(
-                        (form.engine.fields() == Fields::File)
-                            .then(|| self.form_field("Database file", &form.path, cx)),
-                    )
-                    // No encryption row: the transport is HTTPS and always
-                    // verified, so there is no choice to show. No password
-                    // either; the key file is the credential.
-                    .children((form.engine.fields() == Fields::Account).then(|| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_MD))
-                            .child(self.form_field("Account", &form.account, cx))
-                            .child(self.form_field("Username", &form.user, cx))
-                            .child(self.form_field("Private key file", &form.private_key, cx))
-                            .child(self.form_field("Database", &form.database, cx))
-                            .child(self.form_field("Warehouse", &form.warehouse, cx))
-                            .child(self.form_field("Role", &form.role, cx))
-                            // Last, because it is nearly always blank: the
-                            // account names its own host.
-                            .child(self.form_field("Host", &form.host, cx))
-                    }))
-                    .children((form.engine.fields() == Fields::Server).then(|| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::SPACE_MD))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(layout::SPACE_SM))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .child(self.form_field("Host", &form.host, cx)),
-                                    )
-                                    // An SRV name takes no port: its records
-                                    // name each server's own.
-                                    .children((!(form.srv && form.engine.resolves_srv())).then(
-                                        || {
-                                            div()
-                                                .w(px(96.))
-                                                .child(self.form_field("Port", &form.port, cx))
-                                        },
-                                    )),
-                            )
-                            .children(form.engine.resolves_srv().then(|| {
-                                Checkbox::new("srv-host")
-                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .label("Host is an SRV name (mongodb+srv)")
-                                    .checked(form.srv)
-                                    .on_click(cx.listener(|workspace, on: &bool, _, cx| {
-                                        if let Some(form) = &mut workspace.form {
-                                            form.srv = *on;
-                                            form.test = None;
-                                            cx.notify();
-                                        }
-                                    }))
-                            }))
-                            .child(self.form_field("Database", &form.database, cx))
-                            .child(self.form_field("Username", &form.user, cx))
-                            .child(self.labelled_field(
-                                "Password",
-                                Input::new(&form.password).mask_toggle().w_full(),
-                                cx,
-                            ))
-                            .children(
-                                form.engine
-                                    .takes_options()
-                                    .then(|| self.form_field("Options", &form.options, cx)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(layout::SPACE_XS))
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(t.text_muted)
-                                            .child("Encryption"),
-                                    )
-                                    .child(div().flex().gap(px(layout::SPACE_XS)).children(
-                                        SslMode::ALL.map(|mode| self.sslmode_chip(mode, cx)),
-                                    ))
-                                    // Five words do not say which ones check who
-                                    // answered, and that is the whole difference
-                                    // between them.
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                            .text_color(t.text_faint)
-                                            .child(form.sslmode.explanation()),
-                                    ),
-                            )
-                            // Only where it is consulted: on `require` a
-                            // certificate file changes nothing, and a field that
-                            // changes nothing reads as though it does.
-                            .children(form.sslmode.checks_certificate().then(|| {
-                                self.form_field("Root certificate", &form.root_certificate, cx)
-                            }))
-                            .child(
-                                Checkbox::new("ssh-tunnel")
-                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .label("Connect through an SSH tunnel")
-                                    .checked(form.ssh)
-                                    .on_click(cx.listener(|workspace, on: &bool, _, cx| {
-                                        if let Some(form) = &mut workspace.form {
-                                            form.ssh = *on;
-                                            if *on {
-                                                form.needs_focus = Some(form.ssh_host.clone());
-                                            }
-                                            // A pass without the tunnel did not test it.
-                                            form.test = None;
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .children(form.ssh.then(|| {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(layout::SPACE_MD))
-                                    // Host and Port are the far end of the
-                                    // forward, which is easy to read as this
-                                    // machine's view of the network.
-                                    .child(
-                                        div()
-                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                            .text_color(t.text_faint)
-                                            .child(
-                                                "Host and Port are as the SSH host sees them: \
-                                                 localhost is the SSH host itself.",
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap(px(layout::SPACE_SM))
-                                            .child(div().flex_1().child(self.form_field(
-                                                "SSH host",
-                                                &form.ssh_host,
-                                                cx,
-                                            )))
-                                            .child(div().w(px(96.)).child(self.form_field(
-                                                "SSH port",
-                                                &form.ssh_port,
-                                                cx,
-                                            ))),
-                                    )
-                                    .child(self.form_field("SSH username", &form.ssh_user, cx))
-                                    .child(self.form_field(
-                                        "Identity file",
-                                        &form.ssh_identity_file,
-                                        cx,
-                                    ))
-                            }))
-                    }))
-                    // Outside the server block: every engine can stop a
-                    // statement, and this is the only place a profile has to
-                    // say for how long -- there is no settings window and is
-                    // not going to be one.
-                    .child(self.form_field("Statement timeout", &form.statement_timeout, cx))
-                    .children(message.map(|message| {
-                        div()
-                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                            .text_color(t.danger)
-                            .child(message)
-                    }))
-                    .children(form.test.as_ref().map(|test| {
-                        let (color, text) = match test {
-                            ConnectionTest::Running(_) => {
-                                (t.text_muted, "Testing connection…".to_string())
-                            }
-                            ConnectionTest::Passed => {
-                                (t.success, "Connection succeeded.".to_string())
-                            }
-                            ConnectionTest::Failed(message) => (t.danger, message.clone()),
-                        };
-                        div()
-                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                            .text_color(color)
-                            .child(text)
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(layout::SPACE_SM))
-                            .child(
-                                button("cancel", "Cancel", Tone::Quiet, Control::Standard, t)
-                                    .flex_1()
-                                    .on_click(cx.listener(|workspace, _, window, cx| {
-                                        workspace.show_editor(&ShowEditor, window, cx);
-                                    })),
-                            )
-                            .child(
-                                button(
-                                    "test-connection",
-                                    "Test",
-                                    Tone::Quiet,
-                                    Control::Standard,
-                                    t,
-                                )
-                                .flex_1()
-                                .on_click(cx.listener(Self::test_connection)),
-                            )
-                            .child(
-                                button(
-                                    "connect",
-                                    if editing { "Save" } else { "Connect" },
-                                    Tone::Primary,
-                                    Control::Standard,
-                                    t,
-                                )
-                                .flex_1()
-                                .on_click(cx.listener(Self::connect)),
-                            ),
-                    ),
+                    .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.open_palette(PaletteMode::Engine, window, cx);
+                    })),
             )
+            .child(
+                icon_button("close-form", icon::CLOSE, Tone::Quiet, Control::Standard, t)
+                    .tooltip(close)
+                    .on_click(cx.listener(|workspace, _, _, cx| workspace.close_form(cx))),
+            )
+    }
+
+    /// Where the connection goes, how it gets there safely, and what it may
+    /// do once there: each a well of rows.
+    fn render_form_sections(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        let mono = fonts(cx).family(FontSlot::Editor).clone();
+        let mono_field = |input: &Entity<InputState>| bare(input).font_family(mono.clone());
+
+        let mut connection = Vec::new();
+        // Snowflake has no connection URL, and a file is its own field:
+        // `Engine::fields()` is where that is decided, not a match on the
+        // engine here.
+        if form.engine.fields() == Fields::Server {
+            connection.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .min_h(px(layout::chrome(layout::FORM_ROW_HEIGHT)))
+                    .px(px(layout::SPACE_LG))
+                    .child(
+                        icon(icon::LINK)
+                            .size(px(layout::chrome(layout::ICON_SIZE)))
+                            .text_color(t.text_faint),
+                    )
+                    .child(div().flex_1().min_w_0().child(mono_field(&form.url)))
+                    .into_any_element(),
+            );
+        }
+        connection
+            .push(field_row("name", "Name", &form.name, bare(&form.name), t).into_any_element());
+        match form.engine.fields() {
+            // An engine that is a file has no host, no credentials and no
+            // transport, so those fields are absent rather than present and
+            // inert. A disabled field still reads as something the
+            // connection has.
+            Fields::File => connection.push(
+                field_row(
+                    "path",
+                    "Database file",
+                    &form.path,
+                    mono_field(&form.path),
+                    t,
+                )
+                .into_any_element(),
+            ),
+            // No encryption row: the transport is HTTPS and always verified,
+            // so there is no choice to show. No password either; the key
+            // file is the credential.
+            Fields::Account => {
+                for (id, label, input, monospace) in [
+                    ("account", "Account", &form.account, false),
+                    ("user", "User", &form.user, false),
+                    ("private-key", "Private key file", &form.private_key, true),
+                    ("database", "Database", &form.database, false),
+                    ("warehouse", "Warehouse", &form.warehouse, false),
+                    ("role", "Role", &form.role, false),
+                    // Last, because it is nearly always blank: the account
+                    // names its own host.
+                    ("host", "Host", &form.host, false),
+                ] {
+                    let control = if monospace {
+                        mono_field(input)
+                    } else {
+                        bare(input)
+                    };
+                    connection.push(field_row(id, label, input, control, t).into_any_element());
+                }
+            }
+            Fields::Server => {
+                // An SRV name takes no port: its records name each server's
+                // own.
+                let srv = form.srv && form.engine.resolves_srv();
+                connection.push(
+                    field_row("host", "Host", &form.host, bare(&form.host), t)
+                        .when(!srv, |row| row.child(port_field(&form.port, t)))
+                        .into_any_element(),
+                );
+                if form.engine.resolves_srv() {
+                    connection.push(
+                        ui::option_row(
+                            "SRV host",
+                            Some("The host is a DNS name whose records list the servers (mongodb+srv).".into()),
+                            ui::switch("srv-host", form.srv, t).on_click(cx.listener(
+                                |workspace, _, window, cx| {
+                                    if let Some(form) = &mut workspace.form {
+                                        form.srv = !form.srv;
+                                        // The port going takes the focus with it.
+                                        if form.srv && form.port.focus_handle(cx).is_focused(window) {
+                                            form.needs_focus = Some(form.host.clone());
+                                        }
+                                        form.test = None;
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                            t,
+                        )
+                        .into_any_element(),
+                    );
+                }
+                connection.extend(
+                    [
+                        field_row(
+                            "database",
+                            "Database",
+                            &form.database,
+                            bare(&form.database),
+                            t,
+                        ),
+                        field_row("user", "User", &form.user, bare(&form.user), t),
+                        field_row(
+                            "password",
+                            "Password",
+                            &form.password,
+                            bare(&form.password).mask_toggle(),
+                            t,
+                        ),
+                    ]
+                    .map(IntoElement::into_any_element),
+                );
+                if form.engine.takes_options() {
+                    connection.push(
+                        field_row(
+                            "options",
+                            "Options",
+                            &form.options,
+                            mono_field(&form.options),
+                            t,
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        let mut security = Vec::new();
+        if form.engine.fields() == Fields::Server {
+            security.push(
+                ui::option_row(
+                    "Encryption",
+                    // Five words do not say which ones check who answered,
+                    // and that is the whole difference between them.
+                    Some(form.sslmode.explanation().into()),
+                    self.sslmode_dropdown(cx),
+                    t,
+                )
+                .into_any_element(),
+            );
+            // Only where it is consulted: on `require` a certificate file
+            // changes nothing, and a field that changes nothing reads as
+            // though it does.
+            if form.sslmode.checks_certificate() {
+                security.push(
+                    field_row(
+                        "root-certificate",
+                        "Root certificate",
+                        &form.root_certificate,
+                        mono_field(&form.root_certificate),
+                        t,
+                    )
+                    .into_any_element(),
+                );
+            }
+            // Host and Port are the far end of the forward, which is easy to
+            // read as this machine's view of the network.
+            security.push(
+                ui::option_row(
+                    "SSH tunnel",
+                    Some(
+                        "Host and port are as the SSH host sees them: localhost is the SSH host \
+                         itself."
+                            .into(),
+                    ),
+                    ui::switch("ssh-tunnel", form.ssh, t)
+                        .on_click(cx.listener(Self::toggle_ssh_tunnel)),
+                    t,
+                )
+                .into_any_element(),
+            );
+            if form.ssh {
+                let reveal = !cx.reduce_motion();
+                let nested = |id: &'static str,
+                              label: &'static str,
+                              input: &Entity<InputState>,
+                              control: Input| {
+                    nested_field_row(layout::SPACE_MD, id, label, input, control, t)
+                };
+                let rows = [
+                    nested("ssh-host", "SSH host", &form.ssh_host, bare(&form.ssh_host))
+                        .child(port_field(&form.ssh_port, t)),
+                    nested("ssh-user", "SSH user", &form.ssh_user, bare(&form.ssh_user)),
+                    nested(
+                        "identity-file",
+                        "Identity file",
+                        &form.ssh_identity_file,
+                        mono_field(&form.ssh_identity_file),
+                    ),
+                ];
+                security.extend(
+                    rows.into_iter()
+                        .enumerate()
+                        .map(|(index, row)| revealed(row, index, reveal)),
+                );
+            }
+        }
+
+        let mut behaviour = Vec::new();
+        // Only while creating: past that, `Workspace::set_mode` is the one
+        // door a mode changes through, from the titlebar, and it pushes the
+        // change into live grids this form has no route to.
+        if form.editing.is_none() {
+            let access = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
+                ui::segmented_choice(("access", index), mode.label(), mode == form.mode, t)
+                    .on_click(cx.listener(move |workspace, _, _, cx| {
+                        if let Some(form) = &mut workspace.form {
+                            form.mode = mode;
+                            // A pass without the Read-only hold did not test it.
+                            form.test = None;
+                            cx.notify();
+                        }
+                    }))
+            });
+            behaviour.push(
+                ui::option_row("Access", None, ui::segmented(t).children(access), t)
+                    .into_any_element(),
+            );
+        }
+        // The colour only ever labels a connection, so nothing here can make
+        // the form invalid and nothing has to move focus.
+        let swatches = std::iter::once(None)
+            .chain(ConnectionColor::ALL.map(Some))
+            .enumerate()
+            .map(|(index, color)| {
+                ui::swatch(("color", index), color, color == form.color, t).on_click(cx.listener(
+                    move |workspace, _, _, cx| {
+                        if let Some(form) = &mut workspace.form {
+                            form.color = color;
+                            cx.notify();
+                        }
+                    },
+                ))
+            });
+        behaviour.push(
+            ui::option_row(
+                "Color",
+                None,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .children(swatches),
+                t,
+            )
+            .into_any_element(),
+        );
+        behaviour
+            .push(ui::option_row("Project", None, self.project_dropdown(cx), t).into_any_element());
+        // Every engine can stop a statement, and this is the only place a
+        // profile has to say for how long.
+        behaviour.push(
+            ui::option_row(
+                "Statement timeout",
+                None,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .w(px(layout::chrome(layout::FORM_TIMEOUT_WIDTH)))
+                    .h(px(Control::Compact.height()))
+                    .px(px(layout::SPACE_SM))
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .border_1()
+                    .border_color(t.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(gpui_component::Sizable::small(bare(
+                                &form.statement_timeout,
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(t.text_faint)
+                            .child("s"),
+                    ),
+                t,
+            )
+            .into_any_element(),
+        );
+
+        let section = |label: &'static str, rows: Vec<AnyElement>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_SM))
+                .child(
+                    div()
+                        .px(px(layout::SPACE_XS))
+                        .child(section_label(t, label)),
+                )
+                .child(ui::well(t, rows))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(layout::FORM_SECTION_GAP))
+            .px(px(layout::FORM_PADDING))
+            .pb(px(layout::FORM_PADDING))
+            .child(section("Connection", connection))
+            .when(!security.is_empty(), |body| {
+                body.child(section("Security", security))
+            })
+            .child(section("Behaviour", behaviour))
+    }
+
+    /// Test and what it last said, then the way out and the way in.
+    fn render_form_footer(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        let status = match (&form.error, &form.test) {
+            (Some(error), _) => Some((Status::Failed, one_line(error))),
+            (None, Some(ConnectionTest::Running(_))) => {
+                Some((Status::Connecting, "Testing connection…".to_string()))
+            }
+            (None, Some(ConnectionTest::Passed)) => {
+                Some((Status::Connected, "Connection succeeded.".to_string()))
+            }
+            (None, Some(ConnectionTest::Failed(message))) => {
+                Some((Status::Failed, one_line(message)))
+            }
+            (None, None) => None,
+        };
+        let commit = if form.editing.is_some() {
+            "Save"
+        } else {
+            "Connect"
+        };
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .px(px(layout::FORM_PADDING))
+            .py(px(layout::SPACE_MD))
+            .border_t_1()
+            .border_color(t.border)
+            .child(
+                button("test-connection", "Test", Tone::Quiet, Control::Standard, t)
+                    .border_1()
+                    .border_color(t.border)
+                    .on_click(cx.listener(Self::test_connection)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .children(status.map(|(status, text)| {
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(layout::SPACE_SM))
+                            .child(ui::status_dot(t, status))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                    .text_color(if status == Status::Failed {
+                                        t.danger
+                                    } else {
+                                        t.text_muted
+                                    })
+                                    .child(text),
+                            )
+                    })),
+            )
+            .child(
+                button("cancel", "Cancel", Tone::Quiet, Control::Standard, t)
+                    .on_click(cx.listener(|workspace, _, _, cx| workspace.close_form(cx))),
+            )
+            .child(ui::accent_button("connect", commit, t, cx).on_click(cx.listener(Self::connect)))
+    }
+
+    fn sslmode_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        Self::form_dropdown(
+            "sslmode",
+            form.sslmode,
+            vec![SslMode::ALL.to_vec()],
+            |mode| mode.label().into(),
+            |_| None,
+            |form, mode| {
+                // Stepping down from a verifying mode unmounts the
+                // certificate field, which may be the one holding focus.
+                if form.sslmode.checks_certificate() && !mode.checks_certificate() {
+                    form.needs_focus = Some(form.password.clone());
+                }
+                form.sslmode = mode;
+            },
+            cx,
+        )
+    }
+
+    fn toggle_ssh_tunnel(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        form.ssh = !form.ssh;
+        if form.ssh {
+            form.needs_focus = Some(form.ssh_host.clone());
+        } else if [
+            &form.ssh_host,
+            &form.ssh_port,
+            &form.ssh_user,
+            &form.ssh_identity_file,
+        ]
+        .iter()
+        .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            // The rows going take the focus with them.
+            form.needs_focus = Some(form.password.clone());
+        }
+        // A pass without the tunnel did not test it.
+        form.test = None;
+        cx.notify();
+    }
+
+    /// Closes the form without saving, from its × or its Cancel.
+    pub(crate) fn close_form(&mut self, cx: &mut Context<Self>) {
+        self.form = None;
+        self.refocus_front();
+        cx.notify();
     }
 
     /// Where an import's connections go, asked before any is added: a new
@@ -527,15 +760,6 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
-    }
-
-    pub(crate) fn form_field(
-        &self,
-        label: &'static str,
-        input: &Entity<InputState>,
-        cx: &App,
-    ) -> impl IntoElement {
-        self.labelled_field(label, Input::new(input).w_full(), cx)
     }
 
     pub(crate) fn labelled_field(
@@ -1794,23 +2018,6 @@ pub(super) fn welcome_row(id: impl Into<gpui::ElementId>, t: Theme) -> gpui::Sta
         .hover(|style| style.bg(t.element_hover))
 }
 
-/// The mark a card leads with: its icon, in the accent, on a tile.
-fn icon_tile(t: Theme, path: &'static str) -> gpui::Div {
-    div()
-        .size(px(layout::chrome(28.)))
-        .flex_shrink_0()
-        .rounded(px(layout::RADIUS_CONTROL))
-        .bg(t.element_active)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            icon(path)
-                .size(px(layout::chrome(layout::ICON_SIZE)))
-                .text_color(t.accent),
-        )
-}
-
 pub(super) fn name_field(input: &Entity<InputState>) -> AnyElement {
     div()
         .px(px(layout::SPACE_XS))
@@ -1861,5 +2068,94 @@ fn crumb_separator(t: Theme) -> AnyElement {
         .text_size(px(layout::chrome(layout::TEXT_SM)))
         .text_color(t.text_faint)
         .child("/")
+        .into_any_element()
+}
+
+/// A field of the connection form: its label, then whatever takes the rest of
+/// the row. The label focuses the field, as a form's label does.
+fn field_row(
+    id: &'static str,
+    label: &'static str,
+    input: &Entity<InputState>,
+    control: impl IntoElement,
+    t: Theme,
+) -> gpui::Div {
+    nested_field_row(0., id, label, input, control, t)
+}
+
+/// [`field_row`] with its label stepped in by `indent`, for a field that
+/// belongs to the switch above it. The field itself stays in line with the
+/// others.
+fn nested_field_row(
+    indent: f32,
+    id: &'static str,
+    label: &'static str,
+    input: &Entity<InputState>,
+    control: impl IntoElement,
+    t: Theme,
+) -> gpui::Div {
+    let target = input.clone();
+    div()
+        .flex()
+        .items_center()
+        .min_h(px(layout::chrome(layout::FORM_ROW_HEIGHT)))
+        .px(px(layout::SPACE_LG))
+        .child(
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .w(px(layout::FORM_LABEL_WIDTH))
+                .pl(px(indent))
+                .text_color(t.text_muted)
+                .child(label)
+                .on_click(move |_, window, cx| target.focus_handle(cx).focus(window, cx)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .child(control),
+        )
+}
+
+/// A field with nothing around it: the row it sits in is the box.
+fn bare(input: &Entity<InputState>) -> Input {
+    Input::new(input).appearance(false).p_0()
+}
+
+/// A port after its host, behind a hairline and the colon that joins the two
+/// in a URL.
+fn port_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .w(px(layout::FORM_PORT_WIDTH))
+        .ml(px(layout::SPACE_SM))
+        .pl(px(layout::SPACE_SM))
+        .border_l_1()
+        .border_color(t.border)
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .child(div().text_color(t.text_faint).child(":"))
+        .child(div().flex_1().min_w_0().child(bare(input)))
+}
+
+const SSH_REVEAL_MS: u64 = 220;
+const SSH_REVEAL_PX: f32 = 4.;
+
+/// The SSH rows, settling in once as the tunnel is switched on. Keyed by the
+/// row, so it plays each time they mount and never again while they stay.
+fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
+    if !animate {
+        return row.into_any_element();
+    }
+    row.relative()
+        .with_animation(
+            ("ssh-reveal", index),
+            Animation::new(Duration::from_millis(SSH_REVEAL_MS)).with_easing(ease_out_quint()),
+            |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
+        )
         .into_any_element()
 }
