@@ -1,8 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use gpui_component::tree::TreeItem;
 
-use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
+use crate::db::{Catalog, Engine, RelationKind, Routine, RoutineKind, Schema};
+use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
 
 /// The row counts a preview can be asked for besides none at all, and the one
@@ -58,20 +62,73 @@ pub struct ExplorerLeaf {
     pub size: Option<u64>,
 }
 
+#[derive(Default)]
 pub struct ExplorerTree {
     pub items: Vec<TreeItem>,
     pub leaves: HashMap<String, ExplorerLeaf>,
+    /// The characters of each row's own name the filter matched, by row id.
+    /// A row kept only because its schema or parent matched has none.
+    pub highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+/// One filter pass over the catalog: the query parsed once, and what the rows
+/// it keeps record as they are built.
+struct Builder {
+    query: Query,
+    fuzzy: Fuzzy,
+    lowercase: String,
+    leaves: HashMap<String, ExplorerLeaf>,
+    highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+impl Builder {
+    fn new(filter: &str) -> Self {
+        Self {
+            query: Query::new(filter),
+            fuzzy: Fuzzy::new(),
+            lowercase: filter.trim().to_lowercase(),
+            leaves: HashMap::new(),
+            highlights: HashMap::new(),
+        }
+    }
+
+    /// Whether the row `id`'s own name matches, noting which characters did.
+    fn name_matches(&mut self, id: &str, name: &str) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        if !self.fuzzy.matches(&self.query, name) {
+            return false;
+        }
+        let ranges = self.fuzzy.highlights(&self.query, name);
+        if !ranges.is_empty() {
+            self.highlights.insert(id.to_string(), ranges);
+        }
+        true
+    }
+
+    // Substring, not fuzzy: these are searched for a word like `bigint` or
+    // `plpgsql`, and as a subsequence a type signature matches nearly anything.
+    fn signature_matches(&self, routine: &Routine) -> bool {
+        [
+            &routine.identity_arguments,
+            &routine.result_type,
+            &routine.language,
+        ]
+        .into_iter()
+        .any(|field| field.to_lowercase().contains(&self.lowercase))
+    }
 }
 
 pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
-    let filter = filter.trim().to_lowercase();
-    let mut leaves = HashMap::new();
+    let mut builder = Builder::new(filter);
 
     let items = catalog
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let schema_matches = matches_filter(&schema.name, &filter);
+            let id = format!("schema-{schema_index}");
+            let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
             let partitions = partitions_by_parent(schema);
@@ -89,12 +146,11 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     })
                     .filter_map(|(relation_index, _)| {
                         relation_item(
-                            &mut leaves,
+                            &mut builder,
                             schema,
                             schema_index,
                             relation_index,
                             &partitions,
-                            &filter,
                             schema_matches,
                         )
                     })
@@ -110,13 +166,14 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .routines
                     .iter()
                     .enumerate()
-                    .filter(|(_, routine)| {
-                        routine.kind == kind
-                            && (schema_matches || routine_matches(routine, &filter))
-                    })
-                    .map(|(routine_index, routine)| {
+                    .filter(|(_, routine)| routine.kind == kind)
+                    .filter_map(|(routine_index, routine)| {
                         let id = format!("routine-{schema_index}-{routine_index}");
-                        leaves.insert(
+                        let name_matches = builder.name_matches(&id, &routine.name);
+                        if !(schema_matches || name_matches || builder.signature_matches(routine)) {
+                            return None;
+                        }
+                        builder.leaves.insert(
                             id.clone(),
                             ExplorerLeaf {
                                 target: ExplorerTarget::Routine {
@@ -127,10 +184,10 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                                 size: None,
                             },
                         );
-                        TreeItem::new(
+                        Some(TreeItem::new(
                             id,
                             format!("{}({})", routine.name, routine.identity_arguments),
-                        )
+                        ))
                     })
                     .collect::<Vec<_>>();
 
@@ -144,14 +201,18 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
             }
 
             Some(
-                TreeItem::new(format!("schema-{schema_index}"), schema.name.clone())
+                TreeItem::new(id, schema.name.clone())
                     .expanded(true)
                     .children(groups),
             )
         })
         .collect();
 
-    ExplorerTree { items, leaves }
+    ExplorerTree {
+        items,
+        leaves: builder.leaves,
+        highlights: builder.highlights,
+    }
 }
 
 /// Every schema's partitions, by the name of the relation they hang under.
@@ -188,31 +249,23 @@ fn partitions_by_parent(schema: &Schema) -> HashMap<&str, Vec<usize>> {
 /// parent whose name the filter matched — which is what makes a filter on a
 /// partitioned table keep all of its partitions.
 fn relation_item(
-    leaves: &mut HashMap<String, ExplorerLeaf>,
+    builder: &mut Builder,
     schema: &Schema,
     schema_index: usize,
     relation_index: usize,
     partitions: &HashMap<&str, Vec<usize>>,
-    filter: &str,
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let matched = inherited || relation_matches(relation, filter);
+    let id = format!("relation-{schema_index}-{relation_index}");
+    let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
         .get(relation.name.as_str())
         .into_iter()
         .flatten()
         .filter_map(|&index| {
-            relation_item(
-                leaves,
-                schema,
-                schema_index,
-                index,
-                partitions,
-                filter,
-                matched,
-            )
+            relation_item(builder, schema, schema_index, index, partitions, matched)
         })
         .collect();
 
@@ -220,8 +273,7 @@ fn relation_item(
         return None;
     }
 
-    let id = format!("relation-{schema_index}-{relation_index}");
-    leaves.insert(
+    builder.leaves.insert(
         id.clone(),
         ExplorerLeaf {
             target: ExplorerTarget::Relation {
@@ -404,21 +456,6 @@ fn from_where(engine: Engine, schema: &str, relation: &str, filter: &str) -> Str
         sql.push_str(&format!(" WHERE {filter}"));
     }
     sql
-}
-
-fn relation_matches(relation: &Relation, filter: &str) -> bool {
-    matches_filter(&relation.name, filter)
-}
-
-fn routine_matches(routine: &Routine, filter: &str) -> bool {
-    matches_filter(&routine.name, filter)
-        || matches_filter(&routine.identity_arguments, filter)
-        || matches_filter(&routine.result_type, filter)
-        || matches_filter(&routine.language, filter)
-}
-
-fn matches_filter(value: &str, filter: &str) -> bool {
-    filter.is_empty() || value.to_lowercase().contains(filter)
 }
 
 #[cfg(test)]
@@ -710,6 +747,70 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "analytics");
         assert_eq!(items[0].children[0].children[0].label, "events");
+    }
+
+    fn marked(explorer: &ExplorerTree, id: &str, label: &str) -> Option<String> {
+        let ranges = explorer.highlights.get(id)?;
+        Some(ranges.iter().map(|range| &label[range.clone()]).collect())
+    }
+
+    #[test]
+    fn a_subsequence_of_a_name_finds_it_and_marks_the_letters_it_matched() {
+        let explorer = tree(&catalog(), "acct");
+        let categories = &explorer.items[0].children;
+
+        assert_eq!(explorer.items.len(), 1);
+        assert_eq!(categories[0].children[0].label, "accounts");
+        assert_eq!(
+            marked(&explorer, "relation-1-1", "accounts").as_deref(),
+            Some("acct")
+        );
+        // A routine's row reads `name(args)`, and only the name was matched.
+        let label = "account_name(account_id bigint)";
+        assert_eq!(categories[2].children[0].label, label);
+        assert_eq!(
+            marked(&explorer, "routine-1-1", label).as_deref(),
+            Some("acct")
+        );
+        assert!(
+            explorer.highlights["routine-1-1"]
+                .iter()
+                .all(|range| range.end <= "account_name".len())
+        );
+    }
+
+    #[test]
+    fn a_routine_signature_matches_as_a_substring_and_is_not_marked() {
+        let by_argument = tree(&catalog(), "BIGINT");
+        assert_eq!(
+            by_argument.items[0].children[0].children[0].label,
+            "account_name(account_id bigint)"
+        );
+        assert!(by_argument.highlights.is_empty());
+
+        let by_language = tree(&catalog(), "plpgsql");
+        assert_eq!(
+            by_language.items[0].children[0].children[0].label,
+            "reindex()"
+        );
+
+        // A subsequence of `account_id bigint`, which no name holds.
+        assert!(tree(&catalog(), "acbt").items.is_empty());
+    }
+
+    #[test]
+    fn only_a_row_whose_own_name_matched_is_marked() {
+        let explorer = tree(&catalog(), "analytics");
+
+        assert_eq!(
+            marked(&explorer, "schema-0", "analytics").as_deref(),
+            Some("analytics")
+        );
+        // Kept because its schema matched, not because of its name.
+        assert!(explorer.leaves.contains_key("relation-0-0"));
+        assert!(!explorer.highlights.contains_key("relation-0-0"));
+
+        assert!(tree(&catalog(), "").highlights.is_empty());
     }
 
     #[test]

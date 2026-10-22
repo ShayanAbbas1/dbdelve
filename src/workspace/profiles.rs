@@ -15,6 +15,9 @@ use std::path::Path;
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
+        // Every change to the connections or projects passes through here,
+        // and the switcher's search holds indices into them.
+        self.match_connections(cx);
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
@@ -1738,15 +1741,13 @@ impl Workspace {
         let filter = profile.session.explorer_filter.read(cx).value();
         let explorer = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
-            _ => explorer::ExplorerTree {
-                items: Vec::new(),
-                leaves: HashMap::new(),
-            },
+            _ => explorer::ExplorerTree::default(),
         };
         let tree = profile.session.explorer_tree.clone();
 
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
+            profile.session.explorer_highlights = Arc::new(explorer.highlights);
         }
         tree.update(cx, |tree, cx| tree.set_items(explorer.items, cx));
     }

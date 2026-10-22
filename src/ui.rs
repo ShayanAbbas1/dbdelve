@@ -7,8 +7,8 @@
 //! up looking like two different applications.
 
 use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled,
-    div, prelude::FluentBuilder, px,
+    AnyElement, Div, FontWeight, HighlightStyle, InteractiveElement, IntoElement, Keystroke,
+    ParentElement, SharedString, Styled, StyledText, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     InteractiveElementExt, POPOVER_BLUR,
@@ -16,7 +16,7 @@ use gpui_component::{
     kbd::Kbd,
 };
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use crate::{
     actions::RefreshConnection,
@@ -43,6 +43,24 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
         ObjectKind::Routine(RoutineKind::Function) => icon::FUNCTION,
         ObjectKind::Routine(RoutineKind::Procedure) => icon::PROCEDURE,
     }
+}
+
+/// `text` with the byte `ranges` a filter matched drawn in the accent, bolder.
+pub(crate) fn highlighted(
+    text: impl Into<SharedString>,
+    ranges: &[Range<usize>],
+    t: Theme,
+) -> StyledText {
+    let style = HighlightStyle {
+        color: Some(t.accent.into()),
+        font_weight: Some(FontWeight::SEMIBOLD),
+        ..Default::default()
+    };
+    let text = StyledText::new(text);
+    if ranges.is_empty() {
+        return text;
+    }
+    text.with_highlights(ranges.iter().map(|range| (range.clone(), style)))
 }
 
 /// One column of icons down the sidebar, so every label starts at the same x

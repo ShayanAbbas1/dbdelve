@@ -3,6 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use gpui::StyledText;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
@@ -1726,15 +1727,15 @@ impl Workspace {
             let t = popup_theme(cx);
             let add_workspace = workspace.clone();
             let dismiss_workspace = workspace.clone();
-            let searched = self.searched_connections(cx);
-            let selected = self.selected_connection(cx);
+            let searched = self.connection_matches.as_ref();
+            let selected = self.selected_connection();
             let mut profile_rows = HashMap::<Option<String>, Vec<AnyElement>>::new();
             for (index, profile) in
                 self.profiles
                     .iter()
                     .enumerate()
-                    .filter(|(index, profile)| match &searched {
-                        Some(matches) => matches.contains(index),
+                    .filter(|(index, profile)| match searched {
+                        Some(matches) => matches.order.contains(index),
                         None => {
                             self.projects.is_empty() || self.is_expanded(self.group_of(&profile.id))
                         }
@@ -1779,7 +1780,13 @@ impl Workspace {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(profile.name.clone()),
+                                .child(highlighted(
+                                    profile.name.clone(),
+                                    searched
+                                        .and_then(|matches| matches.names.get(&index))
+                                        .map_or(&[][..], Vec::as_slice),
+                                    t,
+                                )),
                         )
                         .child(
                             div()
@@ -2433,6 +2440,7 @@ impl Workspace {
         let t = *theme(cx);
         let workspace = cx.entity().downgrade();
         let leaves = profile.session.explorer_leaves.clone();
+        let highlights = profile.session.explorer_highlights.clone();
         let menu_leaves = leaves.clone();
         let menu_workspace = workspace.clone();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
@@ -2464,19 +2472,25 @@ impl Workspace {
                         let active = leaf.is_none()
                             && entry.depth() == 0
                             && active_schema.as_ref() == Some(&label);
+                        let matched = highlights
+                            .get(entry.item().id.as_str())
+                            .map_or(&[][..], Vec::as_slice);
                         // Three ranks, three weights: a schema owns the column, a
                         // category only labels the run of objects under it, and the
                         // objects themselves are what the eye is actually hunting for.
                         let (label, row) = match (leaf, entry.depth()) {
-                            (Some(_), _) => (label, ListItem::new(index).text_color(t.text)),
+                            (Some(_), _) => (
+                                highlighted(label, matched, t),
+                                ListItem::new(index).text_color(t.text),
+                            ),
                             (None, 0) => (
-                                label,
+                                highlighted(label, matched, t),
                                 ListItem::new(index)
                                     .text_color(t.text)
                                     .font_weight(FontWeight::SEMIBOLD),
                             ),
                             (None, _) => (
-                                label.to_uppercase().into(),
+                                StyledText::new(label.to_uppercase()),
                                 ListItem::new(index)
                                     .text_color(t.text_faint)
                                     .text_size(px(layout::chrome(layout::TEXT_XS)))

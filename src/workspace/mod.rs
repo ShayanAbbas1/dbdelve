@@ -147,6 +147,10 @@ pub(crate) struct Workspace {
     /// The switcher's search field, there while the switcher is open.
     pub(crate) connection_search: Option<Entity<InputState>>,
     pub(crate) connection_search_needs_focus: bool,
+    /// What the search matches, worked out when the query or the
+    /// connections change rather than every frame. `None` while the field is
+    /// empty or put away.
+    pub(crate) connection_matches: Option<projects::ConnectionMatches>,
     /// Which of the search's matches up and down have moved to, and Enter
     /// opens.
     pub(crate) search_selection: usize,
@@ -300,6 +304,7 @@ impl Workspace {
             menu_imports_rows: false,
             connection_search: None,
             connection_search_needs_focus: false,
+            connection_matches: None,
             search_selection: 0,
             projects: Vec::new(),
             project_name: None,

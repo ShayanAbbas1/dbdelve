@@ -16,16 +16,13 @@ use gpui_component::{
     IndexPath,
     list::{ListDelegate, ListItem, ListState},
 };
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{CaseMatching, Normalization, Pattern},
-};
 
 use crate::{
     Workspace,
     db::{ExplainMode, RelationKind, RoutineKind},
     explorer::{ExplorerTarget, ObjectKind},
     export::Format,
+    fuzzy::{Fuzzy, Query},
     icons::icon,
     import::Source,
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
@@ -190,7 +187,7 @@ pub struct Palette {
     /// Indices into `items`, best first. The list renders through this, so the
     /// order on screen is the matcher's order.
     matched: Vec<usize>,
-    matcher: Matcher,
+    fuzzy: Fuzzy,
     /// The theme in force when a theme list opened, for a filter that
     /// matches nothing, or a row that is not a theme, to fall back to.
     unpreviewed: Option<Theme>,
@@ -217,7 +214,7 @@ impl Palette {
             mode,
             matched: (0..items.len()).collect(),
             items,
-            matcher: Matcher::new(Config::DEFAULT),
+            fuzzy: Fuzzy::new(),
             unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
             theme_opacity: workspace.settings.theme_opacity.clone(),
             fallback_opacity: workspace.settings.opacity,
@@ -265,7 +262,7 @@ impl ListDelegate for Palette {
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) -> Task<()> {
-        self.matched = matches(&self.items, query, &mut self.matcher);
+        self.matched = matches(&self.items, query, &mut self.fuzzy);
         Task::ready(())
     }
 
@@ -1079,22 +1076,14 @@ fn kind_label(kind: ObjectKind) -> &'static str {
 }
 
 /// Score every label against the query and keep the survivors, best first.
-///
-/// An empty query scores everything at zero, and the sort is stable, so the
-/// unfiltered list is the list in the order it was built.
-fn matches(items: &[Item], query: &str, matcher: &mut Matcher) -> Vec<usize> {
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-    let mut buffer = Vec::new();
-    let mut scored = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            let label = Utf32Str::new(&item.label, &mut buffer);
-            pattern.score(label, matcher).map(|score| (index, score))
+fn matches(items: &[Item], query: &str, fuzzy: &mut Fuzzy) -> Vec<usize> {
+    fuzzy
+        .rank(&Query::new(query), items.iter().enumerate(), |(_, item)| {
+            item.label.as_str()
         })
-        .collect::<Vec<_>>();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(index, _)| index).collect()
+        .into_iter()
+        .map(|((index, _), _)| index)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1110,8 +1099,7 @@ mod tests {
 
     fn matched(labels: &[&str], query: &str) -> Vec<String> {
         let items = items(labels);
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        matches(&items, query, &mut matcher)
+        matches(&items, query, &mut Fuzzy::new())
             .into_iter()
             .map(|index| items[index].label.clone())
             .collect()

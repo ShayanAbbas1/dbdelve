@@ -244,6 +244,9 @@ pub(crate) struct Session {
     pub(crate) explorer_filter: Entity<InputState>,
     pub(crate) explorer_tree: Entity<TreeState>,
     pub(crate) explorer_leaves: Arc<HashMap<String, ExplorerLeaf>>,
+    /// The matched characters of each row's name, by tree item id, as
+    /// [`crate::explorer::ExplorerTree::highlights`] built them.
+    pub(crate) explorer_highlights: Arc<HashMap<String, Vec<Range<usize>>>>,
     /// `cmd+enter` reaches the workspace only through the focused element's
     /// dispatch path, so an unfocused editor makes the primary keystroke dead.
     pub(crate) editor_needs_focus: bool,
@@ -552,6 +555,7 @@ impl Session {
             explorer_filter,
             explorer_tree: cx.new(|cx| TreeState::new(cx)),
             explorer_leaves: Arc::new(HashMap::new()),
+            explorer_highlights: Arc::new(HashMap::new()),
             editor_needs_focus: true,
             save_name_needs_focus: false,
             saved_queries,

@@ -4,7 +4,18 @@
 //! next/previous connection keep to; nothing about a connection itself
 //! changes, so its tabs, saved queries and history come back as they were.
 
+use std::ops::Range;
+
 use super::*;
+use crate::fuzzy::{Fuzzy, Query};
+
+/// The connections the switcher's search keeps, and the characters of each
+/// one's name it matched.
+pub(crate) struct ConnectionMatches {
+    /// Indices into the profiles, in the order the switcher lists them.
+    pub(crate) order: Vec<usize>,
+    pub(crate) names: HashMap<usize, Vec<Range<usize>>>,
+}
 
 impl Workspace {
     /// The project a connection is in, by name, or `None` for No project.
@@ -65,6 +76,7 @@ impl Workspace {
         self.assigning_project = None;
         self.expanded_groups = vec![self.current_group().map(str::to_string)];
         self.search_selection = 0;
+        self.connection_matches = None;
         let input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(
             &input,
@@ -72,10 +84,11 @@ impl Workspace {
             |workspace, _, event: &InputEvent, _, cx| match event {
                 InputEvent::Change => {
                     workspace.search_selection = 0;
+                    workspace.match_connections(cx);
                     cx.notify();
                 }
                 InputEvent::PressEnter { .. } => {
-                    if let Some(index) = workspace.selected_connection(cx) {
+                    if let Some(index) = workspace.selected_connection() {
                         workspace.activate(index, cx);
                     }
                 }
@@ -92,6 +105,7 @@ impl Workspace {
     /// `drop_project_name` gives. Not when the switcher closed for a form: the
     /// tab's focus is applied after the form's, and would take it.
     pub(crate) fn drop_connection_search(&mut self) {
+        self.connection_matches = None;
         if self.connection_search.take().is_some()
             && self.form.is_none()
             && let Some(profile) = self.profile_mut()
@@ -102,18 +116,18 @@ impl Workspace {
 
     /// The match up and down have moved to, held inside the matches as they
     /// narrow.
-    pub(crate) fn selected_connection(&self, cx: &App) -> Option<usize> {
-        let matches = self.searched_connections(cx)?;
+    pub(crate) fn selected_connection(&self) -> Option<usize> {
+        let matches = &self.connection_matches.as_ref()?.order;
         matches
             .get(self.search_selection.min(matches.len().saturating_sub(1)))
             .copied()
     }
 
     pub(crate) fn step_search_selection(&mut self, step: isize, cx: &mut Context<Self>) {
-        let Some(matches) = self.searched_connections(cx) else {
+        let Some(matches) = &self.connection_matches else {
             return;
         };
-        let last = matches.len().saturating_sub(1);
+        let last = matches.order.len().saturating_sub(1);
         self.search_selection = self
             .search_selection
             .min(last)
@@ -122,16 +136,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The connections the switcher's search matches, in the order it lists
-    /// them, or `None` while there is no search.
-    pub(crate) fn searched_connections(&self, cx: &App) -> Option<Vec<usize>> {
-        let query = self
-            .connection_search
-            .as_ref()?
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
+    /// Runs the switcher's search again, for a query or a set of connections
+    /// or projects that changed. A no-op while there is no search.
+    pub(crate) fn match_connections(&mut self, cx: &App) {
+        self.connection_matches = self.searched_connections(cx);
+    }
+
+    fn searched_connections(&self, cx: &App) -> Option<ConnectionMatches> {
+        let query = Query::new(&self.connection_search.as_ref()?.read(cx).value());
         if query.is_empty() {
             return None;
         }
@@ -390,16 +402,16 @@ pub(crate) fn chosen_project(
     }
 }
 
-/// The `(id, name, host)` connections whose name, host or project holds
-/// `query`, ignoring case, in the order the switcher lists them: No project
-/// first, then each project's.
+/// The `(id, name, host)` connections whose name, host or project the query
+/// matches, in the order the switcher lists them: No project first, then each
+/// project's. Not ranked, since the switcher is grouped by project.
 fn matching_connections(
     connections: &[(&str, &str, String)],
     projects: &[store::StoredProject],
-    query: &str,
-) -> Vec<usize> {
-    let query = query.to_lowercase();
-    let holds = |text: &str| text.to_lowercase().contains(&query);
+    query: &Query,
+) -> ConnectionMatches {
+    let mut fuzzy = Fuzzy::new();
+    let mut names = HashMap::new();
     let mut matches = connections
         .iter()
         .enumerate()
@@ -407,17 +419,37 @@ fn matching_connections(
             let project = projects
                 .iter()
                 .position(|project| project.connections.iter().any(|member| member == id));
-            (holds(name) || holds(host) || project.is_some_and(|at| holds(&projects[at].name)))
-                .then_some((project.map_or(0, |at| at + 1), index))
+            let name_matches = fuzzy.matches(query, name);
+            if name_matches {
+                let ranges = fuzzy.highlights(query, name);
+                if !ranges.is_empty() {
+                    names.insert(index, ranges);
+                }
+            }
+            (name_matches
+                || fuzzy.matches(query, host)
+                || project.is_some_and(|at| fuzzy.matches(query, &projects[at].name)))
+            .then_some((project.map_or(0, |at| at + 1), index))
         })
         .collect::<Vec<_>>();
     matches.sort_by_key(|&(group, _)| group);
-    matches.into_iter().map(|(_, index)| index).collect()
+    ConnectionMatches {
+        order: matches.into_iter().map(|(_, index)| index).collect(),
+        names,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn matched(
+        connections: &[(&str, &str, String)],
+        projects: &[store::StoredProject],
+        query: &str,
+    ) -> Vec<usize> {
+        matching_connections(connections, projects, &Query::new(query)).order
+    }
 
     fn project(name: &str, connections: &[&str]) -> store::StoredProject {
         store::StoredProject {
@@ -492,10 +524,7 @@ mod tests {
             project("Analytics", &["analytics-prod"]),
             project("Billing", &["billing-prod"]),
         ];
-        assert_eq!(
-            matching_connections(&connections, &projects, "Prod"),
-            [3, 2, 0]
-        );
+        assert_eq!(matched(&connections, &projects, "Prod"), [3, 2, 0]);
     }
 
     #[test]
@@ -506,10 +535,29 @@ mod tests {
             ("scratch", "Scratch", "localhost".to_string()),
         ];
         let projects = [project("Billing", &["ledger"])];
-        assert_eq!(
-            matching_connections(&connections, &projects, "INTERNAL"),
-            [0]
-        );
-        assert_eq!(matching_connections(&connections, &projects, "bill"), [1]);
+        assert_eq!(matched(&connections, &projects, "INTERNAL"), [0]);
+        assert_eq!(matched(&connections, &projects, "bill"), [1]);
+    }
+
+    #[test]
+    fn a_search_matches_a_subsequence_and_marks_only_the_name_it_matched() {
+        let connections = [
+            ("analytics-prod", "Analytics PROD", "localhost".to_string()),
+            ("orders", "Orders", "db.internal".to_string()),
+            ("scratch", "Scratch", "localhost".to_string()),
+        ];
+        let matches = matching_connections(&connections, &[], &Query::new("anprd"));
+        assert_eq!(matches.order, [0]);
+        let name = connections[0].1;
+        let marked = matches.names[&0]
+            .iter()
+            .map(|range| &name[range.clone()])
+            .collect::<String>();
+        assert_eq!(marked.to_lowercase(), "anprd");
+
+        // Kept for its host, so nothing in its name is marked.
+        let matches = matching_connections(&connections, &[], &Query::new("dbint"));
+        assert_eq!(matches.order, [1]);
+        assert!(matches.names.is_empty());
     }
 }

@@ -9,6 +9,7 @@ mod explain;
 mod explorer;
 mod export;
 mod filter;
+mod fuzzy;
 mod import;
 mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
@@ -91,9 +92,9 @@ use session::{
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};
 use ui::{
-    Control, Tone, button, button_label, dialog, frosted_card, group_thousands, human_bytes,
-    icon_button, object_icon, one_line, raised_card, relative_age, row_icon, row_icon_tinted,
-    row_readout, section_label, segment, titlebar,
+    Control, Tone, button, button_label, dialog, frosted_card, group_thousands, highlighted,
+    human_bytes, icon_button, object_icon, one_line, raised_card, relative_age, row_icon,
+    row_icon_tinted, row_readout, section_label, segment, titlebar,
 };
 use workspace::Workspace;
 

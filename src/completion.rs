@@ -29,14 +29,11 @@ use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     TextEdit,
 };
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{CaseMatching, Normalization, Pattern},
-};
 
 use crate::{
     Workspace,
     db::{Catalog, RelationKind, Syntax},
+    fuzzy::{Fuzzy, Query},
     mql::{self, Completing},
     redis_cmd, sql,
 };
@@ -188,9 +185,9 @@ pub struct SchemaCompletions {
     /// `None` only in this module's own tests, which drive [`Self::items`]
     /// against a pre-filled cache and never reach the fetch.
     workspace: Option<WeakEntity<Workspace>>,
-    /// `Matcher` scores through `&mut self` and the trait hands us `&self`.
+    /// The matcher scores through `&mut self` and the trait hands us `&self`.
     /// One matcher reused rather than one per keystroke, as the palette does.
-    matcher: RefCell<Matcher>,
+    fuzzy: RefCell<Fuzzy>,
 }
 
 impl SchemaCompletions {
@@ -205,7 +202,7 @@ impl SchemaCompletions {
             catalog,
             columns,
             workspace: Some(workspace),
-            matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
+            fuzzy: RefCell::new(Fuzzy::new()),
         }
     }
 
@@ -437,26 +434,18 @@ impl SchemaCompletions {
             Syntax::Sql => {}
             Syntax::Redis => {
                 let (word, candidates) = redis_candidates(sql, offset);
-                let ranked = rank(
-                    candidates,
-                    &sql[word.clone()],
-                    &mut self.matcher.borrow_mut(),
-                )
-                .into_iter()
-                .map(|candidate| (word.clone(), candidate))
-                .collect();
+                let ranked = rank(candidates, &sql[word.clone()], &mut self.fuzzy.borrow_mut())
+                    .into_iter()
+                    .map(|candidate| (word.clone(), candidate))
+                    .collect();
                 return (ranked, wanted);
             }
             Syntax::Mongo => {
                 let candidates = self.mongo_candidates(sql, word.clone(), &mut wanted);
-                let ranked = rank(
-                    candidates,
-                    &sql[word.clone()],
-                    &mut self.matcher.borrow_mut(),
-                )
-                .into_iter()
-                .map(|candidate| (word.clone(), candidate))
-                .collect();
+                let ranked = rank(candidates, &sql[word.clone()], &mut self.fuzzy.borrow_mut())
+                    .into_iter()
+                    .map(|candidate| (word.clone(), candidate))
+                    .collect();
                 return (ranked, wanted);
             }
         }
@@ -482,7 +471,7 @@ impl SchemaCompletions {
         let before = &sql[..word.start];
 
         let candidates = self.candidates(statement, before, qualifier, &mut wanted);
-        let ranked = rank(candidates, prefix, &mut self.matcher.borrow_mut())
+        let ranked = rank(candidates, prefix, &mut self.fuzzy.borrow_mut())
             .into_iter()
             .map(|candidate| (word.clone(), candidate))
             .collect();
@@ -576,21 +565,17 @@ fn relation_kind(kind: RelationKind) -> CompletionItemKind {
 
 /// Score every candidate against what has been typed, best first.
 ///
-/// The same scorer the palette uses, for the same reason: a fuzzy match is
-/// what people expect from a list that narrows as they type. An empty query
-/// scores everything at zero and the sort is stable, so the order
-/// [`SchemaCompletions::candidates`] built survives.
-fn rank(candidates: Vec<Candidate>, prefix: &str, matcher: &mut Matcher) -> Vec<Candidate> {
-    let pattern = Pattern::parse(prefix, CaseMatching::Ignore, Normalization::Smart);
-    let mut buffer = Vec::new();
+/// The same matcher the palette uses, for the same reason: a fuzzy match is
+/// what people expect from a list that narrows as they type.
+///
+/// Not [`Fuzzy::rank`]: that gives a tie to the shorter label, and here a tie
+/// keeps the order [`SchemaCompletions::candidates`] built, which puts the
+/// statement's own columns ahead of keywords.
+fn rank(candidates: Vec<Candidate>, prefix: &str, fuzzy: &mut Fuzzy) -> Vec<Candidate> {
+    let query = Query::new(prefix);
     let mut scored = candidates
         .into_iter()
-        .filter_map(|candidate| {
-            let label = Utf32Str::new(&candidate.label, &mut buffer);
-            pattern
-                .score(label, matcher)
-                .map(|score| (score, candidate))
-        })
+        .filter_map(|candidate| Some((fuzzy.score(&query, &candidate.label)?, candidate)))
         .collect::<Vec<_>>();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.truncate(MAX_ITEMS);
@@ -829,7 +814,7 @@ mod tests {
             catalog: Arc::new(catalog),
             columns: Rc::new(RefCell::new(held)),
             workspace: None,
-            matcher: RefCell::new(Matcher::new(Config::DEFAULT)),
+            fuzzy: RefCell::new(Fuzzy::new()),
         }
     }
 
