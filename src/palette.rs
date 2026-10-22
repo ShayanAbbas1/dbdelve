@@ -3,8 +3,8 @@
 //! The palette searches everything the active profile can reach -- its verbs,
 //! its tables and routines, its saved queries, the statements it has run and
 //! the other connections -- and the scope pills narrow it to one of those.
-//! `cmd+p` opens on All and `cmd+shift+p` on Commands; `tab` moves between
-//! scopes. The pickers a command opens (themes, fonts, databases, schemas,
+//! `cmd+p` opens on Objects and `cmd+shift+p` on Commands; `tab` moves
+//! between scopes. The pickers a command opens (themes, fonts, databases, schemas,
 //! columns) are the same card over a list of their own.
 //!
 //! The command scope offers only the verbs that apply to what is on screen: a
@@ -359,7 +359,9 @@ enum Row {
 /// groups are ordered by their best row: the first row is always the best
 /// match, and a group's rows stay together beneath it. Under All a group is a
 /// scope, cut to its best few. With nothing typed, the rows confirmed most
-/// recently lead under Recent, and are not repeated further down.
+/// recently lead under Recent, and are not repeated further down -- except
+/// where the list is already in an order of its own: History is newest first,
+/// and Connections is grouped by project.
 fn arrange(
     items: &[Item],
     scope: Option<Scope>,
@@ -377,21 +379,22 @@ fn arrange(
         |(_, item)| item.label.as_str(),
     );
 
-    let recent: Vec<usize> =
-        if query.is_empty() && matches!(scope, Some(Scope::All | Scope::Commands)) {
-            recents
-                .iter()
-                .filter_map(|(scope, label)| {
-                    ranked
-                        .iter()
-                        .map(|((index, _), _)| *index)
-                        .find(|&index| items[index].scope == *scope && items[index].label == *label)
-                })
-                .take(RECENT_ROWS)
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let recent: Vec<usize> = if query.is_empty()
+        && matches!(scope, Some(Scope::All | Scope::Commands | Scope::Objects))
+    {
+        recents
+            .iter()
+            .filter_map(|(scope, label)| {
+                ranked
+                    .iter()
+                    .map(|((index, _), _)| *index)
+                    .find(|&index| items[index].scope == *scope && items[index].label == *label)
+            })
+            .take(RECENT_ROWS)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let mut groups: Vec<(&'static str, Vec<usize>)> = Vec::new();
     if !recent.is_empty() {
@@ -871,6 +874,12 @@ impl Palette {
             Mode::ImportTheme(source) if self.items.is_empty() => (
                 "No themes found".to_string(),
                 format!("{} has no themes on this machine.", source.name()),
+            ),
+            // `cmd+p` opens on Objects, which is empty until the catalog loads
+            // and on a connection that has none.
+            Mode::Search(scope) if self.query.is_empty() && scope != Scope::All => (
+                format!("No {} here", scope.title().to_lowercase()),
+                "Press Tab to search another scope.".to_string(),
             ),
             Mode::Search(Scope::All) => (
                 "No results".to_string(),
@@ -2065,6 +2074,46 @@ mod tests {
             &recents,
         );
         assert_eq!(rows[..2], [Row::Header(RECENT_GROUP), Row::Item(1)]);
+    }
+
+    #[test]
+    fn cmd_p_opens_on_objects_and_closes_from_there() {
+        let objects = Mode::Search(Scope::Objects);
+        let commands = Mode::Search(Scope::Commands);
+        let all = Mode::Search(Scope::All);
+        assert_eq!(stroke(objects, objects, objects), Stroke::Close);
+        assert_eq!(stroke(objects, all, objects), Stroke::Close);
+        assert_eq!(stroke(commands, objects, objects), Stroke::Close);
+        assert_eq!(
+            stroke(commands, all, objects),
+            Stroke::Rescope(Scope::Objects)
+        );
+        assert_eq!(
+            stroke(objects, objects, commands),
+            Stroke::Rescope(Scope::Commands)
+        );
+    }
+
+    #[test]
+    fn recent_objects_lead_the_objects_scope_until_something_is_typed() {
+        let items = sample();
+        let recents = [(Scope::Objects, "public.events".to_string())];
+        let rows = arrange(
+            &items,
+            Some(Scope::Objects),
+            &Query::new(""),
+            &mut Fuzzy::new(),
+            &recents,
+        );
+        assert_eq!(
+            labels(&items, &rows),
+            [
+                "# Recent",
+                "public.events",
+                "public.accounts",
+                "analytics.events"
+            ]
+        );
     }
 
     #[test]

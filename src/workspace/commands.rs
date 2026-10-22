@@ -13,7 +13,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(PaletteMode::Search(Scope::All), window, cx);
+        self.open_palette(PaletteMode::Search(Scope::Objects), window, cx);
     }
 
     pub(crate) fn go_to_column(

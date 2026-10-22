@@ -132,7 +132,9 @@ registry! {
     ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),
     ("select_database", "Select Database", None, ["secondary-k d"], SelectDatabase),
     ("open_settings", "Open Settings", None, ["secondary-,"], OpenSettings),
-    ("fuzzy_open", "Fuzzy Schema Search", None, ["secondary-p"], FuzzyOpen),
+    // Keyed by the id it had as a search across everything, so an override
+    // saved against it keeps working.
+    ("fuzzy_open", "Go to Object", None, ["secondary-p"], FuzzyOpen),
     ("go_to_column", "Go to Column", None, ["secondary-shift-o"], GoToColumn),
     ("command_palette", "Command Palette", None, ["secondary-shift-p"], CommandPalette),
     ("palette_previous", "Palette: Previous Row", Some("Palette > Input"), ["up"], PalettePrevious),
