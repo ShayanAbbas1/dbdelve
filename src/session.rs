@@ -323,6 +323,14 @@ pub(crate) struct ApplyReview {
     pub(crate) sql: String,
 }
 
+impl ApplyReview {
+    /// Whether this review is in front of `active`, the only tab it is drawn
+    /// over and so the only one it may hold up.
+    pub(crate) fn covers(&self, active: Tab) -> bool {
+        self.tab == active
+    }
+}
+
 /// The row a table has not got yet, one field per column (spec §4).
 ///
 /// Insertion needs a schema and a table and no primary key, so this is offered
@@ -603,6 +611,14 @@ impl Session {
         {
             self.apply_review = None;
         }
+    }
+
+    /// Whether an apply review is open over the active tab. One left on
+    /// another tab is hidden, so it must not refuse this tab's edits.
+    pub(crate) fn apply_review_blocks_active(&self) -> bool {
+        self.apply_review
+            .as_ref()
+            .is_some_and(|review| review.covers(self.active))
     }
 
     /// The query buffer in front, or `None` when an object tab is.
@@ -2252,6 +2268,18 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn a_review_on_another_tab_does_not_block_the_active_one() {
+        let review = ApplyReview {
+            tab: Tab::Query(1),
+            title: "Apply edits",
+            sql: "UPDATE t SET a = 1".into(),
+        };
+        assert!(review.covers(Tab::Query(1)));
+        assert!(!review.covers(Tab::Query(2)));
+        assert!(!review.covers(Tab::Object(1)));
+    }
 
     #[test]
     fn a_plan_survives_the_round_trip_through_a_snapshot() {
