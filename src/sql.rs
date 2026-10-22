@@ -1950,6 +1950,14 @@ pub(crate) enum Mode {
 impl Mode {
     pub(crate) const ALL: [Mode; 3] = [Mode::ReadOnly, Mode::ReadWrite, Mode::Full];
 
+    pub(crate) fn next(self) -> Mode {
+        match self {
+            Mode::ReadOnly => Mode::ReadWrite,
+            Mode::ReadWrite => Mode::Full,
+            Mode::Full => Mode::ReadOnly,
+        }
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Mode::ReadOnly => "Read-only",
@@ -2929,6 +2937,13 @@ fn has_dollar_quote(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mode_cycle_runs_read_only_to_full_and_back() {
+        assert_eq!(Mode::ReadOnly.next(), Mode::ReadWrite);
+        assert_eq!(Mode::ReadWrite.next(), Mode::Full);
+        assert_eq!(Mode::Full.next(), Mode::ReadOnly);
+    }
 
     #[test]
     fn a_grids_statement_is_found_wherever_it_stands_in_the_buffer() {

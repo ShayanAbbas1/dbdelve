@@ -202,6 +202,7 @@ actions!(
         PaletteRowActions,
         SwitchConnection,
         SearchEverything,
+        CycleMode,
         CloseTab,
         ToggleSidebar,
         ToggleRowPanel,

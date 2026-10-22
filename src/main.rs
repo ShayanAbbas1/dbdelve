@@ -56,8 +56,8 @@ use gpui_component::{
 
 use actions::{
     AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
-    CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, DeleteRow, DiscardEdits, EditCell,
-    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
+    CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits,
+    EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
     ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
     NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PreviousEdit,
     PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,

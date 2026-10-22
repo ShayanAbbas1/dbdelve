@@ -92,6 +92,20 @@ impl Workspace {
         self.set_mode(action.mode, cx);
     }
 
+    /// Steps through the same door as the titlebar menu, so it inherits
+    /// whatever that does and nothing more.
+    pub(crate) fn cycle_mode(
+        &mut self,
+        _: &CycleMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mode) = self.profile().map(|profile| profile.mode) else {
+            return;
+        };
+        self.choose_mode(&SetMode { mode: mode.next() }, window, cx);
+    }
+
     /// The picker's way back out of a silenced confirmation -- see `set_mode`'s
     /// caller in the titlebar menu. Without it, ticking "don't ask again" is a
     /// one-way door.

@@ -241,7 +241,9 @@ an upgrade, or ask for confirmation.
   function call or anything else it does not recognise still needs Full.
   Before this a bare `IF` needed Full everywhere, whatever it held.
 - `Workspace::set_mode` is the only place a mode changes; it also pushes the
-  mode into every open grid, which caches it.
+  mode into every open grid, which caches it. `CycleMode` (no default chord,
+  "Cycle Access Level") steps Read-only, Read-write, Full and back through
+  `choose_mode`, so it takes the titlebar menu's path and nothing else.
 - `Connection::set_read_only` holds a Read-only session to reads on the server
   (Postgres and MySQL; SQLite has no such setting, Snowflake no session
   to hold it in, and SQL Server no session-level switch). It is a backstop, not the boundary: `sql::gate` is. A
