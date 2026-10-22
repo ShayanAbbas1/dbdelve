@@ -62,6 +62,10 @@ pub mod layout {
     pub const RADIUS_CONTROL: f32 = 6.0;
     pub const RADIUS_PANEL: f32 = 10.0;
     pub const RADIUS_LARGE: f32 = 16.0;
+    /// The floating cards that hold a surface of their own: the palette and
+    /// the settings panel.
+    pub const RADIUS_CARD: f32 = 14.0;
+    pub const RADIUS_KEYCAP: f32 = 5.0;
 
     /// The three heights a button is drawn at. Standard is for the dialogs and
     /// the connection form, where it sits beside a field and is the thing the
@@ -119,10 +123,28 @@ pub mod layout {
     /// Import Rows lays its options, mapping and preview side by side.
     pub const IMPORT_DIALOG_WIDTH: f32 = 960.0;
     pub const IMPORT_DIALOG_HEIGHT: f32 = 640.0;
-    /// The palette. Wide enough for a schema-qualified name and its kind, and
-    /// capped so a catalog of thousands scrolls rather than filling the window.
-    pub const PALETTE_WIDTH: f32 = 520.0;
-    pub const PALETTE_MAX_HEIGHT: f32 = 360.0;
+    /// The palette. Wide enough for a schema-qualified name, its kind and a
+    /// chord, and its list capped so a catalog of thousands scrolls rather than
+    /// filling the window.
+    pub const PALETTE_WIDTH: f32 = 640.0;
+    pub const PALETTE_MAX_HEIGHT: f32 = 400.0;
+    pub const PALETTE_MIN_HEIGHT: f32 = 120.0;
+    /// What the card holds besides its list -- the field, the scopes and the
+    /// footer -- kept clear of the window's bottom edge when the list is cut.
+    pub const PALETTE_CHROME_HEIGHT: f32 = 180.0;
+    pub const PALETTE_INPUT_HEIGHT: f32 = 52.0;
+    pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
+    pub const PALETTE_HEADER_HEIGHT: f32 = 28.0;
+    pub const PALETTE_TILE_SIZE: f32 = 26.0;
+    pub const PALETTE_ACCENT_BAR_WIDTH: f32 = 3.0;
+    pub const PALETTE_ACCENT_BAR_HEIGHT: f32 = 16.0;
+    pub const KEYCAP_HEIGHT: f32 = 20.0;
+    pub const KEYCAP_GAP: f32 = 2.0;
+    /// How far the window behind a modal surface is blurred.
+    pub const SCRIM_BLUR: f32 = 6.0;
+    /// The accent as a tint behind a selected pill, and as its edge.
+    pub const ACCENT_WASH: f32 = 0.14;
+    pub const ACCENT_EDGE: f32 = 0.45;
     /// An anchored menu, capped so a wide relation's column list scrolls rather
     /// than running off the window.
     pub const MENU_MAX_HEIGHT: f32 = 320.0;
@@ -377,6 +399,10 @@ const POPUP_MUTED_CONTRAST: f32 = 3.0;
 /// Muted and faint text on a glass card, as shares of the body text: Zeron's.
 const POPUP_MUTED_INK: f32 = 0.64;
 const POPUP_FAINT_INK: f32 = 0.48;
+/// How dark the window goes behind a modal surface. Lighter on a light theme,
+/// where the same black reads as a stain rather than a dim: Zeron's.
+const SCRIM_DARK: f32 = 0.35;
+const SCRIM_LIGHT: f32 = 0.19;
 
 fn neutral(lightness: f32) -> Srgb {
     Oklch::new(lightness, NEUTRAL_CHROMA, NEUTRAL_HUE).to_srgb()
@@ -683,6 +709,14 @@ impl Theme {
     /// editor is not the same window.
     pub fn data_glass(self) -> Rgba {
         self.bg.alpha(self.tint(DATA_ALPHA))
+    }
+
+    /// The dim laid over the window behind a modal surface.
+    pub fn scrim(self) -> Rgba {
+        BLACK.alpha(match self.appearance {
+            Appearance::Dark => SCRIM_DARK,
+            Appearance::Light => SCRIM_LIGHT,
+        })
     }
 
     /// Every floating card — a modal, the palette, the switcher, and each

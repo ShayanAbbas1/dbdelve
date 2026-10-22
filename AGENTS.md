@@ -1493,8 +1493,8 @@ the visible one.
 
 Use these rather than hand-rolling: `EditorState` (the SQL buffer: rope-backed,
 IME, line numbers, tree-sitter highlighting), `DataTable` over a `TableDelegate`
-(the grid, virtualized on both axes), `ListState` (the palette's search field,
-virtualized scroll and click-to-confirm), `PopupMenu` and the `DropdownMenu`
+(the grid, virtualized on both axes), `v_virtual_list` (the palette's rows,
+virtualized at their two heights, header and row), `PopupMenu` and the `DropdownMenu`
 trait (an anchored menu whose open state the library owns, which is the answer
 to the "GPUI drops view state" hazard below rather than a dropdown of ours),
 `Root` dialog layers, resizable panels, `Spinner`, and the completion popup.
@@ -1511,9 +1511,12 @@ is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards").
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has
 nothing stacked to close, or the completion popup cannot be dismissed.
 
-It does **not** provide a fuzzy matcher or a command palette. Those are ours:
-`src/palette.rs` and `src/completion.rs` both score with `nucleo-matcher`. A
-palette row carries a `Command`; `Workspace::run_command` routes every one into
+It does **not** provide a fuzzy matcher, and its `command` palette filters by
+substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
+(`nucleo-matcher`) every list that narrows as it is typed into goes through --
+the palette, completions, the explorer's filter and the connection switcher's
+search -- so a query that finds something in one finds it in the others, and
+each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
 second implementation of anything.
 

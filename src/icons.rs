@@ -89,7 +89,6 @@ pub mod icon {
     pub const CLOSE_WINDOW: &str = "icons/close.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";
-    pub const SWITCHER: &str = "icons/chevrons-up-down.svg";
     /// A connection's mode, on its pill in the titlebar.
     pub const READ_ONLY: &str = "icons/eye.svg";
     pub const READ_WRITE: &str = "icons/pencil.svg";
@@ -198,7 +197,6 @@ mod tests {
         for path in [
             icon::CHEVRON_DOWN,
             icon::CHEVRON_RIGHT,
-            icon::SWITCHER,
             icon::READ_ONLY,
             icon::READ_WRITE,
             icon::FULL_ACCESS,

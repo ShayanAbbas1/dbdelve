@@ -13,7 +13,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(PaletteMode::Jump, window, cx);
+        self.open_palette(PaletteMode::Search(Scope::All), window, cx);
     }
 
     pub(crate) fn go_to_column(
@@ -128,21 +128,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(PaletteMode::Commands, window, cx);
+        self.open_palette(PaletteMode::Search(Scope::Commands), window, cx);
     }
 
-    /// The same stroke again closes the palette; the other one swaps which list
-    /// it is showing, so the two surfaces are one keystroke apart.
+    /// The same stroke again closes the palette; the other one moves it to
+    /// its own scope, keeping what was typed, so the two are one keystroke
+    /// apart.
     pub(crate) fn open_palette(
         &mut self,
         mode: PaletteMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let showing = self
-            .palette
-            .as_ref()
-            .map(|list| list.read(cx).delegate().mode());
+        let showing = self.palette.as_ref().map(|palette| palette.read(cx).mode());
+        if let (Some(PaletteMode::Search(_)), PaletteMode::Search(scope)) = (showing, mode)
+            && showing != Some(mode)
+            && let Some(palette) = self.palette.clone()
+        {
+            palette.update(cx, |palette, cx| palette.set_scope(scope, window, cx));
+            return;
+        }
         // Swapping straight to another list skips `close_palette`, and a
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
@@ -174,40 +179,28 @@ impl Workspace {
         let first = match mode {
             PaletteMode::Theme => Theme::all()
                 .iter()
-                .position(|candidate| candidate.name == theme(cx).name)
-                .unwrap_or_default(),
+                .position(|candidate| candidate.name == theme(cx).name),
             PaletteMode::ImportTheme(source) => source
                 .found()
                 .iter()
-                .position(|candidate| candidate.name == theme(cx).name)
-                .unwrap_or_default(),
-            PaletteMode::Schema => self
-                .profile()
-                .and_then(crate::palette::active_schema_row)
-                .unwrap_or_default(),
-            PaletteMode::Database => self
-                .profile()
-                .and_then(|profile| {
-                    let databases = &profile.databases;
-                    databases
-                        .names
-                        .iter()
-                        .position(|name| Some(name) == databases.current.as_ref())
-                })
-                .unwrap_or_default(),
-            _ => 0,
+                .position(|candidate| candidate.name == theme(cx).name),
+            PaletteMode::Schema => self.profile().and_then(crate::palette::active_schema_row),
+            PaletteMode::Database => self.profile().and_then(|profile| {
+                let databases = &profile.databases;
+                databases
+                    .names
+                    .iter()
+                    .position(|name| Some(name) == databases.current.as_ref())
+            }),
+            _ => None,
         };
-        let palette = Palette::new(mode, self, cx);
-        let list = cx.new(|cx| ListState::new(palette, window, cx).searchable(true));
-        // Nothing is selected on a fresh list, and `enter` on nothing selected
-        // does nothing -- so a row is chosen before it is ever drawn.
-        list.update(cx, |list, cx| {
-            list.set_selected_index(Some(IndexPath::new(first)), window, cx);
-            list.scroll_to_selected_item(window, cx);
-        });
-        cx.subscribe_in(&list, window, Self::on_palette_event)
+        let palette = cx.new(|cx| Palette::new(mode, self, window, cx));
+        if let Some(first) = first {
+            palette.update(cx, |palette, cx| palette.select_item(first, window, cx));
+        }
+        cx.subscribe_in(&palette, window, Self::on_palette_event)
             .detach();
-        self.palette = Some(list);
+        self.palette = Some(palette);
         cx.notify();
     }
 
@@ -252,15 +245,22 @@ impl Workspace {
     /// an overlay that is still holding the keyboard.
     pub(crate) fn on_palette_event(
         &mut self,
-        list: &Entity<ListState<Palette>>,
-        event: &ListEvent,
+        palette: &Entity<Palette>,
+        event: &PaletteEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let searching = matches!(palette.read(cx).mode(), PaletteMode::Search(_));
         let command = match event {
-            ListEvent::Select(_) => return,
-            ListEvent::Cancel => None,
-            ListEvent::Confirm(index) => list.read(cx).delegate().command(index.row).cloned(),
+            PaletteEvent::Dismiss => None,
+            PaletteEvent::Confirm { command, label } => {
+                if searching {
+                    self.palette_recents.retain(|recent| recent != label);
+                    self.palette_recents.insert(0, label.clone());
+                    self.palette_recents.truncate(palette::RECENTS_KEPT);
+                }
+                Some(command.clone())
+            }
         };
         self.close_palette(window, cx);
         if let Some(command) = command {
@@ -406,7 +406,9 @@ impl Workspace {
             Command::ShowPlan(showing) => self.show_plan(showing, cx),
             Command::SaveQuery => self.save_query(&SaveQuery, window, cx),
             Command::RenameQuery => self.rename_query(window, cx),
-            Command::QueryHistory => self.open_palette(PaletteMode::History, window, cx),
+            Command::QueryHistory => {
+                self.open_palette(PaletteMode::Search(Scope::History), window, cx)
+            }
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
             Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
@@ -458,49 +460,5 @@ impl Workspace {
             Command::GoToColumn => self.go_to_column(&GoToColumn, window, cx),
             Command::RevealColumn(col) => self.reveal_column(col, window, cx),
         }
-    }
-
-    pub(crate) fn palette_next(
-        &mut self,
-        _: &PaletteNext,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_palette_selection(1, window, cx);
-    }
-
-    pub(crate) fn palette_previous(
-        &mut self,
-        _: &PalettePrevious,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_palette_selection(-1, window, cx);
-    }
-
-    /// The list binds the arrows itself, but the search field is deeper in the
-    /// dispatch path than the list is, and a single-line input swallows them
-    /// without passing them on. So the palette moves its own selection.
-    pub(crate) fn move_palette_selection(
-        &mut self,
-        step: isize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(list) = self.palette.clone() else {
-            return;
-        };
-        list.update(cx, |list, cx| {
-            let rows = list.delegate().len() as isize;
-            if rows == 0 {
-                return;
-            }
-            let row = list.selected_index().map_or(0, |index| index.row) as isize;
-            // Wrapping, because a list this short is faster to reach the end of
-            // from the top than by holding a key down.
-            let row = (row + step).rem_euclid(rows) as usize;
-            list.set_selected_index(Some(IndexPath::new(row)), window, cx);
-            list.scroll_to_selected_item(window, cx);
-        });
     }
 }

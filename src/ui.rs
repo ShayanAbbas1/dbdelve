@@ -556,6 +556,75 @@ pub(crate) fn chord_hint(id: &str, overrides: &HashMap<String, String>) -> Strin
         .unwrap_or_default()
 }
 
+/// The chord bound to an action today, as GPUI writes it -- an override if the
+/// user set one, else the shipped default -- or `None` for an unbound action.
+pub(crate) fn chord_for(id: &str, overrides: &HashMap<String, String>) -> Option<String> {
+    keybindings::REGISTRY
+        .iter()
+        .find(|spec| spec.id == id)
+        .and_then(|spec| keybindings::chords_for(spec, overrides).first().copied())
+        .map(str::to_string)
+}
+
+/// A chord as the keys a hand presses, one label per keycap: the modifiers in
+/// the platform's order, then the key. A two-stroke chord is both strokes'
+/// keys in turn.
+pub(crate) fn keycap_parts(chord: &str) -> Vec<gpui::SharedString> {
+    chord
+        .split_whitespace()
+        .filter_map(|stroke| Keystroke::parse(stroke).ok())
+        .flat_map(|stroke| {
+            let held = stroke.modifiers;
+            let modifiers = [
+                (held.control, "⌃", "Ctrl"),
+                (held.alt, "⌥", "Alt"),
+                (held.shift, "⇧", "Shift"),
+                (held.platform, "⌘", "Super"),
+                (held.function, "fn", "Fn"),
+            ];
+            let mut parts: Vec<gpui::SharedString> = modifiers
+                .into_iter()
+                .filter(|(down, _, _)| *down)
+                .map(|(_, mac, other)| {
+                    if cfg!(target_os = "macos") {
+                        mac
+                    } else {
+                        other
+                    }
+                    .into()
+                })
+                .collect();
+            let bare = Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                ..stroke
+            };
+            parts.push(Kbd::format(&bare).into());
+            parts
+        })
+        .collect()
+}
+
+/// One key of a shortcut, as a small cap.
+pub(crate) fn key_chip(label: impl Into<gpui::SharedString>, t: Theme) -> Div {
+    let height = layout::chrome(layout::KEYCAP_HEIGHT);
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(height))
+        .min_w(px(height))
+        .px(px(layout::SPACE_XS))
+        .rounded(px(layout::RADIUS_KEYCAP))
+        .border_1()
+        .border_color(t.border)
+        .bg(t.element_hover)
+        .text_size(px(layout::chrome(layout::TEXT_XS)))
+        .line_height(gpui::relative(1.))
+        .text_color(t.text_muted)
+        .child(label.into())
+}
+
 /// A shortcut hint and what it does, in the app face rather than the editor's
 /// monospace -- these are sentences about the UI, not query output.
 pub(crate) fn key_hint(
@@ -657,6 +726,18 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_chord_reads_as_a_cap_per_key_with_the_modifiers_in_platform_order() {
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &["⇧", "⌘", "P"]
+        } else {
+            &["Ctrl", "Shift", "P"]
+        };
+        assert_eq!(keycap_parts("secondary-shift-p"), expected);
+        assert_eq!(keycap_parts("g g").len(), 2);
+    }
+
     use super::*;
     use crate::explorer;
 

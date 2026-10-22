@@ -907,58 +907,6 @@ impl Workspace {
             .child(control)
     }
 
-    /// The palette, centred over everything else.
-    ///
-    /// `key_context` is load-bearing: the arrow keys are bound against
-    /// `Palette > Input`, which is the only predicate deep enough to win the
-    /// keystroke back from the search field. See `move_palette_selection`.
-    pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = popup_theme(cx);
-        let list = self.palette.as_ref()?;
-        let placeholder = list.read(cx).delegate().placeholder();
-        let workspace = cx.entity().downgrade();
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .justify_center()
-                // Cross-axis stretch is the flex default, and it would take the
-                // palette's own height with it: a box down to the bottom of the
-                // window, with the list capped at its own max height near the
-                // top and the rest of the panel painted empty.
-                .items_start()
-                .child(
-                    div()
-                        .id("palette")
-                        .key_context("Palette")
-                        // Below the titlebar rather than centred vertically:
-                        // the eye is already at the top of the window, and the
-                        // list grows downwards from a fixed line.
-                        .mt(px(layout::TITLEBAR_HEIGHT * 2.))
-                        .w(px(layout::PALETTE_WIDTH))
-                        .border_1()
-                        .border_color(t.border_strong)
-                        .rounded(px(layout::RADIUS_PANEL))
-                        .map(|card| raised_card(card, t))
-                        .overflow_hidden()
-                        .child(
-                            List::new(list)
-                                .search_placeholder(placeholder)
-                                .max_h(px(layout::PALETTE_MAX_HEIGHT)),
-                        )
-                        .on_mouse_down_out(move |_, window, cx| {
-                            _ = workspace.update(cx, |workspace, cx| {
-                                workspace.close_palette(window, cx);
-                            });
-                        }),
-                )
-                .into_any_element(),
-        )
-    }
-
     /// What `cmd+w` asks before it takes unapplied cell edits with the tab.
     pub(crate) fn render_reference_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);

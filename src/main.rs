@@ -43,12 +43,12 @@ use gpui::{
     deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    Disableable, IndexPath, Root,
+    Disableable, Root,
     input::{
         CompletionProvider, EditorMode, EditorState, Enter, IndentInline, Input, InputEvent,
         InputModeKind, InputState, Position,
     },
-    list::{List, ListEvent, ListItem, ListState},
+    list::ListItem,
     resizable::{ResizableState, h_resizable, resizable_panel},
     tree::tree as render_tree,
 };
@@ -58,14 +58,14 @@ use actions::{
     CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, DeleteRow, DiscardEdits, EditCell,
     ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
     ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
-    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PaletteNext,
-    PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
-    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
-    ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault,
-    SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode,
-    SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor, ShowReferences, SortColumn,
-    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
-    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PreviousEdit,
+    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+    SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn,
+    SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns,
+    ShowEditor, ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
+    TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
+    ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -81,7 +81,7 @@ use filter::{
     sort_columns, sort_expression, value_placeholder,
 };
 use icons::{Icons, icon};
-use palette::{Command, Mode as PaletteMode, Palette};
+use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope};
 use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,

@@ -246,7 +246,10 @@ pub(crate) struct Workspace {
     /// snapshot of what the catalog held and which tab was in front, and both
     /// can move underneath it — so it is thrown away on the way out rather
     /// than kept and refreshed.
-    pub(crate) palette: Option<Entity<ListState<Palette>>>,
+    pub(crate) palette: Option<Entity<Palette>>,
+    /// The labels of the rows last confirmed in the palette, newest first, for
+    /// its Recent group. Kept for the session only.
+    pub(crate) palette_recents: Vec<String>,
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
@@ -354,6 +357,7 @@ impl Workspace {
             store_unreadable: false,
             next_generation: 0,
             palette: None,
+            palette_recents: Vec::new(),
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
@@ -1066,8 +1070,8 @@ impl Render for Workspace {
         // Last, and unconditionally: the palette is modal, and it holds the
         // keyboard against anything above that just claimed it. One a modal
         // cannot be typed into is one that cannot be dismissed either.
-        if let Some(list) = &self.palette {
-            let handle = list.focus_handle(cx);
+        if let Some(palette) = &self.palette {
+            let handle = palette.focus_handle(cx);
             if !handle.is_focused(window) {
                 handle.focus(window, cx);
             }
@@ -1088,8 +1092,6 @@ impl Render for Workspace {
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
-                .on_action(cx.listener(Self::palette_next))
-                .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
@@ -1105,7 +1107,7 @@ impl Render for Workspace {
                         .child(self.render_connection_form(cx)),
                 )
                 .children(self.render_import_choice(cx))
-                .children(self.render_palette(cx));
+                .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
             return div()
@@ -1118,8 +1120,6 @@ impl Render for Workspace {
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
-                .on_action(cx.listener(Self::palette_next))
-                .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::open_connection_form))
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
@@ -1131,7 +1131,7 @@ impl Render for Workspace {
                 .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
                 .children(self.settings_open.then(|| views::render_settings(self, cx)))
                 .children(self.render_import_choice(cx))
-                .children(self.render_palette(cx));
+                .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {
@@ -1766,8 +1766,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reset_editor_zoom))
             .on_action(cx.listener(Self::fuzzy_open))
             .on_action(cx.listener(Self::command_palette))
-            .on_action(cx.listener(Self::palette_next))
-            .on_action(cx.listener(Self::palette_previous))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::open_settings))
             // Unregistered under the import dialog, which stops only the
@@ -1916,7 +1914,7 @@ impl Render for Workspace {
             .children(self.render_stale_edit(cx))
             .children(self.settings_open.then(|| views::render_settings(self, cx)))
             .children(self.render_import_choice(cx))
-            .children(self.render_palette(cx))
+            .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
 }
