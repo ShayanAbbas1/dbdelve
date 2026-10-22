@@ -2590,6 +2590,33 @@ pub(crate) fn format(text: &str) -> Result<String, &'static str> {
     }
 }
 
+/// Whether `at` falls strictly inside a comment, a string, a template, a regex
+/// or any other single token of `text`, rather than between two. Yes when the
+/// grammar does not load, so a selection is refused rather than guessed at.
+pub(crate) fn splits_a_token(text: &str, at: usize) -> bool {
+    let mut parser = Parser::new();
+    let Some(tree) = parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()
+        .and_then(|()| parser.parse(text, None))
+    else {
+        return true;
+    };
+    let mut node = tree.root_node().descendant_for_byte_range(at, at);
+    while let Some(inner) = node {
+        let token = inner.child_count() == 0
+            || matches!(
+                inner.kind(),
+                "string" | "template_string" | "regex" | "comment"
+            );
+        if token && inner.start_byte() < at && at < inner.end_byte() {
+            return true;
+        }
+        node = inner.parent();
+    }
+    false
+}
+
 /// How wide a bracket may stand on one line before its items go one per line.
 const FORMAT_WIDTH: usize = 80;
 const FORMAT_INDENT: usize = 2;
