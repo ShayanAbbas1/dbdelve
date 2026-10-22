@@ -3,6 +3,9 @@
 //! few things worth doing before connecting anywhere.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+use gpui::{Animation, AnimationExt, Transformation, ease_in_out, ease_out_quint, size, svg};
 
 use super::*;
 use crate::import::Source;
@@ -128,7 +131,161 @@ pub(crate) fn rows(importable: &[Source]) -> Vec<Row> {
         .collect()
 }
 
+/// Whether the first-run greeting has played. A file from before there was
+/// one, holding connections, belongs to someone already past their first run.
+pub(crate) fn welcomed(stored: Option<bool>, has_profiles: bool) -> bool {
+    stored.unwrap_or(has_profiles)
+}
+
+/// The surface's entrance, read off one wall clock rather than an animation
+/// per element: a dozen pieces step in on one timeline, and a single clock
+/// keeps them in step and says exactly when the last has landed, which is when
+/// the surface stops asking for frames.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Entrance {
+    started: Instant,
+    /// The first run's, with its greeting ahead of the title.
+    intro: bool,
+}
+
+/// Where one piece of the entrance is: how much of it shows, and how far
+/// below its place it still sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Pose {
+    pub(crate) opacity: f32,
+    pub(crate) offset: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Part {
+    Mark,
+    Greeting,
+    Title,
+    Card,
+    Tile(usize),
+    Backdrop,
+}
+
+const FIELD_LOGO_MS: u64 = 160;
+const RISE_MS: f32 = 340.;
+const RISE_PX: f32 = 8.;
+const SETTLE_MS: f32 = 260.;
+const SETTLE_PX: f32 = 4.;
+const TILES_AFTER_CARD_MS: f32 = 140.;
+const TILE_STAGGER_MS: f32 = 28.;
+const GREETING_AT_MS: f32 = 80.;
+const GREETING_MS: f32 = 2000.;
+const GREETING_PX: f32 = 6.;
+/// The greeting is in by this share of its run, and starts out at the next.
+const GREETING_IN: f32 = 0.14;
+const GREETING_OUT: f32 = 0.72;
+const BACKDROP_AT_MS: f32 = 250.;
+const BACKDROP_MS: f32 = 900.;
+
+fn title_at(intro: bool) -> f32 {
+    if intro { 1480. } else { 60. }
+}
+
+fn card_at(intro: bool) -> f32 {
+    if intro { 1500. } else { 120. }
+}
+
+fn tile_at(intro: bool, index: usize) -> f32 {
+    card_at(intro) + TILES_AFTER_CARD_MS + index as f32 * TILE_STAGGER_MS
+}
+
+fn progress(elapsed: f32, at: f32, duration: f32) -> f32 {
+    ((elapsed - at) / duration).clamp(0., 1.)
+}
+
+fn rise(elapsed: f32, at: f32, duration: f32, distance: f32) -> Pose {
+    let eased = ease_out_quint()(progress(elapsed, at, duration));
+    Pose {
+        opacity: eased,
+        offset: distance * (1. - eased),
+    }
+}
+
+/// In, held, then out upwards, making room for the title in the same place.
+fn greeting(elapsed: f32) -> Pose {
+    let run = progress(elapsed, GREETING_AT_MS, GREETING_MS);
+    let ease = ease_out_quint();
+    if run <= GREETING_IN {
+        let eased = ease(run / GREETING_IN);
+        Pose {
+            opacity: eased,
+            offset: GREETING_PX * (1. - eased),
+        }
+    } else if run <= GREETING_OUT {
+        Pose {
+            opacity: 1.,
+            offset: 0.,
+        }
+    } else {
+        let eased = ease((run - GREETING_OUT) / (1. - GREETING_OUT));
+        Pose {
+            opacity: 1. - eased,
+            offset: -GREETING_PX * eased,
+        }
+    }
+}
+
+pub(crate) fn pose(part: Part, intro: bool, elapsed: f32) -> Pose {
+    match part {
+        Part::Mark => rise(elapsed, 0., RISE_MS, RISE_PX),
+        Part::Greeting if intro => greeting(elapsed),
+        Part::Greeting => Pose {
+            opacity: 0.,
+            offset: 0.,
+        },
+        Part::Title => rise(elapsed, title_at(intro), RISE_MS, RISE_PX),
+        Part::Card => rise(elapsed, card_at(intro), RISE_MS, RISE_PX),
+        Part::Tile(index) => rise(elapsed, tile_at(intro, index), SETTLE_MS, SETTLE_PX),
+        Part::Backdrop => Pose {
+            opacity: ease_in_out(progress(elapsed, BACKDROP_AT_MS, BACKDROP_MS)),
+            offset: 0.,
+        },
+    }
+}
+
+/// When the last piece has landed.
+pub(crate) fn entrance_ms(intro: bool) -> f32 {
+    let tiles = tile_at(intro, Engine::ALL.len() - 1) + SETTLE_MS;
+    let greeting = if intro {
+        GREETING_AT_MS + GREETING_MS
+    } else {
+        0.
+    };
+    tiles
+        .max(greeting)
+        .max(card_at(intro) + RISE_MS)
+        .max(BACKDROP_AT_MS + BACKDROP_MS)
+}
+
+/// A piece of the entrance where it is now. The caller positions it, relative
+/// or absolute, so the offset moves it without moving anything beside it.
+fn posed(element: gpui::Div, pose: Pose) -> gpui::Div {
+    element.top(px(pose.offset)).opacity(pose.opacity)
+}
+
 impl Workspace {
+    /// Starts the entrance the first frame the surface is shown, and only
+    /// then: a re-render mid-way must not start it over.
+    pub(crate) fn begin_welcome(&mut self, cx: &mut Context<Self>) {
+        if self.welcome_entrance.is_some() {
+            return;
+        }
+        let intro = !self.settings.welcomed;
+        self.welcome_entrance = Some(Entrance {
+            started: Instant::now(),
+            intro,
+        });
+        if intro {
+            self.settings.welcomed = true;
+            self.remember_profiles(cx);
+        }
+    }
+
     pub(crate) fn render_welcome(
         &self,
         window: &mut Window,
@@ -136,18 +293,37 @@ impl Workspace {
     ) -> impl IntoElement {
         let t = *theme(cx);
         let card_theme = popup_theme(cx);
-        let viewport = window.viewport_size().width.as_f32();
+        let viewport = window.viewport_size();
         let width = layout::WELCOME_WIDTH
-            .min(viewport - 2. * layout::SPACE_LG)
+            .min(viewport.width.as_f32() - 2. * layout::SPACE_LG)
             .max(0.);
         let top = if self.projects.is_empty() {
             layout::WELCOME_TOP
         } else {
             layout::WELCOME_TOP_WITH_PROJECTS
         };
+        let (intro, elapsed) = match self.welcome_entrance {
+            Some(entrance) if !cx.reduce_motion() => (
+                entrance.intro,
+                entrance.started.elapsed().as_secs_f32() * 1000.,
+            ),
+            _ => (false, f32::INFINITY),
+        };
+        if elapsed < entrance_ms(intro) {
+            window.request_animation_frame();
+        }
+        let at = |part| pose(part, intro, elapsed);
+        let heading = || {
+            div()
+                .text_size(px(layout::chrome(layout::WELCOME_TITLE_SIZE)))
+                .line_height(px(layout::chrome(layout::WELCOME_TITLE_LINE)))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(t.text)
+                .whitespace_nowrap()
+        };
 
         let projects = self.render_welcome_projects(card_theme, cx);
-        div()
+        let surface = div()
             .id("welcome-scroll")
             .size_full()
             .overflow_y_scroll()
@@ -159,23 +335,38 @@ impl Workspace {
             .flex_col()
             .items_center()
             .child(
-                gpui::img(crate::icons::BRAND)
-                    .flex_shrink_0()
-                    .size(px(layout::WELCOME_MARK_SIZE)),
+                posed(div().relative().flex_shrink_0(), at(Part::Mark))
+                    .child(gpui::img(crate::icons::BRAND).size(px(layout::WELCOME_MARK_SIZE))),
             )
+            // The greeting and the title share one place, the one handing it
+            // to the other.
             .child(
                 div()
+                    .relative()
                     .flex_shrink_0()
+                    .w(px(width))
                     .mt(px(layout::WELCOME_MARK_GAP))
                     .mb(px(layout::WELCOME_TITLE_GAP))
-                    .text_size(px(layout::chrome(layout::WELCOME_TITLE_SIZE)))
-                    .line_height(px(layout::chrome(layout::WELCOME_TITLE_LINE)))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.text)
-                    .child("Connect a database"),
+                    .flex()
+                    .justify_center()
+                    .child(posed(heading().relative(), at(Part::Title)).child("Connect a database"))
+                    .when(intro, |place| {
+                        place.child(
+                            posed(
+                                heading()
+                                    .absolute()
+                                    .left_0()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center(),
+                                at(Part::Greeting),
+                            )
+                            .child("Welcome to DBDelve"),
+                        )
+                    }),
             )
             .child(
-                div()
+                posed(div().relative(), at(Part::Card))
                     .flex_shrink_0()
                     .w(px(width))
                     .flex()
@@ -188,7 +379,7 @@ impl Workspace {
                     .map(|card| raised_card(card, card_theme))
                     .overflow_hidden()
                     .child(self.render_welcome_field(card_theme, cx))
-                    .child(self.render_engine_grid(width, card_theme, cx))
+                    .child(self.render_engine_grid(width, card_theme, &at, cx))
                     .children(projects)
                     .child(self.render_welcome_rows(card_theme, cx)),
             )
@@ -200,16 +391,33 @@ impl Workspace {
                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .text_color(t.text_muted)
                     .child(message)
-            }))
+            }));
+
+        div()
+            .relative()
+            .size_full()
+            .children(backdrop(t, viewport, at(Part::Backdrop)))
+            .child(surface)
     }
 
     fn render_welcome_field(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let recognised = recognise(&self.welcome_url.read(cx).value());
         let size = px(layout::chrome(layout::WELCOME_FIELD_ICON));
         let leading = match recognised.engine() {
-            Some(engine) => icon(engine.logo())
-                .size(size)
-                .text_color(theme::engine_brand(engine, t, &t.logo_planes()))
+            // Keyed by the engine, so a logo fades in each time the field
+            // comes to mean a different one, and holds while it still does.
+            Some(engine) => div()
+                .flex_shrink_0()
+                .child(
+                    icon(engine.logo())
+                        .size(size)
+                        .text_color(theme::engine_brand(engine, t, &t.logo_planes())),
+                )
+                .with_animation(
+                    gpui::SharedString::from(format!("welcome-field-{}", engine.as_str())),
+                    Animation::new(Duration::from_millis(FIELD_LOGO_MS)).with_easing(ease_in_out),
+                    |logo, delta| logo.opacity(delta),
+                )
                 .into_any_element(),
             None => icon(icon::LINK)
                 .size(size)
@@ -240,7 +448,13 @@ impl Workspace {
         search_field(leading, &self.welcome_url, t).children(trailing)
     }
 
-    fn render_engine_grid(&self, width: f32, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_engine_grid(
+        &self,
+        width: f32,
+        t: Theme,
+        at: &dyn Fn(Part) -> Pose,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let columns = if width < layout::WELCOME_NARROW {
             layout::WELCOME_GRID_COLUMNS - 1
         } else {
@@ -254,7 +468,8 @@ impl Workspace {
             .p(px(layout::WELCOME_SECTION_PADDING))
             .children(Engine::ALL.into_iter().enumerate().map(|(index, engine)| {
                 let brand = theme::engine_brand(engine, t, &planes);
-                item(("welcome-engine", index))
+                let tile = item(("welcome-engine", index))
+                    .w_full()
                     .child(
                         item_content(t)
                             .child(
@@ -268,7 +483,8 @@ impl Workspace {
                     )
                     .on_click(cx.listener(move |workspace, _, window, cx| {
                         workspace.new_connection_on(engine, window, cx);
-                    }))
+                    }));
+                posed(div().relative().min_w_0(), at(Part::Tile(index))).child(tile)
             }))
     }
 
@@ -520,6 +736,58 @@ impl Workspace {
     }
 }
 
+/// The contours and the light behind the card, on opaque themes only: a
+/// glass theme already has the desktop behind it. Sized to cover the surface
+/// at the asset's own proportions, and in steps, so a resize redraws the
+/// bitmap a few times rather than on every pixel.
+fn backdrop(t: Theme, viewport: gpui::Size<gpui::Pixels>, pose: Pose) -> Option<gpui::Div> {
+    if t.is_glass {
+        return None;
+    }
+    let aspect = layout::BACKDROP_ASPECT;
+    let tall = (viewport.height.as_f32() - layout::TITLEBAR_HEIGHT) * aspect;
+    let wide = viewport.width.as_f32().max(tall);
+    let width = (wide / layout::BACKDROP_STEP).ceil() * layout::BACKDROP_STEP;
+    let height = width / aspect;
+    let shrink = layout::LIFT_DOWNSCALE;
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(pose.opacity)
+            .child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .w(px(width))
+                    .h(px(height))
+                    .child(
+                        svg()
+                            .path(crate::icons::LIFT)
+                            .absolute()
+                            .left(px((width - width / shrink) / 2.))
+                            .top(px((height - height / shrink) / 2.))
+                            .w(px(width / shrink))
+                            .h(px(height / shrink))
+                            .text_color(t.lift())
+                            .with_transformation(Transformation::scale(size(shrink, shrink))),
+                    )
+                    .child(
+                        svg()
+                            .path(crate::icons::CONTOURS)
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .text_color(t.contour()),
+                    ),
+            ),
+    )
+}
+
 /// An engine tile or a row: a quiet control laid out the way a palette row is.
 fn item(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     ui::control(id, Tone::Quiet, Control::Standard)
@@ -623,6 +891,65 @@ mod tests {
         assert_eq!(recognise("~/app.db").engine(), Some(Engine::Sqlite));
         assert_eq!(recognise("post").engine(), None);
         assert_eq!(recognise("nope://x").engine(), None);
+    }
+
+    #[test]
+    fn the_greeting_plays_once_and_never_for_someone_already_connected() {
+        assert!(!welcomed(None, false));
+        assert!(welcomed(None, true));
+        assert!(welcomed(Some(true), false));
+        // Once it has played, deleting every connection does not replay it,
+        // and a stored `false` is the file's word, not a guess.
+        assert!(!welcomed(Some(false), true));
+    }
+
+    #[test]
+    fn every_piece_starts_hidden_and_lands_by_the_end_of_the_entrance() {
+        for intro in [true, false] {
+            let end = entrance_ms(intro);
+            let mut parts = vec![Part::Mark, Part::Title, Part::Card, Part::Backdrop];
+            parts.extend((0..Engine::ALL.len()).map(Part::Tile));
+            for part in parts {
+                assert_eq!(pose(part, intro, 0.).opacity, 0., "{part:?}");
+                assert_eq!(
+                    pose(part, intro, end),
+                    Pose {
+                        opacity: 1.,
+                        offset: 0.
+                    },
+                    "{part:?}"
+                );
+            }
+            assert_eq!(pose(Part::Greeting, intro, end).opacity, 0.);
+        }
+    }
+
+    #[test]
+    fn the_greeting_hands_its_place_to_the_title_on_a_first_run_only() {
+        let held = GREETING_AT_MS + GREETING_MS * (GREETING_IN + GREETING_OUT) / 2.;
+        assert_eq!(pose(Part::Greeting, true, held).opacity, 1.);
+        assert_eq!(pose(Part::Title, true, held).opacity, 0.);
+        assert_eq!(pose(Part::Greeting, false, held).opacity, 0.);
+        assert_eq!(pose(Part::Title, false, held).opacity, 1.);
+        // On its way out it drifts up, not down.
+        let leaving = GREETING_AT_MS + GREETING_MS * 0.9;
+        assert!(pose(Part::Greeting, true, leaving).offset < 0.);
+    }
+
+    #[test]
+    fn the_tiles_settle_one_after_another() {
+        let first = tile_at(false, 0);
+        let midway = first + SETTLE_MS / 2.;
+        let early = pose(Part::Tile(0), false, midway);
+        let late = pose(Part::Tile(5), false, midway);
+        assert!(early.opacity > late.opacity);
+        assert!(early.offset < late.offset);
+    }
+
+    #[test]
+    fn a_later_visit_is_over_well_before_a_first_run() {
+        assert_eq!(entrance_ms(false), BACKDROP_AT_MS + BACKDROP_MS);
+        assert!(entrance_ms(true) > entrance_ms(false) + RISE_MS);
     }
 
     #[test]

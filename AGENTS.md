@@ -1641,8 +1641,8 @@ Hard-won and easy to rediscover. Read before writing any animated element.
 
 ### Animation
 
-There is no motion system of DBDelve's own: no transitions, no easing curves,
-and hover states are instant. Two things move:
+There is no motion system of DBDelve's own: no transitions, no shared easing
+curves, and hover states are instant. These things move:
 
 - **The query-in-flight `Spinner`** (gpui-component's, built in `views.rs`),
   shown while a query runs beside a live **Cancel** button. It is
@@ -1655,6 +1655,17 @@ and hover states are instant. Two things move:
   never runs spins forever.
 - **The row panel's "copied" check** fades in once over 150ms. It does not
   repeat, so it is not the redraw hazard.
+- **The welcome surface's entrance** (`workspace/welcome.rs`), approved for
+  that screen alone. The mark, the title, the card and the engine tiles fade
+  and rise a few pixels into place (opacity and a relative `top`, never
+  scale), the contours behind fade in, and on the very first run a greeting
+  holds the title's place for a moment first (`Settings::welcomed`, persisted).
+  One wall clock (`Entrance`) drives every piece rather than an element-keyed
+  animation each: the surface asks for the next frame only until
+  `entrance_ms` has passed and then asks for nothing. It starts when the
+  surface comes on screen, never on a re-render, and `reduce_motion` skips it.
+  The URL field's engine logo fades in once over 160ms, keyed by the engine.
+  Neither repeats, so neither is the redraw hazard.
 
 Anything else that moves needs raising first, and a second repeating animation
 means building the shared throttled clock and moving both onto it.

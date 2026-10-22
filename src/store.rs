@@ -378,6 +378,10 @@ pub struct StoredSettings {
     pub color_titlebar: Option<bool>,
     #[serde(default)]
     pub client_sort: Option<bool>,
+    /// Whether the first-run greeting has played. Absent in a file written
+    /// before there was one.
+    #[serde(default)]
+    pub welcomed: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -2014,6 +2018,7 @@ open_objects = []
                 check_for_updates: Some(false),
                 color_titlebar: Some(false),
                 client_sort: Some(true),
+                welcomed: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),

@@ -58,6 +58,8 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// Whether the first-run greeting has played on the welcome surface.
+    pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -85,6 +87,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            welcomed: false,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -222,6 +225,10 @@ pub(crate) struct Workspace {
     /// The welcome surface's connection URL field. Kept rather than built
     /// with the surface: a fresh one every frame would lose what was typed.
     pub(crate) welcome_url: Entity<InputState>,
+    /// When the welcome surface last came on screen, and whether it was
+    /// greeting a first run. `None` while something else is in front, so it
+    /// enters again the next time it is shown.
+    pub(crate) welcome_entrance: Option<welcome::Entrance>,
     /// A column a structure tab asked to see, waiting for its data tab's rows:
     /// the tab's id and the column's name.
     pub(crate) reveal_on_rows: Option<(u64, String)>,
@@ -366,6 +373,7 @@ impl Workspace {
             project_name_error: None,
             welcome_needs_focus: true,
             welcome_url,
+            welcome_entrance: None,
             reveal_on_rows: None,
             store_unreadable: false,
             next_generation: 0,
@@ -428,6 +436,8 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.welcomed =
+                    welcome::welcomed(stored_settings.welcomed, !profiles.is_empty());
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -1138,6 +1148,11 @@ impl Render for Workspace {
             }
         }
 
+        if self.form.is_some() || self.profile().is_some() {
+            self.welcome_entrance = None;
+        } else {
+            self.begin_welcome(cx);
+        }
         if self.form.is_some() {
             return div()
                 .id("connection-form")

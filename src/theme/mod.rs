@@ -190,6 +190,19 @@ pub mod layout {
     /// The accent as a tint behind a selected pill, and as its edge.
     pub const ACCENT_WASH: f32 = 0.14;
     pub const ACCENT_EDGE: f32 = 0.45;
+    /// How much of `border` the welcome surface's contours keep.
+    pub const CONTOUR_SHARE: f32 = 0.8;
+    /// How much of the card's tone the light behind it carries.
+    pub const LIFT_ALPHA: f32 = 0.6;
+    /// The welcome backdrop is rasterised again only when the window crosses
+    /// one of these steps, not on every pixel of a resize.
+    pub const BACKDROP_STEP: f32 = 160.0;
+    /// The lift is a soft gradient, so it is rasterised this many times
+    /// smaller and scaled up: nothing in it needs the resolution.
+    pub const LIFT_DOWNSCALE: f32 = 8.0;
+    /// The contour asset's width over its height, which the backdrop keeps
+    /// whatever shape the window is.
+    pub const BACKDROP_ASPECT: f32 = 1200.0 / 780.0;
     /// An anchored menu, capped so a wide relation's column list scrolls rather
     /// than running off the window.
     pub const MENU_MAX_HEIGHT: f32 = 320.0;
@@ -792,6 +805,20 @@ impl Theme {
     }
 
     /// The dim laid over the window behind a modal surface.
+    /// The depth contours behind the welcome card: the hairline, fainter,
+    /// since they are scenery rather than an edge.
+    pub fn contour(self) -> Rgba {
+        Rgba {
+            a: self.border.a * layout::CONTOUR_SHARE,
+            ..self.border
+        }
+    }
+
+    /// The glow the welcome card sits in: the card's own tone, thinned.
+    pub fn lift(self) -> Rgba {
+        self.overlay.alpha(layout::LIFT_ALPHA)
+    }
+
     pub fn scrim(self) -> Rgba {
         BLACK.alpha(match self.appearance {
             Appearance::Dark => SCRIM_DARK,

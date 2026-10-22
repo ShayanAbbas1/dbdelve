@@ -193,10 +193,28 @@ fn brand_document() -> String {
     )
 }
 
+/// The depth contours behind the welcome card, faded out toward the middle
+/// inside the file itself: GPUI has no gradient mask to fade them with.
+pub const CONTOURS: &str = "welcome/contours.svg";
+/// The soft light the welcome card sits in. GPUI paints no radial gradient,
+/// but an SVG drawn as a mask keeps its gradient's alpha.
+pub const LIFT: &str = "welcome/lift.svg";
+
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == BRAND {
-            return Ok(Some(Cow::Owned(brand_document().into_bytes())));
+        match path {
+            BRAND => return Ok(Some(Cow::Owned(brand_document().into_bytes()))),
+            CONTOURS => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/welcome/contours.svg"
+                ))));
+            }
+            LIFT => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/welcome/lift.svg"
+                ))));
+            }
+            _ => {}
         }
         Ok(ICONS
             .iter()
