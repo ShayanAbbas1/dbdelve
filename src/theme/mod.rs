@@ -777,14 +777,20 @@ impl Theme {
         })
     }
 
-    /// What an engine's logo is drawn on outside the titlebar: the panes, and
-    /// the palette's card. On glass the card is frosted over
-    /// [`Theme::popup_backdrop`], the worst its contents are shown over.
-    pub fn logo_planes(self) -> [Srgb; 3] {
+    /// What an engine's logo is drawn on outside the titlebar: the panes, the
+    /// palette's card, and the tile a palette row holds its icon in, which is
+    /// the hover wash over the card, or over the selected row's. On glass the
+    /// card is frosted over [`Theme::popup_backdrop`], the worst its contents
+    /// are shown over.
+    pub fn logo_planes(self) -> [Srgb; 5] {
+        let card = self.overlay_glass().flatten(self.popup_backdrop());
+        let selected = self.element_active.flatten(card);
         [
             self.bg,
             self.panel,
-            self.overlay_glass().flatten(self.popup_backdrop()),
+            card,
+            self.element_hover.flatten(card),
+            self.element_hover.flatten(selected),
         ]
     }
 

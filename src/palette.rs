@@ -1649,6 +1649,7 @@ struct Listed<'a> {
     /// every folder on the way and would match nearly anything.
     host: String,
     endpoint: String,
+    logo: &'static str,
     color: Option<ConnectionColor>,
 }
 
@@ -1668,6 +1669,7 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     .unwrap_or_default(),
             },
             endpoint: profile.config.endpoint(),
+            logo: profile.config.engine().logo(),
             color: profile.color,
         })
         .collect();
@@ -1729,7 +1731,7 @@ fn listed_connections(
                 .collect();
             let item = Item::new(
                 connection.name,
-                icon::DATABASE,
+                connection.logo,
                 Command::SwitchProfile(index),
             )
             .detail(connection.endpoint.clone())
@@ -1783,7 +1785,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
         items.push(
             row(
                 format!("Switch to {name}"),
-                icon::DATABASE,
+                profile.config.engine().logo(),
                 Command::SwitchProfile(index),
                 CONNECTION,
             )
@@ -3020,6 +3022,7 @@ mod tests {
             name,
             host: host.to_string(),
             endpoint: host.to_string(),
+            logo: Engine::Postgres.logo(),
             color: None,
         }
     }
@@ -3045,6 +3048,18 @@ mod tests {
                 project("Analytics", &["warehouse"]),
             ],
         )
+    }
+
+    #[test]
+    fn a_connection_row_wears_its_engines_logo() {
+        let (mut listed, projects) = connections();
+        listed[1].logo = Engine::Sqlite.logo();
+        let items = listed_connections(&listed, &projects, 0);
+        for item in &items {
+            if let Command::SwitchProfile(index) = item.command {
+                assert_eq!(item.icon, listed[index].logo, "{}", item.label);
+            }
+        }
     }
 
     #[test]

@@ -1249,7 +1249,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   there is no switcher panel of its own. That scope lists every connection
   grouped by project in the order projects are kept, No project first
   (`palette::listed_connections`), the one in front marked current, each with
-  its colour and a status dot read as the row is drawn; an empty project
+  its engine's logo (in its colour when it has one) and a status dot read as the row is drawn; an empty project
   keeps its header with a "New connection in…" row, and with no projects the
   connections are headed "Connections" whenever another group stands beside
   them. Groups are told apart by what they are (`palette::Group`), never by
