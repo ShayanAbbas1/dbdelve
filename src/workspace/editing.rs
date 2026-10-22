@@ -184,7 +184,7 @@ impl Workspace {
             );
             return;
         }
-        if !self.review_slot_free(tab, window, cx) {
+        if !self.review_slot_free(tab, false, window, cx) {
             return;
         }
 
@@ -715,9 +715,7 @@ impl Workspace {
         // A batch already on screen was generated from the pending set as it
         // stood. Another edit behind the modal would leave the statement the
         // user is reading describing something other than what the grid holds.
-        if profile.session.apply_review_covers(profile.session.active)
-            || profile.session.import_rows.is_some()
-        {
+        if !profile.session.may_stage_into(profile.session.active) {
             return;
         }
         let Some(results) = profile.session.active_results().cloned() else {
@@ -862,9 +860,7 @@ impl Workspace {
         };
         // The gate `edit_cell` holds, for its reason: a batch already on screen
         // was generated from the pending set as it stood.
-        if profile.session.apply_review_covers(profile.session.active)
-            || profile.session.import_rows.is_some()
-        {
+        if !profile.session.may_stage_into(profile.session.active) {
             return false;
         }
         let Some(results) = profile.session.active_results().cloned() else {
@@ -950,14 +946,12 @@ impl Workspace {
         value: NewValue,
         cx: &mut Context<Self>,
     ) -> bool {
-        let reviewing = self
+        let may_stage = self
             .profiles
             .iter()
             .find(|found| found.id == profile)
-            .is_none_or(|found| {
-                found.session.apply_review_covers(tab) || found.session.import_rows.is_some()
-            });
-        let staged = !reviewing
+            .is_some_and(|found| found.session.may_stage_into(tab));
+        let staged = may_stage
             && grid.update(cx, |table, cx| {
                 let staged =
                     !table.delegate().unconfirmed() && table.delegate_mut().stage(row, col, value);
@@ -1170,12 +1164,6 @@ impl Workspace {
             return;
         }
         let tab = profile.session.active;
-        if !self.review_slot_free(tab, window, cx) {
-            return;
-        }
-        let Some(profile) = self.profile() else {
-            return;
-        };
         // Scoped to the active tab's own form: one left open on another tab
         // (or a closed one, cleared at close) must not block this one.
         if profile
@@ -1245,6 +1233,9 @@ impl Workspace {
                     .into(),
                 cx,
             );
+            return;
+        }
+        if !self.review_slot_free(tab, false, window, cx) {
             return;
         }
 
@@ -1649,13 +1640,7 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
-        let refused = match tab {
-            Tab::Query(_) => profile.session.apply_review_covers(tab),
-            Tab::Object(_) => !self.review_slot_free(tab, window, cx),
-        };
-        if refused {
-            return;
-        }
+        let own_review = profile.session.apply_review_covers(tab);
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
@@ -1679,7 +1664,9 @@ impl Workspace {
         }
 
         match tab {
+            Tab::Query(_) if own_review => {}
             Tab::Query(_) => self.apply_in_buffer(batch, window, cx),
+            Tab::Object(_) if !self.review_slot_free(tab, true, window, cx) => {}
             Tab::Object(_) => {
                 if let Some(profile) = self.profile_mut() {
                     profile.session.apply_review = Some(ApplyReview {
@@ -1784,14 +1771,29 @@ impl Workspace {
     /// Refused while any review is open, another tab's included: the session
     /// holds one, and a second would overwrite the first's statement unseen.
     /// Another tab's is brought forward, so what is in the way is on screen.
-    fn review_slot_free(&mut self, from: Tab, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(profile) = self.profile() else {
+    /// `from`'s own is replaced only when `replaces_own`, the new statement
+    /// then being its newer one.
+    ///
+    /// Asked last, once the creator has nothing left of its own to refuse:
+    /// a creator that would have refused anyway must not move the user.
+    fn review_slot_free(
+        &mut self,
+        from: Tab,
+        replaces_own: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(profile) = self.profile_mut() else {
             return false;
         };
-        match profile.session.review_slot(from) {
-            ReviewSlot::Free => true,
-            ReviewSlot::Held => false,
-            ReviewSlot::HeldBy(holder) => {
+        match profile.session.review_slot(from, replaces_own) {
+            ReviewSlot::Free | ReviewSlot::Replace => true,
+            ReviewSlot::Stale => {
+                profile.session.apply_review = None;
+                true
+            }
+            ReviewSlot::Refuse => false,
+            ReviewSlot::JumpTo(holder) => {
                 self.activate_tab(holder, window, cx);
                 self.note(
                     "Run or close this statement before starting another.".into(),

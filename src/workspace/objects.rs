@@ -1476,18 +1476,7 @@ impl Workspace {
             let profile_id = profile.id.clone();
             profile.session.objects.retain(|tab| tab.id != id);
             profile.session.structure_requests.remove(&id);
-            // Nothing else clears a form once its tab is gone: left in place,
-            // it would hold its input fields alive for nothing and `new_row`
-            // reopening this id, impossible since ids never recur, is the
-            // only other thing that would have found it again.
-            if profile
-                .session
-                .insert_form
-                .as_ref()
-                .is_some_and(|form| form.tab == Tab::Object(id))
-            {
-                profile.session.insert_form = None;
-            }
+            profile.session.forget(Tab::Object(id));
             if let Some(key) = snapshot {
                 let _ = store::remove_grid(&profile_id, &key);
             }
