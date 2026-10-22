@@ -1582,9 +1582,10 @@ mod tests {
 #[cfg(test)]
 mod backdrop_blur_tests {
     use crate::{
-        AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, DrawOrder, Element, GlobalElementId,
-        Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Render,
-        Styled as _, TestAppContext, Window, blue, canvas, div, fill, px, red, rgb, rgba,
+        AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, DrawOrder, Element,
+        GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement as _,
+        Pixels, Render, Styled as _, TestAppContext, Window, blue, canvas, div, fill, px, red, rgb,
+        rgba,
     };
 
     const BACKDROP: u32 = 0x808080;
@@ -1676,10 +1677,20 @@ mod backdrop_blur_tests {
                     .size_full(),
                 );
             let content = if self.in_enclosing_layer {
-                Layered(div().size_full().bg(rgb(BACKDROP)).child(card).into_any_element())
-                    .into_any_element()
+                Layered(
+                    div()
+                        .size_full()
+                        .bg(rgb(BACKDROP))
+                        .child(card)
+                        .into_any_element(),
+                )
+                .into_any_element()
             } else {
-                div().size_full().bg(rgb(BACKDROP)).child(card).into_any_element()
+                div()
+                    .size_full()
+                    .bg(rgb(BACKDROP))
+                    .child(card)
+                    .into_any_element()
             };
             div().size_full().child(content)
         }
@@ -1714,8 +1725,14 @@ mod backdrop_blur_tests {
     #[crate::test]
     fn frosted_element_keeps_its_paint_order(cx: &mut TestAppContext) {
         let (blur, quads) = paint(cx, false);
-        assert!(order_of(&quads, rgb(BACKDROP)) < blur, "the blur sees the backdrop");
-        assert!(blur < order_of(&quads, rgba(CARD)), "the fill draws over the blur");
+        assert!(
+            order_of(&quads, rgb(BACKDROP)) < blur,
+            "the blur sees the backdrop"
+        );
+        assert!(
+            blur < order_of(&quads, rgba(CARD)),
+            "the fill draws over the blur"
+        );
         assert!(
             order_of(&quads, red()) < order_of(&quads, blue()),
             "a quad painted after a nested layer draws over it"
@@ -1725,8 +1742,17 @@ mod backdrop_blur_tests {
     #[crate::test]
     fn frosted_element_in_an_enclosing_layer_draws_over_its_blur(cx: &mut TestAppContext) {
         let (blur, quads) = paint(cx, true);
-        assert!(order_of(&quads, rgb(BACKDROP)) < blur, "the blur sees the backdrop");
-        assert!(blur <= order_of(&quads, rgba(CARD)), "the fill draws over the blur");
-        assert!(blur <= order_of(&quads, blue()), "children draw over the blur");
+        assert!(
+            order_of(&quads, rgb(BACKDROP)) < blur,
+            "the blur sees the backdrop"
+        );
+        assert!(
+            blur <= order_of(&quads, rgba(CARD)),
+            "the fill draws over the blur"
+        );
+        assert!(
+            blur <= order_of(&quads, blue()),
+            "children draw over the blur"
+        );
     }
 }
