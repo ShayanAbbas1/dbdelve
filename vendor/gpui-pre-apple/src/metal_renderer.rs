@@ -879,6 +879,18 @@ impl MetalRenderer {
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
+        // dbdelve patch: blurs ordered above every batch still draw.
+        for (index, blur) in pending_blurs {
+            command_encoder = self.draw_backdrop_blur(
+                index,
+                blur,
+                instance_bindings,
+                texture,
+                viewport_size,
+                command_buffer,
+                command_encoder,
+            );
+        }
 
         command_encoder.end_encoding();
 
@@ -2299,6 +2311,29 @@ mod backdrop_blur_tests {
         let b = render(&mut scene);
 
         // The black/white boundary inside the blur smears to about mid-grey.
+        let p = b.get_pixel(320, 240);
+        assert!(
+            (80..=176).contains(&p[0]),
+            "expected smeared edge, got {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn blur_ordered_above_every_batch_still_draws() {
+        let mut scene = Scene::default();
+        push_quad(&mut scene, bounds(0., 0., 320., VIEW_H as f32), 0.);
+        push_quad(&mut scene, bounds(320., 0., 320., VIEW_H as f32), 1.);
+        // No splitter and nothing painted after: no batch reaches its order.
+        scene.insert_backdrop_blur(BackdropBlur {
+            order: 0,
+            blur_radius: ScaledPixels(16.),
+            bounds: bounds(260., 180., 120., 120.),
+            content_mask: ContentMask { bounds: viewport() },
+            corner_radii: Corners::default(),
+        });
+        let b = render(&mut scene);
+
         let p = b.get_pixel(320, 240);
         assert!(
             (80..=176).contains(&p[0]),
