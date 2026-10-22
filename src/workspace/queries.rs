@@ -2557,7 +2557,11 @@ impl Workspace {
 
         // Said out loud rather than left as a no-op: a Format that appears to
         // do nothing reads as a broken Format, not as a deliberate refusal.
-        let formatted = match crate::sql::format(self.engine(), source) {
+        let formatted = match span.len() < text.len() {
+            true => crate::sql::format_selection(self.engine(), &text, span.clone()),
+            false => crate::sql::format(self.engine(), source),
+        };
+        let formatted = match formatted {
             Ok(formatted) => formatted,
             Err(refusal) => {
                 self.note(refusal.into(), cx);

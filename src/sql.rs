@@ -27,7 +27,7 @@ use sqlparser::dialect::{
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{ColumnDefinition, Engine, ExplainMode};
@@ -2862,8 +2862,12 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 ///
 /// Each statement is reflowed on its own, and the text between statements --
 /// blank lines, comments, the `;`s and SQL Server's `GO` lines -- is kept as
-/// written. Reflowed with its batch, `GO 5` becomes a `GO` and a stray `5` on
-/// the next line: a count the refusal no longer sees.
+/// written, except that a statement sharing a line with the one before it
+/// starts a line of its own. Reflowed with its batch, `GO 5` becomes a `GO` and
+/// a stray `5` on the next line: a count the refusal no longer sees.
+///
+/// The result must tokenize as the buffer did, whitespace aside, or it is
+/// refused: that is what catches a split that cut a literal in two.
 ///
 /// Err is the refusal, said to the user as it stands. A MongoDB buffer is not
 /// SQL, and sqlformat over it splits regexes and turns comment text into code,
@@ -2874,7 +2878,7 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // per line here, as it is in `mql::format`: sqlformat carries a multi-line
 // string literal through as one token, and a prefix would edit its value.
 pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
-    let dialect = match engine {
+    let layout = match engine {
         Engine::MongoDb => return crate::mql::format(sql),
         Engine::Redis => return Err("Not formatting: a Redis command is one line, as typed."),
         Engine::SqlServer => sqlformat::Dialect::SQLServer,
@@ -2886,25 +2890,151 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
         | Engine::Snowflake => sqlformat::Dialect::Generic,
     };
     if has_dollar_quote(sql) {
-        return Err("Not formatting: a dollar-quoted body would be rewritten.");
+        return Err(DOLLAR_QUOTED);
     }
+    let Some(reader) = dialect(engine) else {
+        return Err(READS_DIFFERENTLY);
+    };
+    let Some(before) = layout_free_tokens(reader.as_ref(), sql) else {
+        return Err(UNENDED);
+    };
     let options = sqlformat::FormatOptions {
-        dialect,
+        dialect: layout,
         ..sqlformat::FormatOptions::default()
     };
+    let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
+    let reads_the_same =
+        |after: &str| layout_free_tokens(reader.as_ref(), after).as_ref() == Some(&before);
+
     let mut formatted = String::with_capacity(sql.len());
     let mut written = 0;
-    for statement in Buffer::for_engine(engine, sql).statements() {
-        formatted += &sql[written..statement.start];
-        formatted += &sqlformat::format(
-            &sql[statement.clone()],
-            &sqlformat::QueryParams::default(),
-            &options,
-        );
+    for (index, statement) in Buffer::for_engine(engine, sql)
+        .statements()
+        .iter()
+        .enumerate()
+    {
+        let gap = &sql[written..statement.start];
+        if index > 0 && !gap.contains('\n') {
+            formatted += gap.trim_end();
+            formatted.push('\n');
+        } else {
+            formatted += gap;
+        }
+        formatted += &reflow(&sql[statement.clone()]);
         written = statement.end;
     }
     formatted += &sql[written..];
-    Ok(formatted)
+    if reads_the_same(&formatted) {
+        return Ok(formatted);
+    }
+
+    // The statement split does not read MySQL's `\'` (see `unread_pieces`), so
+    // a `;` after one cuts the literal in two. sqlformat does read it, and over
+    // the whole buffer keeps the literal whole -- at the cost of the blank
+    // lines. Never on SQL Server, where that would reflow the `GO` lines.
+    if engine != Engine::SqlServer {
+        let whole = reflow(sql);
+        if reads_the_same(&whole) {
+            return Ok(whole);
+        }
+    }
+    Err(READS_DIFFERENTLY)
+}
+
+const DOLLAR_QUOTED: &str = "Not formatting: a dollar-quoted body would be rewritten.";
+const READS_DIFFERENTLY: &str = "Not formatting: the new layout would read as different SQL.";
+const UNENDED: &str = "Not formatting: a string, quoted name or comment does not end.";
+
+/// [`format`] of the `selection` of `sql` alone.
+///
+/// Refused when either end of the selection falls inside a word, a literal, a
+/// quoted name or a comment of the buffer around it: reflowed on its own, the
+/// piece of a literal reads as code, and its text changes with the layout. A
+/// dollar quote anywhere in the buffer is refused, as it is for the buffer.
+pub(crate) fn format_selection(
+    engine: Engine,
+    sql: &str,
+    selection: Range<usize>,
+) -> Result<String, &'static str> {
+    if let Some(reader) = dialect(engine) {
+        if has_dollar_quote(sql) {
+            return Err(DOLLAR_QUOTED);
+        }
+        match splits_a_token(reader.as_ref(), sql, &[selection.start, selection.end]) {
+            None => return Err(UNENDED),
+            Some(true) => {
+                return Err(
+                    "Not formatting: the selection starts or ends partway through a word, \
+                     string or comment.",
+                );
+            }
+            Some(false) => {}
+        }
+    }
+    format(engine, &sql[selection])
+}
+
+/// The tokens of `sql` with the whitespace between them left out, and each
+/// comment reduced to its words, which sqlformat respaces but never rewrites.
+/// `None` when `sql` does not tokenize.
+fn layout_free_tokens(dialect: &dyn Dialect, sql: &str) -> Option<Vec<Token>> {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Whitespace(Whitespace::Space | Whitespace::Newline | Whitespace::Tab) => {
+                    None
+                }
+                Token::Whitespace(Whitespace::SingleLineComment { comment, prefix }) => {
+                    Some(Token::Whitespace(Whitespace::SingleLineComment {
+                        comment: words(&comment),
+                        prefix,
+                    }))
+                }
+                Token::Whitespace(Whitespace::MultiLineComment(comment)) => Some(
+                    Token::Whitespace(Whitespace::MultiLineComment(words(&comment))),
+                ),
+                token => Some(token),
+            })
+            .collect(),
+    )
+}
+
+/// Whether any of the byte offsets `at` falls strictly inside a token of `sql`
+/// other than plain whitespace. `None` when `sql` does not tokenize.
+fn splits_a_token(dialect: &dyn Dialect, sql: &str, at: &[usize]) -> Option<bool> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize_with_location().ok()?;
+    // Spans are lines and columns of chars, in source order, so one walk
+    // forward through the text turns them all into byte offsets.
+    let mut chars = sql.char_indices().peekable();
+    let (mut line, mut column) = (1, 1);
+    let mut offset_of = |location: Location| {
+        while (line, column) < (location.line, location.column) {
+            let Some((_, c)) = chars.next() else {
+                break;
+            };
+            if c == '\n' {
+                (line, column) = (line + 1, 1);
+            } else {
+                column += 1;
+            }
+        }
+        chars.peek().map_or(sql.len(), |(offset, _)| *offset)
+    };
+    for token in tokens {
+        let start = offset_of(token.span.start);
+        let end = offset_of(token.span.end);
+        let plain = matches!(
+            token.token,
+            Token::Whitespace(Whitespace::Space | Whitespace::Newline | Whitespace::Tab)
+        );
+        if !plain && at.iter().any(|&at| start < at && at < end) {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -6088,6 +6218,47 @@ mod tests {
             formatted,
             "\n  select\n  a,\n  b\nfrom\n  t;  -- why\n\n\n-- next\nselect\n  2;\n"
         );
+    }
+
+    #[test]
+    fn statements_on_one_line_are_formatted_onto_lines_of_their_own() {
+        assert_eq!(
+            format(Engine::Postgres, "select 1; select 2").unwrap(),
+            "select\n  1;\nselect\n  2"
+        );
+    }
+
+    // The statement split cuts this literal at its `;`. Formatted piece by
+    // piece, `'Don\'t'` would come back as `' Don \ ' t`.
+    #[test]
+    fn a_backslash_escaped_literal_survives_formatting_on_mysql() {
+        let sql = "select 1;\n\ninsert into notes values ('Don\\'t; be    late');";
+        let formatted = format(Engine::MySql, sql).unwrap();
+
+        assert!(formatted.contains("('Don\\'t; be    late')"), "{formatted}");
+    }
+
+    #[test]
+    fn a_selection_cutting_through_a_literal_or_comment_is_refused() {
+        let sql = "insert into t values ('line one\nline   two');\n/* a   b */ select  1;";
+        let from = |text: &str| sql.find(text).unwrap();
+        // Line by line through a literal that spans two.
+        assert!(
+            format_selection(Engine::Postgres, sql, from("line   two")..from(";\n/*")).is_err()
+        );
+        assert!(format_selection(Engine::Postgres, sql, from("b */")..sql.len()).is_err());
+        assert!(format_selection(Engine::Postgres, sql, from("ect  1")..sql.len()).is_err());
+        assert_eq!(
+            format_selection(Engine::Postgres, sql, from("/*")..sql.len()).unwrap(),
+            "/* a   b */ select\n  1;"
+        );
+    }
+
+    #[test]
+    fn a_selection_inside_a_dollar_quoted_body_is_refused() {
+        let sql = "select $$hello   world$$";
+        let start = sql.find("hello").unwrap();
+        assert!(format_selection(Engine::Postgres, sql, start..start + 13).is_err());
     }
 
     #[test]
