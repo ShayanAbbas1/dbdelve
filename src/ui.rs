@@ -13,6 +13,7 @@ use gpui::{
 use gpui_component::{
     InteractiveElementExt, POPOVER_BLUR,
     button::{Button, ButtonVariants},
+    input::{Input, InputState},
     kbd::Kbd,
 };
 
@@ -380,6 +381,35 @@ pub(crate) fn raised_card<E: Styled>(card: E, t: Theme) -> E {
 
 fn frosts(fill: theme::color::Rgba) -> bool {
     fill.a < 1.0
+}
+
+/// The big field a floating card leads with: the palette's search, and the
+/// welcome surface's connection URL. An icon, a bare input in the large text
+/// size, and a hairline under it; the caller adds whatever sits at its end.
+pub(crate) fn search_field(
+    leading: impl IntoElement,
+    input: &gpui::Entity<InputState>,
+    t: Theme,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_MD))
+        .min_h(px(layout::chrome(layout::PALETTE_INPUT_HEIGHT)))
+        .px(px(layout::SPACE_LG))
+        .border_b_1()
+        .border_color(t.border)
+        .child(leading)
+        .child(
+            div().flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .p_0()
+                    // After the input's own size, which would set the
+                    // library's text size.
+                    .text_size(px(layout::chrome(layout::TEXT_LG))),
+            ),
+        )
 }
 
 /// What a button's fill says. Colour is state here as everywhere else: a dbdelve

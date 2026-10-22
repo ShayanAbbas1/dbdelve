@@ -32,7 +32,7 @@ use gpui::{
 };
 use gpui_component::{
     VirtualListScrollHandle,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     v_virtual_list,
 };
 
@@ -55,7 +55,7 @@ use crate::{
     },
     ui::{
         Control, Tone, chord_for, highlighted, icon_button, key_chip, keycap_parts, keycaps,
-        kind_color, object_icon, one_line, raised_card, row_icon_tinted, status_dot,
+        kind_color, object_icon, one_line, raised_card, row_icon_tinted, search_field, status_dot,
     },
     workspace::opacity_for,
 };
@@ -1745,34 +1745,18 @@ impl Render for Palette {
                     }))
                     .on_action(cx.listener(|palette, _: &PaletteRowActions, _, cx| palette.act(cx)))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(layout::SPACE_MD))
-                            .min_h(px(layout::chrome(layout::PALETTE_INPUT_HEIGHT)))
-                            .px(px(layout::SPACE_LG))
-                            .border_b_1()
-                            .border_color(t.border)
-                            .child(
-                                icon(icon::SEARCH)
-                                    .size(px(layout::chrome(layout::ICON_SIZE)))
-                                    .text_color(t.text_muted),
-                            )
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    Input::new(&self.input)
-                                        .appearance(false)
-                                        .p_0()
-                                        // After the input's own size, which
-                                        // would set the library's text size.
-                                        .text_size(px(layout::chrome(layout::TEXT_LG))),
-                                ),
-                            )
-                            .children(
-                                self.hint_chords[4]
-                                    .as_deref()
-                                    .map(|chord| keycaps(chord, t)),
-                            ),
+                        search_field(
+                            icon(icon::SEARCH)
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                .text_color(t.text_muted),
+                            &self.input,
+                            t,
+                        )
+                        .children(
+                            self.hint_chords[4]
+                                .as_deref()
+                                .map(|chord| keycaps(chord, t)),
+                        ),
                     )
                     .child(self.render_scopes(t, cx))
                     .child(list)
