@@ -334,6 +334,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.fill_from_url(window, cx);
+    }
+
+    /// Fills the open form from the URL in its URL field. Shared by the form's
+    /// own fill button and the welcome surface's field, so a URL pasted into
+    /// either lands the same way.
+    pub(crate) fn fill_from_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &self.form else {
             return;
         };

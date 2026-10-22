@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 62] = [
+const ICONS: [(&str, &IconData); 64] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -82,6 +82,8 @@ const ICONS: [(&str, &IconData); 62] = [
         icondata_lu::LuSlidersHorizontal,
     ),
     ("icons/keyboard.svg", icondata_lu::LuKeyboard),
+    ("icons/link.svg", icondata_lu::LuLink),
+    ("icons/import.svg", icondata_lu::LuImport),
     ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
     ("icons/engine-mysql.svg", icondata_si::SiMysql),
     ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
@@ -162,6 +164,10 @@ pub mod icon {
     pub const SETTINGS: &str = "icons/settings.svg";
     pub const SLIDERS: &str = "icons/sliders-horizontal.svg";
     pub const KEYBOARD: &str = "icons/keyboard.svg";
+    /// The welcome surface's URL field, before it knows the engine.
+    pub const LINK: &str = "icons/link.svg";
+    /// Connections read in from another client.
+    pub const IMPORT: &str = "icons/import.svg";
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -170,8 +176,28 @@ pub fn icon(path: &'static str) -> Icon {
 
 pub struct Icons;
 
+/// The app's own mark, in colour. Drawn with `img`, which keeps an SVG's
+/// paint, where `svg` and `icon` keep only its shape.
+pub const BRAND: &str = "brand/dbdelve.svg";
+
+/// The icon's file declares 1024px, and `img` rasterises an SVG at its
+/// declared size and then scales the bitmap. Shrinking that far with no
+/// mipmaps shimmers at the edges, so it is declared at three times the size it
+/// is drawn: enough for a 2x and a 3x display.
+fn brand_document() -> String {
+    let side = (3. * crate::theme::layout::WELCOME_MARK_SIZE) as u32;
+    include_str!("../assets/icon/dbdelve.svg").replacen(
+        r#"width="1024" height="1024""#,
+        &format!(r#"width="{side}" height="{side}""#),
+        1,
+    )
+}
+
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == BRAND {
+            return Ok(Some(Cow::Owned(brand_document().into_bytes())));
+        }
         Ok(ICONS
             .iter()
             .find(|(name, _)| *name == path)
@@ -208,6 +234,13 @@ fn document(icon: &IconData) -> String {
 mod tests {
     use super::*;
     use crate::db::Engine;
+
+    #[test]
+    fn the_brand_mark_is_declared_near_the_size_it_is_drawn() {
+        let document = brand_document();
+        assert!(document.contains(r#"width="132" height="132""#));
+        assert!(!document.contains(r#"width="1024""#));
+    }
 
     #[test]
     fn every_named_icon_resolves_to_a_document() {
@@ -254,6 +287,8 @@ mod tests {
             icon::SLIDERS,
             icon::KEYBOARD,
             icon::THEME,
+            icon::LINK,
+            icon::IMPORT,
         ] {
             assert_draws(path);
         }

@@ -141,6 +141,28 @@ pub mod layout {
     pub const PALETTE_ACCENT_BAR_HEIGHT: f32 = 16.0;
     /// The settings panel, docked at the window's right edge. Not scaled with
     /// the chrome: a row too narrow for its control puts it under the text.
+    /// The welcome surface. Its card is narrower than the palette's: it holds
+    /// a grid of short engine names, not long labels.
+    pub const WELCOME_WIDTH: f32 = 520.0;
+    pub const WELCOME_TOP: f32 = 104.0;
+    /// Less air above once projects are in the card, so their list starts
+    /// on screen on a laptop.
+    pub const WELCOME_TOP_WITH_PROJECTS: f32 = 64.0;
+    pub const WELCOME_MARK_SIZE: f32 = 44.0;
+    pub const WELCOME_MARK_GAP: f32 = 14.0;
+    pub const WELCOME_TITLE_SIZE: f32 = 20.0;
+    pub const WELCOME_TITLE_LINE: f32 = 26.0;
+    pub const WELCOME_TITLE_GAP: f32 = 22.0;
+    pub const WELCOME_FIELD_ICON: f32 = 18.0;
+    pub const WELCOME_SECTION_PADDING: f32 = 6.0;
+    pub const WELCOME_ITEM_GAP: f32 = 2.0;
+    pub const WELCOME_ITEM_INSET: f32 = 10.0;
+    /// Concentric with the card's corner: its radius less the padding between.
+    pub const WELCOME_ITEM_RADIUS: f32 = RADIUS_CARD - WELCOME_SECTION_PADDING;
+    pub const WELCOME_GRID_COLUMNS: u16 = 3;
+    /// A card narrower than this has no room for three engine names a row.
+    pub const WELCOME_NARROW: f32 = 420.0;
+
     pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
     /// The most of a narrow window's width the panel takes, so the window's
     /// own edge never cuts it off.

@@ -274,21 +274,36 @@ impl Engine {
         }
     }
 
+    /// Every spelling [`Engine::parse`] reads: the URL schemes as well as the
+    /// stored spellings. A table so the welcome surface can tell a scheme still
+    /// being typed from one that is no scheme at all.
+    pub const SCHEMES: [(&'static str, Self); 15] = [
+        ("postgres", Self::Postgres),
+        ("postgresql", Self::Postgres),
+        ("mysql", Self::MySql),
+        ("mariadb", Self::MariaDb),
+        ("sqlite", Self::Sqlite),
+        ("sqlite3", Self::Sqlite),
+        ("file", Self::Sqlite),
+        ("turso", Self::Turso),
+        ("snowflake", Self::Snowflake),
+        ("mssql", Self::SqlServer),
+        ("sqlserver", Self::SqlServer),
+        ("mongodb", Self::MongoDb),
+        ("mongodb+srv", Self::MongoDb),
+        ("redis", Self::Redis),
+        ("rediss", Self::Redis),
+    ];
+
     /// Accepts the URL schemes as well as the stored spellings, so one function
     /// serves both the profile reader and the URL box.
     pub fn parse(value: &str) -> Result<Self, String> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "postgres" | "postgresql" => Ok(Self::Postgres),
-            "mysql" => Ok(Self::MySql),
-            "mariadb" => Ok(Self::MariaDb),
-            "sqlite" | "sqlite3" | "file" => Ok(Self::Sqlite),
-            "turso" => Ok(Self::Turso),
-            "snowflake" => Ok(Self::Snowflake),
-            "mssql" | "sqlserver" => Ok(Self::SqlServer),
-            "mongodb" | "mongodb+srv" => Ok(Self::MongoDb),
-            "redis" | "rediss" => Ok(Self::Redis),
-            other => Err(format!("{other} is not a database engine dbdelve speaks.")),
-        }
+        let value = value.trim().to_ascii_lowercase();
+        Self::SCHEMES
+            .iter()
+            .find(|(spelling, _)| *spelling == value)
+            .map(|(_, engine)| *engine)
+            .ok_or_else(|| format!("{value} is not a database engine dbdelve speaks."))
     }
 
     /// The port a blank one means, where the engine has one.

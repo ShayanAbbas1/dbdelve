@@ -16,6 +16,7 @@ mod profiles;
 mod projects;
 mod queries;
 mod tabs;
+mod welcome;
 
 use std::collections::{HashMap, HashSet};
 
@@ -218,6 +219,9 @@ pub(crate) struct Workspace {
     /// The welcome surface's half of `editor_needs_focus`: set when whatever
     /// held focus over it has gone, applied on the next frame.
     pub(crate) welcome_needs_focus: bool,
+    /// The welcome surface's connection URL field. Kept rather than built
+    /// with the surface: a fresh one every frame would lose what was typed.
+    pub(crate) welcome_url: Entity<InputState>,
     /// A column a structure tab asked to see, waiting for its data tab's rows:
     /// the tab's id and the column's name.
     pub(crate) reveal_on_rows: Option<(u64, String)>,
@@ -278,6 +282,21 @@ impl Workspace {
                 workspace.search_settings(cx);
             }
         })
+        .detach();
+        let welcome_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Paste a connection URL")
+                .clean_on_escape()
+        });
+        cx.subscribe_in(
+            &welcome_url,
+            window,
+            |workspace, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => workspace.submit_welcome_url(window, cx),
+                _ => {}
+            },
+        )
         .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
@@ -346,6 +365,7 @@ impl Workspace {
             welcome_notice: None,
             project_name_error: None,
             welcome_needs_focus: true,
+            welcome_url,
             reveal_on_rows: None,
             store_unreadable: false,
             next_generation: 0,
@@ -1084,7 +1104,7 @@ impl Render for Workspace {
             && self.profiles.is_empty()
             && std::mem::take(&mut self.welcome_needs_focus)
         {
-            self.focus.focus(window, cx);
+            self.welcome_url.focus_handle(cx).focus(window, cx);
         }
         if std::mem::take(&mut self.custom_limit_needs_focus)
             && let Some((_, input)) = &self.custom_limit
@@ -1171,7 +1191,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
-                .child(self.beside_settings(self.render_welcome(cx).into_any_element(), cx))
+                .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.render_import_choice(cx))
                 .children(self.palette.clone());
         };
