@@ -803,17 +803,15 @@ impl MetalRenderer {
             while let Some((index, blur)) =
                 pending_blurs.next_if(|(_, blur)| blur.order <= batch_order)
             {
-                command_encoder.end_encoding();
-                self.draw_backdrop_blur(
+                command_encoder = self.draw_backdrop_blur(
                     index,
                     blur,
                     instance_bindings,
                     texture,
                     viewport_size,
                     command_buffer,
+                    command_encoder,
                 );
-                command_encoder =
-                    new_command_encoder_for_texture(command_buffer, texture, viewport_size, None);
             }
             match batch {
                 PrimitiveBatch::Shadows(range) => {
@@ -888,17 +886,21 @@ impl MetalRenderer {
     }
 
     /// dbdelve patch: snapshot the drawable beneath `blur`, gaussian-blur it
-    /// and paint it back inside the blur's rounded bounds, in a render pass of
-    /// its own. The caller ends its encoder first and opens a new one after.
-    fn draw_backdrop_blur(
+    /// and paint it back inside the blur's rounded bounds. This ends
+    /// `command_encoder` and returns the open encoder of the pass that drew the
+    /// blur, for the batches that follow to continue in; a blur with nothing
+    /// visible leaves the pass alone and returns `command_encoder`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_backdrop_blur<'a>(
         &mut self,
         index: usize,
         blur: &BackdropBlur,
         instance_bindings: &InstanceBindings,
-        texture: &metal::TextureRef,
+        texture: &'a metal::TextureRef,
         viewport_size: Size<DevicePixels>,
-        command_buffer: &metal::CommandBufferRef,
-    ) {
+        command_buffer: &'a metal::CommandBufferRef,
+        command_encoder: &'a metal::RenderCommandEncoderRef,
+    ) -> &'a metal::RenderCommandEncoderRef {
         // Only the visible (clipped) bounds are ever sampled, and the gaussian
         // reaches about 3 sigma past a sampled pixel, so the snapshot needs
         // just that padded region rather than the whole drawable.
@@ -914,8 +916,9 @@ impl MetalRenderer {
         let y1 = ((visible.origin.y.0 + visible.size.height.0 + padding).ceil() as i64)
             .min(drawable_height);
         if x1 <= x0 || y1 <= y0 {
-            return;
+            return command_encoder;
         }
+        command_encoder.end_encoding();
         let (scratch, blurred) = self.ensure_backdrop_scratch(
             (x1 - x0) as u64,
             (y1 - y0) as u64,
@@ -1009,7 +1012,7 @@ impl MetalRenderer {
             1,
             index as u64,
         );
-        command_encoder.end_encoding();
+        command_encoder
     }
 
     /// dbdelve patch: the backdrop blur's scratch textures, sized to the padded
