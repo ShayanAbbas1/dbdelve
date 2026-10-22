@@ -1020,8 +1020,8 @@ fn render_keybinding(
                 Control::Compact,
                 t,
             )
-            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                workspace.start_rebind(id, cx);
+            .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                workspace.start_rebind(id, window, cx);
             })),
         )
         .children(overrides.contains_key(id).then(|| {

@@ -1731,10 +1731,23 @@ impl Workspace {
     /// Put the batch away, leaving the edits pending: reading a statement and
     /// deciding not to run it is not the same as throwing the edits out, which
     /// is what Discard is for.
+    ///
+    /// Scoped to the active tab, the only one it is drawn over, as
+    /// `close_new_row` is: one left on another tab must not eat the `escape`
+    /// meant for what this tab has in front.
     pub(crate) fn close_apply_review(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(profile) = self.profile_mut() else {
             return false;
         };
+        let active = profile.session.active;
+        if profile
+            .session
+            .apply_review
+            .as_ref()
+            .is_none_or(|review| review.tab != active)
+        {
+            return false;
+        }
         let closed = profile.session.apply_review.take().is_some();
         if closed {
             cx.notify();

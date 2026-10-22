@@ -210,16 +210,17 @@ impl Workspace {
             }),
             _ => None,
         };
-        // Only the lists the panel opens hand the keyboard back to it. Any
-        // other command puts focus where it wants it -- a table opened, a new
-        // query tab -- and the panel taking it back would leave that dead.
-        // The theme list's import rows open their list as the theme list
-        // closes, while the panel's search waits to be focused.
-        let picks_setting = picks_theme || matches!(mode, PaletteMode::Font(_));
+        // A list put up in place of one opened from the panel, or by a row
+        // confirmed there, was opened from the panel too. The theme list's
+        // import rows open their list as the theme list closes, while the
+        // panel's search waits to be focused.
         let from_settings = self.settings_search_needs_focus
             || self.settings_focus.contains_focused(window, cx)
-            || (stroke.is_some() && self.palette_from_settings);
-        self.palette_from_settings = picks_setting && self.settings_open && from_settings;
+            || self.palette_from_settings;
+        self.palette_from_settings = self.settings_open && from_settings;
+        // The palette takes the keyboard, and a capture left listening behind
+        // it would take the first key typed after it closes.
+        self.cancel_rebind(cx);
         let palette = cx.new(|cx| Palette::new(mode, self, window, cx));
         if let Some(first) = first {
             palette.update(cx, |palette, cx| palette.select_item(first, window, cx));
@@ -294,9 +295,17 @@ impl Workspace {
                 Some(command.clone())
             }
         };
-        self.close_palette(window, cx);
-        if let Some(command) = command {
-            self.run_command(command, window, cx);
+        let Some(command) = command else {
+            self.close_palette(window, cx);
+            return;
+        };
+        let from_settings = self.palette_from_settings;
+        self.take_palette(true, window, cx);
+        self.palette_from_settings = from_settings;
+        self.run_command(command, window, cx);
+        // Kept only for a list the command put up in the palette's place.
+        if self.palette.is_none() {
+            self.palette_from_settings = false;
         }
     }
 
@@ -310,13 +319,34 @@ impl Workspace {
     /// Every way out routes through here for that reason: `escape`, the same
     /// stroke again, a click outside, and confirming a row.
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.palette.take().is_none() {
+        self.take_palette(false, window, cx)
+    }
+
+    /// A palette opened from the settings panel hands the keyboard back to
+    /// its search when it is dismissed, and when a setting is picked from it.
+    /// Any other row confirmed there puts focus where its command wants it --
+    /// a table opened, a new query tab -- and the panel taking it back would
+    /// leave that dead.
+    fn take_palette(
+        &mut self,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(palette) = self.palette.take() else {
             return false;
-        }
+        };
+        let picks_setting = matches!(
+            palette.read(cx).mode(),
+            PaletteMode::Theme | PaletteMode::ImportTheme(_) | PaletteMode::Font(_)
+        );
         self.end_theme_preview(window, cx);
+        let to_settings = std::mem::take(&mut self.palette_from_settings)
+            && self.settings_open
+            && (picks_setting || !confirmed);
         if let Some(form) = self.form.as_mut() {
             form.needs_focus = Some(form.url.clone());
-        } else if std::mem::take(&mut self.palette_from_settings) && self.settings_open {
+        } else if to_settings {
             self.settings_search_needs_focus = true;
         } else {
             self.refocus_front();
@@ -379,6 +409,9 @@ impl Workspace {
         self.settings_open = false;
         self.settings_search_needs_focus = false;
         self.rebinding = None;
+        if matches!(self.custom_limit, Some((LimitTarget::Default, _))) {
+            self.custom_limit = None;
+        }
         self.clear_settings_search(window, cx);
     }
 
@@ -434,8 +467,17 @@ impl Workspace {
     /// new capture always replaces whatever was mid-capture before it. The
     /// keystroke itself arrives at the interceptor `Workspace::new` installs,
     /// not here.
-    pub(crate) fn start_rebind(&mut self, id: &'static str, cx: &mut Context<Self>) {
+    ///
+    /// The panel takes focus: a click on Edit leaves it wherever it was, and
+    /// the interceptor reads focus outside the panel as a click elsewhere.
+    pub(crate) fn start_rebind(
+        &mut self,
+        id: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.rebinding = Some(id);
+        self.settings_focus.focus(window, cx);
         cx.notify();
     }
 

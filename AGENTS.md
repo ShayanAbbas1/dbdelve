@@ -1537,6 +1537,10 @@ second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
 opens it on Objects, `cmd+shift+p` on Commands and the titlebar's connection
 name on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
+A palette opened from the settings panel, or put up by a row confirmed there,
+hands the keyboard back to the panel's search when it is dismissed or a theme
+or font is picked from it; any other row it confirms leaves focus where its
+command put it.
 
 It also does **not** ship the icons its `IconName` names: those are Lucide file
 paths with no files behind them. `src/icons.rs` is DBDelve's `AssetSource`: it

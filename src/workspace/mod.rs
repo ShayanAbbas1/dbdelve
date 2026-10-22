@@ -514,10 +514,12 @@ impl Workspace {
                 }) else {
                     return;
                 };
-                // A click elsewhere is a change of mind, and the key is for
-                // whatever took focus. A window focused on nothing is not
-                // elsewhere: that is the Edit button unmounted under the
-                // pointer, which `on_focus_lost` hands back to the panel.
+                // Starting a capture puts focus in the panel, so focus
+                // anywhere else is a click elsewhere: a change of mind, and
+                // the key is for whatever took focus. A window focused on
+                // nothing is not elsewhere: that is a button pressed from the
+                // keyboard and unmounted, which `on_focus_lost` hands back to
+                // the panel.
                 if window.focused(cx).is_some()
                     && !workspace.settings_focus.contains_focused(window, cx)
                 {
@@ -540,11 +542,11 @@ impl Workspace {
         })
         .detach();
 
-        // A button takes the keyboard when clicked, and in the settings panel
-        // one can be gone the next frame -- Reset once there is nothing left to
-        // reset, Edit while its row waits for a key, a row the search no longer
-        // finds. A window focused on nothing has every binding dead, so the
-        // panel takes the keyboard back for it.
+        // A button pressed from the keyboard holds focus, and in the settings
+        // panel one can be gone the next frame -- Reset once there is nothing
+        // left to reset, Edit while its row waits for a key, a row the search
+        // no longer finds. A window focused on nothing has every binding dead,
+        // so the panel takes the keyboard back for it.
         cx.on_focus_lost(window, |workspace, window, cx| {
             if workspace.settings_open
                 && window.focus_lost_restore_target(cx).as_ref() == Some(&workspace.settings_focus)

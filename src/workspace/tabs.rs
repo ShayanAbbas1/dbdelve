@@ -606,7 +606,13 @@ impl Workspace {
         // completions, or for the new-row form beside the grid. The search is
         // emptied before the panel closes.
         if self.settings_open && self.settings_focus.contains_focused(window, cx) {
-            if !self.clear_settings_search(window, cx) {
+            // The default row limit's Custom… field is put away alone, as a
+            // click elsewhere would.
+            if matches!(self.custom_limit, Some((LimitTarget::Default, _))) {
+                self.custom_limit = None;
+                self.settings_focus.focus(window, cx);
+                cx.notify();
+            } else if !self.clear_settings_search(window, cx) {
                 self.close_settings(window, cx);
             }
             return;
