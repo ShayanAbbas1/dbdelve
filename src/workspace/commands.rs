@@ -146,10 +146,12 @@ impl Workspace {
         // Swapping straight to another list skips `close_palette`, and a
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
-        // The theme lists are the only ones reachable before any connection
-        // exists, from the welcome surface or the connection form.
+        // The theme lists and the engine list are the only ones reachable
+        // before any connection exists, from the welcome surface or the
+        // connection form.
         let picks_theme = matches!(mode, PaletteMode::Theme | PaletteMode::ImportTheme(_));
-        if showing == Some(mode) || (self.profile().is_none() && !picks_theme) {
+        let before_any_connection = picks_theme || mode == PaletteMode::Engine;
+        if showing == Some(mode) || (self.profile().is_none() && !before_any_connection) {
             self.close_palette(window, cx);
             return;
         }
@@ -195,6 +197,7 @@ impl Workspace {
                         .position(|name| Some(name) == databases.current.as_ref())
                 })
                 .unwrap_or_default(),
+            PaletteMode::Engine => crate::palette::active_engine_row(self).unwrap_or_default(),
             _ => 0,
         };
         let palette = Palette::new(mode, self, cx);
@@ -283,7 +286,7 @@ impl Workspace {
         }
         self.end_theme_preview(window, cx);
         if let Some(form) = self.form.as_mut() {
-            form.needs_focus = Some(form.url.clone());
+            form.needs_focus = Some(form.lead_field());
         } else {
             self.refocus_front();
         }
@@ -439,6 +442,12 @@ impl Workspace {
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),
+            Command::SetEngine(engine) => {
+                if let Some(form) = &mut self.form {
+                    form.set_engine(engine);
+                }
+                cx.notify();
+            }
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => self.set_schema(name, cx),
             Command::SetTheme(theme) => self.set_theme(*theme, window, cx),

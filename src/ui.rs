@@ -20,13 +20,13 @@ use std::collections::HashMap;
 
 use crate::{
     actions::RefreshConnection,
-    db::{RelationKind, RoutineKind},
+    db::{Engine, RelationKind, RoutineKind},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
     session::ProfileState,
     sql::Mode,
-    theme::{self, ConnectionColor, Theme, layout},
+    theme::{self, ConnectionColor, Theme, color::Srgb, layout},
 };
 
 /// The icon a sidebar row carries: a grid for a table, layers for one split
@@ -69,15 +69,33 @@ pub(crate) fn kind_color(path: &str) -> Option<ConnectionColor> {
 }
 
 /// `row_icon`, in a connection's own colour. Without one it is `row_icon`
-/// exactly, so an uncoloured connection is drawn the way it always was.
+/// exactly, so an uncoloured connection is drawn the way it always was. An
+/// engine's logo without one wears its brand; with one, the colour the user
+/// chose wins, since it is how they tell production from the rest.
 pub(crate) fn row_icon_tinted(
     t: Theme,
     path: &'static str,
     color: Option<ConnectionColor>,
 ) -> impl IntoElement {
+    let brand = || {
+        Engine::ALL
+            .into_iter()
+            .find(|engine| engine.logo() == path)
+            .map_or(t.text_faint, |engine| {
+                theme::engine_brand(engine, t, &t.logo_planes())
+            })
+    };
     icon(path)
         .size(px(layout::chrome(layout::ICON_SIZE)))
-        .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
+        .text_color(color.map_or_else(brand, ConnectionColor::swatch))
+}
+
+/// An engine's logo in its brand hue, at a lightness that stands off every
+/// one of `planes`: for a surface whose colour is not the theme's own.
+pub(crate) fn engine_logo(t: Theme, engine: Engine, planes: &[Srgb]) -> impl IntoElement {
+    icon(engine.logo())
+        .size(px(layout::chrome(layout::ICON_SIZE)))
+        .text_color(theme::engine_brand(engine, t, planes))
 }
 
 /// A connection's state as one dot, the same in the status bar and the

@@ -13,7 +13,8 @@ use gpui_component::input::InputState;
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
+        ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel,
+        SslMode,
     },
     session::Profile,
     sql::Mode,
@@ -91,6 +92,32 @@ pub(crate) struct ConnectionForm {
 }
 
 impl ConnectionForm {
+    /// The first field the form draws for its engine.
+    pub(crate) fn lead_field(&self) -> Entity<InputState> {
+        match self.engine.fields() {
+            Fields::Account => self.account.clone(),
+            _ => self.url.clone(),
+        }
+    }
+
+    pub(crate) fn set_engine(&mut self, engine: Engine) {
+        // Only when the field set actually changes: Postgres and MySQL show
+        // the same fields, so a switch between them leaves focus where the
+        // palette hands it back (the lead field). Only a change of field set
+        // moves it, to the new set's first field.
+        if self.engine.fields() != engine.fields() {
+            self.needs_focus = Some(match engine.fields() {
+                Fields::Server => self.host.clone(),
+                Fields::File => self.path.clone(),
+                Fields::Account => self.account.clone(),
+            });
+        }
+        self.engine = engine;
+        // Both belonged to the fields that just left the screen.
+        self.error = None;
+        self.test = None;
+    }
+
     pub(crate) fn new(
         config: Option<&ConnectionConfig>,
         window: &mut Window,

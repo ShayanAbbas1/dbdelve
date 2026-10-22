@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 51] = [
+const ICONS: [(&str, &IconData); 60] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -77,6 +77,15 @@ const ICONS: [(&str, &IconData); 51] = [
     ("icons/folder.svg", icondata_lu::LuFolder),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
+    ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
+    ("icons/engine-mysql.svg", icondata_si::SiMysql),
+    ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
+    ("icons/engine-sqlite.svg", icondata_si::SiSqlite),
+    ("icons/engine-turso.svg", icondata_si::SiTurso),
+    ("icons/engine-snowflake.svg", icondata_si::SiSnowflake),
+    ("icons/engine-sqlserver.svg", icondata_lu::LuServer),
+    ("icons/engine-mongodb.svg", icondata_si::SiMongodb),
+    ("icons/engine-redis.svg", icondata_si::SiRedis),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
@@ -190,6 +199,7 @@ fn document(icon: &IconData) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
 
     #[test]
     fn every_named_icon_resolves_to_a_document() {
@@ -236,6 +246,9 @@ mod tests {
             icon::SETTINGS,
         ] {
             assert_draws(path);
+        }
+        for engine in Engine::ALL {
+            assert_draws(engine.logo());
         }
     }
 

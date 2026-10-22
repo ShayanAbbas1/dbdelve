@@ -435,24 +435,14 @@ impl Workspace {
         )
     }
 
-    /// A field-shaped button that opens a menu of `groups` of options, with a
-    /// separator between groups: the pickers on the connection form and the
-    /// import's project. `pick` makes the choice; `marker` is what is drawn
-    /// before a label, if anything.
-    pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
+    /// The face of a field-shaped picker: its current choice and a chevron.
+    fn field_trigger(
         id: impl Into<gpui::ElementId>,
-        selected: T,
-        groups: Vec<Vec<T>>,
-        label: impl Fn(&T) -> gpui::SharedString + 'static,
-        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
-        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+        marker: Option<AnyElement>,
+        label: gpui::SharedString,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui_component::button::Button {
         let t = *theme(cx);
-        let workspace = cx.entity().downgrade();
-        let label = Rc::new(label);
-        let marker = Rc::new(marker);
-        let pick = Rc::new(pick);
         ui::control(id, Tone::Quiet, Control::Standard)
             .w_full()
             .px(px(layout::SPACE_SM))
@@ -466,7 +456,7 @@ impl Workspace {
                     .gap(px(layout::SPACE_XS))
                     .text_size(px(layout::chrome(layout::TEXT_MD)))
                     .text_color(t.text)
-                    .children(marker(&selected))
+                    .children(marker)
                     .child(
                         div()
                             .flex_1()
@@ -474,10 +464,30 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(label(&selected)),
+                            .child(label),
                     )
                     .child(row_icon(t, icon::CHEVRON_DOWN)),
             )
+    }
+
+    /// A field-shaped button that opens a menu of `groups` of options, with a
+    /// separator between groups: the pickers on the connection form and the
+    /// import's project. `pick` makes the choice; `marker` is what is drawn
+    /// before a label, if anything.
+    pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
+        id: impl Into<gpui::ElementId>,
+        selected: T,
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace = cx.entity().downgrade();
+        let label = Rc::new(label);
+        let marker = Rc::new(marker);
+        let pick = Rc::new(pick);
+        Self::field_trigger(id, marker(&selected), label(&selected), cx)
             .dropdown_menu(move |menu, _, _| {
                 groups.iter().enumerate().fold(
                     menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
@@ -515,33 +525,17 @@ impl Workspace {
     }
 
     /// The engine decides which fields the form even has, so it is the first
-    /// thing on it.
+    /// thing on it. There are too many to scan in a menu, so it opens the
+    /// searchable palette instead.
     pub(crate) fn engine_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
         let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "engine",
-            form.engine,
-            vec![Engine::ALL.to_vec()],
-            |engine| engine.label().into(),
-            |_| None,
-            |form, engine| {
-                // Only when the field set actually changes: Postgres and
-                // MySQL show the same fields, so switching between them
-                // takes nothing away and must not take focus either.
-                if form.engine.fields() != engine.fields() {
-                    form.needs_focus = Some(match engine.fields() {
-                        Fields::Server => form.host.clone(),
-                        Fields::File => form.path.clone(),
-                        Fields::Account => form.account.clone(),
-                    });
-                }
-                form.engine = engine;
-                // Both belonged to the fields that just left the screen.
-                form.error = None;
-                form.test = None;
-            },
-            cx,
-        )
+        let t = *theme(cx);
+        let marker = row_icon(t, form.engine.logo()).into_any_element();
+        Self::field_trigger("engine", Some(marker), form.engine.label().into(), cx)
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.open_palette(PaletteMode::Engine, window, cx);
+            }))
+            .into_any_element()
     }
 
     /// Weakest first.

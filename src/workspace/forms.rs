@@ -1770,7 +1770,11 @@ impl Workspace {
                         .rounded(px(layout::RADIUS_CONTROL))
                         .hover(|style| style.bg(t.element_hover))
                         .when(selected == Some(index), |row| row.bg(t.element_active))
-                        .child(row_icon_tinted(t, icon::DATABASE, profile.color))
+                        .child(row_icon_tinted(
+                            t,
+                            profile.config.engine().logo(),
+                            profile.color,
+                        ))
                         .child(ui::status_dot(t, &profile.state))
                         .child(
                             div()
@@ -2049,8 +2053,36 @@ impl Workspace {
             .map(|profile| profile.name.clone())
             .unwrap_or_else(|| "Connections".into());
         let active_color = self.profile().and_then(|profile| profile.color);
+        // The logo keeps its brand here, never the connection's colour: the
+        // band or pill behind it is already wearing that colour, and the logo
+        // would sink into it. So its lightness is tuned to whatever it sits on.
+        let behind_logo = match active_color {
+            Some(color) if self.settings.color_titlebar => color.band(t).flatten(t.surface),
+            Some(color) => color.chip(t),
+            None => t.surface,
+        };
+        let active_logo = match self.profile() {
+            Some(profile) => {
+                engine_logo(t, profile.config.engine(), &[behind_logo]).into_any_element()
+            }
+            None => row_icon(t, icon::DATABASE).into_any_element(),
+        };
         let project_name = self.current_group().map(str::to_string);
-        let toggle_workspace = workspace.clone();
+        // While the panel is open its `on_mouse_down_out` already owns closing,
+        // and it fires on the press. Carrying a click handler here too would
+        // reopen on the release, so the open panel leaves both segments
+        // without one: no handler, no click recorded, no reopen.
+        let switcher_open = self.switcher_open;
+        let opens_switcher = |segment: gpui::Stateful<gpui::Div>| {
+            let workspace = workspace.clone();
+            segment.when(!switcher_open, |segment| {
+                segment.on_click(move |_, window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.open_switcher(window, cx);
+                    });
+                })
+            })
+        };
 
         div()
             .relative()
@@ -2062,65 +2094,38 @@ impl Workspace {
             .children(panel.map(deferred))
             .child(
                 div()
-                    .id("profile-switcher")
                     .flex()
                     .items_center()
-                    .gap(px(layout::SPACE_XS))
-                    .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
-                    .px(px(layout::SPACE_SM))
-                    .rounded(px(layout::RADIUS_CONTROL))
-                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                    .text_color(t.text_faint)
-                    .hover(|style| style.bg(t.element_hover).text_color(t.text))
-                    .when_some(project_name, |trigger, name| {
-                        trigger
-                            .child(row_icon(t, icon::PROJECT))
-                            .child(
-                                div()
-                                    .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(name),
-                            )
-                            .child("/")
+                    // The titlebar's own gap, so this `/` spaces like the
+                    // breadcrumb's after it.
+                    .gap(px(layout::SPACE_SM))
+                    .when_some(project_name, |path, name| {
+                        path.child(opens_switcher(crumb(
+                            "project-switcher",
+                            t,
+                            Some(row_icon(t, icon::PROJECT).into_any_element()),
+                            name,
+                            false,
+                            layout::SIDEBAR_DEFAULT_WIDTH / 2.,
+                        )))
+                        .child(crumb_separator(t))
                     })
-                    .child(row_icon_tinted(t, icon::DATABASE, active_color))
-                    .child(
-                        div()
-                            .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(active_name),
-                    )
-                    .child(row_icon(t, icon::CHEVRON_DOWN))
-                    // With a colour the name becomes the label of a pill: in
-                    // its own hue, or a plain chip when the band behind it is
-                    // already wearing that hue. The text keeps the normal
-                    // colour, because the hue at text size on a tint of itself
-                    // is the one arrangement nobody can read.
-                    .when_some(active_color, |pill, color| {
-                        pill.bg(if self.settings.color_titlebar {
-                            t.surface
-                        } else {
-                            color.chip(t)
-                        })
-                        .text_color(t.text)
-                        .font_weight(FontWeight::MEDIUM)
-                    })
-                    // While the panel is open its `on_mouse_down_out` already
-                    // owns closing, and it fires on the press. Carrying a click
-                    // handler here too would reopen on the release, so the open
-                    // panel leaves the trigger without one: no handler, no
-                    // click recorded, no reopen.
-                    .when(!self.switcher_open, |trigger| {
-                        trigger.on_click(move |_, window, cx| {
-                            _ = toggle_workspace.update(cx, |workspace, cx| {
-                                workspace.open_switcher(window, cx);
-                            });
-                        })
-                    }),
+                    .child(opens_switcher(
+                        crumb(
+                            "profile-switcher",
+                            t,
+                            Some(active_logo),
+                            active_name,
+                            false,
+                            layout::SIDEBAR_DEFAULT_WIDTH,
+                        )
+                        // Without a coloured band to say which connection
+                        // this is, the name becomes a pill in its own hue.
+                        .when_some(
+                            active_color.filter(|_| !self.settings.color_titlebar),
+                            |pill, color| pill.bg(color.chip(t)),
+                        ),
+                    )),
             )
             .into_any_element()
     }
@@ -2133,37 +2138,16 @@ impl Workspace {
             return Vec::new();
         };
         let segment = |id: &'static str, label: String, placeholder: bool| {
-            div()
-                .id(id)
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .gap(px(layout::SPACE_XS))
-                .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
-                .px(px(layout::SPACE_SM))
-                .rounded(px(layout::RADIUS_CONTROL))
-                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                .text_color(t.text_faint)
-                .hover(|style| style.bg(t.element_hover).text_color(t.text))
-                .child(
-                    div()
-                        .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH / 2.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .when(placeholder, |label| label.italic())
-                        .child(label),
-                )
-                .child(row_icon(t, icon::CHEVRON_DOWN))
+            crumb(
+                id,
+                t,
+                None,
+                label,
+                placeholder,
+                layout::SIDEBAR_DEFAULT_WIDTH / 2.,
+            )
         };
-        let separator = || {
-            div()
-                .flex_shrink_0()
-                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                .text_color(t.text_faint)
-                .child("/")
-                .into_any_element()
-        };
+        let separator = || crumb_separator(t);
         let mut steps = Vec::new();
         if profile.config.engine().switches_database() {
             let database = profile
@@ -2748,5 +2732,50 @@ fn name_field(input: &Entity<InputState>) -> AnyElement {
         .px(px(layout::SPACE_XS))
         .py(px(layout::SPACE_XS))
         .child(gpui_component::Sizable::small(Input::new(input)))
+        .into_any_element()
+}
+
+/// One step of the titlebar's path. The project, the connection, its database
+/// and its schema all look and hover alike, so the path reads as one thing.
+fn crumb(
+    id: &'static str,
+    t: Theme,
+    marker: Option<AnyElement>,
+    label: impl Into<gpui::SharedString>,
+    placeholder: bool,
+    max_width: f32,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .h(px(layout::chrome(layout::CONTROL_HEIGHT_COMPACT)))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .text_color(t.text)
+        .font_weight(FontWeight::MEDIUM)
+        .hover(|style| style.bg(t.element_hover))
+        .children(marker)
+        .child(
+            div()
+                .max_w(px(max_width))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .when(placeholder, |label| label.italic())
+                .child(label.into()),
+        )
+        .child(row_icon(t, icon::CHEVRON_DOWN))
+}
+
+fn crumb_separator(t: Theme) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .text_color(t.text_faint)
+        .child("/")
         .into_any_element()
 }
