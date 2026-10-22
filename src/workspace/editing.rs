@@ -690,9 +690,9 @@ impl Workspace {
             }
         }
 
-        let mut replaced = text.clone();
-        replaced.replace_range(range, &sorted);
-        editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
+        editor.update(cx, |editor, cx| {
+            queries::replace_range(editor, range, &sorted, window, cx);
+        });
         match queued {
             Some(index) => self.rerun_queued(Tab::Query(tab_id), index, sorted, cx),
             None => {
@@ -1692,7 +1692,9 @@ impl Workspace {
 
         let text = editor.read(cx).value().to_string();
         let appended = appended_statement(self.engine(), &text, &batch);
-        editor.update(cx, |editor, cx| editor.set_value(appended, window, cx));
+        editor.update(cx, |editor, cx| {
+            queries::rewrite(editor, &appended, window, cx)
+        });
         self.execute_and_then(batch, Tab::Query(id), Some(refresh), false, None, cx);
     }
 

@@ -1474,7 +1474,7 @@ impl Workspace {
         let appended = appended_statement(self.engine(), &text, &sql);
         let line = appended.lines().count().saturating_sub(sql.lines().count()) as u32;
         editor.update(cx, |editor, cx| {
-            editor.set_value(appended, window, cx);
+            rewrite(editor, &appended, window, cx);
             editor.set_cursor_position(Position::new(line, 0), window, cx);
         });
         self.activate_tab(Tab::Query(id), window, cx);
