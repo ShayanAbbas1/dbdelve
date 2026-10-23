@@ -77,11 +77,10 @@ impl Workspace {
                 cx,
             ),
         };
-        if index != self.active {
-            self.activate(index, cx);
-        } else {
-            self.connect_active(cx);
-        }
+        // Even when it is in front already: a profile made here for the first
+        // file ever opened is index 0, in front behind the New connection
+        // form, which would cover the tabs this opens.
+        self.activate(index, cx);
         let Some(profile_id) = self.profile().map(|profile| profile.id.clone()) else {
             return;
         };
@@ -98,29 +97,40 @@ impl Workspace {
             editor.update(cx, |editor, cx| editor.set_value(sql.clone(), window, cx));
             self.runs_on_connect.push((profile_id.clone(), id, sql));
         }
-        self.run_waiting_files(cx);
+        // Otherwise its connect is on its way, and lands in `run_waiting_files`.
+        if self
+            .profile()
+            .is_some_and(|profile| profile.connection().is_some())
+        {
+            self.run_waiting_files(&profile_id, cx);
+        }
     }
 
-    /// Run what [`Workspace::open_data_files`] left waiting for its profile to
-    /// connect, once it has. Anything for a profile no longer in front is
-    /// dropped: its statement is still in its tab, a Run away.
-    pub(crate) fn run_waiting_files(&mut self, cx: &mut Context<Self>) {
-        let Some((id, connected)) = self
+    /// Run what [`Workspace::open_data_files`] left waiting for `profile`,
+    /// once its connect has landed: if it connected and is still in front.
+    /// Otherwise it is dropped, its statement still in its tab, a Run away --
+    /// a later connect must not run it over whatever the tab holds by then.
+    pub(crate) fn run_waiting_files(&mut self, profile: &str, cx: &mut Context<Self>) {
+        let waiting = waiting_for(&mut self.runs_on_connect, profile);
+        if !self
             .profile()
-            .map(|profile| (profile.id.clone(), profile.connection().is_some()))
-        else {
-            return;
-        };
-        if !connected {
+            .is_some_and(|front| front.id == profile && front.connection().is_some())
+        {
             return;
         }
-        let waiting = std::mem::take(&mut self.runs_on_connect);
-        for (profile, tab, sql) in waiting {
-            if profile == id {
-                self.execute_sql(sql, Tab::Query(tab), cx);
-            }
+        for (tab, sql) in waiting {
+            self.execute_sql(sql, Tab::Query(tab), cx);
         }
     }
+}
+
+/// `profile`'s waiting runs, taken out of `waiting`: tab and statement.
+fn waiting_for(waiting: &mut Vec<(String, u64, String)>, profile: &str) -> Vec<(u64, String)> {
+    let (taken, kept) = std::mem::take(waiting)
+        .into_iter()
+        .partition::<Vec<_>, _>(|(id, ..)| id == profile);
+    *waiting = kept;
+    taken.into_iter().map(|(_, tab, sql)| (tab, sql)).collect()
 }
 
 /// The statement that reads a file, by its extension, or `None` for a file
@@ -178,6 +188,21 @@ mod tests {
         );
         assert_eq!(reading(Path::new("/data/notes.md")), None);
         assert_eq!(reading(Path::new("/data/no-extension")), None);
+    }
+
+    #[test]
+    fn a_connect_landing_settles_its_own_profiles_waiting_runs_and_no_others() {
+        let mut waiting = vec![
+            ("files".to_string(), 1, "a".to_string()),
+            ("other".to_string(), 2, "b".to_string()),
+            ("files".to_string(), 3, "c".to_string()),
+        ];
+        assert_eq!(
+            waiting_for(&mut waiting, "files"),
+            [(1, "a".to_string()), (3, "c".to_string())]
+        );
+        assert_eq!(waiting, [("other".to_string(), 2, "b".to_string())]);
+        assert_eq!(waiting_for(&mut waiting, "files"), []);
     }
 
     #[test]
