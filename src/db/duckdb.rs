@@ -797,6 +797,7 @@ fn type_name(field: &Field) -> String {
         DataType::Timestamp(_, Some(_)) => "timestamp with time zone".into(),
         DataType::Interval(_) | DataType::Duration(_) => "interval".into(),
         DataType::List(item) | DataType::LargeList(item) => format!("{}[]", type_name(item)),
+        DataType::FixedSizeList(item, size) => format!("{}[{size}]", type_name(item)),
         DataType::Struct(_) => "struct".into(),
         DataType::Map(..) => "map".into(),
         DataType::Dictionary(_, value) => type_name(&Field::new("", value.as_ref().clone(), true)),
@@ -1101,6 +1102,36 @@ mod tests {
                 Some("24:00:00+00"),
                 Some("[12:00:00+01]")
             ]]
+        );
+    }
+
+    #[test]
+    fn a_fixed_size_array_is_named_with_its_size() {
+        let connection = memory("CREATE TABLE t (a INTEGER[3], b INTEGER[2][1], c VARCHAR[1][]);");
+        let result = connection
+            .query(
+                "SELECT [1, 2, 3]::INTEGER[3] AS a, [[1, 2]]::INTEGER[2][1] AS b,
+                        [['x']]::VARCHAR[1][] AS c",
+                Fetch::default(),
+            )
+            .unwrap();
+        let types: Vec<_> = result
+            .columns
+            .iter()
+            .map(|column| column.data_type.as_deref().unwrap())
+            .collect();
+        assert_eq!(types, ["integer[3]", "integer[2][1]", "varchar[1][]"]);
+        let structure: Vec<_> = connection
+            .structure("main", "t")
+            .unwrap()
+            .columns
+            .into_iter()
+            .map(|column| column.data_type)
+            .collect();
+        assert_eq!(structure, types);
+        assert_eq!(
+            cells(&result),
+            [[Some("[1, 2, 3]"), Some("[[1, 2]]"), Some("[[x]]")]]
         );
     }
 
