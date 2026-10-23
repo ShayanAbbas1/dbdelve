@@ -508,9 +508,7 @@ fn printable(
             }),
             "bit" => spelled(array, bits),
             "bignum" => spelled(array, bignum),
-            "time_tz" => spelled(array, |bytes| {
-                Some(time_tz(u64::from_le_bytes(bytes.try_into().ok()?)))
-            }),
+            "time_tz" => spelled(array, time_tz),
             _ => Ok(array.clone()),
         };
     }
@@ -734,8 +732,12 @@ fn bignum(bytes: &[u8]) -> Option<String> {
 }
 
 /// A `TIMETZ` as DuckDB packs it: microseconds since midnight in the high
-/// 40 bits, its offset in the low 24.
-fn time_tz(bits: u64) -> String {
+/// 40 bits, and in the low 24 its offset in seconds taken from the widest
+/// DuckDB allows, so that times sort by the instant they name.
+fn time_tz(bytes: &[u8]) -> Option<String> {
+    const WIDEST_OFFSET: i64 = 16 * 3600 - 1;
+    let bits = u64::from_le_bytes(bytes.try_into().ok()?);
+    let offset = WIDEST_OFFSET - (bits & 0xff_ffff) as i64;
     let micros = bits >> 24;
     let (seconds, micros) = (micros / 1_000_000, micros % 1_000_000);
     let mut time = format!(
@@ -749,7 +751,17 @@ fn time_tz(bits: u64) -> String {
         time.push('.');
         time.push_str(fraction.trim_end_matches('0'));
     }
-    time
+    let sign = if offset < 0 { '-' } else { '+' };
+    let offset = offset.unsigned_abs();
+    let (hours, minutes, seconds) = (offset / 3600, offset / 60 % 60, offset % 60);
+    write!(time, "{sign}{hours:02}").ok()?;
+    if minutes > 0 || seconds > 0 {
+        write!(time, ":{minutes:02}").ok()?;
+    }
+    if seconds > 0 {
+        write!(time, ":{seconds:02}").ok()?;
+    }
+    Some(time)
 }
 
 /// An Arrow type under the name DuckDB gives it, lowercased as every engine's
@@ -758,7 +770,7 @@ fn time_tz(bits: u64) -> String {
 fn type_name(field: &Field) -> String {
     if let Some(name) = extension(field) {
         return match name.as_str() {
-            "time_tz" => "time".into(),
+            "time_tz" => "time with time zone".into(),
             _ => name,
         };
     }
@@ -1056,6 +1068,38 @@ mod tests {
                 Some("-1"),
                 Some("-256"),
                 Some("[255]")
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_time_with_a_zone_keeps_its_offset() {
+        let result = memory("")
+            .query(
+                "SELECT '12:34:56+05:30'::TIMETZ AS india, '12:34:56.5-08'::TIMETZ AS pacific,
+                        '01:02:03+05:30:15'::TIMETZ AS seconds,
+                        '00:00:00.000001-15:59:59'::TIMETZ AS widest,
+                        '24:00:00+00'::TIMETZ AS midnight, ['12:00:00+01'::TIMETZ] AS listed",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.columns[0].data_type.as_deref(),
+            Some("time with time zone")
+        );
+        assert_eq!(
+            result.columns[5].data_type.as_deref(),
+            Some("time with time zone[]")
+        );
+        assert_eq!(
+            cells(&result),
+            [[
+                Some("12:34:56+05:30"),
+                Some("12:34:56.5-08"),
+                Some("01:02:03+05:30:15"),
+                Some("00:00:00.000001-15:59:59"),
+                Some("24:00:00+00"),
+                Some("[12:00:00+01]")
             ]]
         );
     }
