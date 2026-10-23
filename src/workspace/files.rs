@@ -134,8 +134,32 @@ fn reading(path: &Path) -> Option<String> {
         "xlsx" | "xlsm" | "xls" | "ods" => "read_xlsx",
         _ => return None,
     };
-    let path = Engine::DuckDb.quote_literal(&path.to_string_lossy());
+    let path = path.to_string_lossy();
+    let path = match function {
+        "read_xlsx" => path.into_owned(),
+        _ => unglobbed(&path),
+    };
+    let path = Engine::DuckDb.quote_literal(&path);
     Some(format!("SELECT * FROM {function}({path});"))
+}
+
+/// `path` as a pattern DuckDB's file readers match to itself alone. They read
+/// every path as a glob, so `br[a].csv` would read `bra.csv` and `what?.csv`
+/// every file it could stand for; a character class holding one character
+/// matches only that character, and is the only escape the glob has.
+fn unglobbed(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        match character {
+            '*' | '?' | '[' => {
+                escaped.push('[');
+                escaped.push(character);
+                escaped.push(']');
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -154,5 +178,36 @@ mod tests {
         );
         assert_eq!(reading(Path::new("/data/notes.md")), None);
         assert_eq!(reading(Path::new("/data/no-extension")), None);
+    }
+
+    #[test]
+    fn a_file_whose_name_reads_as_a_pattern_is_read_alone() {
+        use crate::db::{CancelToken, Connection, Fetch};
+        let dir = std::env::temp_dir().join(format!("dbdelve-files-glob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = [
+            ("br[a].csv", "bra.csv"),
+            ("what?.csv", "what!.csv"),
+            ("star*.csv", "star2.csv"),
+            ("report [2024].csv", "report 2.csv"),
+        ];
+        for (n, (named, near)) in files.iter().enumerate() {
+            std::fs::write(dir.join(named), format!("n\n{n}\n")).unwrap();
+            std::fs::write(dir.join(near), "n\n-1\n").unwrap();
+        }
+        let connection = Connection::open(ConnectionConfig::DuckDb {
+            path: DUCKDB_IN_MEMORY.to_string(),
+            statement_timeout: 0,
+        })
+        .unwrap();
+        for (n, (named, _)) in files.iter().enumerate() {
+            let sql = reading(&dir.join(named)).unwrap();
+            let result = connection
+                .query(&sql, &CancelToken::default(), Fetch::default())
+                .unwrap();
+            let read: Vec<Option<&str>> = result.rows.iter().map(|row| row.get(0)).collect();
+            assert_eq!(read, [Some(n.to_string().as_str())], "{sql}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
