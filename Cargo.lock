@@ -2143,6 +2143,7 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "url",
+ "uuid",
  "windows-sys 0.61.2",
  "winresource",
 ]

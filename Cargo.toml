@@ -88,6 +88,8 @@ duckdb = { version = "=1.20000.0", default-features = false, features = [
 # extension is not one libduckdb-sys can link in, and a download at run time is
 # not something a database client should need to open a file.
 calamine = { version = "=0.36.1", features = ["dates"] }
+# A DuckDB `UUID` arrives as its sixteen bytes; see `db::duckdb::printable`.
+uuid = "=1.24.1"
 
 turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }
 turso_core = "=0.8.2"

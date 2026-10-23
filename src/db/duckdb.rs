@@ -9,7 +9,8 @@
 //! Results come back as Arrow batches and every cell is rendered by Arrow's
 //! own formatter, so a `LIST`, a `STRUCT` or a `DECIMAL(18,3)` reads the way
 //! DuckDB's own shell prints it rather than through a match on every type this
-//! file would have to keep up with.
+//! file would have to keep up with. The few types Arrow has no word for are
+//! spelled out first, by [`printable`].
 //!
 //! Nothing here is editable in the grid yet: DuckDB does not say which table a
 //! result column was read from, and a predicate dbdelve cannot read off the
@@ -20,9 +21,12 @@ use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use duckdb::arrow::array::{Array, ArrayRef, Int64Array};
+use duckdb::arrow::array::{
+    Array, ArrayRef, AsArray, FixedSizeListArray, Int64Array, LargeListArray, ListArray, MapArray,
+    StringArray, StructArray,
+};
 use duckdb::arrow::compute::cast;
-use duckdb::arrow::datatypes::{DataType, FieldRef};
+use duckdb::arrow::datatypes::{DataType, Field, FieldRef};
 use duckdb::arrow::error::ArrowError;
 use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
 use duckdb::{Config, InterruptHandle};
@@ -68,7 +72,7 @@ pub struct Connection {
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         let connection = match path.trim() {
-            "" | IN_MEMORY => duckdb::Connection::open_in_memory()
+            "" | IN_MEMORY => duckdb::Connection::open_in_memory_with_flags(config()?)
                 .map_err(|error| plain_error(error.to_string()))?,
             path => {
                 let path = crate::store::home_expanded(path);
@@ -81,7 +85,7 @@ impl Connection {
                         path.display()
                     )));
                 }
-                duckdb::Connection::open_with_flags(&path, Config::default()).map_err(|error| {
+                duckdb::Connection::open_with_flags(&path, config()?).map_err(|error| {
                     plain_error(format!("Cannot open {}: {error}", path.display()))
                 })?
             }
@@ -298,6 +302,16 @@ impl Connection {
     }
 }
 
+/// Arrow's export of a DuckDB type it has no type of its own for: tagged
+/// with the type's name rather than squeezed into the nearest Arrow type,
+/// where a `UHUGEINT` wraps into a negative `DECIMAL(38,0)` and a `HUGEINT`
+/// cannot be told from a decimal. [`printable`] reads the tags.
+fn config() -> Result<Config, DbError> {
+    Config::default()
+        .with("arrow_lossless_conversion", "true")
+        .map_err(|error| plain_error(error.to_string()))
+}
+
 fn lock(
     connection: &Mutex<duckdb::Connection>,
 ) -> Result<std::sync::MutexGuard<'_, duckdb::Connection>, DbError> {
@@ -318,7 +332,7 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
         .iter()
         .map(|field| Column {
             name: field.name().clone(),
-            data_type: Some(type_name(field.data_type())),
+            data_type: Some(type_name(field)),
         })
         .collect();
 
@@ -327,8 +341,8 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
     // parser's call, since a `SELECT count(*) AS "Count"` has the same shape.
     let command = match schema.fields().as_ref() {
         [field] => matches!(
-            (field.name().as_str(), field.data_type()),
-            ("Count", DataType::Int64) | ("Success", DataType::Boolean)
+            (field.name().as_str(), type_name(field).as_str()),
+            ("Count", "bigint") | ("Success", "boolean")
         ),
         _ => false,
     };
@@ -365,7 +379,8 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
         let arrays = batch
             .columns()
             .iter()
-            .map(zones_as_offsets)
+            .zip(schema.fields())
+            .map(|(array, field)| printable(array, field))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| plain_error(error.to_string()))?;
         let formatters = arrays
@@ -464,54 +479,213 @@ fn rolled_back(connection: &duckdb::Connection, sql: &str, error: DbError) -> Db
     }
 }
 
-/// `array` with every zone a timestamp names spelled as its offset. DuckDB
-/// hands a `TIMESTAMPTZ` over as UTC under the zone's name, and Arrow formats
-/// a named zone only with `chrono-tz`, which links the whole zone database in
-/// for the one name DuckDB ever gives. Inside a list, a struct or a map too.
-fn zones_as_offsets(array: &ArrayRef) -> Result<ArrayRef, ArrowError> {
-    match offset_type(array.data_type()) {
-        Some(data_type) => cast(array, &data_type),
-        None => Ok(array.clone()),
+/// `array` in types Arrow's formatter prints the way DuckDB's shell does,
+/// inside a list, a struct or a map too.
+///
+/// A zone a timestamp names is spelled as its offset: DuckDB hands a
+/// `TIMESTAMPTZ` over as UTC under the zone's name, and Arrow formats a named
+/// zone only with `chrono-tz`, which links the whole zone database in for the
+/// one name DuckDB ever gives. A type [`config`] tags, which Arrow would print
+/// as bytes, is written out as text.
+fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
+    if let Some(name) = extension(field) {
+        return match name.as_str() {
+            "boolean" => cast(array, &DataType::Boolean),
+            "hugeint" => spelled(array, |bytes| {
+                Some(i128::from_le_bytes(bytes.try_into().ok()?).to_string())
+            }),
+            "uhugeint" => spelled(array, |bytes| {
+                Some(u128::from_le_bytes(bytes.try_into().ok()?).to_string())
+            }),
+            "uuid" => spelled(array, |bytes| {
+                Some(uuid::Uuid::from_slice(bytes).ok()?.to_string())
+            }),
+            "time_tz" => spelled(array, |bytes| {
+                Some(time_tz(u64::from_le_bytes(bytes.try_into().ok()?)))
+            }),
+            _ => Ok(array.clone()),
+        };
+    }
+    let item = |values: &ArrayRef, field: &FieldRef| -> FieldRef {
+        Arc::new(Field::new(
+            field.name(),
+            values.data_type().clone(),
+            field.is_nullable(),
+        ))
+    };
+    Ok(match field.data_type() {
+        DataType::Timestamp(unit, Some(_)) => {
+            cast(array, &DataType::Timestamp(*unit, Some("+00:00".into())))?
+        }
+        DataType::List(field) => {
+            let list = array.as_list::<i32>();
+            let values = printable(list.values(), field)?;
+            if Arc::ptr_eq(&values, list.values()) {
+                return Ok(array.clone());
+            }
+            Arc::new(ListArray::try_new(
+                item(&values, field),
+                list.offsets().clone(),
+                values,
+                list.nulls().cloned(),
+            )?)
+        }
+        DataType::LargeList(field) => {
+            let list = array.as_list::<i64>();
+            let values = printable(list.values(), field)?;
+            if Arc::ptr_eq(&values, list.values()) {
+                return Ok(array.clone());
+            }
+            Arc::new(LargeListArray::try_new(
+                item(&values, field),
+                list.offsets().clone(),
+                values,
+                list.nulls().cloned(),
+            )?)
+        }
+        DataType::FixedSizeList(field, size) => {
+            let list = array.as_fixed_size_list();
+            let values = printable(list.values(), field)?;
+            if Arc::ptr_eq(&values, list.values()) {
+                return Ok(array.clone());
+            }
+            Arc::new(FixedSizeListArray::try_new(
+                item(&values, field),
+                *size,
+                values,
+                list.nulls().cloned(),
+            )?)
+        }
+        DataType::Map(field, sorted) => {
+            let map = array.as_map();
+            let entries: ArrayRef = Arc::new(map.entries().clone());
+            let printed = printable(&entries, field)?;
+            if Arc::ptr_eq(&printed, &entries) {
+                return Ok(array.clone());
+            }
+            Arc::new(MapArray::try_new(
+                item(&printed, field),
+                map.offsets().clone(),
+                printed.as_struct().clone(),
+                map.nulls().cloned(),
+                *sorted,
+            )?)
+        }
+        DataType::Struct(fields) => {
+            let structure = array.as_struct();
+            let columns = structure
+                .columns()
+                .iter()
+                .zip(fields)
+                .map(|(column, field)| printable(column, field))
+                .collect::<Result<Vec<_>, _>>()?;
+            if columns
+                .iter()
+                .zip(structure.columns())
+                .all(|(printed, column)| Arc::ptr_eq(printed, column))
+            {
+                return Ok(array.clone());
+            }
+            let fields = columns
+                .iter()
+                .zip(fields)
+                .map(|(column, field)| item(column, field))
+                .collect::<Vec<_>>();
+            Arc::new(StructArray::try_new(
+                fields.into(),
+                columns,
+                structure.nulls().cloned(),
+            )?)
+        }
+        _ => array.clone(),
+    })
+}
+
+/// The DuckDB type `field` carries under an Arrow extension, as [`config`]
+/// asks for: Arrow's own boolean as bytes, UUID and JSON, or one of DuckDB's
+/// it calls opaque.
+fn extension(field: &Field) -> Option<String> {
+    let metadata = field.metadata();
+    match metadata.get("ARROW:extension:name")?.as_str() {
+        "arrow.bool8" => Some("boolean".into()),
+        "arrow.uuid" => Some("uuid".into()),
+        "arrow.json" => Some("json".into()),
+        "arrow.opaque" => {
+            let opaque: serde_json::Value =
+                serde_json::from_str(metadata.get("ARROW:extension:metadata")?).ok()?;
+            Some(opaque.get("type_name")?.as_str()?.to_string())
+        }
+        _ => None,
     }
 }
 
-fn offset_type(data_type: &DataType) -> Option<DataType> {
-    let item = |field: &FieldRef| -> Option<FieldRef> {
-        Some(Arc::new(
-            field
-                .as_ref()
-                .clone()
-                .with_data_type(offset_type(field.data_type())?),
-        ))
+/// A column of bytes as the text `spell` makes of each value.
+fn spelled(
+    array: &ArrayRef,
+    spell: impl Fn(&[u8]) -> Option<String>,
+) -> Result<ArrayRef, ArrowError> {
+    let spell = |bytes: Option<&[u8]>| -> Result<Option<String>, ArrowError> {
+        bytes
+            .map(|bytes| {
+                spell(bytes).ok_or_else(|| {
+                    ArrowError::InvalidArgumentError(format!(
+                        "{} bytes are not a value of this type",
+                        bytes.len()
+                    ))
+                })
+            })
+            .transpose()
     };
-    Some(match data_type {
-        DataType::Timestamp(unit, Some(_)) => DataType::Timestamp(*unit, Some("+00:00".into())),
-        DataType::List(field) => DataType::List(item(field)?),
-        DataType::LargeList(field) => DataType::LargeList(item(field)?),
-        DataType::FixedSizeList(field, size) => DataType::FixedSizeList(item(field)?, *size),
-        DataType::Map(entries, sorted) => DataType::Map(item(entries)?, *sorted),
-        DataType::Struct(fields) => {
-            let offset: Vec<Option<FieldRef>> = fields.iter().map(item).collect();
-            if offset.iter().all(Option::is_none) {
-                return None;
-            }
-            DataType::Struct(
-                fields
-                    .iter()
-                    .zip(offset)
-                    .map(|(field, offset)| offset.unwrap_or_else(|| field.clone()))
-                    .collect(),
-            )
+    let values: StringArray = match array.data_type() {
+        DataType::FixedSizeBinary(_) => array
+            .as_fixed_size_binary()
+            .iter()
+            .map(spell)
+            .collect::<Result<_, _>>()?,
+        DataType::Binary => array
+            .as_binary::<i32>()
+            .iter()
+            .map(spell)
+            .collect::<Result<_, _>>()?,
+        other => {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "{other} is not a type of bytes"
+            )));
         }
-        _ => return None,
-    })
+    };
+    Ok(Arc::new(values))
+}
+
+/// A `TIMETZ` as DuckDB packs it: microseconds since midnight in the high
+/// 40 bits, its offset in the low 24.
+fn time_tz(bits: u64) -> String {
+    let micros = bits >> 24;
+    let (seconds, micros) = (micros / 1_000_000, micros % 1_000_000);
+    let mut time = format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if micros > 0 {
+        let fraction = format!("{micros:06}");
+        time.push('.');
+        time.push_str(fraction.trim_end_matches('0'));
+    }
+    time
 }
 
 /// An Arrow type under the name DuckDB gives it, lowercased as every engine's
 /// type names are in the grid, so `db::is_numeric_type` and the Structure view
 /// read the same words DuckDB's own shell prints.
-fn type_name(data_type: &DataType) -> String {
-    match data_type {
+fn type_name(field: &Field) -> String {
+    if let Some(name) = extension(field) {
+        return match name.as_str() {
+            "time_tz" => "time".into(),
+            _ => name,
+        };
+    }
+    match field.data_type() {
         DataType::Boolean => "boolean".into(),
         DataType::Int8 => "tinyint".into(),
         DataType::Int16 => "smallint".into(),
@@ -533,12 +707,10 @@ fn type_name(data_type: &DataType) -> String {
         DataType::Timestamp(_, None) => "timestamp".into(),
         DataType::Timestamp(_, Some(_)) => "timestamp with time zone".into(),
         DataType::Interval(_) | DataType::Duration(_) => "interval".into(),
-        DataType::List(item) | DataType::LargeList(item) => {
-            format!("{}[]", type_name(item.data_type()))
-        }
+        DataType::List(item) | DataType::LargeList(item) => format!("{}[]", type_name(item)),
         DataType::Struct(_) => "struct".into(),
         DataType::Map(..) => "map".into(),
-        DataType::Dictionary(_, value) => type_name(value),
+        DataType::Dictionary(_, value) => type_name(&Field::new("", value.as_ref().clone(), true)),
         other => other.to_string().to_lowercase(),
     }
 }
@@ -649,11 +821,14 @@ mod tests {
             .query(
                 "SELECT [1, NULL] AS list, 12.50::DECIMAL(5,2) AS money, NULL AS nothing,
                         TIMESTAMP '2026-01-03 10:04:05' AS moment, DATE '2026-01-03' AS day,
-                        {'at': TIMESTAMPTZ '2026-01-03 10:04:05+02'} AS zoned",
+                        {'at': TIMESTAMPTZ '2026-01-03 10:04:05+02'} AS zoned,
+                        true AS yes, [false, NULL] AS answers",
                 Fetch::default(),
             )
             .unwrap();
         assert_eq!(result.columns[1].data_type.as_deref(), Some("decimal(5,2)"));
+        assert_eq!(result.columns[6].data_type.as_deref(), Some("boolean"));
+        assert_eq!(result.columns[7].data_type.as_deref(), Some("boolean[]"));
         assert_eq!(
             cells(&result),
             [[
@@ -662,7 +837,9 @@ mod tests {
                 None,
                 Some("2026-01-03 10:04:05"),
                 Some("2026-01-03"),
-                Some("{at: 2026-01-03 08:04:05+00:00}")
+                Some("{at: 2026-01-03 08:04:05+00:00}"),
+                Some("true"),
+                Some("[false, NULL]")
             ]]
         );
     }
@@ -691,6 +868,34 @@ mod tests {
                 column.data_type
             );
         }
+    }
+
+    #[test]
+    fn a_128_bit_integer_reads_exactly_at_either_end() {
+        let result = memory("")
+            .query(
+                "SELECT 340282366920938463463374607431768211455::UHUGEINT AS top,
+                        (-170141183460469231731687303715884105728)::HUGEINT AS bottom,
+                        [0::UHUGEINT, 340282366920938463463374607431768211455::UHUGEINT] AS listed,
+                        '018f1f6e-7c2a-7000-8000-000000000001'::UUID AS id",
+                Fetch::default(),
+            )
+            .unwrap();
+        let types: Vec<_> = result
+            .columns
+            .iter()
+            .map(|column| column.data_type.as_deref().unwrap())
+            .collect();
+        assert_eq!(types, ["uhugeint", "hugeint", "uhugeint[]", "uuid"]);
+        assert_eq!(
+            cells(&result),
+            [[
+                Some("340282366920938463463374607431768211455"),
+                Some("-170141183460469231731687303715884105728"),
+                Some("[0, 340282366920938463463374607431768211455]"),
+                Some("018f1f6e-7c2a-7000-8000-000000000001")
+            ]]
+        );
     }
 
     #[test]
@@ -1103,3 +1308,4 @@ mod tests {
         );
     }
 }
+
