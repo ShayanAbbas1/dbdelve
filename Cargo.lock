@@ -2117,6 +2117,7 @@ dependencies = [
  "mongodb",
  "mysql",
  "nucleo-matcher",
+ "num-bigint 0.4.8",
  "percent-encoding",
  "redis",
  "ring",

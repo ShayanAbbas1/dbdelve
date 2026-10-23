@@ -30,6 +30,7 @@ use duckdb::arrow::datatypes::{DataType, Field, FieldRef};
 use duckdb::arrow::error::ArrowError;
 use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
 use duckdb::{Config, InterruptHandle};
+use num_bigint::BigUint;
 
 use super::{
     Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, Stopped,
@@ -505,6 +506,8 @@ fn printable(
             "uuid" => spelled(array, |bytes| {
                 Some(uuid::Uuid::from_slice(bytes).ok()?.to_string())
             }),
+            "bit" => spelled(array, bits),
+            "bignum" => spelled(array, bignum),
             "time_tz" => spelled(array, |bytes| {
                 Some(time_tz(u64::from_le_bytes(bytes.try_into().ok()?)))
             }),
@@ -704,6 +707,30 @@ fn spelled(
         }
     };
     Ok(Arc::new(values))
+}
+
+/// A `BIT` as DuckDB packs it: a byte saying how many of the next byte's
+/// leading bits are padding, then the bits.
+fn bits(bytes: &[u8]) -> Option<String> {
+    let (&padding, bytes) = bytes.split_first()?;
+    let bits: String = bytes.iter().map(|byte| format!("{byte:08b}")).collect();
+    Some(bits.get(usize::from(padding)..)?.to_string())
+}
+
+/// A `BIGNUM` as DuckDB packs it: a three-byte header whose top bit is set
+/// for a number that is not negative, then its magnitude in base 256, most
+/// significant byte first. A negative number has every byte inverted.
+fn bignum(bytes: &[u8]) -> Option<String> {
+    let negative = bytes.first()? & 0x80 == 0;
+    let digits = bytes.get(3..)?;
+    let magnitude = match negative {
+        true => BigUint::from_bytes_be(&digits.iter().map(|byte| !byte).collect::<Vec<_>>()),
+        false => BigUint::from_bytes_be(digits),
+    };
+    Some(match negative {
+        true => format!("-{magnitude}"),
+        false => magnitude.to_string(),
+    })
 }
 
 /// A `TIMETZ` as DuckDB packs it: microseconds since midnight in the high
@@ -990,6 +1017,46 @@ mod tests {
                     Some("{at: 2026-01-03 08:04:05+00:00}")
                 ]
             ]
+        );
+    }
+
+    #[test]
+    fn a_bit_string_reads_as_bits_and_a_bignum_as_a_number() {
+        let result = memory("")
+            .query(
+                "SELECT '101010011'::BIT AS flags, '00000000011'::BIT AS padded,
+                        ['1'::BIT, '0'::BIT] AS listed_flags,
+                        ('-1' || repeat('0', 50))::BIGNUM AS big, 0::BIGNUM AS zero,
+                        (-1)::BIGNUM AS minus_one, (-256)::BIGNUM AS minus_byte,
+                        [255::BIGNUM] AS listed_big",
+                Fetch::default(),
+            )
+            .unwrap();
+        let types: Vec<_> = result
+            .columns
+            .iter()
+            .map(|column| column.data_type.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "bit", "bit", "bit[]", "bignum", "bignum", "bignum", "bignum", "bignum[]"
+            ]
+        );
+        assert!(super::super::is_numeric_type("bignum"));
+        assert!(!super::super::is_numeric_type("bit"));
+        assert_eq!(
+            cells(&result),
+            [[
+                Some("101010011"),
+                Some("00000000011"),
+                Some("[1, 0]"),
+                Some("-100000000000000000000000000000000000000000000000000"),
+                Some("0"),
+                Some("-1"),
+                Some("-256"),
+                Some("[255]")
+            ]]
         );
     }
 
