@@ -373,6 +373,9 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
             .map(|array| ArrayFormatter::try_new(array.as_ref(), &options))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| plain_error(error.to_string()))?;
+        // Logical, not physical: a bare `NULL` arrives as Arrow's null type,
+        // which has no validity buffer and so no physical nulls.
+        let nulls: Vec<_> = arrays.iter().map(|array| array.logical_nulls()).collect();
         for row in 0..batch.len() {
             returned += 1;
             if fetch.limit.is_some_and(|limit| kept >= limit) {
@@ -394,8 +397,8 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
                     feed.fill();
                 }
             }
-            for (array, formatter) in arrays.iter().zip(&formatters) {
-                if array.is_null(row) {
+            for (nulls, formatter) in nulls.iter().zip(&formatters) {
+                if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row)) {
                     builder.push(None);
                     continue;
                 }

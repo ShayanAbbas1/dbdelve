@@ -76,8 +76,14 @@ rusqlite = { version = "0.40", default-features = false, features = [
 # DuckDB, embedded the way SQLite is: no server, the engine compiled into the
 # binary. `parquet` and `json` are DuckDB's own readers, linked in so a file
 # opens with no extension downloaded at run time; `vtab` is duckdb-rs's
-# table-function API, through which `db::xlsx` adds `read_xlsx`.
-duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json", "vtab"] }
+# table-function API, through which `db::xlsx` adds `read_xlsx`. Its default
+# features only add a prebuilt-library download that `bundled` has no use for.
+duckdb = { version = "=1.20000.0", default-features = false, features = [
+    "bundled",
+    "parquet",
+    "json",
+    "vtab",
+] }
 # Spreadsheets for DuckDB's `read_xlsx` (`db::xlsx`): DuckDB's own excel
 # extension is not one libduckdb-sys can link in, and a download at run time is
 # not something a database client should need to open a file.
