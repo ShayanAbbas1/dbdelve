@@ -2849,7 +2849,12 @@ impl ResultGrid {
                     .get(col_ix)
                     .and_then(|column| column.data_type.clone())
                     .map(|data_type| {
+                        // Only the room the name leaves: from no width of its
+                        // own, the type ellipsizes and goes before the name
+                        // gives up a character. Both shrinking from their full
+                        // widths cut the name while the type still showed.
                         div()
+                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
