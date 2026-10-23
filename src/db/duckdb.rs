@@ -29,7 +29,7 @@ use duckdb::{Config, InterruptHandle};
 use super::{
     Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, Stopped,
     Structure, assemble_catalog, assemble_foreign_keys, assemble_references, assemble_structure,
-    percent_decoded, plain_error, required_cell, terminated,
+    plain_error, required_cell, terminated,
 };
 
 /// What an empty path means: a database held in memory, gone when the
@@ -43,16 +43,13 @@ pub const INTERRUPTED: &str = "INTERRUPT Error: Interrupted!";
 /// How DuckDB refuses a `ROLLBACK` with no transaction to end.
 const NO_TRANSACTION: &str = "no transaction is active";
 
-/// The path out of a `duckdb:` URL, the way `sqlite.rs` reads its own: all of
-/// it after the scheme, less an optional `//`. Nothing after the scheme is a
-/// database in memory.
+/// The path out of a `duckdb:` URL, read as `sqlite.rs` reads its own.
+/// Nothing after the scheme is a database in memory.
 pub fn path_from_url(url: &str) -> Result<String, String> {
-    let rest = url.split_once(':').map_or("", |(_, rest)| rest);
-    let path = rest.strip_prefix("//").unwrap_or(rest);
-    let decoded = percent_decoded(path)?;
-    Ok(match decoded.is_empty() {
+    let path = super::sqlite::url_path(url)?;
+    Ok(match path.is_empty() {
         true => IN_MEMORY.to_string(),
-        false => decoded,
+        false => path,
     })
 }
 
@@ -882,6 +879,12 @@ mod tests {
             "/tmp/a b.duckdb"
         );
         assert_eq!(path_from_url("duckdb:").unwrap(), IN_MEMORY);
+        assert_eq!(path_from_url("duckdb://").unwrap(), IN_MEMORY);
+        assert_eq!(
+            path_from_url("duckdb:///C:/data/app.duckdb").unwrap(),
+            "C:/data/app.duckdb"
+        );
+        assert!(path_from_url("duckdb:///tmp/%zz.duckdb").is_err());
     }
 
     #[test]

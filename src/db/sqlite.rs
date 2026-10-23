@@ -39,6 +39,16 @@ use super::{
 /// the profile already says, and one of them is `mode=rwc`, which would put
 /// back the file creation [`Connection::open`] deliberately refuses.
 pub fn path_from_url(url: &str) -> Result<String, String> {
+    let path = url_path(url)?;
+    if path.is_empty() {
+        return Err("Connection URL does not name a database file.".into());
+    }
+    Ok(path)
+}
+
+/// [`path_from_url`] less its refusal of a URL with nothing after the scheme,
+/// which DuckDB reads as a database in memory.
+pub(super) fn url_path(url: &str) -> Result<String, String> {
     let rest = url
         .split_once(':')
         .map(|(_, rest)| rest)
@@ -52,10 +62,6 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
         && drive.is_ascii_alphabetic()
     {
         decoded.remove(0);
-    }
-
-    if decoded.is_empty() {
-        return Err("Connection URL does not name a database file.".into());
     }
     Ok(decoded)
 }
