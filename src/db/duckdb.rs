@@ -934,6 +934,33 @@ mod tests {
     }
 
     #[test]
+    fn a_text_filter_matches_a_column_that_is_not_text() {
+        use crate::filter::{Operator, filter_predicate};
+        let connection = memory(
+            "CREATE TABLE t (day DATE, n INTEGER);
+             INSERT INTO t VALUES ('2024-03-01', 2024), ('2025-01-01', 7);",
+        );
+        for (column, data_type, operator, value) in [
+            ("day", "date", Operator::Contains, "2024"),
+            ("day", "date", Operator::StartsWith, "2024-"),
+            ("day", "date", Operator::EndsWith, "03-01"),
+            ("n", "integer", Operator::Contains, "02"),
+            ("n", "integer", Operator::NotContains, "7"),
+            ("day", "date", Operator::Regex, "^2024"),
+        ] {
+            let predicate =
+                filter_predicate(Engine::DuckDb, column, Some(data_type), operator, value).unwrap();
+            let sql = format!("SELECT n FROM t WHERE {predicate}");
+            assert!(
+                crate::sql::is_generated_select(Engine::DuckDb, &sql),
+                "{sql}"
+            );
+            let read = connection.query(&sql, Fetch::default()).unwrap();
+            assert_eq!(cells(&read), [[Some("2024")]], "{sql}");
+        }
+    }
+
+    #[test]
     fn an_import_asked_to_skip_duplicates_runs_into_a_table_with_no_key() {
         use crate::import_rows::{OnDuplicate, Options, Plan, TargetColumn, prepare};
         let connection = memory("CREATE TABLE t AS SELECT 1 AS id, 'a' AS name;");

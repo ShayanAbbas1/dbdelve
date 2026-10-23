@@ -575,7 +575,10 @@ pub(crate) fn filter_predicate(
             Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
             // Matches anywhere in the value, as `~` does; `regexp_full_match`
             // would anchor it to the whole of it.
-            Engine::DuckDb => Some(format!("regexp_matches({name}, {})", literal(value))),
+            Engine::DuckDb => Some(format!(
+                "regexp_matches(CAST({name} AS VARCHAR), {})",
+                literal(value)
+            )),
             // SQL Server has no regex before 2025's `REGEXP_LIKE`.
             Engine::Sqlite | Engine::Turso | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
@@ -614,6 +617,12 @@ pub(crate) fn substring(
 ) -> String {
     let literal = engine.quote_literal(value);
     if matches!(engine, Engine::Sqlite | Engine::Turso | Engine::DuckDb) {
+        // DuckDB, unlike SQLite, reads no other type as text on its own: a
+        // date or a number has no `instr`.
+        let name = match engine {
+            Engine::DuckDb => format!("CAST({name} AS VARCHAR)"),
+            _ => name.to_string(),
+        };
         return match operator {
             Operator::NotContains => format!("instr({name}, {literal}) = 0"),
             Operator::StartsWith => format!("instr({name}, {literal}) = 1"),
