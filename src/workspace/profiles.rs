@@ -1446,6 +1446,7 @@ impl Workspace {
                     {
                         workspace.load_relation(object, cx);
                     }
+                    workspace.run_waiting_files(cx);
                     cx.notify();
                 })
                 .ok();

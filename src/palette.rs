@@ -373,6 +373,8 @@ pub enum Command {
     ToggleRowEdit,
     ResetEditorZoom,
     OpenSettings,
+    /// Pick data files to open in DuckDB.
+    OpenDataFiles,
     /// Put the palette up over the columns of the grid in front.
     GoToColumn,
     /// Scroll the grid in front to this column, by index into its columns.
@@ -2891,6 +2893,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             CONNECTION,
         ),
         "new_connection",
+    ));
+    items.push(command(
+        "Open data file (CSV, Excel, Parquet, JSON)…",
+        icon::TABLE,
+        Command::OpenDataFiles,
+        CONNECTION,
     ));
     items.push(bound(
         command(

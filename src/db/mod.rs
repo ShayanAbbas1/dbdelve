@@ -30,6 +30,7 @@ mod snowflake;
 mod sqlite;
 mod ssh;
 mod turso;
+mod xlsx;
 
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 

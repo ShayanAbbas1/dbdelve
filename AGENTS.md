@@ -277,7 +277,8 @@ mysql = "28"               # rust-mysql-simple, blocking. default-features = fal
 rusqlite = "0.40"          # bundled + column_metadata + column_decltype. dff = false
 turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }  # Turso, blocking rsapi
 turso_core = "=0.8.2"      # its Value
-duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json"] }  # DuckDB, Arrow results
+duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json", "vtab"] }  # DuckDB, Arrow results
+calamine = { version = "=0.36.1", features = ["dates"] }  # spreadsheets, for DuckDB's read_xlsx
 
 rustls = "0.23"            # TLS; the driver ships none. default-features = false
 rustls-native-certs = "0.8"     # the platform trust store, for Postgres
@@ -1097,6 +1098,13 @@ Decided, and not to be re-litigated:
   DuckDB result is never editable**: the driver names no column's table;
   inserting from an object tab works. No Explain, and no Read-only backstop.
   Its tests need nothing external and run under plain `cargo test`.
+  `read_xlsx` is a table function of DBDelve's own over calamine (`db::xlsx`),
+  registered at open, since DuckDB's excel extension cannot be linked in: a
+  column whose filled cells are all numbers is a `DOUBLE`, anything else text
+  as the sheet shows it. A data file dropped on the window or picked from the
+  palette (`workspace::files`) opens in a DuckDB profile held in memory, made
+  if there is none, as a query tab whose `SELECT * FROM read_csv(…)` DBDelve
+  wrote on screen and runs once the profile connects.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
 - **MariaDB's `JSON` is a `longtext` with a `json_valid` check**, and is shown

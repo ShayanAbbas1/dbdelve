@@ -685,6 +685,7 @@ impl Workspace {
             // read as the chrome.
             Command::ResetEditorZoom => self.set_zoom(FontSlot::Editor, 100, cx),
             Command::OpenSettings => self.show_settings(window, cx),
+            Command::OpenDataFiles => self.pick_data_files(window, cx),
             Command::GoToColumn => self.go_to_column(&GoToColumn, window, cx),
             Command::RevealColumn(col) => self.reveal_column(col, window, cx),
         }

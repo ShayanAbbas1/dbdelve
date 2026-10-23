@@ -2,8 +2,9 @@
 //!
 //! Embedded like SQLite: no server, no credentials, a file or nothing at all.
 //! What sets it apart is what it reads besides its own tables. A CSV, a
-//! Parquet file and a JSON file are each a `FROM` away, which is what makes a
-//! profile with no file, held in memory, a useful thing to have open.
+//! Parquet file, a JSON file and -- through `db::xlsx` -- a spreadsheet are
+//! each a `FROM` away, which is what makes a profile with no file, held in
+//! memory, a useful thing to have open.
 //!
 //! Results come back as Arrow batches and every cell is rendered by Arrow's
 //! own formatter, so a `LIST`, a `STRUCT` or a `DECIMAL(18,3)` reads the way
@@ -85,6 +86,11 @@ impl Connection {
                 })?
             }
         };
+        // Into the database's catalog, so a connection cloned from this one
+        // has it too.
+        connection
+            .register_table_function::<super::xlsx::ReadXlsx>("read_xlsx")
+            .map_err(|error| plain_error(error.to_string()))?;
         let origin = connection
             .try_clone()
             .map_err(|error| plain_error(error.to_string()))?;
@@ -548,6 +554,12 @@ fn query_error(error: duckdb::Error) -> DbError {
 mod tests {
     use super::*;
 
+    /// The fixtures beside the other engines' seeds, by absolute path: a
+    /// relative one would resolve against wherever the test runner stands.
+    fn fixture(name: &str) -> String {
+        format!("{}/dev/duckdb/{name}", env!("CARGO_MANIFEST_DIR"))
+    }
+
     fn memory(setup: &str) -> Connection {
         let connection = Connection::open(IN_MEMORY, 0).expect("an in-memory database opens");
         if !setup.is_empty() {
@@ -568,6 +580,52 @@ mod tests {
             .get(0)
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn a_csv_file_is_a_table_away() {
+        let result = memory("")
+            .query(
+                &format!(
+                    "SELECT nombre FROM read_csv('{}') WHERE ciudad = 'Londres'",
+                    fixture("clientes.csv")
+                ),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(result.columns[0].name, "nombre");
+        assert_eq!(cells(&result), [[Some("Ada Lovelace")]]);
+    }
+
+    #[test]
+    fn a_spreadsheet_reads_by_its_header_with_numbers_as_numbers() {
+        let connection = memory("");
+        let result = connection
+            .query(
+                &format!("SELECT * FROM read_xlsx('{}')", fixture("facturas.xlsx")),
+                Fetch::default(),
+            )
+            .unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["numero", "cliente", "importe", "fecha", "pagada"]);
+        assert_eq!(result.columns[2].data_type.as_deref(), Some("double"));
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0].get(2), Some("1250.5"));
+        assert_eq!(result.rows[0].get(3), Some("2026-01-03"));
+        assert_eq!(result.rows[2].get(2), None);
+
+        let february = connection
+            .alongside()
+            .unwrap()
+            .query(
+                &format!(
+                    "SELECT numero FROM read_xlsx('{}', sheet := 'Febrero')",
+                    fixture("facturas.xlsx")
+                ),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(cells(&february), [[Some("F-010")]]);
     }
 
     #[test]
