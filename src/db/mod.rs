@@ -2187,6 +2187,14 @@ pub fn is_numeric_type(data_type: &str) -> bool {
             | "smallint"
             | "mediumint"
             | "bigint"
+            // DuckDB's unsigned and 128-bit widths, and its arbitrary one.
+            | "utinyint"
+            | "usmallint"
+            | "uinteger"
+            | "ubigint"
+            | "hugeint"
+            | "uhugeint"
+            | "bignum"
             | "serial"
             | "smallserial"
             | "bigserial"
@@ -3700,6 +3708,9 @@ mod tests {
             "long",
             "double",
             "decimal",
+            // DuckDB's.
+            "UBIGINT",
+            "hugeint",
         ] {
             assert!(is_numeric_type(numeric), "{numeric}");
         }

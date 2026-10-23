@@ -595,6 +595,32 @@ mod tests {
     }
 
     #[test]
+    fn every_integer_width_reads_as_a_number() {
+        let connection = memory(
+            "CREATE TABLE t (a UTINYINT, b USMALLINT, c UINTEGER, d UBIGINT, e HUGEINT,
+                             f UHUGEINT);",
+        );
+        let result = connection
+            .query(
+                "SELECT 1::UTINYINT, 1::USMALLINT, 1::UINTEGER, 1::UBIGINT, 1::HUGEINT,
+                        1::UHUGEINT",
+                Fetch::default(),
+            )
+            .unwrap();
+        for column in &result.columns {
+            let data_type = column.data_type.as_deref().unwrap();
+            assert!(super::super::is_numeric_type(data_type), "{data_type}");
+        }
+        for column in connection.structure("main", "t").unwrap().columns {
+            assert!(
+                super::super::is_numeric_type(&column.data_type),
+                "{}",
+                column.data_type
+            );
+        }
+    }
+
+    #[test]
     fn a_query_counts_its_rows_and_a_write_counts_what_it_changed() {
         let connection = memory("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1), (2), (3);");
         let selected = connection
