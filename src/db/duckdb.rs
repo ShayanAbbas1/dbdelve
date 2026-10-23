@@ -614,6 +614,41 @@ mod tests {
     }
 
     #[test]
+    fn a_command_is_told_from_a_query_by_its_statement_not_its_column() {
+        let connection = memory("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);");
+        let inserted = connection
+            .query(
+                "WITH s AS (SELECT 2 AS id) INSERT INTO t SELECT * FROM s",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert!(inserted.columns.is_empty(), "{inserted:?}");
+        assert_eq!(inserted.rows_affected, Some(1));
+        let by_name = connection
+            .query("INSERT INTO t BY NAME SELECT 3 AS id", Fetch::default())
+            .unwrap();
+        assert!(by_name.columns.is_empty(), "{by_name:?}");
+        assert_eq!(by_name.rows_affected, Some(1));
+        let checkpoint = connection.query("CHECKPOINT", Fetch::default()).unwrap();
+        assert!(checkpoint.columns.is_empty(), "{checkpoint:?}");
+
+        let tabled = connection
+            .query(
+                "CREATE TABLE c AS SELECT 42::BIGINT AS \"Count\"; TABLE c",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(cells(&tabled), [[Some("42")]]);
+        let counted = connection
+            .query(
+                "INSERT INTO t BY NAME SELECT 4 AS id; SELECT count(*) AS \"Count\" FROM t",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(cells(&counted), [[Some("4")]]);
+    }
+
+    #[test]
     fn a_multi_statement_selection_keeps_the_last_result() {
         let result = memory("")
             .query("SELECT 1; SELECT 2, 3", Fetch::default())

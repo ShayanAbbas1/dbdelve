@@ -2323,38 +2323,102 @@ pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
 }
 
 /// Whether the last statement of `sql` answers with rows: a query, or a
-/// write with a `RETURNING`. False for any other statement, and for one that
-/// does not parse. DuckDB answers a command with a result set too, a single
-/// `Count` or `Success` column, which only the statement tells apart from a
-/// query's own column of that name.
+/// write with a `RETURNING`. DuckDB answers a command with a result set too,
+/// a single `Count` or `Success` column, which only the statement tells apart
+/// from a query's own column of that name.
+///
+/// duckdb-rs keeps the type DuckDB gives a prepared statement to itself, so
+/// it is read off the text: the last statement alone, so an earlier one the
+/// grammar cannot read does not hide it, and by its first word where the
+/// grammar cannot read it either -- DuckDB has queries of its own, `TABLE t`
+/// or `PIVOT`, as well as commands. A word not known as a command reads as a
+/// query, since showing a command's count as a row costs less than dropping
+/// a query's rows.
 pub(crate) fn answers_with_rows(engine: Engine, sql: &str) -> bool {
     let Some(dialect) = dialect(engine) else {
         return false;
     };
-    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
-        matches!(
-            statements.last(),
-            Some(
-                Statement::Query(_)
-                    | Statement::Insert(Insert {
-                        returning: Some(_),
-                        ..
-                    })
-                    | Statement::Update(Update {
-                        returning: Some(_),
-                        ..
-                    })
-                    | Statement::Delete(Delete {
-                        returning: Some(_),
-                        ..
-                    })
-                    | Statement::Merge(Merge {
-                        output: Some(_),
-                        ..
-                    })
-            )
-        )
-    })
+    let Some(tokens) = located_tokens(dialect.as_ref(), sql) else {
+        return true;
+    };
+    let Some(last) = between_semicolons(&tokens).pop() else {
+        return false;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), &sql[last.clone()]) {
+        Ok(statements) => statements.last().is_some_and(statement_answers_with_rows),
+        Err(_) => !tokens
+            .iter()
+            .filter(|(_, range)| last.contains(&range.start))
+            .find_map(|(token, _)| match token {
+                Token::Word(word) => Some(word),
+                _ => None,
+            })
+            .is_some_and(|word| {
+                COMMAND_WORDS
+                    .iter()
+                    .any(|command| word.value.eq_ignore_ascii_case(command))
+            }),
+    }
+}
+
+/// The first words of the statements DuckDB answers with a `Count` or a
+/// `Success` of its own.
+const COMMAND_WORDS: &[&str] = &[
+    "ABORT",
+    "ALTER",
+    "ANALYZE",
+    "ATTACH",
+    "BEGIN",
+    "CHECKPOINT",
+    "COMMENT",
+    "COMMIT",
+    "COPY",
+    "CREATE",
+    "DEALLOCATE",
+    "DELETE",
+    "DETACH",
+    "DROP",
+    "END",
+    "EXPORT",
+    "FORCE",
+    "IMPORT",
+    "INSERT",
+    "INSTALL",
+    "LOAD",
+    "MERGE",
+    "PREPARE",
+    "RESET",
+    "ROLLBACK",
+    "SET",
+    "START",
+    "TRUNCATE",
+    "UPDATE",
+    "USE",
+    "VACUUM",
+];
+
+fn statement_answers_with_rows(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(query) => query_answers_with_rows(query),
+        Statement::Insert(Insert { returning, .. })
+        | Statement::Update(Update { returning, .. })
+        | Statement::Delete(Delete { returning, .. }) => returning.is_some(),
+        Statement::Merge(Merge { output, .. }) => output.is_some(),
+        _ => false,
+    }
+}
+
+/// A query answers with rows unless its body is a write a `WITH` leads:
+/// `WITH s AS (…) INSERT INTO t SELECT * FROM s` parses as a query.
+fn query_answers_with_rows(query: &Query) -> bool {
+    match query.body.as_ref() {
+        SetExpr::Insert(statement)
+        | SetExpr::Update(statement)
+        | SetExpr::Delete(statement)
+        | SetExpr::Merge(statement) => statement_answers_with_rows(statement),
+        SetExpr::Query(query) => query_answers_with_rows(query),
+        _ => true,
+    }
 }
 
 /// Whether a submission may be stopped part way once its rows pass the limit:
