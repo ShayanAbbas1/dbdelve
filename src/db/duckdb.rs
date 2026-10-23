@@ -380,7 +380,7 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
             .columns()
             .iter()
             .zip(schema.fields())
-            .map(|(array, field)| printable(array, field))
+            .map(|(array, field)| printable(array, field, &options))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| plain_error(error.to_string()))?;
         let formatters = arrays
@@ -486,8 +486,13 @@ fn rolled_back(connection: &duckdb::Connection, sql: &str, error: DbError) -> Db
 /// `TIMESTAMPTZ` over as UTC under the zone's name, and Arrow formats a named
 /// zone only with `chrono-tz`, which links the whole zone database in for the
 /// one name DuckDB ever gives. A type [`config`] tags, which Arrow would print
-/// as bytes, is written out as text.
-fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
+/// as bytes, is written out as text, and so is a date or a timestamp column
+/// that holds an infinity.
+fn printable(
+    array: &ArrayRef,
+    field: &Field,
+    options: &FormatOptions,
+) -> Result<ArrayRef, ArrowError> {
     if let Some(name) = extension(field) {
         return match name.as_str() {
             "boolean" => cast(array, &DataType::Boolean),
@@ -514,12 +519,14 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
         ))
     };
     Ok(match field.data_type() {
-        DataType::Timestamp(unit, Some(_)) => {
-            cast(array, &DataType::Timestamp(*unit, Some("+00:00".into())))?
-        }
+        DataType::Timestamp(unit, Some(_)) => finite_or_spelled(
+            &cast(array, &DataType::Timestamp(*unit, Some("+00:00".into())))?,
+            options,
+        )?,
+        DataType::Date32 | DataType::Timestamp(_, None) => finite_or_spelled(array, options)?,
         DataType::List(field) => {
             let list = array.as_list::<i32>();
-            let values = printable(list.values(), field)?;
+            let values = printable(list.values(), field, options)?;
             if Arc::ptr_eq(&values, list.values()) {
                 return Ok(array.clone());
             }
@@ -532,7 +539,7 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
         }
         DataType::LargeList(field) => {
             let list = array.as_list::<i64>();
-            let values = printable(list.values(), field)?;
+            let values = printable(list.values(), field, options)?;
             if Arc::ptr_eq(&values, list.values()) {
                 return Ok(array.clone());
             }
@@ -545,7 +552,7 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
         }
         DataType::FixedSizeList(field, size) => {
             let list = array.as_fixed_size_list();
-            let values = printable(list.values(), field)?;
+            let values = printable(list.values(), field, options)?;
             if Arc::ptr_eq(&values, list.values()) {
                 return Ok(array.clone());
             }
@@ -559,7 +566,7 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
         DataType::Map(field, sorted) => {
             let map = array.as_map();
             let entries: ArrayRef = Arc::new(map.entries().clone());
-            let printed = printable(&entries, field)?;
+            let printed = printable(&entries, field, options)?;
             if Arc::ptr_eq(&printed, &entries) {
                 return Ok(array.clone());
             }
@@ -577,7 +584,7 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
                 .columns()
                 .iter()
                 .zip(fields)
-                .map(|(column, field)| printable(column, field))
+                .map(|(column, field)| printable(column, field, options))
                 .collect::<Result<Vec<_>, _>>()?;
             if columns
                 .iter()
@@ -599,6 +606,49 @@ fn printable(array: &ArrayRef, field: &Field) -> Result<ArrayRef, ArrowError> {
         }
         _ => array.clone(),
     })
+}
+
+/// `array` as text when it holds DuckDB's `infinity` or `-infinity`: the
+/// widest value its integer holds, either way, which Arrow reads as a date
+/// past the end of its calendar and fails to print. Left as it is otherwise.
+fn finite_or_spelled(array: &ArrayRef, options: &FormatOptions) -> Result<ArrayRef, ArrowError> {
+    let infinity = |value: i64, widest: i64| {
+        if value == widest {
+            Some("infinity")
+        } else if value == -widest {
+            Some("-infinity")
+        } else {
+            None
+        }
+    };
+    let data = array.to_data();
+    let infinities: Vec<_> = match array.data_type() {
+        DataType::Date32 => data
+            .buffer::<i32>(0)
+            .iter()
+            .map(|&day| infinity(day.into(), i32::MAX.into()))
+            .collect(),
+        _ => data
+            .buffer::<i64>(0)
+            .iter()
+            .map(|&moment| infinity(moment, i64::MAX))
+            .collect(),
+    };
+    if infinities.iter().all(Option::is_none) {
+        return Ok(array.clone());
+    }
+    let formatter = ArrayFormatter::try_new(array.as_ref(), options)?;
+    let values: StringArray = infinities
+        .iter()
+        .enumerate()
+        .map(|(row, infinity)| {
+            array.is_valid(row).then(|| match infinity {
+                Some(infinity) => infinity.to_string(),
+                None => formatter.value(row).to_string(),
+            })
+        })
+        .collect();
+    Ok(Arc::new(values))
 }
 
 /// The DuckDB type `field` carries under an Arrow extension, as [`config`]
@@ -895,6 +945,51 @@ mod tests {
                 Some("[0, 340282366920938463463374607431768211455]"),
                 Some("018f1f6e-7c2a-7000-8000-000000000001")
             ]]
+        );
+    }
+
+    #[test]
+    fn an_infinite_date_or_timestamp_reads_as_infinity() {
+        let result = memory("")
+            .query(
+                "SELECT DATE 'infinity' AS day, TIMESTAMP '-infinity' AS moment,
+                        TIMESTAMPTZ 'infinity' AS zoned, TIMESTAMP_NS '-infinity' AS nanos,
+                        TIMESTAMP_MS 'infinity' AS millis, TIMESTAMP_S '-infinity' AS seconds,
+                        [DATE '-infinity', DATE '2026-01-03'] AS days,
+                        {'at': TIMESTAMPTZ '-infinity'} AS event
+                 UNION ALL
+                 SELECT DATE '2026-01-03', TIMESTAMP '2026-01-03 10:04:05',
+                        TIMESTAMPTZ '2026-01-03 10:04:05+02',
+                        TIMESTAMP_NS '2026-01-03 10:04:05.123456789',
+                        TIMESTAMP_MS '2026-01-03 10:04:05.123', TIMESTAMP_S '2026-01-03 10:04:05',
+                        [], {'at': TIMESTAMPTZ '2026-01-03 10:04:05+02'}",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            cells(&result),
+            [
+                [
+                    Some("infinity"),
+                    Some("-infinity"),
+                    Some("infinity"),
+                    Some("-infinity"),
+                    Some("infinity"),
+                    Some("-infinity"),
+                    Some("[-infinity, 2026-01-03]"),
+                    Some("{at: -infinity}")
+                ],
+                [
+                    Some("2026-01-03"),
+                    Some("2026-01-03 10:04:05"),
+                    Some("2026-01-03 08:04:05+00:00"),
+                    Some("2026-01-03 10:04:05.123456789"),
+                    Some("2026-01-03 10:04:05.123"),
+                    Some("2026-01-03 10:04:05"),
+                    Some("[]"),
+                    Some("{at: 2026-01-03 08:04:05+00:00}")
+                ]
+            ]
         );
     }
 
@@ -1308,4 +1403,3 @@ mod tests {
         );
     }
 }
-
