@@ -2209,11 +2209,13 @@ impl Workspace {
                                     let sort = sort_columns(engine, &keys, &result.columns);
                                     let (names, widths, vertical, horizontal, column_view) = &shown;
                                     let column_view = carried_view(table.delegate(), column_view);
+                                    let (carried_names, carried_widths) =
+                                        carried_layout(table.delegate(), names, widths);
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
                                         .with_engine(engine)
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
-                                        .with_layout(names, widths)
+                                        .with_layout(&carried_names, &carried_widths)
                                         .with_column_view(&column_view);
                                     // Streamed rows are the finished result's
                                     // first rows, in order, so what was picked
@@ -2929,6 +2931,20 @@ fn carried_view(grid: &ResultGrid, at_start: &ColumnView) -> ColumnView {
     match grid.columns().is_empty() {
         true => at_start.clone(),
         false => grid.column_view(),
+    }
+}
+
+/// The widths the finished grid starts from: the streamed grid's, which hold
+/// any column dragged while the rows were arriving, over the ones taken when
+/// the run began.
+fn carried_layout(
+    grid: &ResultGrid,
+    names: &[String],
+    widths: &[ColumnWidth],
+) -> (Vec<String>, Vec<ColumnWidth>) {
+    match grid.columns().is_empty() {
+        true => (names.to_vec(), widths.to_vec()),
+        false => grid.layout(),
     }
 }
 
