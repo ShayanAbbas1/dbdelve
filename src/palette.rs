@@ -286,7 +286,7 @@ pub enum Command {
     /// the place they would have clicked.
     FilterRows,
     ClearFilter,
-    /// Open the "New row" form over the preview. Insertion needs no primary
+    /// Open the "Insert" form over the preview. Insertion needs no primary
     /// key, so this is offered where the grid refuses to edit.
     NewRow,
     ImportRows,
@@ -2572,7 +2572,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     if session.active_query_tab().is_some() {
         if let Some((_, table, _)) = session.query_insert_target(cx) {
             items.push(command(
-                &format!("New row in {table}…"),
+                &format!("Insert in {table}…"),
                 icon::PLUS,
                 Command::NewRow,
                 ROWS,
@@ -2676,7 +2676,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ));
             }
             if tab.takes_inserts(profile.config.engine()) {
-                items.push(command("New row…", icon::PLUS, Command::NewRow, ROWS));
+                items.push(command("Insert…", icon::PLUS, Command::NewRow, ROWS));
             }
             if tab.takes_imports(profile.config.engine()) {
                 items.push(command(

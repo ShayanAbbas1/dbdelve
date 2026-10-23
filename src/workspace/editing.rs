@@ -7,7 +7,7 @@ use super::*;
 use crate::session::{ReviewSlot, StaleEdit, StaleResume, refreshing};
 
 impl Workspace {
-    /// Open the "New row" form over the preview in front, one field per column
+    /// Open the "Insert" form over the preview in front, one field per column
     /// of the relation's loaded structure (spec §4).
     ///
     /// Requires a schema and a table and not a primary key, which is why this
@@ -192,7 +192,7 @@ impl Workspace {
             profile.session.insert_form = None;
             profile.session.apply_review = Some(ApplyReview {
                 tab,
-                title: "New row",
+                title: "Insert",
                 sql: statement,
             });
         }

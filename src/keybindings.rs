@@ -179,7 +179,7 @@ registry! {
     ("clear_filter", "Clear Filter", None, [], ClearFilter),
     ("add_filter", "Add Filter", None, [], AddFilter),
     ("toggle_next_join", "Toggle Join Type", None, [], ToggleNextJoin),
-    ("new_row", "New Row", None, [], NewRow),
+    ("new_row", "Insert", None, [], NewRow),
     ("import_rows", "Import Rows", None, [], ImportRows),
     // Scoped like `set_null` rather than left global: they act on the grid's
     // active cell, so a chord put on one later must not fire from the editor.

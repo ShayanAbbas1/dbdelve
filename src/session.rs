@@ -285,7 +285,7 @@ pub(crate) struct Session {
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
     pub(crate) apply_review: Option<ApplyReview>,
-    /// The "New row" form a preview tab is filling in. Beside `apply_review`
+    /// The "Insert" form a preview tab is filling in. Beside `apply_review`
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
     pub(crate) insert_form: Option<InsertForm>,

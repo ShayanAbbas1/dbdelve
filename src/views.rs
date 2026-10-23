@@ -1009,7 +1009,7 @@ fn control_row() -> gpui::Div {
         .px(px(layout::SPACE_SM))
 }
 
-/// The "New row" form (spec §4), in the place the row panel takes beside the
+/// The "Insert" form (spec §4), in the place the row panel takes beside the
 /// grid rather than over it.
 ///
 /// The buttons are Cancel and **Review SQL**: this generates the statement and
@@ -1088,7 +1088,7 @@ fn render_new_row_panel(
         .flex_col()
         .gap(px(layout::SPACE_MD))
         .p(px(layout::SPACE_MD))
-        .child(section_label(t, "New row"))
+        .child(section_label(t, "Insert"))
         // The one line that says what an empty field means, because the
         // three-way rule is invisible otherwise.
         .child(
@@ -3212,7 +3212,7 @@ fn render_query_toolbar(
         .then(|| session.query_insert_target(cx))
         .flatten()
         .map(|(_, table, _)| {
-            let label = format!("New row in {table}");
+            let label = format!("Insert in {table}");
             button("new-row", label, Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(NewRow), cx);
             })
@@ -3361,7 +3361,7 @@ fn relation_controls(
                 )),
         )
         .children(takes_inserts.then(|| {
-            button("new-row", "New row", Tone::Quiet, Control::Compact, t).on_click(
+            button("new-row", "Insert", Tone::Quiet, Control::Compact, t).on_click(
                 |_, window, cx| {
                     window.dispatch_action(Box::new(NewRow), cx);
                 },
