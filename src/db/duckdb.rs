@@ -40,6 +40,9 @@ pub const IN_MEMORY: &str = ":memory:";
 /// the statement timeout fired it.
 pub const INTERRUPTED: &str = "INTERRUPT Error: Interrupted!";
 
+/// How DuckDB refuses a `ROLLBACK` with no transaction to end.
+const NO_TRANSACTION: &str = "no transaction is active";
+
 /// The path out of a `duckdb:` URL, the way `sqlite.rs` reads its own: all of
 /// it after the scheme, less an optional `//`. Nothing after the scheme is a
 /// database in memory.
@@ -427,7 +430,9 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
 /// answers `is_autocommit` with `true` whatever the connection is in. A
 /// typo inside a transaction the user began earlier is theirs to finish and
 /// is left alone. A `BEGIN` sent inside one fails and aborts it, so it has
-/// nothing left in it but a `ROLLBACK` either way.
+/// nothing left in it but a `ROLLBACK` either way. One the batch already
+/// ended, with a `COMMIT` before the statement that failed, has nothing to
+/// roll back or report.
 fn rolled_back(connection: &duckdb::Connection, sql: &str, error: DbError) -> DbError {
     let Some(start) = Engine::DuckDb.transaction_start() else {
         return error;
@@ -442,6 +447,7 @@ fn rolled_back(connection: &duckdb::Connection, sql: &str, error: DbError) -> Db
     let outcome = match connection.execute_batch("ROLLBACK") {
         Ok(()) => "The transaction the batch opened was rolled back; nothing it wrote remains."
             .to_string(),
+        Err(failure) if failure.to_string().contains(NO_TRANSACTION) => return error,
         Err(failure) => format!(
             "The transaction the batch opened is still open: the rollback failed too. {failure}"
         ),
@@ -695,6 +701,41 @@ mod tests {
         connection
             .query("BEGIN; INSERT INTO t VALUES (1); COMMIT;", Fetch::default())
             .expect("the next batch opens its own transaction");
+    }
+
+    #[test]
+    fn a_batch_that_committed_before_it_failed_has_no_transaction_to_report() {
+        let connection = memory("CREATE TABLE t (id INTEGER PRIMARY KEY);");
+        let error = connection
+            .query(
+                "BEGIN; INSERT INTO t VALUES (1); COMMIT; SELECT * FROM nosuch;",
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert!(error.message.contains("nosuch"), "{error:?}");
+        assert!(!error.message.contains("still open"), "{error:?}");
+        assert!(!error.message.contains("rolled back"), "{error:?}");
+        assert_eq!(count(&connection), "1");
+    }
+
+    #[test]
+    fn a_cancelled_bracketed_batch_reads_as_a_cancel() {
+        let connection = memory("CREATE TABLE t (id BIGINT);");
+        let stopper = connection.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            stopper.cancel().unwrap();
+        });
+        let error = connection
+            .query(
+                "BEGIN; INSERT INTO t SELECT a.range FROM range(1000000000000) a, range(1000) b; \
+                 COMMIT;",
+                Fetch::default(),
+            )
+            .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.message.contains("rolled back"), "{error:?}");
+        assert!(super::super::is_cancel(Engine::DuckDb, &error), "{error:?}");
     }
 
     #[test]

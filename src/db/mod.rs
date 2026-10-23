@@ -2682,7 +2682,8 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
         Engine::Sqlite => message == "interrupted",
         Engine::Turso => message == turso::INTERRUPTED,
-        Engine::DuckDb => message == duckdb::INTERRUPTED,
+        // Followed by what became of the transaction a bracketed batch opened.
+        Engine::DuckDb => message.starts_with(duckdb::INTERRUPTED),
         // The second is dbdelve's own, a cancel between partitions.
         Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
