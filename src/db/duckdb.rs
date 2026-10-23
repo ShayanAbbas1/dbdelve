@@ -629,6 +629,18 @@ mod tests {
     }
 
     #[test]
+    fn a_spreadsheets_header_repeated_in_another_case_reads_as_another_column() {
+        let result = memory("")
+            .query(
+                &format!("SELECT * FROM read_xlsx('{}')", fixture("encabezados.xlsx")),
+                Fetch::default(),
+            )
+            .unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Nombre", "nombre_2", "NOMBRE_3", "nombre_2_2"]);
+    }
+
+    #[test]
     fn nested_and_exact_types_render_as_duckdb_prints_them() {
         let result = memory("")
             .query(

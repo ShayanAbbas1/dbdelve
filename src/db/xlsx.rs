@@ -81,11 +81,12 @@ impl VTab for ReadXlsx {
                 .map(|name| name.trim().to_string())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("column{}", col + 1));
-            // DuckDB refuses two columns of one name, and a sheet's header row
-            // repeats itself as often as anyone typed it.
+            // DuckDB refuses two columns of one name, whatever their case,
+            // and a sheet's header row repeats itself as often as anyone
+            // typed it.
             let mut unique = name.clone();
             let mut suffix = 2;
-            while taken.contains(&unique) {
+            while taken.contains(&unique.to_lowercase()) {
                 unique = format!("{name}_{suffix}");
                 suffix += 1;
             }
@@ -94,7 +95,7 @@ impl VTab for ReadXlsx {
                 false => LogicalTypeId::Varchar,
             };
             bind.add_result_column(&unique, LogicalTypeHandle::from(kind));
-            taken.push(unique);
+            taken.push(unique.to_lowercase());
         }
         Ok(Sheet { numeric, rows })
     }
