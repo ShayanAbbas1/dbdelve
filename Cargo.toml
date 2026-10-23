@@ -73,6 +73,10 @@ rusqlite = { version = "0.40", default-features = false, features = [
     "column_metadata",
     "column_decltype",
 ] }
+# DuckDB, embedded the way SQLite is: no server, the engine compiled into the
+# binary. `parquet` and `json` are DuckDB's own readers, linked in so a file
+# opens with no extension downloaded at run time.
+duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json"] }
 
 turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }
 turso_core = "=0.8.2"

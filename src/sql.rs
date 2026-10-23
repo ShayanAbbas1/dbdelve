@@ -19,11 +19,12 @@ use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Expr, Query, SetExpr,
-    Statement, UtilityOption,
+    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Delete, Expr, Insert,
+    Merge, Query, SetExpr, Statement, Update, UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    Dialect, DuckDbDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    SnowflakeDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
@@ -70,6 +71,7 @@ impl Buffer {
             | Engine::MariaDb
             | Engine::Sqlite
             | Engine::Turso
+            | Engine::DuckDb
             | Engine::Snowflake => statements_in(sql),
         };
 
@@ -160,6 +162,7 @@ pub(crate) fn queued_statements(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::MongoDb
         | Engine::Redis => Buffer::for_engine(engine, sql).statements().to_vec(),
@@ -189,6 +192,7 @@ pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::MongoDb
         | Engine::Redis => 1,
@@ -278,6 +282,7 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -332,6 +337,7 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -518,6 +524,7 @@ pub fn insert_row(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -598,7 +605,7 @@ pub(crate) fn insert_rows(
     // ponytail: Stop and Skip only. Update-existing-row is deferred: Postgres cannot spell ON CONFLICT (pk) DO UPDATE under the pinned grammar, MySQL's matches any unique key, SQL Server and Snowflake would need MERGE.
     let tail = match (skip, engine) {
         (false, _) => String::new(),
-        (true, Engine::Postgres | Engine::Sqlite | Engine::Turso) => {
+        (true, Engine::Postgres | Engine::Sqlite | Engine::Turso | Engine::DuckDb) => {
             " ON CONFLICT DO NOTHING".into()
         }
         (true, Engine::MySql | Engine::MariaDb) => {
@@ -630,9 +637,12 @@ pub fn insert_template(
     let placeholder: fn(usize) -> String = match engine {
         Engine::Postgres => |n| format!("${n}"),
         Engine::SqlServer => |n| format!("@p{n}"),
-        Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Turso | Engine::Snowflake => {
-            |_| "?".into()
-        }
+        Engine::MySql
+        | Engine::MariaDb
+        | Engine::Sqlite
+        | Engine::Turso
+        | Engine::DuckDb
+        | Engine::Snowflake => |_| "?".into(),
         Engine::MongoDb | Engine::Redis => return None,
     };
     let names: Vec<String> = columns
@@ -679,6 +689,7 @@ pub fn delete_row(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -934,6 +945,7 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => generated_write(statement, engine.backslash_escapes()),
     }
@@ -949,6 +961,7 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => delete_key_matches(statement, keys, engine.backslash_escapes()),
     }
@@ -981,6 +994,7 @@ pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -1835,6 +1849,7 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -2104,6 +2119,7 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer
         | Engine::Redis => Ok(()),
@@ -2185,10 +2201,11 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
         Engine::Sqlite => (word(tokens.next().as_ref(), "QUERY")
             && word(tokens.next().as_ref(), "PLAN"))
         .then_some(ExplainMode::Plan),
-        // Turso has no Explain at all (`Engine::explain_prefix`), and
+        // Turso and DuckDB have no Explain at all (`Engine::explain_prefix`), and
         // Snowflake's and SQL Server's plans are shapes the parser does not read.
         Engine::MariaDb
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer
         | Engine::MongoDb
@@ -2248,6 +2265,7 @@ fn dialect(engine: Engine) -> Option<Box<dyn Dialect>> {
         Engine::Postgres => Box::new(PostgreSqlDialect {}),
         Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
         Engine::Sqlite | Engine::Turso => Box::new(SQLiteDialect {}),
+        Engine::DuckDb => Box::new(DuckDbDialect {}),
         Engine::Snowflake => Box::new(SnowflakeDialect {}),
         Engine::SqlServer => Box::new(MsSqlDialect {}),
         Engine::MongoDb | Engine::Redis => return None,
@@ -2302,6 +2320,41 @@ fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String
 pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
     let verdict = classify(engine, sql);
     verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
+}
+
+/// Whether the last statement of `sql` answers with rows: a query, or a
+/// write with a `RETURNING`. False for any other statement, and for one that
+/// does not parse. DuckDB answers a command with a result set too, a single
+/// `Count` or `Success` column, which only the statement tells apart from a
+/// query's own column of that name.
+pub(crate) fn answers_with_rows(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        matches!(
+            statements.last(),
+            Some(
+                Statement::Query(_)
+                    | Statement::Insert(Insert {
+                        returning: Some(_),
+                        ..
+                    })
+                    | Statement::Update(Update {
+                        returning: Some(_),
+                        ..
+                    })
+                    | Statement::Delete(Delete {
+                        returning: Some(_),
+                        ..
+                    })
+                    | Statement::Merge(Merge {
+                        output: Some(_),
+                        ..
+                    })
+            )
+        )
+    })
 }
 
 /// Whether a submission may be stopped part way once its rows pass the limit:
@@ -2959,6 +3012,7 @@ fn sqlformat_dialect(engine: Engine) -> Option<sqlformat::Dialect> {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake => sqlformat::Dialect::Generic,
         Engine::MongoDb | Engine::Redis => return None,
     })
@@ -4315,12 +4369,13 @@ mod tests {
         }
     }
 
-    const SQL_ENGINES: [Engine; 7] = [
+    const SQL_ENGINES: [Engine; 8] = [
         Engine::Postgres,
         Engine::MySql,
         Engine::MariaDb,
         Engine::Sqlite,
         Engine::Turso,
+        Engine::DuckDb,
         Engine::Snowflake,
         Engine::SqlServer,
     ];
@@ -6572,6 +6627,7 @@ mod tests {
             Engine::MariaDb,
             Engine::Sqlite,
             Engine::Turso,
+            Engine::DuckDb,
             Engine::Snowflake,
             Engine::SqlServer,
             Engine::MongoDb,

@@ -22,8 +22,9 @@ pub(crate) enum Recognised {
     Typing,
     /// A URL whose scheme names this engine.
     Url(Engine),
-    /// A path to a SQLite file, which has no scheme to read.
-    File,
+    /// A path to a file of this engine's, which has no scheme to read: told
+    /// apart by its extension.
+    File(Engine),
     Unknown,
 }
 
@@ -31,13 +32,20 @@ impl Recognised {
     pub(crate) fn engine(self) -> Option<Engine> {
         match self {
             Recognised::Url(engine) => Some(engine),
-            Recognised::File => Some(Engine::Sqlite),
+            Recognised::File(engine) => Some(engine),
             _ => None,
         }
     }
 }
 
-const SQLITE_EXTENSIONS: [&str; 4] = ["db", "sqlite", "sqlite3", "db3"];
+const FILE_EXTENSIONS: [(&str, Engine); 6] = [
+    ("db", Engine::Sqlite),
+    ("sqlite", Engine::Sqlite),
+    ("sqlite3", Engine::Sqlite),
+    ("db3", Engine::Sqlite),
+    ("duckdb", Engine::DuckDb),
+    ("ddb", Engine::DuckDb),
+];
 
 pub(crate) fn recognise(text: &str) -> Recognised {
     let text = text.trim();
@@ -46,18 +54,17 @@ pub(crate) fn recognise(text: &str) -> Recognised {
     }
     let path_like = text.starts_with('~') || Path::new(text).is_absolute();
     if path_like {
-        let sqlite = Path::new(text)
+        let engine = Path::new(text)
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                SQLITE_EXTENSIONS
+            .and_then(|extension| {
+                FILE_EXTENSIONS
                     .iter()
-                    .any(|known| known.eq_ignore_ascii_case(extension))
+                    .find(|(known, _)| known.eq_ignore_ascii_case(extension))
             });
-        return if sqlite {
-            Recognised::File
-        } else {
-            Recognised::Typing
+        return match engine {
+            Some((_, engine)) => Recognised::File(*engine),
+            None => Recognised::Typing,
         };
     }
     // The scheme the way `from_url` finds it, so the field and the form never
@@ -731,7 +738,7 @@ impl Workspace {
         let Some(form) = &self.form else {
             return;
         };
-        if recognised == Recognised::File {
+        if let Recognised::File(_) = recognised {
             let name = default_profile_name(&ConnectionConfig::Sqlite {
                 path: text.clone(),
                 statement_timeout: 0,
@@ -875,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_sqlite_path_is_a_file_and_any_other_path_is_still_being_typed() {
+    fn a_bare_database_file_path_is_a_file_and_any_other_path_is_still_being_typed() {
         // What counts as absolute is the platform's call: `/Users/…` has no
         // drive, so it is not an absolute path on Windows.
         #[cfg(windows)]
@@ -893,8 +900,12 @@ mod tests {
             "~/data/app.SQLITE3",
             other_absolute,
         ] {
-            assert_eq!(recognise(text), Recognised::File, "{text}");
+            assert_eq!(recognise(text), Recognised::File(Engine::Sqlite), "{text}");
         }
+        assert_eq!(
+            recognise("~/data/app.duckdb"),
+            Recognised::File(Engine::DuckDb)
+        );
         for text in [partial, "~/data/app.csv", "~"] {
             assert_eq!(recognise(text), Recognised::Typing, "{text}");
         }

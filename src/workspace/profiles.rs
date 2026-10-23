@@ -105,6 +105,10 @@ impl Workspace {
                 path: stored.path.unwrap_or_default(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
             },
+            Engine::DuckDb => ConnectionConfig::DuckDb {
+                path: stored.path.unwrap_or_default(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            },
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb
@@ -343,7 +347,11 @@ impl Workspace {
         form.last_url = url.clone();
         let text = url.trim();
         let parsed = match super::welcome::recognise(text) {
-            super::welcome::Recognised::File => Ok(ConnectionConfig::Sqlite {
+            super::welcome::Recognised::File(Engine::DuckDb) => Ok(ConnectionConfig::DuckDb {
+                path: text.to_string(),
+                statement_timeout: 0,
+            }),
+            super::welcome::Recognised::File(_) => Ok(ConnectionConfig::Sqlite {
                 path: text.to_string(),
                 statement_timeout: 0,
             }),
@@ -362,7 +370,9 @@ impl Workspace {
         // throw away a half-typed connection to a different database, which the
         // user never asked to lose by pasting a URL.
         let filled = match &config {
-            ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::Turso { path, .. } => vec![
+            ConnectionConfig::Sqlite { path, .. }
+            | ConnectionConfig::Turso { path, .. }
+            | ConnectionConfig::DuckDb { path, .. } => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.path, path.clone()),
             ],
@@ -1937,7 +1947,7 @@ pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
     let inserted = after_chars.len() - prefix - suffix;
     let fills = match super::welcome::recognise(after) {
         super::welcome::Recognised::Url(engine) => engine.fields() != Fields::Account,
-        super::welcome::Recognised::File => true,
+        super::welcome::Recognised::File(_) => true,
         _ => false,
     };
     inserted > 1 && fills

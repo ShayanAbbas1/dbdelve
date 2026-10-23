@@ -198,6 +198,7 @@ impl Operator {
             | Engine::MariaDb
             | Engine::Sqlite
             | Engine::Turso
+            | Engine::DuckDb
             | Engine::Snowflake
             | Engine::SqlServer
             | Engine::MongoDb => self.on(engine),
@@ -364,6 +365,7 @@ pub(crate) fn filters_on(engine: Engine, column: &str) -> bool {
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer
         | Engine::MongoDb => true,
@@ -413,6 +415,7 @@ pub(crate) fn derived_filter(
                 | Engine::MariaDb
                 | Engine::Sqlite
                 | Engine::Turso
+                | Engine::DuckDb
                 | Engine::Snowflake
                 | Engine::SqlServer => {
                     format!("({left}) {} ({predicate})", bar.conjunction.as_str())
@@ -444,6 +447,7 @@ pub(crate) fn bar_predicate(
             | Engine::MariaDb
             | Engine::Sqlite
             | Engine::Turso
+            | Engine::DuckDb
             | Engine::Snowflake
             | Engine::SqlServer => value.to_string(),
         });
@@ -503,6 +507,7 @@ pub(crate) fn filter_predicate(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -568,6 +573,9 @@ pub(crate) fn filter_predicate(
             // the grammar; `REGEXP_INSTR` is a plain function that matches
             // anywhere in the value.
             Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
+            // Matches anywhere in the value, as `~` does; `regexp_full_match`
+            // would anchor it to the whole of it.
+            Engine::DuckDb => Some(format!("regexp_matches({name}, {})", literal(value))),
             // SQL Server has no regex before 2025's `REGEXP_LIKE`.
             Engine::Sqlite | Engine::Turso | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
@@ -591,12 +599,12 @@ pub(crate) fn filter_predicate(
 /// would refuse every `LIKE` this writes. Postgres and MySQL both default to
 /// the backslash, which is what [`like_pattern`] escapes with.
 ///
-/// **SQLite has no default escape character at all**, so a pattern is the wrong
-/// tool there: a value holding `%` or `_` would silently widen the match, which
-/// is the one failure this exists to prevent. `instr` and `substr` ask the same
-/// question with no pattern to escape. They are case-sensitive where SQLite's
-/// `LIKE` is not, which is the cost of the trade and is smaller than answering
-/// a question nobody asked.
+/// **SQLite has no default escape character at all**, and neither has DuckDB,
+/// so a pattern is the wrong tool there: a value holding `%` or `_` would
+/// silently widen the match, which is the one failure this exists to prevent.
+/// `instr` and `substr` ask the same question with no pattern to escape. They
+/// are case-sensitive where SQLite's `LIKE` is not, which is the cost of the
+/// trade and is smaller than answering a question nobody asked.
 pub(crate) fn substring(
     engine: Engine,
     name: &str,
@@ -605,7 +613,7 @@ pub(crate) fn substring(
     value: &str,
 ) -> String {
     let literal = engine.quote_literal(value);
-    if matches!(engine, Engine::Sqlite | Engine::Turso) {
+    if matches!(engine, Engine::Sqlite | Engine::Turso | Engine::DuckDb) {
         return match operator {
             Operator::NotContains => format!("instr({name}, {literal}) = 0"),
             Operator::StartsWith => format!("instr({name}, {literal}) = 1"),
@@ -809,6 +817,7 @@ pub(crate) fn sort_expression(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }

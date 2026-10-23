@@ -144,9 +144,11 @@ impl ConnectionForm {
             _ => None,
         };
         let file = match config {
-            Some(ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::Turso { path, .. }) => {
-                Some(path.as_str())
-            }
+            Some(
+                ConnectionConfig::Sqlite { path, .. }
+                | ConnectionConfig::Turso { path, .. }
+                | ConnectionConfig::DuckDb { path, .. },
+            ) => Some(path.as_str()),
             _ => None,
         };
         let mongo = match config {
@@ -410,6 +412,15 @@ impl ConnectionForm {
                 path: file()?,
                 statement_timeout,
             },
+            // No file is a database in memory, which is what a profile for
+            // reading CSV and Parquet files wants.
+            Engine::DuckDb => ConnectionConfig::DuckDb {
+                path: match read(&self.path) {
+                    path if path.is_empty() => crate::db::DUCKDB_IN_MEMORY.to_string(),
+                    path => path,
+                },
+                statement_timeout,
+            },
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
@@ -458,6 +469,7 @@ impl ConnectionForm {
             (&self.port, blank.port.into()),
             (&self.database, blank.database.into()),
             (&self.user, blank.user.into()),
+            (&self.path, blank.path.into()),
         ] {
             input.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx)
@@ -619,6 +631,7 @@ pub(crate) struct Placeholders {
     pub(crate) port: String,
     pub(crate) database: &'static str,
     pub(crate) user: &'static str,
+    pub(crate) path: &'static str,
 }
 
 /// Read against `ConnectionConfig::server`, `account` and
@@ -641,6 +654,10 @@ pub(crate) fn placeholders(engine: Engine) -> Placeholders {
         Engine::MongoDb | Engine::Redis => "Optional",
         _ => "Required",
     };
+    let path = match engine {
+        Engine::DuckDb => "Blank for a database in memory",
+        _ => "/path/to/app.sqlite",
+    };
     Placeholders {
         name,
         host,
@@ -650,6 +667,7 @@ pub(crate) fn placeholders(engine: Engine) -> Placeholders {
             .unwrap_or_default(),
         database,
         user,
+        path,
     }
 }
 
@@ -779,9 +797,12 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
             &server.database
         }
         .clone(),
-        ConnectionConfig::Sqlite { path, .. } | ConnectionConfig::Turso { path, .. } => {
-            file_stem(path).to_string()
+        ConnectionConfig::DuckDb { path, .. } if path == crate::db::DUCKDB_IN_MEMORY => {
+            "DuckDB".to_string()
         }
+        ConnectionConfig::Sqlite { path, .. }
+        | ConnectionConfig::Turso { path, .. }
+        | ConnectionConfig::DuckDb { path, .. } => file_stem(path).to_string(),
         ConnectionConfig::Snowflake(account) => account.database.clone(),
         // A database there is a number, which names nothing.
         ConnectionConfig::Redis(server) => server.host.clone(),
@@ -1053,6 +1074,10 @@ mod tests {
         assert_eq!(placeholders(Engine::MongoDb).user, "Optional");
         assert_eq!(placeholders(Engine::Redis).name, "Named after the host");
         assert_eq!(placeholders(Engine::Turso).name, "Named after the file");
+        assert_eq!(
+            placeholders(Engine::DuckDb).path,
+            "Blank for a database in memory"
+        );
         assert_eq!(placeholders(Engine::Snowflake).port, "");
     }
 

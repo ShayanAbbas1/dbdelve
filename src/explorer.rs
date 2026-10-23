@@ -318,6 +318,7 @@ pub fn preview_sql(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }
@@ -350,6 +351,7 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> Option<St
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake => preview_sql(engine, schema, relation, "", Some(100), 0),
         Engine::Redis => return None,
     })
@@ -388,6 +390,7 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
         Engine::Postgres
         | Engine::MySql
         | Engine::MariaDb
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => format!("TRUNCATE TABLE {qualified};"),
     }
@@ -409,6 +412,7 @@ pub fn open_row_sql<'a>(
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer
         | Engine::MongoDb => None,
@@ -435,6 +439,7 @@ pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
         | Engine::MariaDb
         | Engine::Sqlite
         | Engine::Turso
+        | Engine::DuckDb
         | Engine::Snowflake
         | Engine::SqlServer => {}
     }

@@ -386,10 +386,11 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb
+            | Engine::DuckDb
             | Engine::SqlServer
             | Engine::Snowflake
             | Engine::MongoDb
-            | Engine::Redis => unreachable!("only the file engines read pragmas"),
+            | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
         }
     }
 
@@ -400,10 +401,11 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             Engine::Postgres
             | Engine::MySql
             | Engine::MariaDb
+            | Engine::DuckDb
             | Engine::SqlServer
             | Engine::Snowflake
             | Engine::MongoDb
-            | Engine::Redis => unreachable!("only the file engines read pragmas"),
+            | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
         }
     }
 

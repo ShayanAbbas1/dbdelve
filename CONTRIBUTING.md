@@ -226,7 +226,7 @@ chore(release): bump version to 0.3.8
 
 | Scope         | Covers                                                                  |
 | ------------- | ----------------------------------------------------------------------- |
-| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb` | One engine's module in `src/db/` (MySQL covers MariaDB) |
 | `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
 | `ssh`         | SSH tunnels                                                             |
 | `connections` | Connection form, profiles, TLS                                          |

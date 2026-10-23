@@ -1,7 +1,8 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, Snowflake, SQL Server, MongoDB and Redis.
+speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB and
+Redis.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -32,7 +33,8 @@ require it, stop and raise it instead.
    aborts it, and only if `pg_stat_activity` shows the session's process running
    this statement's exact text, never waiting on the side session to find
    out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
-   rolled back alone; SQLite interrupts it; MongoDB drops the cursor; SQL Server
+   rolled back alone; SQLite interrupts it; DuckDB fetches no further; MongoDB
+   drops the cursor; SQL Server
    sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
    `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
    `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
@@ -228,7 +230,7 @@ an upgrade, or ask for confirmation.
   confirmation, before any mode comparison: every typo lands there, and asking
   for Full to get a syntax error back would teach people to live in Full.
   The exception is Read-only on an engine where `Engine::holds_read_only` is
-  false (SQLite, Snowflake, SQL Server): nothing on the server would stop it writing, so
+  false (SQLite, DuckDB, Snowflake, SQL Server): nothing on the server would stop it writing, so
   the verdict carries Read-write and the gate asks for that instead.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
@@ -275,6 +277,7 @@ mysql = "28"               # rust-mysql-simple, blocking. default-features = fal
 rusqlite = "0.40"          # bundled + column_metadata + column_decltype. dff = false
 turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }  # Turso, blocking rsapi
 turso_core = "=0.8.2"      # its Value
+duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json"] }  # DuckDB, Arrow results
 
 rustls = "0.23"            # TLS; the driver ships none. default-features = false
 rustls-native-certs = "0.8"     # the platform trust store, for Postgres
@@ -678,12 +681,13 @@ Decided, and not to be re-litigated:
   engine's default `LIKE` escape, which is the backslash on Postgres and MySQL,
   and `like_pattern` escapes `%`, `_` and the backslash itself with it.
   **SQLite, which has no default escape at all**, gets `instr`/`substr`
-  substring arithmetic instead: case-sensitive where its own `LIKE` is not,
+  substring arithmetic instead, and so does DuckDB, which has none either: case-sensitive where its own `LIKE` is not,
   which is the price of not silently widening a match on a value containing
   `%`. **SQL Server has no default escape either**, but a bracket makes any
   character literal there, so its pattern brackets `%`, `_` and `[` (`[%]`)
   and keeps `LIKE`. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
-  (8.0.4 and later), MariaDB `REGEXP_INSTR(col, pattern) > 0` (it has no
+  (8.0.4 and later), DuckDB `regexp_matches(col, pattern)`, MariaDB
+  `REGEXP_INSTR(col, pattern) > 0` (it has no
   `REGEXP_LIKE`, and its infix `REGEXP` is not in the grammar the gate
   parses), and **omitted from the dropdown on SQLite and SQL Server**, which
   ship no regex (SQL Server not before 2025).
@@ -840,9 +844,9 @@ Decided, and not to be re-litigated:
   refresh runs an `EXPLAIN ANALYZE` again.
 - **`SET column = DEFAULT` is withheld on SQLite** (`Engine::assigns_default`),
   where `DEFAULT` is not an expression.
-- **Read-only has no server-side backstop on SQLite, Snowflake or SQL Server.**
-  Postgres gets `default_transaction_read_only`, MySQL `SET SESSION TRANSACTION
-  READ ONLY`. So on the other three, Read-only refuses a statement `sql::classify` cannot
+- **Read-only has no server-side backstop on SQLite, DuckDB, Snowflake or SQL
+  Server.** Postgres gets `default_transaction_read_only`, MySQL `SET SESSION
+  TRANSACTION READ ONLY`. So on the other four, Read-only refuses a statement `sql::classify` cannot
   read rather than offering to run it once (`Engine::holds_read_only`).
 - **Snowflake has no session, because it is spoken to over its SQL REST API.**
   It publishes no Rust driver. Each submission is one HTTPS request, so nothing
@@ -1069,6 +1073,30 @@ Decided, and not to be re-litigated:
   (`Engine::holds_read_only`). `Connection::connect` is a closure because
   holding `Arc<TursoDatabase>` directly overflows the compiler's `Send`
   evaluation of `db::Connection`. Its live test reads `dbdelve_TURSO_PATH`.
+- **DuckDB is embedded through duckdb-rs, `bundled`: a file, or a database in
+  memory.** A blank path is a database in memory, gone when the profile
+  disconnects; a path that does not exist is refused rather than created, as
+  on SQLite. `parquet` and `json` are linked in, so reading those files
+  downloads nothing. The catalog, structure, keys and DDL come from
+  `duckdb_tables()`, `duckdb_views()`, `duckdb_columns()`,
+  `duckdb_constraints()` and `duckdb_indexes()`. Results arrive as Arrow
+  batches and every cell is rendered by Arrow's formatter; a `TIMESTAMPTZ`,
+  which DuckDB hands over under the zone's name, is relabelled `+00:00` first,
+  since Arrow formats a named zone only with `chrono-tz`. Every statement of a
+  submission but the last runs as it is prepared, and the last one streams,
+  so a read past the row limit is stopped by fetching no further. DuckDB
+  answers a command with a one-column result of its own, `Count` or
+  `Success`, and `sql::answers_with_rows` is what tells that apart from a
+  query's column of the same name. duckdb-rs answers `is_autocommit` with
+  `true` whatever the state, so a failed submission's transaction is rolled
+  back by reading its text, as on MySQL. A cancel, even a read's, or a failed
+  write aborts the transaction it lands in: it refuses everything until a
+  `ROLLBACK`, and a `COMMIT` rolls it back. A second connection (`alongside`,
+  and an import's `apart`) is cloned from an idle one the profile holds,
+  since opening an in-memory database again makes a new, empty one. **A
+  DuckDB result is never editable**: the driver names no column's table;
+  inserting from an object tab works. No Explain, and no Read-only backstop.
+  Its tests need nothing external and run under plain `cargo test`.
 - **Geometry is Postgres-only.** MySQL has a `GEOMETRY` type; rendering it is a
   separate decision nobody has asked for.
 - **MariaDB's `JSON` is a `longtext` with a `json_valid` check**, and is shown
