@@ -11,6 +11,10 @@
 # Build product of dev/sqlite/001-dbdelve-demo.sql, not a source file.
 dev/dbdelve_dev.db
 
+# Build product of dev/duckdb/001-dbdelve-demo.sql, not a source file.
+dev/dbdelve_dev.duckdb
+dev/dbdelve_dev.duckdb.wal
+
 # Camera-roll originals of the README media. HEIC renders in no browser, so the
 # screenshot is committed as the converted PNG beside it. The video isn't
 # committed at all: GitHub only plays a video it hosts itself, so the README

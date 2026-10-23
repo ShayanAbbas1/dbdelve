@@ -472,6 +472,17 @@ sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
 
 The seed uses `unhex()`, so it needs sqlite3 3.41 or later.
 
+DuckDB has no server either. Build the file once, then give the form its
+absolute path; the `duckdb` CLI comes from `brew install duckdb` or duckdb.org:
+
+```sh
+rm -f dev/dbdelve_dev.duckdb && duckdb dev/dbdelve_dev.duckdb < dev/duckdb/001-dbdelve-demo.sql
+```
+
+The seed expects a fresh file, hence the `rm`. It ends with `type_gallery`, a
+table of DuckDB-only types (nested LIST/STRUCT/MAP, ENUM, HUGEINT, infinite
+dates) for checking how a cell renders them.
+
 `dev/load.sh` rebuilds Postgres `events` about a hundred columns wide for load testing;
 it is opt-in and CI never runs it (see `CONTRIBUTING.md`).
 
