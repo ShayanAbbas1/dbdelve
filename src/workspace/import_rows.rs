@@ -277,8 +277,11 @@ impl Workspace {
         dialog.checks += 1;
         dialog.checking = true;
         cx.notify();
-        let targets = match &dialog.structure {
-            StructureState::Loaded(structure) => TargetColumn::from_structure(structure, engine),
+        let (targets, skips) = match &dialog.structure {
+            StructureState::Loaded(structure) => (
+                TargetColumn::from_structure(structure, engine),
+                engine.skips_duplicates_into(structure),
+            ),
             StructureState::Failed(message) => {
                 dialog.prepared = Some(Err(message.clone()));
                 dialog.plan = None;
@@ -320,7 +323,7 @@ impl Workspace {
                         .map(|(columns, mappings)| (columns.as_slice(), mappings.as_slice()));
                     let prepared = prepare(&bytes, &options, &targets, previous, engine)?;
                     let checked = prepared.checked.clone();
-                    let plan = Plan::new(engine, schema, table, checked, &options);
+                    let plan = Plan::new(engine, schema, table, checked, &options, skips);
                     Ok::<_, String>((prepared, plan))
                 })
                 .await;

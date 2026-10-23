@@ -284,6 +284,7 @@ struct Editing<'a> {
     profile: String,
     dialog: &'a ImportDialog,
     engine: Engine,
+    skips_duplicates: bool,
     running: bool,
 }
 
@@ -301,10 +302,15 @@ impl Workspace {
             StructureState::Loaded(structure) => TargetColumn::from_structure(structure, engine),
             _ => Vec::new(),
         });
+        let skips_duplicates = match &dialog.structure {
+            StructureState::Loaded(structure) => engine.skips_duplicates_into(structure),
+            _ => engine.skips_duplicates(),
+        };
         let editing = Editing {
             profile: profile.id.clone(),
             dialog,
             engine,
+            skips_duplicates,
             running: matches!(dialog.phase, ImportPhase::Running { .. }),
         };
         let body = self.import_body(
@@ -577,7 +583,7 @@ impl Workspace {
         }
         groups.push(group(t, "Values", values));
 
-        if editing.engine.skips_duplicates() {
+        if editing.skips_duplicates {
             let mut duplicate = vec![
                 segments(
                     editing,

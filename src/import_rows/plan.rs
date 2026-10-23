@@ -88,6 +88,7 @@ impl Plan {
         table: String,
         checked: Arc<Checked>,
         options: &Options,
+        skips: bool,
     ) -> Self {
         let begin = match options.transaction {
             Transaction::AllOrNothing => engine.all_or_nothing().ok(),
@@ -103,7 +104,7 @@ impl Plan {
                 CHUNK_BYTES,
                 !engine.takes_new_fields(),
             ),
-            skip: options.on_duplicate == OnDuplicate::Skip && engine.skips_duplicates(),
+            skip: options.on_duplicate == OnDuplicate::Skip && skips,
             begin,
             checked,
         }

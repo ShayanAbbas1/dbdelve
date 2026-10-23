@@ -855,6 +855,41 @@ mod tests {
     }
 
     #[test]
+    fn an_import_asked_to_skip_duplicates_runs_into_a_table_with_no_key() {
+        use crate::import_rows::{OnDuplicate, Options, Plan, TargetColumn, prepare};
+        let connection = memory("CREATE TABLE t AS SELECT 1 AS id, 'a' AS name;");
+        let structure = connection.structure("main", "t").unwrap();
+        let targets = TargetColumn::from_structure(&structure, Engine::DuckDb);
+        let bytes = b"id,name\n2,b\n";
+        let mut options = Options::detected(std::path::Path::new("rows.csv"), bytes);
+        options.on_duplicate = OnDuplicate::Skip;
+        let checked = prepare(bytes, &options, &targets, None, Engine::DuckDb)
+            .unwrap()
+            .checked;
+        let plan = Plan::new(
+            Engine::DuckDb,
+            "main".into(),
+            "t".into(),
+            checked,
+            &options,
+            Engine::DuckDb.skips_duplicates_into(&structure),
+        );
+        connection
+            .query(&plan.statement(0).unwrap(), Fetch::default())
+            .unwrap();
+        assert_eq!(count(&connection), "2");
+
+        connection
+            .query(
+                "CREATE TABLE keyed (id INTEGER); CREATE UNIQUE INDEX keyed_id ON keyed (id);",
+                Fetch::default(),
+            )
+            .unwrap();
+        let keyed = connection.structure("main", "keyed").unwrap();
+        assert!(Engine::DuckDb.skips_duplicates_into(&keyed));
+    }
+
+    #[test]
     fn an_import_round_trips_on_duckdb() {
         crate::import_rows::live_round_trip(
             super::super::Connection::DuckDb(memory("")),

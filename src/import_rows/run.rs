@@ -376,7 +376,14 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
             .unwrap()
             .checked;
         assert_eq!(checked.problems, []);
-        let mut plan = Plan::new(engine, schema.into(), TABLE.into(), checked, &options);
+        let mut plan = Plan::new(
+            engine,
+            schema.into(),
+            TABLE.into(),
+            checked,
+            &options,
+            engine.skips_duplicates(),
+        );
         plan.chunks = chunks(&plan.checked.rows, 2, CHUNK_BYTES, !document);
         plan
     };

@@ -613,6 +613,25 @@ impl Engine {
         }
     }
 
+    /// [`Engine::skips_duplicates`] for an insert into a table of `structure`.
+    /// DuckDB refuses `ON CONFLICT DO NOTHING` on a table with no primary key,
+    /// unique constraint or unique index, where the others take it as a clause
+    /// with nothing to do.
+    pub fn skips_duplicates_into(self, structure: &Structure) -> bool {
+        self.skips_duplicates()
+            && (self != Self::DuckDb
+                || structure.constraints.iter().any(|constraint| {
+                    constraint.definition.starts_with("PRIMARY KEY (")
+                        || constraint.definition.starts_with("UNIQUE (")
+                })
+                || structure.indexes.iter().any(|index| {
+                    index
+                        .definition
+                        .get(..20)
+                        .is_some_and(|start| start.eq_ignore_ascii_case("CREATE UNIQUE INDEX "))
+                }))
+    }
+
     /// The statement that opens a transaction spanning an import's chunks, or
     /// why there cannot be one.
     pub fn all_or_nothing(self) -> Result<&'static str, &'static str> {
