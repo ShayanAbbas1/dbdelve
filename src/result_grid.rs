@@ -21,7 +21,7 @@ use crate::{
     icons::icon,
     sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
-    theme::{ConnectionColor, color::Srgb, layout, theme},
+    theme::{ConnectionColor, color::Srgb, fonts, layout, theme},
     ui::{Control, Tone, icon_button},
 };
 
@@ -52,8 +52,20 @@ pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
 /// cell that painted one of them for the other would be lying about the write.
 pub const DEFAULT_LABEL: SharedString = SharedString::new_static("DEFAULT");
 
-/// Where every column starts and the narrowest a drag can leave it.
-const MIN_COLUMN_WIDTH: f32 = 180.0;
+/// The narrowest a drag can leave a column, and the narrowest one is fitted to.
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+/// The widest a column is fitted to, at the grid's default size. A JSON or a
+/// long text column would otherwise take the screen to show one value, which
+/// the row inspector shows better.
+const MAX_FITTED_WIDTH: f32 = 400.0;
+/// How many of the first rows a column is fitted to: a screenful and then
+/// some, so a column is sized by what is seen first, and fitting stops costing
+/// anything once they are in.
+const FITTED_ROWS: usize = 200;
+/// A character's advance as a share of the font size in the bundled Lilex, a
+/// monospaced face. What a grid is fitted with before the face it is drawn in
+/// has been measured, which needs the text system (`fit_to_face`).
+const ESTIMATED_ADVANCE: f32 = 0.6;
 
 /// The table's column 0 is the row-number gutter, which is not part of the
 /// result: every index the library hands the delegate is one past the result's
@@ -106,11 +118,98 @@ pub struct ColumnView {
 /// the first on the next run.
 type ColumnKey = (String, usize);
 
+/// A column's width as carried to the next result with the same columns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnWidth {
+    pub width: Pixels,
+    /// Set by the user's drag rather than fitted, and so never fitted again.
+    pub dragged: bool,
+}
+
+/// How a column came by its width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sizing {
+    /// Fitted to its header and values, and never narrower than `floor`: a
+    /// width carried from an earlier result of the same columns, so a re-run
+    /// does not snap its columns narrower.
+    Fitted {
+        floor: f32,
+    },
+    Dragged,
+}
+
+/// One character's advance in each face a column is fitted to: the values,
+/// the header's name and its type label.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Advances {
+    value: f32,
+    name: f32,
+    data_type: f32,
+}
+
+impl Advances {
+    fn estimated() -> Self {
+        Self {
+            value: layout::grid(layout::BODY_FONT_SIZE) * ESTIMATED_ADVANCE,
+            name: layout::grid(layout::TEXT_SM) * ESTIMATED_ADVANCE,
+            data_type: layout::grid(layout::TEXT_XS) * ESTIMATED_ADVANCE,
+        }
+    }
+
+    /// Measured in the grid's own family. A monospaced face is what the grid
+    /// is drawn in, so one advance stands for every character.
+    fn measured(family: &SharedString, cx: &App) -> Self {
+        let text = cx.text_system();
+        let advance = |size: f32, weight: gpui::FontWeight| {
+            let font = text.resolve_font(&gpui::Font {
+                weight,
+                ..gpui::font(family.clone())
+            });
+            text.ch_advance(font, px(size))
+                .map_or(size * ESTIMATED_ADVANCE, f32::from)
+        };
+        Self {
+            value: advance(
+                layout::grid(layout::BODY_FONT_SIZE),
+                gpui::FontWeight::NORMAL,
+            ),
+            name: advance(layout::grid(layout::TEXT_SM), gpui::FontWeight::MEDIUM),
+            data_type: advance(layout::grid(layout::TEXT_XS), gpui::FontWeight::NORMAL),
+        }
+    }
+}
+
+/// A fitted column's width: as wide as the wider of its header and its widest
+/// value, each with its padding, between the drag minimum and `cap`, and never
+/// narrower than a width carried over.
+fn fitted_width(header: f32, value: f32, cap: f32, floor: f32) -> f32 {
+    header
+        .max(value)
+        .ceil()
+        .clamp(MIN_COLUMN_WIDTH, cap.max(MIN_COLUMN_WIDTH))
+        .max(floor)
+}
+
 pub struct ResultGrid {
     /// Which rows sit at which index: new with every grid and every reorder,
     /// so whatever holds a row by its index can tell it now names another.
     rows_id: u64,
     columns: Vec<Column>,
+    /// Per column, how it came by its width.
+    sizing: Vec<Sizing>,
+    /// Per column, the most characters a value shows among the rows fitted so
+    /// far. It only grows, so a column never narrows under rows already on
+    /// screen as more arrive.
+    widest: Vec<usize>,
+    /// How many of the first rows `widest` has read.
+    fitted_rows: usize,
+    /// The grid's family and scale the widths were fitted in, or `None` while
+    /// they are fitted to `Advances::estimated`.
+    face: Option<(SharedString, f32)>,
+    advances: Advances,
+    /// A fitted width changed since the table last read the widths, which it
+    /// does only on a refresh.
+    resized: bool,
     /// The columns as drawn, left to right: indices into `columns`, the pinned
     /// ones first. A column missing from it is hidden. Everything else in the
     /// grid -- `active`, the pending edits, the sort -- speaks in indices into
@@ -353,11 +452,17 @@ impl ResultGrid {
             })
             .collect();
 
-        Self {
+        let mut grid = Self {
             rows_id: next_rows_id(),
             view: (0..result.columns.len()).collect(),
             pinned: 0,
             columns,
+            sizing: vec![Sizing::Fitted { floor: 0. }; result.columns.len()],
+            widest: vec![0; result.columns.len()],
+            fitted_rows: 0,
+            face: None,
+            advances: Advances::estimated(),
+            resized: false,
             sort: Vec::new(),
             sortable: false,
             fetched: Vec::new(),
@@ -387,7 +492,9 @@ impl ResultGrid {
             mode,
             engine: db::Engine::default(),
             focus: None,
-        }
+        };
+        grid.refit();
+        grid
     }
 
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
@@ -459,9 +566,16 @@ impl ResultGrid {
         // The headers say what the rows are ordered by. `sortable` stays false:
         // whether a header click can do anything is a fact about the statement,
         // and a snapshot is not a statement -- the next run settles it.
-        for (column, width) in grid.columns.iter_mut().zip(&stored.widths) {
-            column.width = px(width.max(MIN_COLUMN_WIDTH));
-        }
+        let widths: Vec<ColumnWidth> = stored
+            .widths
+            .iter()
+            .enumerate()
+            .map(|(col, &width)| ColumnWidth {
+                width: px(width),
+                dragged: stored.dragged.get(col) == Some(&true),
+            })
+            .collect();
+        grid.carry_widths(&widths);
         grid.sort = stored.sort.clone();
         grid = grid.with_column_view(&ColumnView {
             hidden: stored.hidden.clone(),
@@ -504,6 +618,7 @@ impl ResultGrid {
             .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
             .collect();
         self.result.columns = columns;
+        self.refit_from_the_top();
     }
 
     /// Put values rendered off the frame thread in place, each only where the
@@ -525,6 +640,7 @@ impl ResultGrid {
                 row.replace(&edits);
             }
         }
+        self.refit_from_the_top();
     }
 
     pub fn fill(&mut self, at: Option<std::time::Instant>) {
@@ -537,6 +653,9 @@ impl ResultGrid {
 
     pub fn append_rows(&mut self, rows: Vec<db::Row>) {
         self.result.rows.extend(rows);
+        if self.fitted_rows < FITTED_ROWS {
+            self.refit();
+        }
     }
 
     /// The rows streamed in, for the finished result to be built around.
@@ -596,6 +715,11 @@ impl ResultGrid {
                 .iter()
                 .map(|column| f32::from(column.width))
                 .collect(),
+            dragged: self
+                .sizing
+                .iter()
+                .map(|sizing| *sizing == Sizing::Dragged)
+                .collect(),
             hidden: view.hidden,
             pinned: view.pinned,
             active: self.active,
@@ -624,20 +748,121 @@ impl ResultGrid {
         }
     }
 
-    /// The widths the table is drawing, which is where a drag lands: the
-    /// library resizes its own copy of the columns.
-    pub fn set_widths(&mut self, widths: &[gpui::Pixels]) {
-        for (column, width) in self.columns.iter_mut().zip(widths) {
-            column.width = *width;
+    /// The widths as the table draws them, one per drawn column in drawn
+    /// order, which is how a drag reports them: the library resizes its own
+    /// copy of the columns, and reports every column's width when one moves.
+    fn set_drawn_widths(&mut self, widths: &[gpui::Pixels]) {
+        for (&col, width) in self.view.iter().zip(widths) {
+            if self.columns[col].width != *width {
+                self.columns[col].width = *width;
+                self.sizing[col] = Sizing::Dragged;
+            }
         }
     }
 
-    /// The widths as the table draws them, one per drawn column in drawn
-    /// order, which is how a drag reports them.
-    fn set_drawn_widths(&mut self, widths: &[gpui::Pixels]) {
-        for (&col, width) in self.view.iter().zip(widths) {
-            self.columns[col].width = *width;
+    /// Widths an earlier grid of the same columns had: a dragged one stays as
+    /// it was, and a fitted one is the least it can be fitted to.
+    fn carry_widths(&mut self, widths: &[ColumnWidth]) {
+        for (col, carried) in widths.iter().enumerate().take(self.columns.len()) {
+            let width = f32::from(carried.width).max(MIN_COLUMN_WIDTH);
+            self.columns[col].width = px(width);
+            self.sizing[col] = match carried.dragged {
+                true => Sizing::Dragged,
+                false => Sizing::Fitted { floor: width },
+            };
         }
+        self.refit();
+    }
+
+    /// Read the rows not yet fitted to, up to [`FITTED_ROWS`], and widen the
+    /// fitted columns to what they now have to show.
+    fn refit(&mut self) {
+        let rows = self.result.rows.len().min(FITTED_ROWS);
+        for row in self.fitted_rows..rows {
+            for col in 0..self.columns.len() {
+                let shows = match self.shown(row, col) {
+                    Some(shown) => shown.chars().count(),
+                    None if self.missing(row, col) => 0,
+                    None => NULL_LABEL.len(),
+                };
+                self.widest[col] = self.widest[col].max(shows);
+            }
+        }
+        self.fitted_rows = self.fitted_rows.max(rows);
+
+        let cap = layout::grid(MAX_FITTED_WIDTH);
+        for col in 0..self.columns.len() {
+            let Sizing::Fitted { floor } = self.sizing[col] else {
+                continue;
+            };
+            let width = px(fitted_width(
+                self.header_width(col),
+                self.value_width(col),
+                cap,
+                floor,
+            ));
+            if self.columns[col].width != width {
+                self.columns[col].width = width;
+                self.resized = true;
+            }
+        }
+    }
+
+    /// Read the first rows again for what they show: their types or their
+    /// rendering changed what that is. `widest` keeps what it had, so nothing
+    /// narrows.
+    fn refit_from_the_top(&mut self) {
+        self.fitted_rows = 0;
+        self.refit();
+    }
+
+    /// Everything a header draws across its column, at `advances`: its
+    /// padding, the key icon, the name, the type label, and the sort control,
+    /// whose room is kept whether or not the column can be sorted so sorting
+    /// it moves nothing.
+    fn header_width(&self, col: usize) -> f32 {
+        let icon = layout::grid(12.) + layout::SPACE_XS;
+        let key = match self.primary_key.contains(&col) {
+            true => icon,
+            false => 0.,
+        };
+        let data_type = self
+            .result
+            .columns
+            .get(col)
+            .and_then(|column| column.data_type.as_deref())
+            .map_or(0., |data_type| {
+                layout::SPACE_XS
+                    + data_type.to_uppercase().chars().count() as f32 * self.advances.data_type
+            });
+        // `data_th`'s own padding, and the room the library keeps on the right
+        // of every header for a sort icon of its own.
+        let padding = 2. * layout::SPACE_SM
+            + 1.
+            + f32::from(gpui_component::Size::Medium.table_cell_padding().right);
+        padding
+            + key
+            + self.columns[col].name.chars().count() as f32 * self.advances.name
+            + data_type
+            + icon
+    }
+
+    /// The widest value fitted to so far, with the cell's padding and border
+    /// and whichever arrows the column's cells carry.
+    fn value_width(&self, col: usize) -> f32 {
+        let follow = match self.follows_a_key(col) {
+            true => layout::grid(gpui_component::Size::Medium.table_row_height().into()),
+            false => 0.,
+        };
+        let references = match self.reference_menu(col) {
+            Some(_) => Control::Inline.height(),
+            None => 0.,
+        };
+        2. * layout::SPACE_SM
+            + 2.
+            + self.widest[col] as f32 * self.advances.value
+            + follow
+            + references
     }
 
     /// Where a column is drawn, counting from the first after the gutter, or
@@ -839,18 +1064,25 @@ impl ResultGrid {
             })
     }
 
-    pub fn layout(&self) -> (Vec<String>, Vec<gpui::Pixels>) {
+    pub fn layout(&self) -> (Vec<String>, Vec<ColumnWidth>) {
         (
             self.result
                 .columns
                 .iter()
                 .map(|column| column.name.clone())
                 .collect(),
-            self.columns.iter().map(|column| column.width).collect(),
+            self.columns
+                .iter()
+                .zip(&self.sizing)
+                .map(|(column, sizing)| ColumnWidth {
+                    width: column.width,
+                    dragged: *sizing == Sizing::Dragged,
+                })
+                .collect(),
         )
     }
 
-    pub fn with_layout(mut self, names: &[String], widths: &[gpui::Pixels]) -> Self {
+    pub fn with_layout(mut self, names: &[String], widths: &[ColumnWidth]) -> Self {
         let same = self.result.columns.len() == names.len()
             && self
                 .result
@@ -859,7 +1091,7 @@ impl ResultGrid {
                 .zip(names)
                 .all(|(column, name)| column.name == *name);
         if same {
-            self.set_widths(widths);
+            self.carry_widths(widths);
         }
         self
     }
@@ -879,6 +1111,7 @@ impl ResultGrid {
             .iter()
             .map(|col| SharedString::from(format!("follow-key-{col}")))
             .collect();
+        self.refit();
     }
 
     /// Record which of this result's columns other relations point at, given
@@ -911,6 +1144,7 @@ impl ResultGrid {
                 (!menu.is_empty()).then(|| (col, Rc::new(menu)))
             })
             .collect();
+        self.refit();
     }
 
     /// Wide enough for the last row's number and no wider, padded the same on
@@ -993,6 +1227,7 @@ impl ResultGrid {
 
     pub fn mark_primary_key(&mut self, columns: &[String]) {
         self.primary_key = self.columns_named(columns);
+        self.refit();
     }
 
     /// Record which column names what a row opens, by name for the reason
@@ -2044,6 +2279,26 @@ pub(crate) fn relaid(table: &mut TableState<ResultGrid>, cx: &mut Context<TableS
             table.horizontal_scroll_handle.set_offset(from);
         }
         None => table.clear_selection(cx),
+    }
+}
+
+/// Fit the columns in the face the grid is drawn in, measured once per family
+/// and size, and have the table take any width that changed. Called as the grid
+/// is drawn and before the table lays it out, so rows that just arrived are
+/// shown at the width fitted to them in the frame they arrive.
+pub(crate) fn fit_to_face(
+    table: &mut TableState<ResultGrid>,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    let face = (fonts(cx).grid.clone(), layout::grid(1.));
+    let grid = table.delegate_mut();
+    if grid.face.as_ref() != Some(&face) {
+        grid.advances = Advances::measured(&face.0, cx);
+        grid.face = Some(face);
+        grid.refit();
+    }
+    if std::mem::take(&mut grid.resized) {
+        table.refresh(cx);
     }
 }
 
@@ -3591,7 +3846,7 @@ mod tests {
         // the ring on another cell.
         let mut grid = editable_grid();
         grid.sort = vec![(2, false), (0, true)];
-        grid.set_widths(&[px(200.), px(190.), px(240.)]);
+        grid.set_drawn_widths(&[px(200.), px(190.), px(240.)]);
         grid.set_active(1, 2);
         // An edit nobody applied stays with the session that typed it.
         assert!(grid.set_pending(0, 1, value("changed")));
@@ -3797,6 +4052,7 @@ mod tests {
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
                 active: None,
@@ -4398,6 +4654,7 @@ mod tests {
     fn the_active_cell_is_scrolled_back_only_when_the_grid_is_relaid_out_at_a_new_width() {
         // Three columns of 180: the active one spans 360..540.
         let mut grid = editable_grid();
+        grid.set_drawn_widths(&[px(180.), px(180.), px(180.)]);
         assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
         grid.set_active(0, 2);
         assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
@@ -4646,7 +4903,7 @@ mod tests {
     #[test]
     fn a_row_is_as_wide_as_the_columns_drawn() {
         let mut grid = filled(&["a", "b", "c"]);
-        grid.set_widths(&[px(100.), px(100.), px(100.)]);
+        grid.set_drawn_widths(&[px(100.), px(100.), px(100.)]);
         let full = grid.content_width();
         grid.hide_column(0);
         grid.hide_column(2);
@@ -4667,7 +4924,7 @@ mod tests {
     #[test]
     fn a_resize_measures_the_active_cell_among_the_columns_that_scroll() {
         let mut grid = filled(&["id", "note", "total"]);
-        grid.set_widths(&[px(180.), px(180.), px(180.)]);
+        grid.set_drawn_widths(&[px(180.), px(180.), px(180.)]);
         assert_eq!(grid.relaid_out(px(300.), px(0.)), None);
         grid.set_active(0, 2);
         // `note` hidden: `total` is drawn at 180..360, half in at 300.
@@ -4997,23 +5254,148 @@ mod tests {
     }
 
     #[test]
-    fn a_column_starts_at_the_minimum_width_and_a_restore_never_goes_below_it() {
-        let mut grid = editable_grid();
-        assert!(
-            grid.columns
-                .iter()
-                .all(|column| column.width == px(MIN_COLUMN_WIDTH))
-        );
+    fn a_fitted_width_is_the_wider_of_header_and_value_between_the_minimum_and_the_cap() {
+        assert_eq!(fitted_width(90.4, 120.2, 400., 0.), 121.);
+        assert_eq!(fitted_width(20., 30., 400., 0.), MIN_COLUMN_WIDTH);
+        assert_eq!(fitted_width(100., 2_000., 400., 0.), 400.);
+        // A width carried from the last run wins over a narrower fit, and
+        // over the cap too: it was on screen at that width.
+        assert_eq!(fitted_width(100., 150., 400., 180.), 180.);
+        assert_eq!(fitted_width(100., 150., 400., 520.), 520.);
+    }
 
-        grid.set_widths(&[px(100.), px(190.), px(240.)]);
-        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+    /// A grid fitted in a face whose every character is 10px wide.
+    fn measured(columns: Vec<DbColumn>, values: Vec<Vec<Option<String>>>) -> ResultGrid {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns,
+                rows: rows(values),
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        );
+        grid.advances = Advances {
+            value: 10.,
+            name: 10.,
+            data_type: 10.,
+        };
+        grid.refit();
+        grid
+    }
+
+    fn widths(grid: &ResultGrid) -> Vec<Pixels> {
+        grid.columns.iter().map(|column| column.width).collect()
+    }
+
+    #[test]
+    fn a_column_is_fitted_to_what_its_cells_and_its_header_show() {
+        let uuid = "77dd89bb-469c-4dad-9c3e-5f2a8b1c0d4e";
+        let grid = measured(
+            vec![
+                typed("id", "uuid"),
+                typed("created_at", "timestamp with time zone"),
+                typed("total", "integer"),
+                column("n"),
+            ],
+            vec![vec![
+                Some(uuid.into()),
+                Some("2024-01-02 03:04:05.678901+00".into()),
+                Some("1234567".into()),
+                None,
+            ]],
+        );
+        // The value whole, inside the cell's padding and border.
+        assert_eq!(grid.columns[0].width, px(18. + 360.));
+        // The header whole: padding and the library's sort room, the name,
+        // the type label and the sort control.
+        assert_eq!(grid.columns[1].width, px(25. + 100. + 4. + 240. + 16.));
+        // What the cell paints, grouped, and a NULL as the word painted for it.
+        assert_eq!(grid.widest[2], "1,234,567".len());
+        assert_eq!(grid.widest[3], NULL_LABEL.len());
+        // Narrow, but still something to grab.
+        assert_eq!(grid.columns[3].width, px(MIN_COLUMN_WIDTH));
+    }
+
+    #[test]
+    fn a_key_column_makes_room_for_its_icon() {
+        let mut grid = measured(vec![column("identifier")], vec![]);
+        let plain = grid.columns[0].width;
+        grid.mark_primary_key(&["identifier".into()]);
+        assert_eq!(grid.columns[0].width, plain + px(16.));
+    }
+
+    #[test]
+    fn streamed_rows_widen_a_column_until_enough_are_in_and_never_narrow_it() {
+        let mut grid = measured(vec![column("v")], Vec::new());
+        grid.append_rows(rows(vec![vec![Some("x".repeat(20))]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+        assert!(std::mem::take(&mut grid.resized));
+
+        grid.append_rows(rows(vec![vec![Some("short".into())]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+        assert!(!grid.resized);
+
+        // Past the rows a column is fitted to, a wider value ellipsizes.
+        grid.append_rows(rows(vec![vec![Some("y".repeat(20))]; FITTED_ROWS]));
+        grid.append_rows(rows(vec![vec![Some("z".repeat(30))]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+    }
+
+    #[test]
+    fn a_long_value_is_fitted_no_wider_than_the_cap() {
+        let grid = measured(vec![column("doc")], vec![vec![Some("{}".repeat(500))]]);
+        assert_eq!(widths(&grid), [px(MAX_FITTED_WIDTH)]);
+    }
+
+    #[test]
+    fn a_dragged_column_is_never_fitted_again() {
+        let mut grid = measured(vec![column("a"), column("b")], Vec::new());
+        let b = grid.columns[1].width;
+        grid.set_drawn_widths(&[px(90.), b]);
+        grid.append_rows(rows(vec![vec![Some("x".repeat(30)), Some("y".repeat(30))]]));
+        assert_eq!(widths(&grid), [px(90.), px(318.)]);
+    }
+
+    #[test]
+    fn a_rerun_keeps_dragged_widths_and_fits_no_narrower_than_before() {
+        let long = vec![vec![Some("x".repeat(30)), Some("y".repeat(30))]];
+        let mut first = measured(vec![column("a"), column("b")], long);
+        let b = first.columns[1].width;
+        first.set_drawn_widths(&[px(90.), b]);
+        let (names, carried) = first.layout();
+
+        let short = vec![vec![Some("x".into()), Some("y".into())]];
+        let mut again =
+            measured(vec![column("a"), column("b")], short).with_layout(&names, &carried);
+        assert_eq!(widths(&again), [px(90.), px(318.)]);
+
+        again.append_rows(rows(vec![vec![Some("x".repeat(36)), Some("y".repeat(36))]]));
+        assert_eq!(widths(&again), [px(90.), px(378.)]);
+    }
+
+    #[test]
+    fn a_restore_keeps_what_was_dragged_and_never_goes_below_the_minimum() {
+        let mut grid = editable_grid();
+        let total = grid.columns[2].width;
+        grid.set_drawn_widths(&[px(20.), px(190.), total]);
+
+        let (_, carried) = ResultGrid::restored(&grid.stored(), Mode::ReadWrite).layout();
         assert_eq!(
-            restored
-                .columns
-                .iter()
-                .map(|column| column.width)
-                .collect::<Vec<_>>(),
-            [px(MIN_COLUMN_WIDTH), px(190.), px(240.)]
+            carried,
+            [
+                ColumnWidth {
+                    width: px(MIN_COLUMN_WIDTH),
+                    dragged: true,
+                },
+                ColumnWidth {
+                    width: px(190.),
+                    dragged: true,
+                },
+                ColumnWidth {
+                    width: total,
+                    dragged: false,
+                },
+            ]
         );
     }
 

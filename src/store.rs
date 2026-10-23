@@ -274,6 +274,11 @@ pub struct StoredGrid {
     pub client_sort: Option<Vec<(String, bool)>>,
     #[serde(default)]
     pub widths: Vec<f32>,
+    /// Which of [`Self::widths`] the user dragged, and which the grid fitted
+    /// and may widen when the rows change. Absent from a snapshot written
+    /// before it was kept, whose widths are all taken as fitted.
+    #[serde(default)]
+    pub dragged: Vec<bool>,
     /// Hidden columns, as name and which of the same-named columns it is.
     #[serde(default)]
     pub hidden: Vec<(String, usize)>,
@@ -815,6 +820,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             order_by: grid.order_by.clone(),
             client_sort: grid.client_sort.clone(),
             widths: grid.widths.clone(),
+            dragged: grid.dragged.clone(),
             hidden: grid.hidden.clone(),
             pinned: grid.pinned.clone(),
             active: grid.active,
@@ -2511,6 +2517,7 @@ open_objects = []
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
                 active: None,
@@ -2562,6 +2569,7 @@ open_objects = []
                 order_by: vec![("created_at".into(), false)],
                 client_sort: Some(vec![("\"name\"".into(), false)]),
                 widths: vec![80.0, 160.0],
+                dragged: Vec::new(),
                 hidden: vec![("name".into(), 1)],
                 pinned: vec![("id".into(), 0)],
                 active: Some((0, 1)),
@@ -2602,6 +2610,7 @@ open_objects = []
                 order_by: Vec::new(),
                 client_sort: Some(Vec::new()),
                 widths: Vec::new(),
+                dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
                 active: None,
@@ -2654,6 +2663,7 @@ open_objects = []
                 order_by: vec![("\"id\"".into(), true)],
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
                 active: None,

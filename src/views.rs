@@ -1426,6 +1426,7 @@ fn render_results(
         .min_h_0()
         .min_w_0()
         .child({
+            results.update(cx, result_grid::fit_to_face);
             let rows_scroll = smooth_for(
                 "results",
                 scope,

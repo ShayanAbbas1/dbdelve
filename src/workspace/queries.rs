@@ -5,11 +5,10 @@
 
 use std::ops::Range;
 
-use gpui::Pixels;
 use gpui_component::table::TableState;
 
 use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
-use crate::result_grid::ColumnView;
+use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
 use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
@@ -2941,7 +2940,7 @@ fn pour(
     results: &Entity<TableState<ResultGrid>>,
     mode: Mode,
     engine: Engine,
-    (names, widths, column_view): (&[String], &[Pixels], &ColumnView),
+    (names, widths, column_view): (&[String], &[ColumnWidth], &ColumnView),
     cx: &mut App,
 ) -> bool {
     let fed = feed.take();
