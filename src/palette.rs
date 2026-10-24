@@ -51,7 +51,8 @@ use crate::{
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     store::StoredProject,
     theme::{
-        ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme, theme, user,
+        Appearance, ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme,
+        theme, user,
     },
     ui::{
         Control, Tone, chord_for, highlighted, icon_button, key_chip, keycap_parts, keycaps,
@@ -132,11 +133,13 @@ pub enum Mode {
     /// only the row's destination differs.
     Font(FontSlot),
     /// Every theme, then a row per app to import one from. The highlighted
-    /// theme is installed as it moves, and only a confirmed one is kept.
-    Theme,
-    /// Every theme one app has on this machine, previewed as the theme list
-    /// previews, and imported when confirmed.
-    ImportTheme(user::Source),
+    /// theme is installed as it moves, and only a confirmed one is kept. With
+    /// a side, only that side's themes, for the theme worn while the system
+    /// is light or dark.
+    Theme(Option<Appearance>),
+    /// Every theme one app has on this machine, or one side's, previewed as
+    /// the theme list previews, and imported when confirmed.
+    ImportTheme(user::Source, Option<Appearance>),
     /// The databases on the active profile's server, as last fetched.
     Database,
     /// The schemas in the active profile's catalog, to pick the active one.
@@ -187,8 +190,10 @@ impl Mode {
         match self {
             Mode::Search(scope) => scope.placeholder(),
             Mode::Font(_) => "Pick a font…",
-            Mode::Theme => "Pick a theme…",
-            Mode::ImportTheme(_) => "Import a theme…",
+            Mode::Theme(None) => "Pick a theme…",
+            Mode::Theme(Some(Appearance::Light)) => "Pick a light theme…",
+            Mode::Theme(Some(Appearance::Dark)) => "Pick a dark theme…",
+            Mode::ImportTheme(..) => "Import a theme…",
             Mode::Database => "Switch database…",
             Mode::Schema => "Switch schema…",
             Mode::Columns => "Go to a column…",
@@ -211,8 +216,9 @@ impl Mode {
             Mode::Font(FontSlot::Chrome) => "Chrome font",
             Mode::Font(FontSlot::Editor) => "Editor font",
             Mode::Font(FontSlot::Grid) => "Grid font",
-            Mode::Theme => "Themes",
-            Mode::ImportTheme(_) => "Import theme",
+            Mode::Theme(None) => "Themes",
+            Mode::Theme(Some(side)) => side.theme_label(),
+            Mode::ImportTheme(..) => "Import theme",
             Mode::Database => "Databases",
             Mode::Schema => "Schemas",
             Mode::Columns => "Columns",
@@ -347,11 +353,12 @@ pub enum Command {
     RefreshConnection,
     /// Put the palette back up over the theme list.
     SelectTheme,
-    SetTheme(Box<Theme>),
+    /// For the side a light or dark theme list was opened for, if any.
+    SetTheme(Option<Appearance>, Box<Theme>),
     /// Put the palette back up over the themes an app has, to import one.
-    BrowseThemes(user::Source),
+    BrowseThemes(user::Source, Option<Appearance>),
     /// By index into [`user::Source::found`], which stands for the process.
-    ImportTheme(user::Source, usize),
+    ImportTheme(user::Source, usize, Option<Appearance>),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
     SetDatabase(String),
@@ -913,8 +920,8 @@ impl Palette {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut items = match (mode, workspace.profile()) {
-            (Mode::Theme, _) => theme_items(cx),
-            (Mode::ImportTheme(source), _) => import_items(source),
+            (Mode::Theme(side), _) => theme_items(side, picked_theme(workspace, side, cx)),
+            (Mode::ImportTheme(source, side), _) => import_items(source, side),
             (Mode::ConnectionActions(index), _) => connection_action_items(workspace, index),
             (Mode::ProjectActions(at), _) => workspace
                 .projects
@@ -994,7 +1001,7 @@ impl Palette {
             import_pending,
             input,
             scroll: VirtualListScrollHandle::new(),
-            unpreviewed: matches!(mode, Mode::Theme | Mode::ImportTheme(_)).then(|| *theme(cx)),
+            unpreviewed: matches!(mode, Mode::Theme(_) | Mode::ImportTheme(..)).then(|| *theme(cx)),
             theme_opacity: workspace.settings.theme_opacity.clone(),
             fallback_opacity: workspace.settings.opacity,
             _input_events: input_events,
@@ -1271,6 +1278,15 @@ impl Palette {
         }
     }
 
+    /// The system changed side under an open theme list, so a row that is not
+    /// a theme falls back to the theme for the side it is on now.
+    pub fn set_unpreviewed(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unpreviewed.is_some() {
+            self.unpreviewed = Some(theme);
+            self.preview(window, cx);
+        }
+    }
+
     /// The live preview. Nothing here is saved, and nothing here undoes it:
     /// `Workspace::end_theme_preview` does that on the way out.
     fn preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1282,8 +1298,8 @@ impl Palette {
             _ => None,
         };
         let previewed = match command {
-            Some(Command::SetTheme(candidate)) => Some(**candidate),
-            Some(Command::ImportTheme(source, index)) => source.theme(*index),
+            Some(Command::SetTheme(_, candidate)) => Some(**candidate),
+            Some(Command::ImportTheme(source, index, _)) => source.theme(*index),
             _ => Some(unpreviewed),
         };
         if let Some(previewed) = previewed {
@@ -1550,9 +1566,17 @@ impl Palette {
                     "Type its name, then press Enter.".to_string(),
                 ),
             },
-            Mode::ImportTheme(source) if self.items.is_empty() => (
+            Mode::ImportTheme(source, side) if self.items.is_empty() => (
                 "No themes found".to_string(),
-                format!("{} has no themes on this machine.", source.name()),
+                format!(
+                    "{} has no {}themes on this machine.",
+                    source.name(),
+                    match side {
+                        Some(Appearance::Light) => "light ",
+                        Some(Appearance::Dark) => "dark ",
+                        None => "",
+                    }
+                ),
             ),
             Mode::Search(Scope::Objects) if self.catalog_loading => (
                 "Loading database objects…".to_string(),
@@ -2341,13 +2365,33 @@ fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
         .collect()
 }
 
-/// Every theme, in [`Theme::all`] order, the one in force marked the way the
+/// The theme a theme list marks as picked, and opens on: the one on screen,
+/// or the one worn on the side the list picks for, which may be the side the
+/// system is not on.
+pub(crate) fn picked_theme<'a>(
+    workspace: &'a Workspace,
+    side: Option<Appearance>,
+    cx: &App,
+) -> &'a str {
+    match side {
+        Some(side) => workspace.settings.theme_for(side),
+        None => theme(cx).name,
+    }
+}
+
+/// Every theme in [`Theme::all`] order, or only one side's.
+pub(crate) fn listed_themes(side: Option<Appearance>) -> impl Iterator<Item = Theme> {
+    Theme::all()
+        .into_iter()
+        .filter(move |candidate| side.is_none_or(|side| candidate.appearance == side))
+}
+
+/// Every theme [`listed_themes`] lists, the one picked marked the way the
 /// font list marks its family. The ways to import one follow under their own
 /// header, so the list opens on a theme and reads as themes first.
-fn theme_items(cx: &App) -> Vec<Item> {
-    let current = theme(cx).name;
-    let themes = Theme::all().into_iter().map(|candidate| {
-        let hint = if candidate.name == current {
+fn theme_items(side: Option<Appearance>, picked: &str) -> Vec<Item> {
+    let themes = listed_themes(side).map(|candidate| {
+        let hint = if candidate.name == picked {
             "current"
         } else {
             ""
@@ -2355,7 +2399,7 @@ fn theme_items(cx: &App) -> Vec<Item> {
         Item::new(
             candidate.name,
             icon::THEME,
-            Command::SetTheme(Box::new(candidate)),
+            Command::SetTheme(side, Box::new(candidate)),
         )
         .hint(hint)
         .group(Group::Named("Themes"))
@@ -2364,21 +2408,31 @@ fn theme_items(cx: &App) -> Vec<Item> {
         Item::new(
             format!("Import from {}…", source.name()),
             icon::PLUS,
-            Command::BrowseThemes(source),
+            Command::BrowseThemes(source, side),
         )
         .group(Group::Named("Import"))
     });
     themes.chain(imports).collect()
 }
 
-/// Every theme one app has, without the app's name every one of them is
-/// prefixed with, since the list is that app's alone. One already imported is
-/// marked, since importing it again only writes the same file over itself.
-fn import_items(source: user::Source) -> Vec<Item> {
+/// One app's themes as its import list shows them, every one or one side's,
+/// each with its index into [`user::Source::found`].
+pub(crate) fn listed_imports(
+    source: user::Source,
+    side: Option<Appearance>,
+) -> impl Iterator<Item = (usize, &'static Theme)> {
     source
         .found()
         .iter()
         .enumerate()
+        .filter(move |(_, candidate)| side.is_none_or(|side| candidate.appearance == side))
+}
+
+/// Every theme one app has, without the app's name every one of them is
+/// prefixed with, since the list is that app's alone. One already imported is
+/// marked, since importing it again only writes the same file over itself.
+fn import_items(source: user::Source, side: Option<Appearance>) -> Vec<Item> {
+    listed_imports(source, side)
         .map(|(index, candidate)| {
             let label = candidate
                 .name
@@ -2389,7 +2443,12 @@ fn import_items(source: user::Source) -> Vec<Item> {
             } else {
                 ""
             };
-            Item::new(label, icon::THEME, Command::ImportTheme(source, index)).hint(hint)
+            Item::new(
+                label,
+                icon::THEME,
+                Command::ImportTheme(source, index, side),
+            )
+            .hint(hint)
         })
         .collect()
 }
@@ -3263,9 +3322,34 @@ mod tests {
         assert_eq!(stroke(all, commands, commands), Stroke::Close);
         assert_eq!(stroke(commands, all, commands), Stroke::Close);
         assert_eq!(stroke(all, all, commands), Stroke::Rescope(Scope::Commands));
-        assert_eq!(stroke(Mode::Theme, Mode::Theme, all), Stroke::Replace);
-        assert_eq!(stroke(all, objects, Mode::Theme), Stroke::Replace);
-        assert_eq!(stroke(Mode::Theme, Mode::Theme, Mode::Theme), Stroke::Close);
+        let themes = Mode::Theme(None);
+        let light = Mode::Theme(Some(Appearance::Light));
+        assert_eq!(stroke(themes, themes, all), Stroke::Replace);
+        assert_eq!(stroke(all, objects, themes), Stroke::Replace);
+        assert_eq!(stroke(themes, themes, themes), Stroke::Close);
+        assert_eq!(stroke(light, light, themes), Stroke::Replace);
+    }
+
+    #[test]
+    fn a_side_list_holds_that_side_and_imports_for_it() {
+        let light = Some(Appearance::Light);
+        let items = theme_items(light, "GitHub Light");
+        for item in &items {
+            match &item.command {
+                Command::SetTheme(side, candidate) => {
+                    assert_eq!(*side, light);
+                    assert_eq!(candidate.appearance, Appearance::Light);
+                }
+                Command::BrowseThemes(_, side) => assert_eq!(*side, light),
+                _ => panic!("{} is neither a theme nor an import", item.label),
+            }
+        }
+        let picked: Vec<&str> = items
+            .iter()
+            .filter(|item| item.hint.as_ref() == "current")
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(picked, ["GitHub Light"]);
     }
 
     #[test]

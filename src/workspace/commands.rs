@@ -180,38 +180,41 @@ impl Workspace {
         // The theme lists and the engine list are the only ones reachable
         // before any connection exists, from the welcome surface or the
         // connection form.
-        let picks_theme = matches!(mode, PaletteMode::Theme | PaletteMode::ImportTheme(_));
+        let picks_theme = matches!(mode, PaletteMode::Theme(_) | PaletteMode::ImportTheme(..));
         let before_any_connection = picks_theme || mode == PaletteMode::Engine;
         if stroke == Some(Stroke::Close) || (self.profile().is_none() && !before_any_connection) {
             self.close_palette(window, cx);
             return;
         }
-        if let PaletteMode::ImportTheme(source) = mode
+        if let PaletteMode::ImportTheme(source, side) = mode
             && !source.is_ready()
         {
             self.close_palette(window, cx);
-            self.open_import_list_once_found(source, window, cx);
+            self.open_import_list_once_found(source, side, window, cx);
             return;
         }
 
-        // A theme list opens on the theme in force where it lists it, so the
-        // preview it starts with is no change at all.
+        // A theme list opens on the theme it has picked, so the preview it
+        // starts with is no change at all -- unless it is the list for the
+        // side the system is not on, which opens on that side's theme.
         if picks_theme {
             self.theme_before_preview = Some(*theme(cx));
         }
         // On the picker rather than at startup, which most launches never
         // need, and ahead of the import rows it lists.
-        if mode == PaletteMode::Theme {
+        if matches!(mode, PaletteMode::Theme(_)) {
             theme::user::prewarm();
         }
         let first = match mode {
-            PaletteMode::Theme => Theme::all()
-                .iter()
-                .position(|candidate| candidate.name == theme(cx).name),
-            PaletteMode::ImportTheme(source) => source
-                .found()
-                .iter()
-                .position(|candidate| candidate.name == theme(cx).name),
+            PaletteMode::Theme(side) => {
+                let picked = crate::palette::picked_theme(self, side, cx);
+                crate::palette::listed_themes(side).position(|candidate| candidate.name == picked)
+            }
+            PaletteMode::ImportTheme(source, side) => {
+                let picked = crate::palette::picked_theme(self, side, cx);
+                crate::palette::listed_imports(source, side)
+                    .position(|(_, candidate)| candidate.name == picked)
+            }
             PaletteMode::Schema => self.profile().and_then(crate::palette::active_schema_row),
             PaletteMode::MoveToProject(index) => self.profiles.get(index).and_then(|profile| {
                 crate::palette::current_project_row(index, &profile.id, &self.projects)
@@ -268,6 +271,7 @@ impl Workspace {
     fn open_import_list_once_found(
         &mut self,
         source: theme::user::Source,
+        side: Option<theme::Appearance>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -291,7 +295,7 @@ impl Workspace {
                 }
                 // Something else opened while the scan ran is left alone.
                 if workspace.palette.is_none() {
-                    workspace.open_palette(PaletteMode::ImportTheme(source), window, cx);
+                    workspace.open_palette(PaletteMode::ImportTheme(source, side), window, cx);
                 }
             });
         })
@@ -384,7 +388,7 @@ impl Workspace {
         };
         let picks_setting = matches!(
             palette.read(cx).mode(),
-            PaletteMode::Theme | PaletteMode::ImportTheme(_) | PaletteMode::Font(_)
+            PaletteMode::Theme(_) | PaletteMode::ImportTheme(..) | PaletteMode::Font(_)
         );
         self.end_theme_preview(window, cx);
         let to_settings = std::mem::take(&mut self.palette_from_settings)
@@ -663,11 +667,13 @@ impl Workspace {
             }
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => self.set_schema(name, cx),
-            Command::SetTheme(theme) => self.set_theme(*theme, window, cx),
-            Command::BrowseThemes(source) => {
-                self.open_palette(PaletteMode::ImportTheme(source), window, cx)
+            Command::SetTheme(side, theme) => self.set_theme(side, *theme, window, cx),
+            Command::BrowseThemes(source, side) => {
+                self.open_palette(PaletteMode::ImportTheme(source, side), window, cx)
             }
-            Command::ImportTheme(source, index) => self.import_theme(source, index, window, cx),
+            Command::ImportTheme(source, index, side) => {
+                self.import_theme(source, index, side, window, cx)
+            }
             Command::PickFont(slot) => self.open_palette(PaletteMode::Font(slot), window, cx),
             Command::SetFont(slot, family) => self.set_font(slot, family, cx),
             Command::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),

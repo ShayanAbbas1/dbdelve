@@ -3,6 +3,19 @@
 DBDelve can import themes from Zed and VS Code, and reads theme files you write
 yourself.
 
+## Matching the system
+
+Turn on **Match system appearance** in Settings, under Appearance, and DBDelve
+switches between a light and a dark theme as the system does. The one Theme
+row becomes two, **Light theme** and **Dark theme**, and each lists only the
+themes of its side. Moving through either list previews each theme, whichever
+side the system is on.
+
+Turning it on keeps the theme on screen as the theme for its own side.
+While it is on, Select Theme lists the themes of the side the system is on now
+and changes that side's theme. Turning it off keeps whichever theme is
+showing.
+
 ## Importing
 
 Open the theme picker and choose **Import from Zed…** or **Import from VS

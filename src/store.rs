@@ -364,6 +364,15 @@ pub struct StoredFonts {
 pub struct StoredSettings {
     #[serde(default)]
     pub theme: Option<String>,
+    /// Whether the theme follows the system between `light_theme` and
+    /// `dark_theme`. `theme` is still written while it does, as the one on
+    /// screen, so an older build opens on that.
+    #[serde(default)]
+    pub match_system_appearance: Option<bool>,
+    #[serde(default)]
+    pub light_theme: Option<String>,
+    #[serde(default)]
+    pub dark_theme: Option<String>,
     #[serde(default)]
     pub chrome_font_size: Option<f32>,
     #[serde(default)]
@@ -2016,6 +2025,9 @@ open_objects = []
             }),
             settings: Some(StoredSettings {
                 theme: Some("Dark".into()),
+                match_system_appearance: Some(true),
+                light_theme: Some("GitHub Light".into()),
+                dark_theme: Some("Dark".into()),
                 chrome_font_size: Some(14.0),
                 editor_font_size: Some(18.0),
                 grid_font_size: Some(12.0),

@@ -528,6 +528,17 @@ runs CI too, not only a change under `src/`.
 - **Titlebar**: macOS and Windows get DBDelve's own strip over a transparent
   system titlebar (`ui::CLIENT_TITLEBAR`); Windows draws no buttons into it, so
   `ui::titlebar` draws them. Linux keeps the system bar.
+- **Appearance**: with Match system appearance on, the window wears
+  `Settings::light_theme` or `dark_theme` by the system's side, switched by
+  `cx.observe_window_appearance` (`follow_system_appearance`). All three
+  platforms report the change; Linux reads it from the XDG portal's
+  `color-scheme`, which can answer after the first frame, and the observer
+  catches that too. The theme global is still the one source for what is on
+  screen; the two names say what to put on next (`Settings::system_theme`).
+  Select Theme opens the list for the side the system is on now, so a side is
+  only offered themes of its own appearance and the theme picked is the theme
+  shown. A change that lands while a theme list is previewing goes into
+  `theme_before_preview` and the palette's fallback, never over the preview.
 
 ### Bundling (macOS)
 

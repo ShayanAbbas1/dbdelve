@@ -41,6 +41,9 @@ impl Workspace {
                     .name
                     .to_string(),
             ),
+            match_system_appearance: Some(self.settings.match_system_appearance),
+            light_theme: Some(self.settings.light_theme.clone()),
+            dark_theme: Some(self.settings.dark_theme.clone()),
             chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
             grid_font_size: Some(self.settings.grid_font_size),

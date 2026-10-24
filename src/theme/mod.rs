@@ -285,6 +285,13 @@ impl Appearance {
             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Self::Dark,
         }
     }
+
+    pub fn theme_label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark theme",
+            Self::Light => "Light theme",
+        }
+    }
 }
 
 impl gpui::Global for Theme {}
@@ -1962,7 +1969,7 @@ const RENAMED_THEMES: [(&str, &str); 4] = [
 
 /// Where someone who has never picked a theme starts: the opaque DBDelve theme
 /// on the system's side. Only a start; once one is saved the system's
-/// appearance no longer matters.
+/// appearance no longer matters, unless the theme is set to match it.
 pub(crate) fn starting_theme(system: Appearance) -> Theme {
     match system {
         Appearance::Dark => Theme::black(),

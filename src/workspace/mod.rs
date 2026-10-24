@@ -48,6 +48,12 @@ pub(crate) struct Settings {
     /// Opacity per theme, keyed by theme name: light glass starts at its own
     /// default, so one shared value painted a different look on each.
     pub(crate) theme_opacity: HashMap<String, f32>,
+    /// Whether the theme follows the system between `light_theme` and
+    /// `dark_theme`. The theme on screen is still the global; these name the
+    /// one put on when the system changes side.
+    pub(crate) match_system_appearance: bool,
+    pub(crate) light_theme: String,
+    pub(crate) dark_theme: String,
     /// One request to GitHub at launch. Off switch because local-first users
     /// get to say no to the only request DBDelve makes on its own.
     pub(crate) check_for_updates: bool,
@@ -84,6 +90,13 @@ impl Default for Settings {
             row_limit: Some(PREVIEW_ROW_LIMIT),
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
+            match_system_appearance: false,
+            light_theme: theme::starting_theme(theme::Appearance::Light)
+                .name
+                .to_string(),
+            dark_theme: theme::starting_theme(theme::Appearance::Dark)
+                .name
+                .to_string(),
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
@@ -101,6 +114,28 @@ impl Settings {
     pub(crate) fn set_opacity_for(&mut self, theme: &Theme, opacity: f32) {
         let opacity = opacity.clamp(theme::OPACITY_MIN, theme::OPACITY_MAX);
         self.theme_opacity.insert(theme.name.to_string(), opacity);
+    }
+
+    pub(crate) fn theme_for(&self, side: theme::Appearance) -> &str {
+        match side {
+            theme::Appearance::Light => &self.light_theme,
+            theme::Appearance::Dark => &self.dark_theme,
+        }
+    }
+
+    pub(crate) fn set_theme_for(&mut self, side: theme::Appearance, name: &str) {
+        let slot = match side {
+            theme::Appearance::Light => &mut self.light_theme,
+            theme::Appearance::Dark => &mut self.dark_theme,
+        };
+        *slot = name.to_string();
+    }
+
+    /// `None` while the theme does not match the system. A name nothing
+    /// answers to any more is that side's starting theme.
+    pub(crate) fn system_theme(&self, system: theme::Appearance) -> Option<Theme> {
+        self.match_system_appearance
+            .then(|| restored_theme(Some(self.theme_for(system)), system))
     }
 }
 
@@ -319,6 +354,10 @@ impl Workspace {
             },
         )
         .detach();
+        cx.observe_window_appearance(window, |workspace, window, cx| {
+            workspace.follow_system_appearance(window, cx);
+        })
+        .detach();
 
         let mut workspace = Self {
             profiles: Vec::new(),
@@ -411,10 +450,22 @@ impl Workspace {
                     .flatten()
                     .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
                     .collect();
-                let restored = restored_theme(
-                    stored_settings.theme.as_deref(),
-                    theme::Appearance::of_system(cx.window_appearance()),
-                );
+                let system = theme::Appearance::of_system(window.appearance());
+                workspace.settings.match_system_appearance =
+                    stored_settings.match_system_appearance.unwrap_or(false);
+                // Through the list, so a theme gone since is named as the one
+                // it falls back to rather than as nothing at all.
+                for (side, stored) in [
+                    (theme::Appearance::Light, &stored_settings.light_theme),
+                    (theme::Appearance::Dark, &stored_settings.dark_theme),
+                ] {
+                    let name = restored_theme(stored.as_deref(), side).name;
+                    workspace.settings.set_theme_for(side, name);
+                }
+                let restored = workspace
+                    .settings
+                    .system_theme(system)
+                    .unwrap_or_else(|| restored_theme(stored_settings.theme.as_deref(), system));
                 install_theme(
                     restored.with_opacity(workspace.settings.opacity_for(&restored)),
                     window,
@@ -2211,6 +2262,21 @@ mod tests {
         settings.set_opacity_for(&second, 0.6);
         assert_eq!(settings.opacity_for(&first), 0.9);
         assert_eq!(settings.opacity_for(&second), 0.6);
+    }
+
+    #[test]
+    fn matching_the_system_wears_the_theme_picked_for_its_side() {
+        use theme::Appearance::{Dark, Light};
+        let mut settings = Settings::default();
+        settings.set_theme_for(Light, "GitHub Light");
+        settings.set_theme_for(Dark, "Dracula");
+        assert!(settings.system_theme(Dark).is_none());
+        settings.match_system_appearance = true;
+        let worn = |settings: &Settings, side| settings.system_theme(side).map(|theme| theme.name);
+        assert_eq!(worn(&settings, Light), Some("GitHub Light"));
+        assert_eq!(worn(&settings, Dark), Some("Dracula"));
+        settings.set_theme_for(Dark, "Deleted Since");
+        assert_eq!(worn(&settings, Dark), Some("DBDelve Black"));
     }
 
     #[test]

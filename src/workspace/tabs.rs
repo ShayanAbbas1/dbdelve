@@ -417,7 +417,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(PaletteMode::Theme, window, cx);
+        // While the theme matches the system, the list is the side the system
+        // is on, so a light theme is never filed as the dark one.
+        let side = self
+            .settings
+            .match_system_appearance
+            .then(|| theme::Appearance::of_system(window.appearance()));
+        self.open_palette(PaletteMode::Theme(side), window, cx);
     }
 
     /// Put back the theme the picker opened over. Every way out of the palette
@@ -433,27 +439,89 @@ impl Workspace {
     }
 
     /// Written through to disk, so the palette a person picked is the one the
-    /// next launch paints.
-    pub(crate) fn set_theme(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
+    /// next launch paints. `side` is set when the light or dark theme is being
+    /// picked, and a side the system is not on waits until it is.
+    pub(crate) fn set_theme(
+        &mut self,
+        side: Option<theme::Appearance>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // `set_font_size` and `set_default_row_limit` both skip the write-through
         // when nothing changed; picking the theme already installed should not
         // rewrite `profiles.toml` or re-post the notice either.
-        if theme.name == theme::theme(cx).name {
+        let unchanged = match side {
+            Some(side) => self.settings.theme_for(side) == theme.name,
+            None => theme::theme(cx).name == theme.name,
+        };
+        if unchanged {
             return;
         }
+        if let Some(side) = side {
+            self.settings.set_theme_for(side, theme.name);
+        }
+        let system = theme::Appearance::of_system(window.appearance());
+        if side.is_none_or(|side| self.settings.match_system_appearance && side == system) {
+            self.switch_theme(theme, window, cx);
+        }
+        // The titlebar deliberately no longer names the theme -- permanent
+        // chrome should not narrate a setting -- so the switch itself says
+        // where it landed.
+        if self.profile().is_some() {
+            let label = side.map_or("Theme", theme::Appearance::theme_label);
+            self.note(format!("{label}: {}", theme.name), cx);
+        }
+        self.remember_profiles(cx);
+        cx.refresh_windows();
+    }
+
+    fn switch_theme(&mut self, theme: Theme, window: &mut Window, cx: &mut Context<Self>) {
         let theme = theme.with_opacity(self.settings.opacity_for(&theme));
         install_theme(theme, window, cx);
         let percent = opacity_percent(theme.opacity).to_string();
         self.opacity_input
             .update(cx, |input, cx| input.set_value(percent, window, cx));
-        // The titlebar deliberately no longer names the theme -- permanent
-        // chrome should not narrate a setting -- so the switch itself says
-        // where it landed.
-        if self.profile().is_some() {
-            self.note(format!("Theme: {}", theme.name), cx);
+    }
+
+    /// Turned on, the theme on screen becomes the one for its own side, so
+    /// nothing changes unless the system is on the other. Turned off, the
+    /// theme on screen stays.
+    pub(crate) fn set_match_system_appearance(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.match_system_appearance = on;
+        if on {
+            let current = self.theme_before_preview.unwrap_or(*theme::theme(cx));
+            self.settings
+                .set_theme_for(current.appearance, current.name);
+            self.follow_system_appearance(window, cx);
         }
         self.remember_profiles(cx);
-        cx.refresh_windows();
+        cx.notify();
+    }
+
+    /// Put on the theme for the side the system is on now. Behind an open
+    /// theme list it is what the list hands back to, and the preview stays.
+    pub(crate) fn follow_system_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let system = theme::Appearance::of_system(window.appearance());
+        let Some(theme) = self.settings.system_theme(system) else {
+            return;
+        };
+        if let Some(before) = &mut self.theme_before_preview {
+            *before = theme;
+            if let Some(palette) = self.palette.clone() {
+                palette.update(cx, |palette, cx| palette.set_unpreviewed(theme, window, cx));
+            }
+            return;
+        }
+        if theme.name != theme::theme(cx).name {
+            self.switch_theme(theme, window, cx);
+            cx.refresh_windows();
+        }
     }
 
     /// The theme is written into dbdelve's own directory first, so picking it
@@ -462,21 +530,24 @@ impl Workspace {
         &mut self,
         source: theme::user::Source,
         index: usize,
+        side: Option<theme::Appearance>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match theme::user::import(source, index) {
-            // `set_theme` skips a theme already in force by name, and a
-            // re-import may have brought it new colours.
-            Ok(theme) if theme.name == theme::theme(cx).name => {
-                install_theme(
-                    theme.with_opacity(self.settings.opacity_for(&theme)),
-                    window,
-                    cx,
-                );
-                cx.refresh_windows();
+            Ok(theme) => {
+                // `set_theme` skips a theme already picked by name, and a
+                // re-import may have brought the one on screen new colours.
+                if theme.name == theme::theme(cx).name {
+                    install_theme(
+                        theme.with_opacity(self.settings.opacity_for(&theme)),
+                        window,
+                        cx,
+                    );
+                    cx.refresh_windows();
+                }
+                self.set_theme(side, theme, window, cx);
             }
-            Ok(theme) => self.set_theme(theme, window, cx),
             Err(message) => self.note(message, cx),
         }
     }

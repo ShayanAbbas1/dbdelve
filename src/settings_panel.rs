@@ -23,13 +23,16 @@ use crate::{
     keybindings::{self, KeybindingSpec},
     palette::Mode as PaletteMode,
     scroller::{SmoothScrollable, smooth},
-    theme::{FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout, popup_theme},
+    theme::{
+        Appearance, FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
+        popup_theme,
+    },
     ui::{
         Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
         option_row, picker, raised_card, segment, switch, well,
     },
     views::row_limit_menu,
-    workspace::{FONT_SIZE_STEP, font_size_range, opacity_percent},
+    workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
 };
 
 /// The categories the panel's tabs show, in the order they are numbered.
@@ -105,7 +108,9 @@ enum SettingId {
     RowLimit,
     DefaultSorting,
     CheckForUpdates,
+    MatchSystemAppearance,
     Theme,
+    SystemTheme(Appearance),
     Opacity,
     ColorTitlebar,
     Font(FontSlot),
@@ -174,12 +179,36 @@ fn setting_rows() -> Vec<SettingRow> {
             &["update", "release", "version", "github"],
         ),
         row(
+            SettingId::MatchSystemAppearance,
+            SettingsTab::Appearance,
+            "Theme",
+            "Match system appearance",
+            "Switch themes when the system turns light or dark.",
+            &["auto", "automatic", "follow", "mode", "dark", "light", "os"],
+        ),
+        row(
             SettingId::Theme,
             SettingsTab::Appearance,
             "Theme",
             "Theme",
             "Moving through the list previews each theme.",
             &["color", "colour", "dark", "light"],
+        ),
+        row(
+            SettingId::SystemTheme(Appearance::Light),
+            SettingsTab::Appearance,
+            "Theme",
+            Appearance::Light.theme_label(),
+            "Used while the system is light.",
+            &["color", "colour", "system", "appearance"],
+        ),
+        row(
+            SettingId::SystemTheme(Appearance::Dark),
+            SettingsTab::Appearance,
+            "Theme",
+            Appearance::Dark.theme_label(),
+            "Used while the system is dark.",
+            &["color", "colour", "system", "appearance"],
         ),
         row(
             SettingId::Opacity,
@@ -351,6 +380,16 @@ fn keybinding(id: &str) -> Option<&'static KeybindingSpec> {
     keybindings::REGISTRY.iter().find(|spec| spec.id == id)
 }
 
+/// Whether a row is on offer as things are set: the one theme while the
+/// theme does not follow the system, and its two sides while it does.
+fn applies(id: SettingId, settings: &Settings) -> bool {
+    match id {
+        SettingId::Theme => !settings.match_system_appearance,
+        SettingId::SystemTheme(_) => settings.match_system_appearance,
+        _ => true,
+    }
+}
+
 /// A row on screen, with the characters of its title the search matched.
 struct Shown<'a> {
     row: &'a SettingRow,
@@ -363,7 +402,10 @@ pub(crate) fn render_settings_panel(
 ) -> AnyElement {
     let t = popup_theme(cx);
     let searching = workspace.settings_matches.is_some();
-    let rows = setting_rows();
+    let rows: Vec<SettingRow> = setting_rows()
+        .into_iter()
+        .filter(|row| applies(row.id, &workspace.settings))
+        .collect();
     let shown: Vec<Shown> = match &workspace.settings_matches {
         Some(found) => rows
             .iter()
@@ -725,13 +767,33 @@ fn render_control(
                 workspace.set_color_titlebar(color, cx);
             }))
             .into_any_element(),
+        SettingId::MatchSystemAppearance => switch(
+            "match-system-appearance",
+            settings.match_system_appearance,
+            t,
+        )
+        .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+            let on = !workspace.settings.match_system_appearance;
+            workspace.set_match_system_appearance(on, window, cx);
+        }))
+        .into_any_element(),
         // The palette lists the themes, and moving through it previews each
         // one on the window this panel sits in.
         SettingId::Theme => picker("theme", t.name, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                workspace.open_palette(PaletteMode::Theme, window, cx);
+                workspace.open_palette(PaletteMode::Theme(None), window, cx);
             }))
             .into_any_element(),
+        // A side's list previews too, whichever side the system is on.
+        SettingId::SystemTheme(side) => picker(
+            ("system-theme", side as usize),
+            settings.theme_for(side).to_string(),
+            t,
+        )
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+            workspace.open_palette(PaletteMode::Theme(Some(side)), window, cx);
+        }))
+        .into_any_element(),
         SettingId::Opacity => render_opacity(workspace, t, cx),
         SettingId::Font(slot) => render_font(workspace, slot, t, cx),
         SettingId::Keybinding(id) => match keybinding(id) {
@@ -961,6 +1023,7 @@ mod tests {
         assert!(found("titlebar").contains(&SettingId::ColorTitlebar));
         assert!(found("transparency").contains(&SettingId::Opacity));
         assert!(found("updates").contains(&SettingId::CheckForUpdates));
+        assert!(found("auto").contains(&SettingId::MatchSystemAppearance));
     }
 
     #[test]
@@ -999,7 +1062,7 @@ mod tests {
     #[test]
     fn a_word_matches_within_one_field_not_across_them() {
         assert_eq!(found("sort"), [SettingId::DefaultSorting]);
-        assert_eq!(found("!keyboard").len(), 9);
+        assert_eq!(found("!keyboard").len(), 12);
     }
 
     #[test]
@@ -1054,6 +1117,36 @@ mod tests {
                 "Results grid",
                 "Editor",
                 "Connection form"
+            ]
+        );
+    }
+
+    #[test]
+    fn matching_the_system_trades_the_theme_row_for_its_two_sides() {
+        let mut settings = Settings::default();
+        let offered = |settings: &Settings| -> Vec<SettingId> {
+            setting_rows()
+                .into_iter()
+                .filter(|row| row.group == "Theme" && applies(row.id, settings))
+                .map(|row| row.id)
+                .collect()
+        };
+        assert_eq!(
+            offered(&settings),
+            [
+                SettingId::MatchSystemAppearance,
+                SettingId::Theme,
+                SettingId::Opacity
+            ]
+        );
+        settings.match_system_appearance = true;
+        assert_eq!(
+            offered(&settings),
+            [
+                SettingId::MatchSystemAppearance,
+                SettingId::SystemTheme(Appearance::Light),
+                SettingId::SystemTheme(Appearance::Dark),
+                SettingId::Opacity
             ]
         );
     }
