@@ -511,17 +511,21 @@ impl Workspace {
         let Some(theme) = self.settings.system_theme(system) else {
             return;
         };
+        let shown = self.theme_before_preview.unwrap_or(*theme::theme(cx));
+        if theme.name == shown.name {
+            return;
+        }
         if let Some(before) = &mut self.theme_before_preview {
             *before = theme;
             if let Some(palette) = self.palette.clone() {
                 palette.update(cx, |palette, cx| palette.set_unpreviewed(theme, window, cx));
             }
-            return;
-        }
-        if theme.name != theme::theme(cx).name {
+        } else {
             self.switch_theme(theme, window, cx);
             cx.refresh_windows();
         }
+        // `theme` is saved as the one on screen, which an older build opens on.
+        self.remember_profiles(cx);
     }
 
     /// The theme is written into dbdelve's own directory first, so picking it
