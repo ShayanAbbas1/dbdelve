@@ -286,6 +286,13 @@ impl Appearance {
         }
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
     pub fn theme_label(self) -> &'static str {
         match self {
             Self::Dark => "Dark theme",

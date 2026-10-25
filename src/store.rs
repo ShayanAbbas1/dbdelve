@@ -366,7 +366,8 @@ pub struct StoredSettings {
     pub theme: Option<String>,
     /// Whether the theme follows the system between `light_theme` and
     /// `dark_theme`. `theme` is still written while it does, as the one on
-    /// screen, so an older build opens on that.
+    /// screen at the save, so an older build opens on that; the system
+    /// changing side alone saves nothing.
     #[serde(default)]
     pub match_system_appearance: Option<bool>,
     #[serde(default)]

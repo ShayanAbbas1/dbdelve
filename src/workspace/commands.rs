@@ -295,6 +295,8 @@ impl Workspace {
                 }
                 // Something else opened while the scan ran is left alone.
                 if workspace.palette.is_none() {
+                    let system = theme::Appearance::of_system(window.appearance());
+                    let side = workspace.settings.list_side(side, system);
                     workspace.open_palette(PaletteMode::ImportTheme(source, side), window, cx);
                 }
             });

@@ -1568,15 +1568,14 @@ impl Palette {
             },
             Mode::ImportTheme(source, side) if self.items.is_empty() => (
                 "No themes found".to_string(),
-                format!(
-                    "{} has no {}themes on this machine.",
-                    source.name(),
-                    match side {
-                        Some(Appearance::Light) => "light ",
-                        Some(Appearance::Dark) => "dark ",
-                        None => "",
-                    }
-                ),
+                match side {
+                    Some(side) => format!(
+                        "{} has no {} themes on this machine.",
+                        source.name(),
+                        side.name()
+                    ),
+                    None => format!("{} has no themes on this machine.", source.name()),
+                },
             ),
             Mode::Search(Scope::Objects) if self.catalog_loading => (
                 "Loading database objects…".to_string(),
@@ -2379,11 +2378,14 @@ pub(crate) fn picked_theme<'a>(
     }
 }
 
-/// Every theme in [`Theme::all`] order, or only one side's.
+fn on_side(side: Option<Appearance>, candidate: &Theme) -> bool {
+    side.is_none_or(|side| candidate.appearance == side)
+}
+
 pub(crate) fn listed_themes(side: Option<Appearance>) -> impl Iterator<Item = Theme> {
     Theme::all()
         .into_iter()
-        .filter(move |candidate| side.is_none_or(|side| candidate.appearance == side))
+        .filter(move |candidate| on_side(side, candidate))
 }
 
 /// Every theme [`listed_themes`] lists, the one picked marked the way the
@@ -2415,8 +2417,6 @@ fn theme_items(side: Option<Appearance>, picked: &str) -> Vec<Item> {
     themes.chain(imports).collect()
 }
 
-/// One app's themes as its import list shows them, every one or one side's,
-/// each with its index into [`user::Source::found`].
 pub(crate) fn listed_imports(
     source: user::Source,
     side: Option<Appearance>,
@@ -2425,7 +2425,7 @@ pub(crate) fn listed_imports(
         .found()
         .iter()
         .enumerate()
-        .filter(move |(_, candidate)| side.is_none_or(|side| candidate.appearance == side))
+        .filter(move |(_, candidate)| on_side(side, candidate))
 }
 
 /// Every theme one app has, without the app's name every one of them is

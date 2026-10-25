@@ -137,6 +137,34 @@ impl Settings {
         self.match_system_appearance
             .then(|| restored_theme(Some(self.theme_for(system)), system))
     }
+
+    /// The side a theme list opens for, asked again whenever one opens: a
+    /// list waiting on an import scan may find matching turned on or off
+    /// since it was asked for.
+    pub(crate) fn list_side(
+        &self,
+        asked: Option<theme::Appearance>,
+        system: theme::Appearance,
+    ) -> Option<theme::Appearance> {
+        self.match_system_appearance
+            .then(|| asked.unwrap_or(system))
+    }
+
+    /// Where a theme picked from a list for `side` goes: the light or dark
+    /// slot it fills, if any, and whether it goes on screen now. A list that
+    /// outlived a change to matching still takes effect: a side's pick shows
+    /// once nothing is matched, and a plain pick while matching fills the
+    /// system's side, or the next change would take it off again.
+    pub(crate) fn pick_target(
+        &self,
+        side: Option<theme::Appearance>,
+        system: theme::Appearance,
+    ) -> (Option<theme::Appearance>, bool) {
+        let matching = self.match_system_appearance;
+        let slot = side.or(matching.then_some(system));
+        let shows = side.is_none_or(|side| !matching || side == system);
+        (slot, shows)
+    }
 }
 
 /// A stored entry wins. Without one, light glass starts at its own default
@@ -2277,6 +2305,24 @@ mod tests {
         assert_eq!(worn(&settings, Dark), Some("Dracula"));
         settings.set_theme_for(Dark, "Deleted Since");
         assert_eq!(worn(&settings, Dark), Some("DBDelve Black"));
+    }
+
+    #[test]
+    fn a_list_that_outlived_a_change_to_matching_still_takes_effect() {
+        use theme::Appearance::{Dark, Light};
+        let mut settings = Settings::default();
+        assert_eq!(settings.list_side(Some(Dark), Light), None);
+        assert_eq!(settings.pick_target(Some(Dark), Light), (Some(Dark), true));
+        assert_eq!(settings.pick_target(None, Light), (None, true));
+        settings.match_system_appearance = true;
+        assert_eq!(settings.list_side(None, Light), Some(Light));
+        assert_eq!(settings.list_side(Some(Dark), Light), Some(Dark));
+        assert_eq!(settings.pick_target(None, Light), (Some(Light), true));
+        assert_eq!(settings.pick_target(Some(Dark), Light), (Some(Dark), false));
+        assert_eq!(
+            settings.pick_target(Some(Light), Light),
+            (Some(Light), true)
+        );
     }
 
     #[test]

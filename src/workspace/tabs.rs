@@ -421,8 +421,7 @@ impl Workspace {
         // is on, so a light theme is never filed as the dark one.
         let side = self
             .settings
-            .match_system_appearance
-            .then(|| theme::Appearance::of_system(window.appearance()));
+            .list_side(None, theme::Appearance::of_system(window.appearance()));
         self.open_palette(PaletteMode::Theme(side), window, cx);
     }
 
@@ -430,10 +429,10 @@ impl Workspace {
     /// comes through here, confirming included: the row's theme is then
     /// installed again by `set_theme`, which is the one path that saves it.
     pub(crate) fn end_theme_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The snapshot predates any opacity change made while previewing.
+        // The snapshot predates any opacity change made while previewing, and
+        // the system may have swapped it for the other side's theme since.
         if let Some(theme) = self.theme_before_preview.take() {
-            let opacity = self.settings.opacity_for(&theme);
-            install_theme(theme.with_opacity(opacity), window, cx);
+            self.switch_theme(theme, window, cx);
             cx.refresh_windows();
         }
     }
@@ -451,18 +450,17 @@ impl Workspace {
         // `set_font_size` and `set_default_row_limit` both skip the write-through
         // when nothing changed; picking the theme already installed should not
         // rewrite `profiles.toml` or re-post the notice either.
-        let unchanged = match side {
-            Some(side) => self.settings.theme_for(side) == theme.name,
-            None => theme::theme(cx).name == theme.name,
-        };
+        let system = theme::Appearance::of_system(window.appearance());
+        let (slot, shows) = self.settings.pick_target(side, system);
+        let unchanged = slot.is_none_or(|slot| self.settings.theme_for(slot) == theme.name)
+            && (!shows || theme::theme(cx).name == theme.name);
         if unchanged {
             return;
         }
-        if let Some(side) = side {
-            self.settings.set_theme_for(side, theme.name);
+        if let Some(slot) = slot {
+            self.settings.set_theme_for(slot, theme.name);
         }
-        let system = theme::Appearance::of_system(window.appearance());
-        if side.is_none_or(|side| self.settings.match_system_appearance && side == system) {
+        if shows {
             self.switch_theme(theme, window, cx);
         }
         // The titlebar deliberately no longer names the theme -- permanent
@@ -521,11 +519,12 @@ impl Workspace {
                 palette.update(cx, |palette, cx| palette.set_unpreviewed(theme, window, cx));
             }
         } else {
+            // A percent half-typed into Settings for the theme going away is
+            // dropped: committing it could save the `5` of a `50` onto that
+            // theme, and leaving it would let the next blur save it onto this.
             self.switch_theme(theme, window, cx);
             cx.refresh_windows();
         }
-        // `theme` is saved as the one on screen, which an older build opens on.
-        self.remember_profiles(cx);
     }
 
     /// The theme is written into dbdelve's own directory first, so picking it
