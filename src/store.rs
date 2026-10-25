@@ -3,9 +3,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::db::{EditTarget, ExplainMode, RelationKind, Row, SshTunnel};
+use crate::db::{EditTarget, Engine, ExplainMode, RelationKind, Row, SshTunnel};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -440,6 +441,64 @@ pub struct ProfileList {
     pub fonts: Option<StoredFonts>,
     pub settings: Option<StoredSettings>,
     pub projects: Vec<StoredProject>,
+    /// Profiles on an engine this build cannot read, held as they were read
+    /// so a save writes them back. Empty for every file without one.
+    pub unavailable: Vec<UnavailableProfile>,
+}
+
+/// A profile whose engine this build cannot read: one written by a newer
+/// build, or for a plugin that is not installed. It is never decoded into a
+/// [`StoredProfile`], since the keys it needs may be ones this build has
+/// never heard of; only what the palette shows is read out of its table, and
+/// the table is written back as it was read (its keys sorted).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnavailableProfile {
+    pub id: String,
+    pub name: String,
+    /// The tag as written, or a tag that is not a string as TOML writes it.
+    pub engine: String,
+    /// The ids of the supported profiles above it in the file, nearest last:
+    /// what [`interleaved`] puts it back after.
+    follows: Vec<String>,
+    table: toml::Table,
+}
+
+impl UnavailableProfile {
+    fn from_table(table: toml::Table, follows: Vec<String>) -> Result<Self, String> {
+        let text = |key: &str| {
+            table
+                .get(key)
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        };
+        let id = text("id").ok_or("a profile on an engine this build cannot read has no id")?;
+        let name =
+            text("name").ok_or("a profile on an engine this build cannot read has no name")?;
+        let engine = match table.get("engine") {
+            Some(toml::Value::String(engine)) => engine.clone(),
+            Some(engine) => engine.to_string(),
+            None => String::new(),
+        };
+        Ok(Self {
+            id,
+            name,
+            engine,
+            follows,
+            table,
+        })
+    }
+
+    /// The SSH key its tunnel names, which removing another profile must not
+    /// delete from under it.
+    pub fn identity_file(&self) -> Option<&str> {
+        self.table.get("ssh")?.get("identity_file")?.as_str()
+    }
+}
+
+impl Serialize for UnavailableProfile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.table.serialize(serializer)
+    }
 }
 
 /// Field order is load-bearing here too: `active` is a scalar, so it has to
@@ -525,12 +584,31 @@ fn read_profiles(path: &Path) -> Result<ProfileList, (&'static str, String)> {
             fonts: None,
             settings: None,
             projects: Vec::new(),
+            unavailable: Vec::new(),
         }),
         Err(error) => Err(("", error.to_string())),
     }
 }
 
 pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
+    // Only the engine tags: a file this pass cannot read goes to the plain
+    // decode below, which reports it in its own words.
+    let unavailable: Vec<bool> = toml::from_str::<Tags>(text)
+        .map(|tags| {
+            tags.profiles
+                .iter()
+                .map(|tag| !readable(tag.engine.as_ref()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // A file with an unavailable profile that the mixed reader cannot hold
+    // takes the plain decode too, so no file an earlier build read is newly
+    // refused.
+    if unavailable.contains(&true)
+        && let Ok(list) = decode_mixed(text, &unavailable)
+    {
+        return Ok(list);
+    }
     toml::from_str::<ProfileFile>(text)
         .map(|file| ProfileList {
             profiles: file.profiles,
@@ -538,19 +616,217 @@ pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
             fonts: file.fonts,
             settings: file.settings,
             projects: file.projects,
+            unavailable: Vec::new(),
         })
         .map_err(|error| error.to_string())
 }
 
 pub(crate) fn encode_profiles(list: &ProfileList) -> Result<String, String> {
-    toml::to_string_pretty(&ProfileFile {
-        active: list.active.clone(),
-        fonts: list.fonts.clone(),
-        settings: list.settings.clone(),
-        projects: list.projects.clone(),
-        profiles: list.profiles.clone(),
-    })
+    if list.unavailable.is_empty() {
+        toml::to_string_pretty(&ProfileFile {
+            active: list.active.clone(),
+            fonts: list.fonts.clone(),
+            settings: list.settings.clone(),
+            projects: list.projects.clone(),
+            profiles: list.profiles.clone(),
+        })
+    } else {
+        toml::to_string_pretty(&MixedFileOut {
+            active: &list.active,
+            fonts: &list.fonts,
+            settings: &list.settings,
+            projects: &list.projects,
+            profiles: interleaved(&list.profiles, &list.unavailable),
+        })
+    }
     .map_err(|error| format!("Could not encode the profile list: {error}"))
+}
+
+/// Each profile's engine tag and nothing else; every other key is skipped
+/// unread.
+#[derive(Deserialize)]
+struct Tags {
+    #[serde(default)]
+    profiles: Vec<Tag>,
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    #[serde(default)]
+    engine: Option<toml::Value>,
+}
+
+/// No tag is a profile written before there was a second engine, and reads as
+/// Postgres; a tag that is not a string is not one any build wrote for an
+/// engine this one has.
+fn readable(tag: Option<&toml::Value>) -> bool {
+    match tag {
+        None => true,
+        Some(toml::Value::String(engine)) => Engine::parse(engine).is_ok(),
+        Some(_) => false,
+    }
+}
+
+enum Entry {
+    Supported(Box<StoredProfile>),
+    Unavailable(toml::Table),
+}
+
+fn decode_mixed(text: &str, unavailable: &[bool]) -> Result<ProfileList, String> {
+    let (file, entries) = toml::Deserializer::parse(text)
+        .and_then(|deserializer| MixedFile(unavailable).deserialize(deserializer))
+        .map_err(|error| error.to_string())?;
+    let mut list = ProfileList {
+        profiles: Vec::new(),
+        active: file.active,
+        fonts: file.fonts,
+        settings: file.settings,
+        projects: file.projects,
+        unavailable: Vec::new(),
+    };
+    for entry in entries {
+        match entry {
+            Entry::Supported(profile) => list.profiles.push(*profile),
+            Entry::Unavailable(table) => {
+                let follows = list.profiles.iter().map(|profile| profile.id.clone());
+                list.unavailable
+                    .push(UnavailableProfile::from_table(table, follows.collect())?);
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// The profile file the way `ProfileFile`'s derive reads it, but with its
+/// profiles read by [`Entries`]. The slice says which `[[profiles]]` index is
+/// unavailable.
+struct MixedFile<'a>(&'a [bool]);
+
+impl<'de> DeserializeSeed<'de> for MixedFile<'_> {
+    type Value = (ProfileFile, Vec<Entry>);
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_struct(
+            "ProfileFile",
+            &["active", "fonts", "settings", "projects", "profiles"],
+            self,
+        )
+    }
+}
+
+impl<'de> Visitor<'de> for MixedFile<'_> {
+    type Value = (ProfileFile, Vec<Entry>);
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("struct ProfileFile")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut file = ProfileFile::default();
+        let mut entries = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "active" => file.active = map.next_value()?,
+                "fonts" => file.fonts = map.next_value()?,
+                "settings" => file.settings = map.next_value()?,
+                "projects" => file.projects = map.next_value()?,
+                "profiles" => entries = map.next_value_seed(Entries(self.0))?,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok((file, entries))
+    }
+}
+
+/// A supported entry goes through `StoredProfile::deserialize` on the very
+/// element deserializer a `Vec<StoredProfile>` is handed, so it reads exactly
+/// as it would in a file with no unavailable profile. An unavailable one is
+/// read as a `Table` straight off toml's deserializer, which keeps a datetime
+/// a `Datetime` rather than its string.
+struct Entries<'a>(&'a [bool]);
+
+impl<'de> DeserializeSeed<'de> for Entries<'_> {
+    type Value = Vec<Entry>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Entries<'_> {
+    type Value = Vec<Entry>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a sequence of profiles")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        loop {
+            let entry = if self.0.get(entries.len()) == Some(&true) {
+                seq.next_element::<toml::Table>()?.map(Entry::Unavailable)
+            } else {
+                seq.next_element::<StoredProfile>()?
+                    .map(|profile| Entry::Supported(Box::new(profile)))
+            };
+            match entry {
+                Some(entry) => entries.push(entry),
+                None => return Ok(entries),
+            }
+        }
+    }
+}
+
+/// `ProfileFile` borrowed, for a file with an unavailable profile; the same
+/// load-bearing field order.
+#[derive(Serialize)]
+struct MixedFileOut<'a> {
+    active: &'a Option<String>,
+    fonts: &'a Option<StoredFonts>,
+    settings: &'a Option<StoredSettings>,
+    projects: &'a [StoredProject],
+    profiles: Vec<ProfileEntry<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProfileEntry<'a> {
+    Supported(&'a StoredProfile),
+    Unavailable(&'a UnavailableProfile),
+}
+
+/// Each unavailable profile goes back after the nearest profile above it in
+/// the file that is still there, at that id's first place; with none left, at
+/// the start. The supported order is only ever pushed to or removed from, so
+/// this needs no bookkeeping, and every unavailable profile has exactly one
+/// place, so none is written twice when ids repeat.
+fn interleaved<'a>(
+    profiles: &'a [StoredProfile],
+    unavailable: &'a [UnavailableProfile],
+) -> Vec<ProfileEntry<'a>> {
+    let anchors = unavailable
+        .iter()
+        .map(|gone| {
+            gone.follows
+                .iter()
+                .rev()
+                .find_map(|id| profiles.iter().position(|profile| &profile.id == id))
+        })
+        .collect::<Vec<_>>();
+    let after = |anchor: Option<usize>| {
+        unavailable
+            .iter()
+            .zip(&anchors)
+            .filter(move |(_, at)| **at == anchor)
+            .map(|(gone, _)| ProfileEntry::Unavailable(gone))
+    };
+    after(None)
+        .chain(profiles.iter().enumerate().flat_map(|(index, profile)| {
+            std::iter::once(ProfileEntry::Supported(profile)).chain(after(Some(index)))
+        }))
+        .collect()
 }
 
 pub fn save_profiles(list: &ProfileList) -> Result<(), String> {
@@ -1228,7 +1504,6 @@ fn secure(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Engine;
     use crate::db::rows;
     use crate::theme::ConnectionColor;
 
@@ -1256,6 +1531,7 @@ mod tests {
                 fonts: file.fonts,
                 settings: file.settings,
                 projects: file.projects,
+                unavailable: Vec::new(),
             })
             .map_err(|error| error.to_string())
     }
@@ -1353,6 +1629,253 @@ mod tests {
             );
             assert!(decode_profiles(broken).is_err(), "{broken}");
         }
+    }
+
+    /// A plugin profile as a later build would write it: no host, user or
+    /// database, nested tabs, a datetime, keys this build has never heard of.
+    const PLUGIN: &str = r#"
+[[profiles]]
+id = "ch"
+name = "ClickHouse prod"
+engine = "plugin:clickhouse"
+speaks = "clickhouse"
+created = 2026-10-01T09:00:00Z
+statement_timeout = 30
+
+[profiles.fields]
+host = "ch.internal"
+port = "9440"
+
+[[profiles.open_queries]]
+id = 0
+active = true
+
+[[profiles.open_objects]]
+schema = "default"
+name = "events"
+
+[[profiles.open_objects.bars]]
+column = "ts"
+value = "1"
+operator = "greater"
+later = "kept"
+"#;
+
+    #[test]
+    fn a_profile_on_an_engine_this_build_lacks_comes_back_whole() {
+        let list = decode_profiles(PLUGIN).expect("one unreadable engine must not fail the file");
+        assert!(
+            list.profiles.is_empty(),
+            "never decoded as a profile, so never restored"
+        );
+        let gone = &list.unavailable[0];
+        assert_eq!(
+            (gone.id.as_str(), gone.name.as_str(), gone.engine.as_str()),
+            ("ch", "ClickHouse prod", "plugin:clickhouse")
+        );
+        // Table equality, so the datetime must come back a Datetime, not its string.
+        let before: toml::Table = toml::from_str(PLUGIN).unwrap();
+        let after: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
+        assert_eq!(after["profiles"], before["profiles"]);
+    }
+
+    #[test]
+    fn an_unavailable_profile_keeps_its_place_and_the_file_is_not_moved_aside() {
+        with_home(|| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\nengine = 'postgres'\n\
+                 {}\n[[profiles]]\nid = 'b'\nname = 'B'\nhost = ''\ndatabase = ''\nuser = ''\nengine = 'sqlite'\npath = '/b.db'\n",
+                PLUGIN.replace("[[profiles]]\nid = \"ch\"", "[[profiles]]\nid = \"x\"")
+            );
+            let path = dbdelve_directory().unwrap().join(PROFILES_FILE);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &text).unwrap();
+
+            let list = load_profiles().expect("a mixed file loads");
+            assert!(
+                !path
+                    .with_file_name(format!("{PROFILES_FILE}.broken"))
+                    .exists()
+            );
+            save_profiles(&list).unwrap();
+
+            let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let ids: Vec<_> = saved["profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, ["a", "x", "b"]);
+        });
+    }
+
+    fn stub(id: &str, engine: &str) -> String {
+        format!(
+            "[[profiles]]\nid = '{id}'\nname = '{id}'\nhost = ''\ndatabase = ''\nuser = ''\nengine = '{engine}'\n"
+        )
+    }
+
+    /// The ids `interleaved` writes, an unavailable one marked `*`.
+    fn written(profiles: &[StoredProfile], unavailable: &[UnavailableProfile]) -> Vec<String> {
+        interleaved(profiles, unavailable)
+            .iter()
+            .map(|entry| match entry {
+                ProfileEntry::Supported(profile) => profile.id.clone(),
+                ProfileEntry::Unavailable(gone) => format!("{}*", gone.id),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unavailable_profiles_go_back_beside_the_profiles_they_followed() {
+        // z above everything, x after a, y after a and b.
+        let file = [
+            ("z", "plugin:t"),
+            ("a", "postgres"),
+            ("x", "plugin:t"),
+            ("b", "postgres"),
+            ("y", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let list = decode_profiles(&file).unwrap();
+        let c = decode_profiles(&stub("c", "postgres")).unwrap().profiles;
+        let order = |keep: &[&str]| {
+            let profiles: Vec<_> = list
+                .profiles
+                .iter()
+                .chain(&c)
+                .filter(|profile| keep.contains(&profile.id.as_str()))
+                .cloned()
+                .collect();
+            written(&profiles, &list.unavailable)
+        };
+        assert_eq!(order(&["a", "b"]), ["z*", "a", "x*", "b", "y*"]);
+        // a removed: x had nothing else above it.
+        assert_eq!(order(&["b"]), ["z*", "x*", "b", "y*"]);
+        // b removed: y falls back to a, after x.
+        assert_eq!(order(&["a"]), ["z*", "a", "x*", "y*"]);
+        // A new profile goes last.
+        assert_eq!(order(&["a", "b", "c"]), ["z*", "a", "x*", "b", "y*", "c"]);
+    }
+
+    #[test]
+    fn an_unavailable_profile_is_written_once_when_ids_repeat() {
+        // A hand-edited file: a twice, and an unavailable profile that is also a.
+        let file = [
+            ("a", "postgres"),
+            ("x", "plugin:t"),
+            ("a", "sqlite"),
+            ("a", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let list = decode_profiles(&file).expect("repeated ids load, as they do today");
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (2, 2));
+        // Each goes after the first surviving occurrence of its nearest anchor, so
+        // a* moves above the second a; it is never written twice.
+        assert_eq!(
+            written(&list.profiles, &list.unavailable),
+            ["a", "x*", "a*", "a"]
+        );
+        let again = decode_profiles(&encode_profiles(&list).unwrap()).unwrap();
+        assert_eq!((again.profiles.len(), again.unavailable.len()), (2, 2));
+    }
+
+    #[test]
+    fn an_alias_or_no_engine_is_still_a_supported_profile() {
+        let file = stub("a", "postgresql")
+            + &stub("b", " MySQL ")
+            + &stub("c", "x").replace("engine = 'x'\n", "");
+        let list = decode_profiles(&file).unwrap();
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (3, 0));
+    }
+
+    #[test]
+    fn an_engine_tag_that_is_not_a_string_is_an_unavailable_profile() {
+        let list = decode_profiles(&stub("a", "x").replace("engine = 'x'", "engine = 3")).unwrap();
+        assert_eq!(list.unavailable[0].engine, "3");
+    }
+
+    #[test]
+    fn a_supported_profile_that_will_not_decode_still_fails_the_file() {
+        let text = stub("a", "postgres") + "port = 'x'\n" + &stub("x", "plugin:t");
+        assert!(decode_profiles(&text).is_err());
+        assert_eq!(
+            decode_profiles(&text),
+            decoded_as_before(&text),
+            "today's words"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_profile_needs_an_id_and_a_name() {
+        assert!(decode_profiles(&PLUGIN.replace("id = \"ch\"\n", "")).is_err());
+        assert!(decode_profiles(&PLUGIN.replace("name = \"ClickHouse prod\"\n", "")).is_err());
+    }
+
+    #[test]
+    fn a_mixed_files_supported_profiles_decode_as_they_would_alone() {
+        let alone = include_str!("testdata/every-engine.toml")
+            .replace("next_query_id = 3", "next_query_id = 18446744073709551615");
+        let mixed = format!("{alone}\n{PLUGIN}");
+        let (now, before) = (
+            decode_profiles(&mixed).unwrap(),
+            decoded_as_before(&alone).unwrap(),
+        );
+        assert_eq!(now.profiles, before.profiles);
+        assert_eq!(
+            (now.active, now.fonts, now.settings, now.projects),
+            (
+                before.active,
+                before.fonts,
+                before.settings,
+                before.projects
+            )
+        );
+        assert_eq!(now.unavailable.len(), 1);
+    }
+
+    #[test]
+    fn a_mixed_file_saves_its_supported_profiles_as_a_plain_file_would() {
+        let mixed = format!("{}\n{PLUGIN}", include_str!("testdata/every-engine.toml"));
+        let mut saved: toml::Table =
+            toml::from_str(&encode_profiles(&decode_profiles(&mixed).unwrap()).unwrap()).unwrap();
+        saved["profiles"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["id"].as_str() != Some("ch"));
+        assert_eq!(
+            saved,
+            toml::from_str::<toml::Table>(include_str!("testdata/every-engine.resaved.toml"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_file_the_mixed_reader_cannot_hold_reads_as_it_does_today() {
+        // A toml::Table cannot hold a u64 above i64::MAX, so the mixed pass fails
+        // and the file falls back to today's decode: clickhouse is a profile again
+        // (restore reads it as Postgres with its notice, as today).
+        let text = stub("a", "postgres")
+            + &stub("c", "clickhouse")
+            + "next_query_id = 18446744073709551615\n";
+        assert_eq!(decode_profiles(&text), decoded_as_before(&text));
+        assert!(decode_profiles(&text).unwrap().unavailable.is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_profiles_identity_file_is_read_from_its_tunnel() {
+        let tunnel = format!("{PLUGIN}\n[profiles.ssh]\nhost = 'j'\nidentity_file = '/k/key'\n");
+        assert_eq!(
+            decode_profiles(&tunnel).unwrap().unavailable[0].identity_file(),
+            Some("/k/key")
+        );
+        assert_eq!(
+            decode_profiles(PLUGIN).unwrap().unavailable[0].identity_file(),
+            None
+        );
     }
 
     #[test]
@@ -1558,6 +2081,7 @@ user = "shayan"
                 fonts: Some(StoredFonts::default()),
                 settings: Some(StoredSettings::default()),
                 projects: Vec::new(),
+                unavailable: Vec::new(),
             })
             .unwrap();
 
@@ -2276,6 +2800,7 @@ open_objects = []
                 fonts: None,
                 settings: None,
                 projects: Vec::new(),
+                unavailable: Vec::new(),
             })
         );
     }

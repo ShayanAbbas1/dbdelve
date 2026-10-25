@@ -198,6 +198,9 @@ pub(crate) struct PendingImport {
 
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
+    /// Profiles on an engine this build cannot open, held as they were read
+    /// and written back by `remember_profiles`; never restored.
+    pub(crate) unavailable: Vec<store::UnavailableProfile>,
     pub(crate) settings: Settings,
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
@@ -393,6 +396,7 @@ impl Workspace {
 
         let mut workspace = Self {
             profiles: Vec::new(),
+            unavailable: Vec::new(),
             settings: Settings::default(),
             active: 0,
             form: None,
@@ -466,6 +470,7 @@ impl Workspace {
                 fonts: stored_fonts,
                 settings: stored_settings,
                 projects,
+                unavailable,
             }) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
@@ -529,12 +534,17 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
-                workspace.settings.welcomed =
-                    welcome::welcomed(stored_settings.welcomed, !profiles.is_empty());
+                workspace.settings.welcomed = welcome::welcomed(
+                    stored_settings.welcomed,
+                    !profiles.is_empty() || !unavailable.is_empty(),
+                );
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
                     .unwrap_or_default();
+                // Ahead of the restore, which must not prune grids an
+                // unavailable profile under the same id still owns.
+                workspace.unavailable = unavailable;
                 for stored in profiles {
                     workspace.restore_profile(stored, window, cx);
                 }
@@ -553,6 +563,7 @@ impl Workspace {
                     .profiles
                     .iter()
                     .map(|profile| profile.id.as_str())
+                    .chain(workspace.unavailable.iter().map(|gone| gone.id.as_str()))
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
             }

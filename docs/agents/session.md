@@ -343,7 +343,10 @@ the visible one.
   over it; if it cannot be moved, nothing is saved for the rest of the session
   (`store_unreadable`). The keybinding read at launch uses `peek_profiles`,
   which moves nothing, so the move and its notice belong to the workspace's
-  own load.
+  own load. A profile on an engine this build cannot read is kept whole as its
+  TOML table (`store::UnavailableProfile`), written back in its place, listed
+  greyed, and can only be removed; nothing filed under its id is deleted while
+  it holds that id, and a file with none decodes and saves exactly as before.
 - **Passwords** go through `keyring`, never into `profiles.toml`: Keychain on
   macOS, Secret Service on Linux, Credential Manager on Windows.
 - **Keybindings** are spelled `secondary-`, which GPUI reads as Cmd on macOS and

@@ -217,7 +217,10 @@ runs, which split off the timing tests and the vendored renderer's tests.
 Paths per platform and the rest of storage are in `docs/agents/session.md`.
 
 - **Storage** is decided in `store.rs`. A `profiles.toml` that will not load is
-  moved aside to `profiles.toml.broken` before anything can save over it.
+  moved aside to `profiles.toml.broken` before anything can save over it. A
+  profile on an engine this build cannot read is kept whole as its TOML table
+  (`store::UnavailableProfile`), written back in its place, listed greyed, and
+  can only be removed; a file with none decodes and saves exactly as before.
 - **Passwords** go through `keyring`, never into `profiles.toml`.
 - **Keybindings** are spelled `secondary-`, which GPUI reads as Cmd on macOS and
   Ctrl elsewhere. Never `cmd-`: on Linux that is Super, which the window manager

@@ -62,6 +62,7 @@ impl Workspace {
             fonts: Some(fonts),
             settings: Some(settings),
             projects: self.projects.clone(),
+            unavailable: self.unavailable.clone(),
         }) {
             self.note(message, cx);
         }
@@ -85,10 +86,11 @@ impl Workspace {
             },
         };
         // No engine at all is a profile written before dbdelve had a second one,
-        // and Postgres is what it was. An engine this build cannot read is a
-        // profile written by a build that has one this one does not, so it is
-        // read as Postgres and says so rather than connecting somewhere the
-        // user did not ask for without mentioning it.
+        // and Postgres is what it was. An engine this build cannot read is held
+        // back by `decode_profiles` as an `UnavailableProfile`, so the `Err` arm
+        // is reached only by a file the mixed reader fell back on: it is read
+        // as Postgres and says so rather than connecting somewhere the user did
+        // not ask for without mentioning it.
         let (engine, unreadable_engine) = match stored.engine.as_deref() {
             None => (Engine::Postgres, None),
             Some(stored) => match Engine::parse(stored) {
@@ -119,7 +121,12 @@ impl Workspace {
                     store::object_grid_key(&object.schema, &object.name, &object.filter)
                 }))
                 .collect();
-        store::prune_grids(&stored.id, &live_grids);
+        // The grid directory is the id's, so when an unavailable profile holds
+        // the id too, its tabs' snapshots are in there as well, and none of
+        // them can be told apart as stale.
+        if !held_by_unavailable(&stored.id, &self.unavailable) {
+            store::prune_grids(&stored.id, &live_grids);
+        }
         let mut session = Session::new(
             stored.id.clone(),
             stored_queries,
@@ -192,10 +199,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> usize {
+        // An unavailable profile's id is taken too: reusing it would hand the
+        // new profile its keychain entry and saved queries.
         let existing = self
             .profiles
             .iter()
             .map(|profile| profile.id.clone())
+            .chain(self.unavailable.iter().map(|gone| gone.id.clone()))
             .collect::<Vec<_>>();
         let id = store::profile_id(&name, &existing);
         let session = Session::new(
@@ -1853,9 +1863,16 @@ impl Workspace {
             return;
         }
 
+        // An unavailable profile under the same id owns everything filed
+        // under it, and gets it back in a build that can read it.
+        let shared = held_by_unavailable(&id, &self.unavailable);
         // Counted before the directory goes, because afterwards there is
         // nothing left to count and the number is what the note reports.
-        let queries = store::saved_queries(&id).len();
+        let queries = if shared {
+            0
+        } else {
+            store::saved_queries(&id).len()
+        };
 
         let stopped = self.abandon_import(&id, cx);
 
@@ -1867,17 +1884,27 @@ impl Workspace {
                 &directory,
                 self.profiles
                     .iter()
-                    .filter_map(|profile| identity_file(&profile.config)),
+                    .filter_map(|profile| identity_file(&profile.config))
+                    .chain(
+                        self.unavailable
+                            .iter()
+                            .filter_map(store::UnavailableProfile::identity_file),
+                    ),
             )
         {
             let _ = std::fs::remove_file(key);
         }
-        store::delete_password(&id);
-        let removed_queries = store::delete_queries(&id);
-        let _ = store::delete_grids(&id);
-        for project in &mut self.projects {
-            project.connections.retain(|member| member != &id);
-        }
+        let removed_queries = if shared {
+            Ok(())
+        } else {
+            store::delete_password(&id);
+            let removed_queries = store::delete_queries(&id);
+            let _ = store::delete_grids(&id);
+            for project in &mut self.projects {
+                project.connections.retain(|member| member != &id);
+            }
+            removed_queries
+        };
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
         if self.profiles.is_empty() {
@@ -2013,6 +2040,13 @@ pub(crate) fn is_unshared_imported_key<'a>(
         && !others.into_iter().any(|other| other == key)
 }
 
+/// Whether a profile this build cannot read holds `id`. Ids are not unique in
+/// a hand-edited file, and the keychain entry, saved queries, grid snapshots
+/// and project membership are filed by id, so they are that profile's too.
+fn held_by_unavailable(id: &str, unavailable: &[store::UnavailableProfile]) -> bool {
+    unavailable.iter().any(|gone| gone.id == id)
+}
+
 /// What a removal took with it. The count is named because saved queries are
 /// the one thing a person could still want back, and a directory that outlived
 /// its profile is reported rather than passed over -- the id is derived from the
@@ -2115,6 +2149,37 @@ mod tests {
             restored_configs(include_str!("../testdata/every-engine.toml")),
             include_str!("../testdata/every-engine.configs.txt")
         );
+    }
+
+    /// A supported `pg` and, hand-edited to the same id, one on a plugin.
+    const SHARED_ID: &str = "[[profiles]]\nid = 'pg'\nname = 'Postgres'\nhost = 'h'\n\
+        database = 'd'\nuser = 'u'\nengine = 'postgres'\n\n\
+        [[profiles]]\nid = 'pg'\nname = 'ODBC'\nengine = 'plugin:odbc'\n";
+
+    #[test]
+    fn a_restore_prunes_no_grids_while_an_unavailable_profile_holds_the_id() {
+        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (1, 1));
+        assert!(held_by_unavailable(&list.profiles[0].id, &list.unavailable));
+        // A file with no unavailable profile prunes every profile's grids, as before.
+        let alone = store::decode_profiles(include_str!("../testdata/every-engine.toml")).unwrap();
+        assert!(alone.unavailable.is_empty());
+        assert!(
+            alone
+                .profiles
+                .iter()
+                .all(|stored| !held_by_unavailable(&stored.id, &alone.unavailable))
+        );
+    }
+
+    #[test]
+    fn removing_a_profile_keeps_what_an_unavailable_one_under_its_id_still_owns() {
+        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        assert!(held_by_unavailable("pg", &list.unavailable));
+        // Only the id decides: another id's keychain entry, queries, grids and
+        // project membership go with it as before.
+        assert!(!held_by_unavailable("odbc", &list.unavailable));
+        assert!(!held_by_unavailable("pg", &[]));
     }
 
     #[test]
