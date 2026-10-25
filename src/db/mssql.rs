@@ -4491,4 +4491,58 @@ mod tests {
             );
         }
     }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        Subject {
+            connection: crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(
+                live_config(),
+            ))
+            .expect("connection should open"),
+            engine: Engine::SqlServer,
+            schema: "dbo",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::SqlServer, "dbo"),
+            endless: "SELECT TOP 3000000 a.name, b.name FROM sys.all_columns a \
+                      CROSS JOIN sys.all_columns b",
+            runaway: "SELECT MAX(CHECKSUM(a.name, b.name, c.name)) FROM sys.all_objects a \
+                      CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c",
+            read_only_refusal: "",
+            fixture: Some(Fixture {
+                types: &[
+                    "int",
+                    "nvarchar",
+                    "bigint",
+                    "decimal",
+                    "float",
+                    "bit",
+                    "date",
+                    "datetime2",
+                    "varbinary",
+                ],
+                renders: &[],
+                find: Box::new(|key| sql_find(Engine::SqlServer, "dbo", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires the repository development database configured through dbdelve_MSSQL_URL",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
 }

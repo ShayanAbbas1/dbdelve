@@ -2054,6 +2054,80 @@ mod tests {
         );
     }
 
+    fn conformance_subject(engine: Engine) -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        Subject {
+            connection: live_profile(engine),
+            engine,
+            schema: "dbdelve_dev",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(engine, "dbdelve_dev"),
+            endless: LIVE_ENDLESS_SELECT,
+            runaway: LIVE_SLOW_SELECT,
+            read_only_refusal: "READ ONLY",
+            fixture: Some(Fixture {
+                types: &[
+                    "int",
+                    "varchar",
+                    "bigint",
+                    "decimal",
+                    "double",
+                    "tinyint",
+                    "date",
+                    "datetime",
+                    "varbinary",
+                ],
+                renders: &[],
+                find: Box::new(move |key| sql_find(engine, "dbdelve_dev", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    fn conformance_on_mysql() -> crate::db::conformance::Subject {
+        conformance_subject(Engine::MySql)
+    }
+
+    fn conformance_on_mariadb() -> crate::db::conformance::Subject {
+        conformance_subject(Engine::MariaDb)
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance_on_mysql,
+        "requires a local MySQL server configured through dbdelve_MYSQL_URL",
+        conformance_on_mysql:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
+
+    crate::db::conformance::suite!(
+        live_conformance_on_mariadb,
+        "requires a local MariaDB server configured through dbdelve_MARIADB_URL",
+        conformance_on_mariadb:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
+
     on_both_servers!(
         live_reads_run_at_once_take_the_time_of_one,
         live_a_cancel_stops_every_read_run_at_once,

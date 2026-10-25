@@ -2099,4 +2099,56 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             structure.constraints
         );
     }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        let path = std::env::var("dbdelve_SQLITE_PATH").expect("dbdelve_SQLITE_PATH is required");
+        Subject {
+            connection: crate::db::Connection::open(crate::db::ConnectionConfig::Sqlite {
+                path,
+                statement_timeout: 0,
+            })
+            .expect("connection should open"),
+            engine: Engine::Sqlite,
+            schema: "main",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::Sqlite, "main"),
+            endless: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                      SELECT i FROM n",
+            runaway: FOREVER,
+            read_only_refusal: "",
+            fixture: Some(Fixture {
+                types: &[
+                    "integer", "text", "integer", "numeric", "real", "boolean", "date", "datetime",
+                    "blob",
+                ],
+                renders: &[
+                    ("fraction", 0, "12.5"),
+                    ("bytes", 0, "x'00FF'"),
+                    ("bytes", 1, "x'DEADBEEF'"),
+                ],
+                find: Box::new(|key| sql_find(Engine::Sqlite, "main", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires the SQLite development database configured through dbdelve_SQLITE_PATH",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
 }

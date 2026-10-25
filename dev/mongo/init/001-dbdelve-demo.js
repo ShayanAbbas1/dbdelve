@@ -240,6 +240,45 @@ db.sensor_readings.insertMany(
   }))
 );
 
+// The engine conformance suite's fixture (src/db/conformance.rs): one
+// collection, the same shape in every seed. `whole` is above 2^53 on purpose.
+// Ids 900 and up belong to the suite's write scenarios.
+db.conformance.insertMany([
+  {
+    _id: 1,
+    label: "alpha",
+    whole: NumberLong("9007199254740993"),
+    fraction: NumberDecimal("12.50"),
+    ratio: 0.5,
+    flag: true,
+    day: ISODate("2024-02-29T00:00:00Z"),
+    moment: ISODate("2024-02-29T12:34:56Z"),
+    bytes: BinData(0, "AP8="),
+  },
+  {
+    _id: 2,
+    label: "Zoë 李 🐉 'quoted'",
+    whole: NumberLong("-42"),
+    fraction: NumberDecimal("-0.01"),
+    ratio: -1.25,
+    flag: false,
+    day: ISODate("1999-12-31T00:00:00Z"),
+    moment: ISODate("1999-12-31T23:59:59Z"),
+    bytes: BinData(0, "3q2+7w=="),
+  },
+  {
+    _id: 3,
+    label: "nulls",
+    whole: null,
+    fraction: null,
+    ratio: null,
+    flag: null,
+    day: null,
+    moment: null,
+    bytes: null,
+  },
+]);
+
 // A million documents and two hundred fields: the fixtures the grid's paging
 // and horizontal scrolling are measured against.
 const kinds = ["click", "view", "purchase", "refund", "signup", "churn"];

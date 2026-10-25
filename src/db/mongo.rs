@@ -4557,4 +4557,61 @@ mod tests {
         );
         assert_eq!(count(&connection, "wide_metrics"), 25);
     }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::Fixture;
+        const COLUMNS_BY_ID: [&str; 9] = [
+            "_id", "label", "whole", "fraction", "ratio", "flag", "day", "moment", "bytes",
+        ];
+        crate::db::conformance::Subject {
+            connection: crate::db::Connection::open(crate::db::ConnectionConfig::MongoDb(
+                live_config(),
+            ))
+            .expect("connection should open"),
+            engine: Engine::MongoDb,
+            schema: "dbdelve_dev",
+            relation: "conformance",
+            key: "_id",
+            columns: &COLUMNS_BY_ID,
+            read: "db.conformance.find({_id: {$lt: 900}}).sort({_id: 1})".to_string(),
+            endless: "db.events.find()",
+            runaway: SLOW,
+            read_only_refusal: "",
+            fixture: Some(Fixture {
+                types: &[
+                    "int", "string", "long", "decimal", "double", "bool", "date", "date", "binData",
+                ],
+                renders: &[
+                    ("flag", 0, "true"),
+                    ("flag", 1, "false"),
+                    ("day", 0, "2024-02-29T00:00:00.000Z"),
+                    ("day", 1, "1999-12-31T00:00:00.000Z"),
+                    ("moment", 0, "2024-02-29T12:34:56.000Z"),
+                    ("moment", 1, "1999-12-31T23:59:59.000Z"),
+                    ("bytes", 0, "BinData(0, 'AP8=')"),
+                    ("bytes", 1, "BinData(0, '3q2+7w==')"),
+                ],
+                find: Box::new(|key| {
+                    format!("db.conformance.find({{_id: {key}}}, {{label: 1, _id: 0}})")
+                }),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires the repository development database configured through dbdelve_MONGO_URL",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
 }

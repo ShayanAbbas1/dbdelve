@@ -216,6 +216,27 @@ GROUP BY plan;
 -- `deactivate_account` is a Postgres/MySQL stored procedure, and has nowhere to
 -- go here for the same reason.
 
+-- The engine conformance suite's fixture (src/db/conformance.rs): one table,
+-- the same shape in every seed. `whole` is above 2^53 on purpose. Ids 900 and
+-- up belong to the suite's write scenarios.
+
+CREATE TABLE conformance (
+    id INTEGER PRIMARY KEY,
+    label TEXT NOT NULL,
+    whole INTEGER,
+    fraction NUMERIC,
+    ratio REAL,
+    flag BOOLEAN,
+    day DATE,
+    moment DATETIME,
+    bytes BLOB
+);
+
+INSERT INTO conformance (id, label, whole, fraction, ratio, flag, day, moment, bytes) VALUES
+    (1, 'alpha', 9007199254740993, 12.50, 0.5, 1, '2024-02-29', '2024-02-29 12:34:56', X'00FF'),
+    (2, 'Zoë 李 🐉 ''quoted''', -42, -0.01, -1.25, 0, '1999-12-31', '1999-12-31 23:59:59', X'DEADBEEF'),
+    (3, 'nulls', NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
 -- A million rows and two hundred columns: the fixtures the grid's paging and
 -- horizontal scrolling are measured against, not the hand-written rows above.
 

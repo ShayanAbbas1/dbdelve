@@ -2420,6 +2420,60 @@ mod tests {
         )
     }
 
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        Subject {
+            connection: live_profile(),
+            engine: Engine::Postgres,
+            schema: "public",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::Postgres, "public"),
+            endless: "SELECT generate_series(1, 500000000) AS n",
+            runaway: "SELECT pg_sleep(30)",
+            read_only_refusal: "read-only transaction",
+            fixture: Some(Fixture {
+                types: &[
+                    "int4",
+                    "text",
+                    "int8",
+                    "numeric",
+                    "float8",
+                    "bool",
+                    "date",
+                    "timestamp",
+                    "bytea",
+                ],
+                renders: &[
+                    ("flag", 0, "t"),
+                    ("flag", 1, "f"),
+                    ("bytes", 0, "\\x00ff"),
+                    ("bytes", 1, "\\xdeadbeef"),
+                ],
+                find: Box::new(|key| sql_find(Engine::Postgres, "public", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires a local Postgres server configured through PG*",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
+
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_reads_run_at_once_take_the_time_of_one() {

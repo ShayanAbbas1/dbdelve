@@ -748,4 +748,56 @@ mod tests {
             assert_eq!(rows.columns.len(), structure.columns.len(), "{relation}");
         }
     }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        let path = std::env::var("dbdelve_TURSO_PATH").expect("dbdelve_TURSO_PATH is required");
+        Subject {
+            connection: crate::db::Connection::open(crate::db::ConnectionConfig::Turso {
+                path,
+                statement_timeout: 0,
+            })
+            .expect("connection should open"),
+            engine: Engine::Turso,
+            schema: "main",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::Turso, "main"),
+            endless: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                      SELECT i FROM n",
+            runaway: RUNAWAY,
+            read_only_refusal: "",
+            fixture: Some(Fixture {
+                types: &[
+                    "integer", "text", "integer", "numeric", "real", "boolean", "date", "datetime",
+                    "blob",
+                ],
+                renders: &[
+                    ("fraction", 0, "12.5"),
+                    ("bytes", 0, "x'00FF'"),
+                    ("bytes", 1, "x'DEADBEEF'"),
+                ],
+                find: Box::new(|key| sql_find(Engine::Turso, "main", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires a Turso database file configured through dbdelve_TURSO_PATH, a copy of the SQLite development database",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
 }

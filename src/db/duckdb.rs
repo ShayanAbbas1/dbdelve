@@ -2411,4 +2411,86 @@ mod tests {
             "main",
         );
     }
+
+    struct ScratchDir(std::path::PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "dbdelve-conformance-duckdb-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).expect("a scratch directory nobody else made");
+        let scratch = ScratchDir(directory);
+        let path = scratch.0.join("dbdelve.duckdb");
+        drop(::duckdb::Connection::open(&path).expect("the scratch database is created"));
+        let connection = crate::db::Connection::open(crate::db::ConnectionConfig::duckdb(
+            path.to_string_lossy().into_owned(),
+            0,
+        ))
+        .expect("connection should open");
+        let seed = std::fs::read_to_string(fixture("001-dbdelve-demo.sql")).expect("the dev seed");
+        connection
+            .query(&seed, &crate::db::CancelToken::default(), Fetch::default())
+            .expect("the dev seed loads");
+        Subject {
+            connection,
+            engine: Engine::DuckDb,
+            schema: "main",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::DuckDb, "main"),
+            endless: "SELECT range FROM range(1000000000)",
+            runaway: "SELECT count(*) FROM range(100000000000)",
+            read_only_refusal: "",
+            fixture: Some(Fixture {
+                types: &[
+                    "integer",
+                    "varchar",
+                    "bigint",
+                    "decimal(10,2)",
+                    "double",
+                    "boolean",
+                    "date",
+                    "timestamp",
+                    "blob",
+                ],
+                renders: &[
+                    ("flag", 0, "true"),
+                    ("flag", 1, "false"),
+                    ("bytes", 0, "00ff"),
+                    ("bytes", 1, "deadbeef"),
+                ],
+                find: Box::new(|key| sql_find(Engine::DuckDb, "main", key)),
+            }),
+            _guard: Some(Box::new(scratch)),
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "builds the DuckDB development seed into a temp file",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
 }

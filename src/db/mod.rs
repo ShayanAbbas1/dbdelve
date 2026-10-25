@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+#[cfg(test)]
+mod conformance;
 mod duckdb;
 mod mongo;
 mod mssql;

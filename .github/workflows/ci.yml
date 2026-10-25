@@ -114,11 +114,13 @@ jobs:
       # without one; the mock tests cover the same ground offline. The one
       # live test that needs no account stays: it is what proves the TLS
       # provider is linked at run time.
-      - run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --skip reads_run_at_once
+      - run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --skip reads_run_at_once --skip conformance
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
       # like SQLite misses the margin by chance, so they run alone.
       - run: cargo test reads_run_at_once -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --test-threads=1
+      # Own step: each DuckDB subject seeds a 1M-row table, which would add contention to the timing assertions above.
+      - run: cargo test live_conformance -- --include-ignored --skip turso::tests::live_ --test-threads=4
       - run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
       # The backdrop blur's pixel tests live in the vendored wgpu renderer,
       # which isn't a workspace member, so `cargo test` alone never runs them.
