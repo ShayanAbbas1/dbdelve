@@ -9,6 +9,7 @@ mod explain;
 mod filters;
 mod gates;
 mod previews;
+mod redis_writes;
 mod rows;
 mod sorts;
 mod spellings;
