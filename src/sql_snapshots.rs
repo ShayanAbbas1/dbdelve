@@ -4,10 +4,13 @@
 //! `explorer.rs` and `db/mod.rs` so that refactor never edits the tests that
 //! judge it.
 
+mod previews;
 mod spellings;
 
 use crate::{
     db::Engine,
+    filter::{self, Operator},
+    redis_cmd,
     sql::{self, Mode},
 };
 
@@ -72,6 +75,31 @@ pub(crate) const TYPES: [Option<&str>; 10] = [
     Some("uniqueidentifier"),
     Some("bytea"),
 ];
+
+pub(crate) const PAGE_KEYS: [&[&str]; 5] = [
+    &[],
+    &["id"],
+    &["id", "Region"],
+    &["we\"ird", "it's", "back`tick", "ümlaut", "[x]", "a.b"],
+    &[""],
+];
+
+pub(crate) fn home(engine: Engine) -> (&'static str, &'static str) {
+    match engine {
+        Engine::MongoDb => ("dbdelve_dev", "accounts"),
+        Engine::Redis => ("db0", redis_cmd::browse::KEYS),
+        _ => ("public", "accounts"),
+    }
+}
+
+pub(crate) fn sample_filter(engine: Engine) -> String {
+    let field = if engine == Engine::Redis {
+        "key"
+    } else {
+        "Name"
+    };
+    filter::filter_predicate(engine, field, None, Operator::Equals, "it's").unwrap_or_default()
+}
 
 /// Backslash first, so the encoding stays injective: a real NUL records as
 /// `\u{0}` and the five characters `\u{0}` as `\\u{0}`.

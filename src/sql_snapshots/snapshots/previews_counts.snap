@@ -1,0 +1,1123 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] plain · count all
+  |SELECT COUNT(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] plain · count filtered
+  |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] quotes · count all
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] quotes · count filtered
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] unicode · count all
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] unicode · count filtered
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] reserved · count all
+  |SELECT COUNT(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] reserved · count filtered
+  |SELECT COUNT(*) FROM "select"."order" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] mixed case · count all
+  |SELECT COUNT(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] mixed case · count filtered
+  |SELECT COUNT(*) FROM "Sales"."OrderLines" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] brackets and dots · count all
+  |SELECT COUNT(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM "[dbo]"."a.b" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] backslash · count all
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] backslash · count filtered
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] plain · count all
+  |SELECT COUNT(*) FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] plain · probe all
+  |SELECT 1 FROM `public`.`accounts` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] plain · count filtered
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] plain · probe filtered
+  |SELECT 1 FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] quotes · count all
+  |SELECT COUNT(*) FROM `my "odd" schema`.`it's ``tick`` "dq"`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] quotes · probe all
+  |SELECT 1 FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] quotes · count filtered
+  |SELECT COUNT(*) FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] quotes · probe filtered
+  |SELECT 1 FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] unicode · count all
+  |SELECT COUNT(*) FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] unicode · probe all
+  |SELECT 1 FROM `données`.`Ünïcødé 表` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] unicode · count filtered
+  |SELECT COUNT(*) FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] unicode · probe filtered
+  |SELECT 1 FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] reserved · count all
+  |SELECT COUNT(*) FROM `select`.`order`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] reserved · probe all
+  |SELECT 1 FROM `select`.`order` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] reserved · count filtered
+  |SELECT COUNT(*) FROM `select`.`order` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] reserved · probe filtered
+  |SELECT 1 FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] mixed case · count all
+  |SELECT COUNT(*) FROM `Sales`.`OrderLines`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] mixed case · probe all
+  |SELECT 1 FROM `Sales`.`OrderLines` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] mixed case · count filtered
+  |SELECT COUNT(*) FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] mixed case · probe filtered
+  |SELECT 1 FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] brackets and dots · count all
+  |SELECT COUNT(*) FROM `[dbo]`.`a.b`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] brackets and dots · probe all
+  |SELECT 1 FROM `[dbo]`.`a.b` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] brackets and dots · probe filtered
+  |SELECT 1 FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] backslash · count all
+  |SELECT COUNT(*) FROM `back\\slash`.`trail\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] backslash · probe all
+  |SELECT 1 FROM `back\\slash`.`trail\\` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] backslash · count filtered
+  |SELECT COUNT(*) FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] backslash · probe filtered
+  |SELECT 1 FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] plain · count all
+  |SELECT COUNT(*) FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] plain · probe all
+  |SELECT 1 FROM `public`.`accounts` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] plain · count filtered
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] plain · probe filtered
+  |SELECT 1 FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] quotes · count all
+  |SELECT COUNT(*) FROM `my "odd" schema`.`it's ``tick`` "dq"`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] quotes · probe all
+  |SELECT 1 FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] quotes · count filtered
+  |SELECT COUNT(*) FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] quotes · probe filtered
+  |SELECT 1 FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] unicode · count all
+  |SELECT COUNT(*) FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] unicode · probe all
+  |SELECT 1 FROM `données`.`Ünïcødé 表` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] unicode · count filtered
+  |SELECT COUNT(*) FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] unicode · probe filtered
+  |SELECT 1 FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] reserved · count all
+  |SELECT COUNT(*) FROM `select`.`order`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] reserved · probe all
+  |SELECT 1 FROM `select`.`order` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] reserved · count filtered
+  |SELECT COUNT(*) FROM `select`.`order` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] reserved · probe filtered
+  |SELECT 1 FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] mixed case · count all
+  |SELECT COUNT(*) FROM `Sales`.`OrderLines`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] mixed case · probe all
+  |SELECT 1 FROM `Sales`.`OrderLines` LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] mixed case · count filtered
+  |SELECT COUNT(*) FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] mixed case · probe filtered
+  |SELECT 1 FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] brackets and dots · count all
+  |SELECT COUNT(*) FROM `[dbo]`.`a.b`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] brackets and dots · probe all
+  |SELECT 1 FROM `[dbo]`.`a.b` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] brackets and dots · probe filtered
+  |SELECT 1 FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] backslash · count all
+  |SELECT COUNT(*) FROM `back\\slash`.`trail\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] backslash · probe all
+  |SELECT 1 FROM `back\\slash`.`trail\\` LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] backslash · count filtered
+  |SELECT COUNT(*) FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] backslash · probe filtered
+  |SELECT 1 FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] plain · count all
+  |SELECT COUNT(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] plain · count filtered
+  |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] quotes · count all
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] quotes · count filtered
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] unicode · count all
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] unicode · count filtered
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] reserved · count all
+  |SELECT COUNT(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] reserved · count filtered
+  |SELECT COUNT(*) FROM "select"."order" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] mixed case · count all
+  |SELECT COUNT(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] mixed case · count filtered
+  |SELECT COUNT(*) FROM "Sales"."OrderLines" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] brackets and dots · count all
+  |SELECT COUNT(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM "[dbo]"."a.b" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] backslash · count all
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] backslash · count filtered
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] plain · count all
+  |SELECT COUNT(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] plain · count filtered
+  |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] quotes · count all
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] quotes · count filtered
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] unicode · count all
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] unicode · count filtered
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] reserved · count all
+  |SELECT COUNT(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] reserved · count filtered
+  |SELECT COUNT(*) FROM "select"."order" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] mixed case · count all
+  |SELECT COUNT(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] mixed case · count filtered
+  |SELECT COUNT(*) FROM "Sales"."OrderLines" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] brackets and dots · count all
+  |SELECT COUNT(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM "[dbo]"."a.b" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] backslash · count all
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] backslash · count filtered
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] plain · count all
+  |SELECT COUNT(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] plain · count filtered
+  |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] quotes · count all
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] quotes · count filtered
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] unicode · count all
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] unicode · count filtered
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] reserved · count all
+  |SELECT COUNT(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] reserved · count filtered
+  |SELECT COUNT(*) FROM "select"."order" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] mixed case · count all
+  |SELECT COUNT(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] mixed case · count filtered
+  |SELECT COUNT(*) FROM "Sales"."OrderLines" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] brackets and dots · count all
+  |SELECT COUNT(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM "[dbo]"."a.b" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] backslash · count all
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] backslash · count filtered
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] plain · count all
+  |SELECT COUNT(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] plain · count filtered
+  |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] quotes · count all
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] quotes · count filtered
+  |SELECT COUNT(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] unicode · count all
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] unicode · count filtered
+  |SELECT COUNT(*) FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] reserved · count all
+  |SELECT COUNT(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] reserved · count filtered
+  |SELECT COUNT(*) FROM "select"."order" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] mixed case · count all
+  |SELECT COUNT(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] mixed case · count filtered
+  |SELECT COUNT(*) FROM "Sales"."OrderLines" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] brackets and dots · count all
+  |SELECT COUNT(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] brackets and dots · count filtered
+  |SELECT COUNT(*) FROM "[dbo]"."a.b" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] backslash · count all
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] backslash · count filtered
+  |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] plain · count all
+  |SELECT COUNT_BIG(*) FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] plain · count filtered
+  |SELECT COUNT_BIG(*) FROM "public"."accounts" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] quotes · count all
+  |SELECT COUNT_BIG(*) FROM "my ""odd"" schema"."it's `tick` ""dq"""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] quotes · probe all
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] quotes · count filtered
+  |SELECT COUNT_BIG(*) FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = N'it''s'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] quotes · probe filtered
+  |SELECT 1 FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] unicode · count all
+  |SELECT COUNT_BIG(*) FROM "données"."Ünïcødé 表"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] unicode · count filtered
+  |SELECT COUNT_BIG(*) FROM "données"."Ünïcødé 表" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] reserved · count all
+  |SELECT COUNT_BIG(*) FROM "select"."order"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] reserved · count filtered
+  |SELECT COUNT_BIG(*) FROM "select"."order" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] mixed case · count all
+  |SELECT COUNT_BIG(*) FROM "Sales"."OrderLines"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] mixed case · count filtered
+  |SELECT COUNT_BIG(*) FROM "Sales"."OrderLines" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] brackets and dots · count all
+  |SELECT COUNT_BIG(*) FROM "[dbo]"."a.b"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] brackets and dots · count filtered
+  |SELECT COUNT_BIG(*) FROM "[dbo]"."a.b" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] backslash · count all
+  |SELECT COUNT_BIG(*) FROM "back\\slash"."trail\\"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] backslash · probe all
+  |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] backslash · count filtered
+  |SELECT COUNT_BIG(*) FROM "back\\slash"."trail\\" WHERE "Name" = N'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] backslash · probe filtered
+  |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = N'it''s' LIMIT 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] plain · count all
+  |db.getCollection("accounts").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] plain · probe all
+  |SELECT 1 FROM "public"."accounts" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] plain · count filtered
+  |db.getCollection("accounts").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] plain · probe filtered
+  |SELECT 1 FROM "public"."accounts" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] quotes · count all
+  |db.getCollection("it's `tick` \\"dq\\"").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] quotes · probe all
+  |SELECT 1 FROM "my \\"odd\\" schema"."it's `tick` \\"dq\\"" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] quotes · count filtered
+  |db.getCollection("it's `tick` \\"dq\\"").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] quotes · probe filtered
+  |SELECT 1 FROM "my \\"odd\\" schema"."it's `tick` \\"dq\\"" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] unicode · count all
+  |db.getCollection("Ünïcødé 表").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] unicode · probe all
+  |SELECT 1 FROM "données"."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] unicode · count filtered
+  |db.getCollection("Ünïcødé 表").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] unicode · probe filtered
+  |SELECT 1 FROM "données"."Ünïcødé 表" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] reserved · count all
+  |db.getCollection("order").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] reserved · probe all
+  |SELECT 1 FROM "select"."order" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] reserved · count filtered
+  |db.getCollection("order").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] reserved · probe filtered
+  |SELECT 1 FROM "select"."order" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] mixed case · count all
+  |db.getCollection("OrderLines").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] mixed case · probe all
+  |SELECT 1 FROM "Sales"."OrderLines" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] mixed case · count filtered
+  |db.getCollection("OrderLines").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] mixed case · probe filtered
+  |SELECT 1 FROM "Sales"."OrderLines" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] brackets and dots · count all
+  |db.getCollection("a.b").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] brackets and dots · probe all
+  |SELECT 1 FROM "[dbo]"."a.b" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] brackets and dots · count filtered
+  |db.getCollection("a.b").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] brackets and dots · probe filtered
+  |SELECT 1 FROM "[dbo]"."a.b" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] backslash · count all
+  |db.getCollection("trail\\\\").countDocuments({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] backslash · probe all
+  |SELECT 1 FROM "back\\\\slash"."trail\\\\" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[mongodb] backslash · count filtered
+  |db.getCollection("trail\\\\").countDocuments({"Name": {"$eq": "it's"}})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] backslash · probe filtered
+  |SELECT 1 FROM "back\\\\slash"."trail\\\\" WHERE {"Name": {"$eq": "it's"}} LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[redis] plain · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] plain · probe all
+  |SELECT 1 FROM public.accounts LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] plain · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] plain · probe filtered
+  |SELECT 1 FROM public.accounts WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] quotes · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] quotes · probe all
+  |SELECT 1 FROM "my \\"odd\\" schema"."it's `tick` \\"dq\\"" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[redis] quotes · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] quotes · probe filtered
+  |SELECT 1 FROM "my \\"odd\\" schema"."it's `tick` \\"dq\\"" WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[redis] unicode · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] unicode · probe all
+  |SELECT 1 FROM données."Ünïcødé 表" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] unicode · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] unicode · probe filtered
+  |SELECT 1 FROM données."Ünïcødé 表" WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] reserved · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] reserved · probe all
+  |SELECT 1 FROM select.order LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] reserved · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] reserved · probe filtered
+  |SELECT 1 FROM select.order WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] mixed case · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] mixed case · probe all
+  |SELECT 1 FROM Sales.OrderLines LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] mixed case · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] mixed case · probe filtered
+  |SELECT 1 FROM Sales.OrderLines WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] brackets and dots · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] brackets and dots · probe all
+  |SELECT 1 FROM [dbo].a.b LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] brackets and dots · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] brackets and dots · probe filtered
+  |SELECT 1 FROM [dbo].a.b WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] backslash · count all
+  |DBSIZE|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] backslash · probe all
+  |SELECT 1 FROM "back\\\\slash"."trail\\\\" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[redis] backslash · count filtered
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] backslash · probe filtered
+  |SELECT 1 FROM "back\\\\slash"."trail\\\\" WHERE MATCH "it's" LIMIT 1|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
