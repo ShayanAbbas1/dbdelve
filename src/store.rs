@@ -605,11 +605,8 @@ pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
     // A file with an unavailable profile that the mixed reader cannot hold
     // takes the plain decode too, so no file an earlier build read is newly
     // refused.
-    // toml's `Value` reads a table whose first key is its private datetime
-    // marker as a datetime and drops the rest of the table, so a file that
-    // spells the marker anywhere is never read into a `Table`.
     if unavailable.contains(&true)
-        && !text.contains("__toml_private_datetime")
+        && !names_a_private_key(text)
         && let Ok(list) = decode_mixed(text, &unavailable)
     {
         return Ok(list);
@@ -645,6 +642,28 @@ pub(crate) fn encode_profiles(list: &ProfileList) -> Result<String, String> {
         })
     }
     .map_err(|error| format!("Could not encode the profile list: {error}"))
+}
+
+/// Whether any key in the document, as toml reads it once unescaped, is one
+/// of toml's private markers. `Value` reads a table whose first key is the
+/// datetime marker as a datetime and drops every other key in it, and a key
+/// can spell the marker with escapes the text never shows. A real datetime is
+/// its own kind of value here, never a table, so only a key can be mistaken.
+/// A document this cannot parse counts too: the mixed reader is not for it.
+fn names_a_private_key(text: &str) -> bool {
+    fn in_table(table: &toml::de::DeTable) -> bool {
+        table.iter().any(|(key, value)| {
+            key.get_ref().contains("__toml_private") || in_value(value.get_ref())
+        })
+    }
+    fn in_value(value: &toml::de::DeValue) -> bool {
+        match value {
+            toml::de::DeValue::Table(table) => in_table(table),
+            toml::de::DeValue::Array(array) => array.iter().any(|item| in_value(item.get_ref())),
+            _ => false,
+        }
+    }
+    toml::de::DeTable::parse(text).map_or(true, |document| in_table(document.get_ref()))
 }
 
 /// Each profile's engine tag and nothing else; every other key is skipped
@@ -1742,9 +1761,62 @@ id = 0
             );
         assert!(marked.contains("keep = \"lost\""));
         assert_eq!(decode_profiles(&marked), decoded_as_before(&marked));
+        // Spelled with escapes, with either string kind for the key, in any
+        // place, nested in an array of tables, or after another key.
+        for key in [
+            "\"$\\u005F_toml_private_datetime\"",
+            "\"$_\\U0000005Ftoml_private_datetime\"",
+            "\"$__toml_private_datetime\"",
+            "'$__toml_private_datetime'",
+            "\"$__toml_private_Datetime\"",
+        ] {
+            let table = format!("{{ {key} = \"2026-10-01T09:00:00Z\", keep = \"lost\" }}");
+            for place in [
+                format!("odd = {table}\n"),
+                format!("odd = [{table}]\n"),
+                format!("odd = {{ first = 1, inner = {table} }}\n"),
+            ] {
+                let text = stub("a", "postgres")
+                    + &stub("x", "y").replace("engine = 'y'\n", &format!("engine = true\n{place}"));
+                assert!(decoded_as_before(&text).is_err(), "{text}");
+                assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+            }
+        }
+        // In a value it is only text: the profile is held back, and kept.
         let quoted =
-            stub("a", "postgres") + "note = '__toml_private_datetime'\n" + &stub("x", "plugin:t");
-        assert_eq!(decode_profiles(&quoted), decoded_as_before(&quoted));
+            stub("a", "postgres") + &stub("x", "plugin:t") + "note = '$__toml_private_datetime'\n";
+        let list = decode_profiles(&quoted).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        assert!(
+            encode_profiles(&list)
+                .unwrap()
+                .contains("note = \"$__toml_private_datetime\"")
+        );
+    }
+
+    #[test]
+    fn every_kind_of_datetime_comes_back_in_an_unavailable_profile() {
+        let kinds = "offset = 1979-05-27T07:32:00-08:00\n\
+                     fraction = 1979-05-27T00:32:00.999999Z\n\
+                     local = 1979-05-27T07:32:00\n\
+                     day = 1979-05-27\n\
+                     time = 07:32:00\n\
+                     [profiles.nested]\nat = [1979-05-27, 07:32:00]\n";
+        let text = stub("a", "postgres") + &stub("x", "plugin:t") + kinds;
+        let list = decode_profiles(&text).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        let saved = encode_profiles(&list).unwrap();
+        for line in [
+            "offset = 1979-05-27T07:32:00-08:00\n",
+            "fraction = 1979-05-27T00:32:00.999999Z\n",
+            "local = 1979-05-27T07:32:00\n",
+            "day = 1979-05-27\n",
+            "time = 07:32:00\n",
+            "at = [\n    1979-05-27,\n    07:32:00,\n]\n",
+        ] {
+            assert!(saved.contains(line), "{line} in {saved}");
+        }
+        assert_eq!(decode_profiles(&saved).unwrap(), list);
     }
 
     #[test]
