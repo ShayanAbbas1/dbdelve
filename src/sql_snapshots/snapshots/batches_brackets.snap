@@ -1,0 +1,151 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[postgres] transaction_start
+  (none)
+
+[postgres] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[postgres] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mysql] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mysql] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mysql] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mysql] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mariadb] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mariadb] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mariadb] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mariadb] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[sqlite] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[sqlite] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[sqlite] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[sqlite] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[turso] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[turso] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[turso] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[turso] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[duckdb] all_or_nothing
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[duckdb] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[duckdb] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[duckdb] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+[snowflake] all_or_nothing => error: |Snowflake runs each request on its own, so no transaction can span the chunks.|
+
+[snowflake] transaction_start
+  |BEGIN|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[snowflake] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[snowflake] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mssql] all_or_nothing
+  |BEGIN TRANSACTION|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mssql] transaction_start
+  |BEGIN TRANSACTION|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mssql] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[mssql] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+[mongodb] all_or_nothing => error: |MongoDB has no transaction on a standalone server, so each chunk is kept as it goes.|
+
+[mongodb] transaction_start
+  (none)
+
+[mongodb] COMMIT
+  |COMMIT|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) bracket=true
+
+[mongodb] ROLLBACK
+  |ROLLBACK|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) bracket=true
+[redis] all_or_nothing => error: |Redis has no transaction that rolls back, so each chunk is kept as it goes.|
+
+[redis] transaction_start
+  (none)
+
+[redis] COMMIT
+  |COMMIT|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) bracket=true
+
+[redis] ROLLBACK
+  |ROLLBACK|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) bracket=true

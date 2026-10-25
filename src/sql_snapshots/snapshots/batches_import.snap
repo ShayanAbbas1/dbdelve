@@ -1,0 +1,1763 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] base · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] json cell · skip=true
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] json null and scalar · skip=true
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[postgres] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[postgres] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[postgres] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[postgres] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[postgres] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[postgres] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] big numbers · skip=true
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column we"ird · skip=true
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column back`tick · skip=true
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column it's · skip=true
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column [x] · skip=true
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column a.b · skip=true
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] conflict column  · skip=true
+  |INSERT INTO "public"."accounts" ("") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] operator column · skip=true
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation plain · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation quotes · skip=true
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation unicode · skip=true
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation reserved · skip=true
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation mixed case · skip=true
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation brackets and dots · skip=true
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation backslash · skip=true
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] base · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] base · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] json cell · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `doc`) VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] json cell · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `doc`) VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] json null and scalar · skip=false
+  |INSERT INTO `public`.`accounts` (`doc`) VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] json null and scalar · skip=true
+  |INSERT INTO `public`.`accounts` (`doc`) VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON DUPLICATE KEY UPDATE `doc` = `doc`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[mysql] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[mysql] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[mysql] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[mysql] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[mysql] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[mysql] big numbers · skip=false
+  |INSERT INTO `public`.`accounts` (`n`) VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] big numbers · skip=true
+  |INSERT INTO `public`.`accounts` (`n`) VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON DUPLICATE KEY UPDATE `n` = `n`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column we"ird · skip=false
+  |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column we"ird · skip=true
+  |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v') ON DUPLICATE KEY UPDATE `we"ird` = `we"ird`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column back`tick · skip=false
+  |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column back`tick · skip=true
+  |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v') ON DUPLICATE KEY UPDATE `back``tick` = `back``tick`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column it's · skip=false
+  |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column it's · skip=true
+  |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v') ON DUPLICATE KEY UPDATE `it's` = `it's`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column [x] · skip=false
+  |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column [x] · skip=true
+  |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v') ON DUPLICATE KEY UPDATE `[x]` = `[x]`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column a.b · skip=false
+  |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column a.b · skip=true
+  |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v') ON DUPLICATE KEY UPDATE `a.b` = `a.b`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column  · skip=false
+  |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] conflict column  · skip=true
+  |INSERT INTO `public`.`accounts` (``) VALUES ('v') ON DUPLICATE KEY UPDATE `` = ``|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] operator column · skip=false
+  |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] operator column · skip=true
+  |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v') ON DUPLICATE KEY UPDATE `$set` = `$set`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation plain · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation plain · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation quotes · skip=false
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation quotes · skip=true
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation unicode · skip=false
+  |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation unicode · skip=true
+  |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation reserved · skip=false
+  |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation reserved · skip=true
+  |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation mixed case · skip=false
+  |INSERT INTO `Sales`.`OrderLines` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation mixed case · skip=true
+  |INSERT INTO `Sales`.`OrderLines` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation brackets and dots · skip=false
+  |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation brackets and dots · skip=true
+  |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation backslash · skip=false
+  |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation backslash · skip=true
+  |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] base · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] base · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] json cell · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `doc`) VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] json cell · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `doc`) VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] json null and scalar · skip=false
+  |INSERT INTO `public`.`accounts` (`doc`) VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] json null and scalar · skip=true
+  |INSERT INTO `public`.`accounts` (`doc`) VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON DUPLICATE KEY UPDATE `doc` = `doc`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[mariadb] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[mariadb] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[mariadb] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[mariadb] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[mariadb] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[mariadb] big numbers · skip=false
+  |INSERT INTO `public`.`accounts` (`n`) VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] big numbers · skip=true
+  |INSERT INTO `public`.`accounts` (`n`) VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON DUPLICATE KEY UPDATE `n` = `n`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column we"ird · skip=false
+  |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column we"ird · skip=true
+  |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v') ON DUPLICATE KEY UPDATE `we"ird` = `we"ird`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column back`tick · skip=false
+  |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column back`tick · skip=true
+  |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v') ON DUPLICATE KEY UPDATE `back``tick` = `back``tick`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column it's · skip=false
+  |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column it's · skip=true
+  |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v') ON DUPLICATE KEY UPDATE `it's` = `it's`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column [x] · skip=false
+  |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column [x] · skip=true
+  |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v') ON DUPLICATE KEY UPDATE `[x]` = `[x]`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column a.b · skip=false
+  |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column a.b · skip=true
+  |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v') ON DUPLICATE KEY UPDATE `a.b` = `a.b`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column  · skip=false
+  |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] conflict column  · skip=true
+  |INSERT INTO `public`.`accounts` (``) VALUES ('v') ON DUPLICATE KEY UPDATE `` = ``|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] operator column · skip=false
+  |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] operator column · skip=true
+  |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v') ON DUPLICATE KEY UPDATE `$set` = `$set`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation plain · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation plain · skip=true
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation quotes · skip=false
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation quotes · skip=true
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation unicode · skip=false
+  |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation unicode · skip=true
+  |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation reserved · skip=false
+  |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation reserved · skip=true
+  |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation mixed case · skip=false
+  |INSERT INTO `Sales`.`OrderLines` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation mixed case · skip=true
+  |INSERT INTO `Sales`.`OrderLines` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation brackets and dots · skip=false
+  |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation brackets and dots · skip=true
+  |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation backslash · skip=false
+  |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation backslash · skip=true
+  |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] base · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] json cell · skip=true
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] json null and scalar · skip=true
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[sqlite] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[sqlite] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[sqlite] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[sqlite] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[sqlite] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[sqlite] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] big numbers · skip=true
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column we"ird · skip=true
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column back`tick · skip=true
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column it's · skip=true
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column [x] · skip=true
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column a.b · skip=true
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] conflict column  · skip=true
+  |INSERT INTO "public"."accounts" ("") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] operator column · skip=true
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation plain · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation quotes · skip=true
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation unicode · skip=true
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation reserved · skip=true
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation mixed case · skip=true
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation brackets and dots · skip=true
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation backslash · skip=true
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] base · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] json cell · skip=true
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] json null and scalar · skip=true
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[turso] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[turso] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[turso] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[turso] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[turso] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[turso] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] big numbers · skip=true
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column we"ird · skip=true
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column back`tick · skip=true
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column it's · skip=true
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column [x] · skip=true
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column a.b · skip=true
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] conflict column  · skip=true
+  |INSERT INTO "public"."accounts" ("") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] operator column · skip=true
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation plain · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation quotes · skip=true
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation unicode · skip=true
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation reserved · skip=true
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation mixed case · skip=true
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation brackets and dots · skip=true
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation backslash · skip=true
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, '0', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] base · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] json cell · skip=true
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] json null and scalar · skip=true
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[duckdb] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[duckdb] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[duckdb] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[duckdb] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[duckdb] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[duckdb] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] big numbers · skip=true
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column we"ird · skip=true
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column back`tick · skip=true
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column it's · skip=true
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column [x] · skip=true
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column a.b · skip=true
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] conflict column  · skip=true
+  |INSERT INTO "public"."accounts" ("") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] operator column · skip=true
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation plain · skip=true
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation quotes · skip=true
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation unicode · skip=true
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation reserved · skip=true
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation mixed case · skip=true
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation brackets and dots · skip=true
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation backslash · skip=true
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '') ON CONFLICT DO NOTHING|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] base · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] json cell · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] json null and scalar · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[snowflake] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[snowflake] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[snowflake] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[snowflake] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[snowflake] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[snowflake] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] big numbers · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column we"ird · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column back`tick · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column it's · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column [x] · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column a.b · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] conflict column  · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] operator column · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation plain · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation quotes · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation unicode · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation reserved · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation mixed case · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation brackets and dots · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[snowflake] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation backslash · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] base · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES (N'1', N'{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] json cell · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES (N'null'),|
+  |(N'"text"'),|
+  |(N'7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] json null and scalar · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[mssql] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[mssql] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[mssql] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[mssql] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[mssql] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[mssql] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] big numbers · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column we"ird · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column back`tick · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column it's · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column [x] · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column a.b · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] conflict column  · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] operator column · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation plain · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation quotes · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation unicode · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation reserved · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation mixed case · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation brackets and dots · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mssql] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
+  |(N'-2.5', NULL, N'0', N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation backslash · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[mongodb] base · skip=false
+  |db.getCollection("accounts").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] base · skip=true
+  |db.getCollection("accounts").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] json cell · skip=false
+  |db.getCollection("accounts").insertMany([{"id": 1, "doc": {"a": [1, "it's", null, {"b": true}], "c": "x\\\\\\\\y"}}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] json cell · skip=true
+  |db.getCollection("accounts").insertMany([{"id": 1, "doc": {"a": [1, "it's", null, {"b": true}], "c": "x\\\\\\\\y"}}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] json null and scalar · skip=false
+  |db.getCollection("accounts").insertMany([{"doc": null},|
+  |{"doc": "text"},|
+  |{"doc": 7}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] json null and scalar · skip=true
+  |db.getCollection("accounts").insertMany([{"doc": null},|
+  |{"doc": "text"},|
+  |{"doc": 7}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] missing cell · skip=false
+  |db.getCollection("accounts").insertMany([{"id": 1}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] missing cell · skip=true
+  |db.getCollection("accounts").insertMany([{"id": 1}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] empty columns · skip=false
+  |db.getCollection("accounts").insertMany([{}])|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] empty columns · skip=true
+  |db.getCollection("accounts").insertMany([{}])|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[mongodb] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[mongodb] big numbers · skip=false
+  |db.getCollection("accounts").insertMany([{"n": NumberLong("9223372036854775807")},|
+  |{"n": NumberDecimal("9223372036854775808")},|
+  |{"n": 0.1},|
+  |{"n": NumberDecimal("12345678901234567890")}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] big numbers · skip=true
+  |db.getCollection("accounts").insertMany([{"n": NumberLong("9223372036854775807")},|
+  |{"n": NumberDecimal("9223372036854775808")},|
+  |{"n": 0.1},|
+  |{"n": NumberDecimal("12345678901234567890")}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] 35 digit number · skip=false
+  error: |`11111111111111111111111111111111111` has more significant digits than a Decimal128 holds (34)|
+
+[mongodb] 35 digit number · skip=true
+  error: |`11111111111111111111111111111111111` has more significant digits than a Decimal128 holds (34)|
+
+[mongodb] conflict column we"ird · skip=false
+  |db.getCollection("accounts").insertMany([{"we\\"ird": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column we"ird · skip=true
+  |db.getCollection("accounts").insertMany([{"we\\"ird": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column back`tick · skip=false
+  |db.getCollection("accounts").insertMany([{"back`tick": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column back`tick · skip=true
+  |db.getCollection("accounts").insertMany([{"back`tick": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column it's · skip=false
+  |db.getCollection("accounts").insertMany([{"it's": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column it's · skip=true
+  |db.getCollection("accounts").insertMany([{"it's": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column [x] · skip=false
+  |db.getCollection("accounts").insertMany([{"[x]": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column [x] · skip=true
+  |db.getCollection("accounts").insertMany([{"[x]": "v"}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] conflict column a.b · skip=false
+  error: |`a.b` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] conflict column a.b · skip=true
+  error: |`a.b` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] conflict column  · skip=false
+  error: |`` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] conflict column  · skip=true
+  error: |`` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] operator column · skip=false
+  error: |`$set` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] operator column · skip=true
+  error: |`$set` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] relation plain · skip=false
+  |db.getCollection("accounts").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation plain · skip=true
+  |db.getCollection("accounts").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation quotes · skip=false
+  |db.getCollection("it's `tick` \\"dq\\"").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation quotes · skip=true
+  |db.getCollection("it's `tick` \\"dq\\"").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation unicode · skip=false
+  |db.getCollection("Ünïcødé 表").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation unicode · skip=true
+  |db.getCollection("Ünïcødé 表").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation reserved · skip=false
+  |db.getCollection("order").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation reserved · skip=true
+  |db.getCollection("order").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation mixed case · skip=false
+  |db.getCollection("OrderLines").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation mixed case · skip=true
+  |db.getCollection("OrderLines").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation brackets and dots · skip=false
+  |db.getCollection("a.b").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation brackets and dots · skip=true
+  |db.getCollection("a.b").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation backslash · skip=false
+  |db.getCollection("trail\\\\").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] relation backslash · skip=true
+  |db.getCollection("trail\\\\").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
+  |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] base · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] base · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] json cell · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] json cell · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] json null and scalar · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] json null and scalar · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] missing cell · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] missing cell · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] empty columns · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] empty columns · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] empty rows · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] empty rows · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] big numbers · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] big numbers · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column we"ird · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column we"ird · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column back`tick · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column back`tick · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column it's · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column it's · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column [x] · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column [x] · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column a.b · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column a.b · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column  · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] conflict column  · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] operator column · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] operator column · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation plain · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation plain · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation quotes · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation quotes · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation unicode · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation unicode · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation reserved · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation reserved · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation mixed case · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation mixed case · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation brackets and dots · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation brackets and dots · skip=true
+  error: |Redis takes no imported rows.|
+
+[redis] relation backslash · skip=false
+  error: |Redis takes no imported rows.|
+
+[redis] relation backslash · skip=true
+  error: |Redis takes no imported rows.|

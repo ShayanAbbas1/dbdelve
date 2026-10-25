@@ -1,0 +1,305 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] two rows
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] composite keys
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] empty
+  error: |There are no edits to apply.|
+
+[postgres] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[mysql] one row
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] two rows
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] composite keys
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '8' AND `Region` = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] default
+  |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] empty
+  error: |There are no edits to apply.|
+
+[mysql] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[mariadb] one row
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] two rows
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] composite keys
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '8' AND `Region` = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] default
+  |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] empty
+  error: |There are no edits to apply.|
+
+[mariadb] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[sqlite] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] two rows
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] composite keys
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] empty
+  error: |There are no edits to apply.|
+
+[sqlite] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[turso] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] two rows
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] composite keys
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] empty
+  error: |There are no edits to apply.|
+
+[turso] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[duckdb] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] two rows
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] composite keys
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] empty
+  error: |There are no edits to apply.|
+
+[duckdb] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[snowflake] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] two rows
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] composite keys
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] empty
+  error: |There are no edits to apply.|
+
+[snowflake] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[mssql] one row
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] two rows
+  |BEGIN TRANSACTION;|
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] composite keys
+  |BEGIN TRANSACTION;|
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] empty
+  error: |There are no edits to apply.|
+
+[mssql] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[mongodb] one row
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd")}, {$set: {"Name": "it's"}});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] two rows
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd")}, {$set: {"Name": "it's"}});|
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abce")}, {$set: {"Name": null}});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] several sets
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd")}, {$set: {"Name": "it's", "flag": true, "id": 42, "price": NumberDecimal("19.99")}});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] typed sets
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd")}, {$set: {"created": ISODate("2024-01-02T03:04:05.123Z"), "big": NumberLong("9007199254740993"), "ref": ObjectId("507f1f77bcf86cd799439011"), "score": 1.5}});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] nullable typed set
+  error: |maybe: `7` does not read as a value of type int | null.|
+
+[mongodb] mixed typed set
+  error: |mixed: `42` does not read as a value of type int | string.|
+
+[mongodb] integer key
+  |db.getCollection("accounts").updateOne({"id": 7}, {$set: {"Name": "it's"}});|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] composite key
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd"), "flag": true}, {$set: {"Name": "it's"}});|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] quoted key field
+  |db.getCollection("accounts").updateOne({"we\\"ird": 1}, {$set: {"Name": "it's"}});|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] default
+  error: |Name: MongoDB has no default for a field to take.|
+
+[mongodb] invalid typed set
+  error: |id: `abc` does not read as a value of type int.|
+
+[mongodb] invalid typed key
+  error: |_id: `xyz` does not read as a value of type objectId.|
+
+[mongodb] empty field name
+  error: |`` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] dotted field name
+  error: |`a.b` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] operator field name
+  error: |`$set` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] operator value
+  error: |x: a field name starting with `$` inside a value is an operator, which DBDelve does not write.|
+
+[mongodb] empty
+  error: |There are no edits to apply.|
+
+[mongodb] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[redis] keys grid edit
+  |SET user:1 "a\\nb é" XX KEEPTTL GET|
+  |EXPIRE user:1 60|
+  |RENAMENX user:1 "user:2 \\"new\\""|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] persist from null
+  |PERSIST k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] persist from empty
+  |PERSIST k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] empty
+  error: |There are no edits to apply.|
+
+[redis] keyless
+  error: |This row's key is not known.|
