@@ -1920,6 +1920,36 @@ impl Workspace {
             cx,
         );
     }
+
+    /// Removes a profile this build cannot open, asked about first like
+    /// [`Self::remove_profile`].
+    pub(crate) fn remove_unavailable(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at >= self.unavailable.len() {
+            return;
+        }
+        let removed = self.unavailable.remove(at);
+        // Ids are not unique in a hand-edited file, and what is filed under
+        // one belongs to every profile holding it.
+        let shared = self.profiles.iter().any(|profile| profile.id == removed.id)
+            || held_by_unavailable(&removed.id, &self.unavailable);
+        let note = if shared {
+            removal_note(&removed.name, 0, None)
+        } else {
+            let queries = store::saved_queries(&removed.id).len();
+            store::delete_password(&removed.id);
+            let removed_queries = store::delete_queries(&removed.id);
+            let _ = store::delete_grids(&removed.id);
+            for project in &mut self.projects {
+                project.connections.retain(|member| member != &removed.id);
+            }
+            removal_note(&removed.name, queries, removed_queries.err())
+        };
+        self.remember_profiles(cx);
+        if self.profiles.is_empty() {
+            self.refocus_front();
+        }
+        self.note(note, cx);
+    }
 }
 
 /// An entry in the connection form's project list.
@@ -2040,6 +2070,15 @@ pub(crate) fn is_unshared_imported_key<'a>(
         && !others.into_iter().any(|other| other == key)
 }
 
+/// Why a profile on `engine` cannot be opened: a plugin it names that is not
+/// installed, or an engine only a newer build has.
+pub(crate) fn unavailable_reason(engine: &str) -> String {
+    match engine.strip_prefix("plugin:") {
+        Some(plugin) if !plugin.is_empty() => format!("Needs the {plugin} plugin"),
+        _ => format!("Made by a newer DBDelve (engine `{engine}`)"),
+    }
+}
+
 /// Whether a profile this build cannot read holds `id`. Ids are not unique in
 /// a hand-edited file, and the keychain entry, saved queries, grid snapshots
 /// and project membership are filed by id, so they are that profile's too.
@@ -2155,6 +2194,20 @@ mod tests {
     const SHARED_ID: &str = "[[profiles]]\nid = 'pg'\nname = 'Postgres'\nhost = 'h'\n\
         database = 'd'\nuser = 'u'\nengine = 'postgres'\n\n\
         [[profiles]]\nid = 'pg'\nname = 'ODBC'\nengine = 'plugin:odbc'\n";
+
+    #[test]
+    fn an_unavailable_profile_says_what_it_is_missing() {
+        assert_eq!(unavailable_reason("plugin:odbc"), "Needs the odbc plugin");
+        assert_eq!(
+            unavailable_reason("clickhouse"),
+            "Made by a newer DBDelve (engine `clickhouse`)"
+        );
+        // No id to name: not a plugin anyone could install.
+        assert_eq!(
+            unavailable_reason("plugin:"),
+            "Made by a newer DBDelve (engine `plugin:`)"
+        );
+    }
 
     #[test]
     fn a_restore_prunes_no_grids_while_an_unavailable_profile_holds_the_id() {

@@ -29,7 +29,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   is typed. Connection rows carry their engine's logo (in their colour when
   they have one), a status dot read as the row is drawn, and the one in
   front is marked current; an empty project holds one "New connection in…"
-  row. `enter` on a project's row folds or unfolds it
+  row. A profile on an engine this build lacks (`Workspace::unavailable`) is
+  listed in its project greyed, its reason as the hint, with no status dot
+  and never under All; `enter` goes straight to the Remove confirmation, and
+  with no supported profile ⌘⇧P opens this scope to reach them
+  (`palette::without_a_connection`). `enter` on a project's row folds or unfolds it
   (`Command::ToggleProject`, the one row the palette stays up for); what is
   folded is `Workspace::collapsed_projects`, by name, kept for the session,
   starting unfolded, and the project in front is unfolded whenever a palette

@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use gpui_component::menu::DropdownMenu;
 
 pub(crate) use import_dialog::PreviewGrid;
+pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 

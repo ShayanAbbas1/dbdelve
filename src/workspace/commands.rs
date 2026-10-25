@@ -148,6 +148,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // With no connection to open, the palette opens only on what the
+        // welcome surface can use; any search reaches the connections this
+        // build cannot open, so they can be removed.
+        let mode = if self.profile().is_none() {
+            crate::palette::without_a_connection(mode, !self.unavailable.is_empty()).unwrap_or(mode)
+        } else {
+            mode
+        };
         // The palette draws over the import's question, and would let the
         // project it picked be renamed or deleted under it. Its own rows for
         // these are left out meanwhile (`palette::waits_for_import`); this
@@ -177,11 +185,9 @@ impl Workspace {
         // Swapping straight to another list skips `close_palette`, and a
         // theme being previewed must not outlive the list that previews it.
         self.end_theme_preview(window, cx);
-        // The theme lists and the engine list are the only ones reachable
-        // before any connection exists, from the welcome surface or the
-        // connection form.
         let picks_theme = matches!(mode, PaletteMode::Theme(_) | PaletteMode::ImportTheme(..));
-        let before_any_connection = picks_theme || mode == PaletteMode::Engine;
+        let before_any_connection =
+            crate::palette::without_a_connection(mode, !self.unavailable.is_empty()).is_some();
         if stroke == Some(Stroke::Close) || (self.profile().is_none() && !before_any_connection) {
             self.close_palette(window, cx);
             return;
@@ -644,6 +650,7 @@ impl Workspace {
             }
             Command::Confirm(target) => self.open_palette(PaletteMode::Confirm(target), window, cx),
             Command::RemoveConnection(index) => self.remove_profile(index, cx),
+            Command::RemoveUnavailable(at) => self.remove_unavailable(at, cx),
             Command::NewConnectionIn(project) => self.new_connection_in(project, window, cx),
             Command::PickProject(verb) => {
                 self.open_palette(PaletteMode::Projects(verb), window, cx)
