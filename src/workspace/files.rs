@@ -66,10 +66,7 @@ impl Workspace {
             Some(index) => index,
             None => self.create_profile(
                 "Files".to_string(),
-                ConnectionConfig::DuckDb {
-                    path: DUCKDB_IN_MEMORY.to_string(),
-                    statement_timeout: 0,
-                },
+                ConnectionConfig::duckdb(DUCKDB_IN_MEMORY.to_string(), 0),
                 None,
                 starting_mode(None),
                 Origin::Form,
@@ -220,11 +217,8 @@ mod tests {
             std::fs::write(dir.join(named), format!("n\n{n}\n")).unwrap();
             std::fs::write(dir.join(near), "n\n-1\n").unwrap();
         }
-        let connection = Connection::open(ConnectionConfig::DuckDb {
-            path: DUCKDB_IN_MEMORY.to_string(),
-            statement_timeout: 0,
-        })
-        .unwrap();
+        let connection =
+            Connection::open(ConnectionConfig::duckdb(DUCKDB_IN_MEMORY.to_string(), 0)).unwrap();
         for (n, (named, _)) in files.iter().enumerate() {
             let sql = reading(&dir.join(named)).unwrap();
             let result = connection

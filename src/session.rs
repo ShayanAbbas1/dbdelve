@@ -70,6 +70,11 @@ pub(crate) struct Profile {
     pub(crate) catalog: CatalogState,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
+    /// Whether the connection opened on another database than the one the
+    /// tabs were opened on, because the picked one was no longer there. What
+    /// is left of that database goes on the next frame, which has the window
+    /// a connect does not, as on a switch.
+    pub(crate) left_database: bool,
     pub(crate) session: Session,
 }
 
@@ -99,6 +104,20 @@ impl Profile {
             _ => None,
         };
         self.config.schema().or(current)
+    }
+
+    /// The database the connection is on: as last listed, else as the
+    /// profile names it, else the one it opened on.
+    pub(crate) fn active_database(&self) -> Option<String> {
+        let opened = match &self.state {
+            ProfileState::Connected(connection) => connection.current_database(),
+            _ => None,
+        };
+        self.databases
+            .current
+            .clone()
+            .or_else(|| self.config.database_name())
+            .or_else(|| opened.map(str::to_string))
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {
@@ -148,10 +167,7 @@ impl Profile {
                 .or_else(|| snowflake.and_then(|account| account.host.clone()))
                 .unwrap_or_default(),
             port: server.and_then(|server| server.port),
-            database: server
-                .map(|server| server.database.clone())
-                .or_else(|| snowflake.map(|account| account.database.clone()))
-                .unwrap_or_default(),
+            database: self.config.database().unwrap_or_default().to_string(),
             user: server
                 .map(|server| server.user.clone())
                 .or_else(|| snowflake.map(|account| account.user.clone()))

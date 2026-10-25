@@ -858,7 +858,8 @@ impl Engine {
     }
 
     /// Whether one server holds several databases a profile can be moved
-    /// between, which [`Connection::databases`] lists.
+    /// between, which [`Connection::databases`] lists. DuckDB's are the ones
+    /// attached to the instance the profile opened.
     pub fn switches_database(self) -> bool {
         matches!(
             self,
@@ -869,14 +870,23 @@ impl Engine {
                 | Self::MongoDb
                 | Self::Redis
                 | Self::Snowflake
+                | Self::DuckDb
         )
+    }
+
+    /// Whether moving the profile onto another database is a `USE` on the
+    /// connection already open rather than a new connection. Reopening a
+    /// DuckDB file detaches everything attached to it, and an in-memory
+    /// database opened again is a new, empty one.
+    pub fn switches_database_in_session(self) -> bool {
+        matches!(self, Self::DuckDb)
     }
 
     /// Whether a profile picks the schema unqualified names resolve in.
     /// MySQL's database is its schema, and SQL Server's default schema is the
     /// login's.
     pub fn picks_schema(self) -> bool {
-        matches!(self, Self::Postgres | Self::Snowflake)
+        matches!(self, Self::Postgres | Self::Snowflake | Self::DuckDb)
     }
 
     /// A database the server keeps for itself, listed after the user's own.
@@ -1422,10 +1432,14 @@ pub enum ConnectionConfig {
         path: String,
         statement_timeout: u32,
     },
-    /// A file, or [`DUCKDB_IN_MEMORY`] for none.
+    /// A file, or [`DUCKDB_IN_MEMORY`] for none. `database` is the attached
+    /// database picked to work in, blank for the one the path opens, and
+    /// `schema` the schema picked in it.
     DuckDb {
         path: String,
         statement_timeout: u32,
+        database: String,
+        schema: Option<String>,
     },
     Snowflake(SnowflakeConfig),
     MongoDb(MongoConfig),
@@ -1434,6 +1448,16 @@ pub enum ConnectionConfig {
 }
 
 impl ConnectionConfig {
+    /// A DuckDB profile on the database `path` opens, with nothing picked.
+    pub fn duckdb(path: String, statement_timeout: u32) -> Self {
+        Self::DuckDb {
+            path,
+            statement_timeout,
+            database: String::new(),
+            schema: None,
+        }
+    }
+
     pub fn engine(&self) -> Engine {
         match self {
             Self::Postgres(_) => Engine::Postgres,
@@ -1498,7 +1522,13 @@ impl ConnectionConfig {
             Self::Redis(server) => {
                 server.database = name.strip_prefix("db").unwrap_or(&name).to_string();
             }
-            Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } => {}
+            Self::DuckDb {
+                database, schema, ..
+            } => {
+                *database = name;
+                *schema = None;
+            }
+            Self::Sqlite { .. } | Self::Turso { .. } => {}
         }
     }
 
@@ -1506,6 +1536,7 @@ impl ConnectionConfig {
     pub fn database(&self) -> Option<&str> {
         match self {
             Self::Snowflake(account) => Some(&account.database),
+            Self::DuckDb { database, .. } => Some(database),
             _ => self.server().map(|server| server.database.as_str()),
         }
     }
@@ -1531,6 +1562,7 @@ impl ConnectionConfig {
         match self {
             Self::Postgres(server) => server.schema.as_deref(),
             Self::Snowflake(account) => account.schema.as_deref(),
+            Self::DuckDb { schema, .. } => schema.as_deref(),
             _ => None,
         }
     }
@@ -1539,6 +1571,7 @@ impl ConnectionConfig {
         match self {
             Self::Postgres(server) => server.schema = schema,
             Self::Snowflake(account) => account.schema = schema,
+            Self::DuckDb { schema: picked, .. } => *picked = schema,
             _ => {}
         }
     }
@@ -1575,10 +1608,7 @@ impl ConnectionConfig {
                 path,
                 statement_timeout: 0,
             }),
-            Engine::DuckDb => duckdb::path_from_url(url).map(|path| Self::DuckDb {
-                path,
-                statement_timeout: 0,
-            }),
+            Engine::DuckDb => duckdb::path_from_url(url).map(|path| Self::duckdb(path, 0)),
             // Nobody pastes a Snowflake URL, because there is no such form.
             Engine::Snowflake => {
                 Err("Snowflake has no connection URL. Fill the fields in instead.".to_string())
@@ -1688,7 +1718,13 @@ impl Connection {
             ConnectionConfig::DuckDb {
                 path,
                 statement_timeout,
-            } => duckdb::Connection::open(&path, statement_timeout).map(Self::DuckDb),
+                database,
+                schema,
+            } => duckdb::Connection::open(&path, statement_timeout).map(|connection| {
+                Self::DuckDb(
+                    connection.opened_on(Some(database).filter(|name| !name.is_empty()), schema),
+                )
+            }),
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
@@ -1984,7 +2020,8 @@ impl Connection {
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
             Self::Snowflake(connection) => connection.databases(),
-            Self::Sqlite(_) | Self::Turso(_) | Self::DuckDb(_) => Ok(Databases::default()),
+            Self::DuckDb(connection) => connection.databases(),
+            Self::Sqlite(_) | Self::Turso(_) => Ok(Databases::default()),
         }?;
         databases.system_last(engine);
         Ok(databases)
@@ -1999,16 +2036,29 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.set_schema(schema),
             Self::Snowflake(connection) => connection.set_schema(schema),
+            Self::DuckDb(connection) => connection.set_schema(schema),
             _ => {}
         }
     }
 
-    /// Move the sessions already open onto the schema last recorded by
-    /// [`Self::set_schema`], which may be newer than the one recorded when
-    /// this was called. Waits for a statement running on them to finish.
+    /// The same for the database, None for the one the connection opened,
+    /// where [`Engine::switches_database_in_session`]: the schema picked in
+    /// the database left behind goes with it. A no-op elsewhere, where a
+    /// database is moved onto by connecting again.
+    pub fn set_database(&self, database: Option<&str>) {
+        if let Self::DuckDb(connection) = self {
+            connection.set_database(database);
+        }
+    }
+
+    /// Move the sessions already open onto the database and schema last
+    /// recorded by [`Self::set_database`] and [`Self::set_schema`], which may
+    /// be newer than the ones recorded when this was called. Waits for a
+    /// statement running on them to finish.
     pub fn apply_schema(&self) -> Result<(), DbError> {
         match self {
             Self::Postgres(connection) => connection.apply_schema(),
+            Self::DuckDb(connection) => connection.apply_pick(),
             _ => Ok(()),
         }
     }
@@ -2018,6 +2068,26 @@ impl Connection {
     pub fn current_schema(&self) -> Option<&str> {
         match self {
             Self::Postgres(connection) => connection.current_schema(),
+            Self::DuckDb(connection) => Some(connection.current_schema()),
+            _ => None,
+        }
+    }
+
+    /// The database a connection opens on before any picked one, where the
+    /// profile does not name it: the database a DuckDB file opens as. None
+    /// where the profile's own config says.
+    pub fn current_database(&self) -> Option<&str> {
+        match self {
+            Self::DuckDb(connection) => Some(connection.current_database()),
+            _ => None,
+        }
+    }
+
+    /// The picked database or schema this connection could not move onto
+    /// when it opened, because it is no longer there.
+    pub fn unpicked(&self) -> Option<&Unpicked> {
+        match self {
+            Self::DuckDb(connection) => connection.unpicked(),
             _ => None,
         }
     }
@@ -2437,6 +2507,17 @@ pub struct Schema {
     pub name: String,
     pub relations: Vec<Relation>,
     pub routines: Vec<Routine>,
+}
+
+/// What a connection did with a picked database or schema that was not there
+/// when it opened: it opened where it would have with nothing picked, or on
+/// the picked database without the schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unpicked {
+    /// The database was dropped as well, so the connection is on another
+    /// database than the profile named, not just another schema.
+    pub database: bool,
+    pub message: String,
 }
 
 /// On-disk bytes and row estimates by schema, then relation name.
@@ -4278,6 +4359,24 @@ mod tests {
         assert_eq!(config.database(), Some(r#""lower""#));
         assert_eq!(config.database_name().as_deref(), Some("lower"));
         assert_eq!(config.schema(), None);
+    }
+
+    #[test]
+    fn a_duckdb_profile_picks_an_attached_database_and_a_schema_in_it() {
+        let mut config = ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0);
+        assert_eq!(config.database(), Some(""));
+        assert_eq!(config.database_name(), None, "the one the file opens as");
+        assert_eq!(config.schema(), None);
+
+        config.set_schema(Some("analytics".into()));
+        assert_eq!(config.schema(), Some("analytics"));
+        config.set_database("other".into());
+        assert_eq!(config.database_name().as_deref(), Some("other"));
+        assert_eq!(config.schema(), None, "a schema of the database left");
+        assert!(Engine::DuckDb.switches_database());
+        assert!(Engine::DuckDb.switches_database_in_session());
+        assert!(Engine::DuckDb.picks_schema());
+        assert!(!Engine::Postgres.switches_database_in_session());
     }
 
     #[test]

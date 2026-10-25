@@ -1641,10 +1641,7 @@ impl Workspace {
         let mut steps = Vec::new();
         if profile.config.engine().switches_database() {
             let database = profile
-                .databases
-                .current
-                .clone()
-                .or_else(|| profile.config.database_name())
+                .active_database()
                 .unwrap_or_else(|| "Database".into());
             steps.push(separator());
             steps.push(

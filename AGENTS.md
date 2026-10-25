@@ -1105,17 +1105,31 @@ Decided, and not to be re-litigated:
   write aborts the transaction it lands in: it refuses everything until a
   `ROLLBACK`, and a `COMMIT` rolls it back. A second connection (`alongside`,
   and an import's `apart`) is cloned from an idle one the profile holds,
-  since opening an in-memory database again makes a new, empty one. **A
+  since opening an in-memory database again makes a new, empty one. A
+  connection cloned that way starts on the database the file opened as, not
+  where a `USE` moved the one it was cloned from: `USE` belongs to the
+  connection and `ATTACH` to the instance. So the profile's picked database
+  and schema are kept on the driver's connection and shared by its clones,
+  and every connection it hands out (`alongside`, so `query_alongside` and
+  `apart` too) runs the `USE` before anything else. Nothing picked runs
+  nothing, and the session's `search_path` stays DuckDB's own. **A
   DuckDB result is editable only as a plain select of one keyed table**: the
   driver names no column's table, so `sql::table_read` reads the statement
   for one base table (no join, subquery, table function, CTE, set operation,
   `DISTINCT`, grouping, window clause or renaming alias) whose columns are
   `*` or bare names, and `duckdb::edit_target` takes the table and its
-  primary key from the catalog. Anything in doubt refuses: a column count
-  the parse and the driver disagree on, a column read twice, a search path
-  someone set, a temporary table of the same name, a two-part name that is
-  also an attached database's, a table in another database. DuckDB enforces
-  its keys, unlike Snowflake. No Explain, and no Read-only backstop.
+  primary key from the catalog. The connection that ran the statement says
+  where its names resolve: `current_database()`, `current_schema()` and the
+  `search_path`, which is either DuckDB's own (blank) or exactly the one
+  entry a `USE` writes for those two, so a picked schema keeps a bare
+  `SELECT * FROM account_scores` editable. A bare name is looked for only in
+  the current schema, though DuckDB would go on to `main` when it is not
+  there. Anything in doubt refuses: a column count the parse and the driver
+  disagree on, a column read twice, any other search path (DuckDB tries each
+  entry in turn), a temporary table of the same name, a schema whose name is
+  also an attached database's (DuckDB calls `"analytics"."t"` ambiguous
+  then), a table in another database. DuckDB enforces its keys, unlike
+  Snowflake. No Explain, and no Read-only backstop.
   Its tests need nothing external and run under plain `cargo test`.
   `read_xlsx` is a table function of DBDelve's own over calamine (`db::xlsx`),
   registered at open, since DuckDB's excel extension cannot be linked in: a
@@ -1420,7 +1434,31 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   queued ones and snapshots included, because those rows belong to the old
   database and an edit staged on them would be applied to the new one. A
   switch with unapplied cell edits on any grid is refused rather than
-  discarding them.
+  discarding them. On DuckDB (`Engine::switches_database_in_session`) the
+  databases are the ones attached to the instance, which reopening the file
+  would detach, so the same switch is a `USE` on the connection already open
+  (`Workspace::use_database`): no reconnect, a new generation and a fresh
+  catalog, and a `USE` that fails puts the profile back where it was. The
+  database the file opens as is stored blank, so a renamed file still opens.
+- **Where `Engine::picks_schema` (Postgres, Snowflake, DuckDB), the titlebar
+  picks the schema unqualified names resolve in**, without a reconnect: tabs,
+  results and staged edits stay, since every name DBDelve writes names its
+  schema. `Workspace::set_schema` records it on the profile and on the live
+  connection, which applies it to the sessions open and to every one it opens
+  later. Postgres puts it in front of the session's own `search_path`, and
+  refuses inside a transaction, since a `ROLLBACK` would undo it;
+  Snowflake sends it with the user's statements only; DuckDB `USE`s
+  `database.schema`, which a `ROLLBACK` does not undo. MySQL and MariaDB have
+  no schema apart from the database, and SQL Server's default schema is the
+  login's (`ALTER USER … WITH DEFAULT_SCHEMA`), with no per-session setting.
+  A picked schema that is gone when a Postgres or Snowflake profile connects is
+  kept, and names resolve past it or fail in the server's words; DuckDB's
+  `USE` refuses one, so its connection opens where nothing is picked, or on the
+  picked database without the schema, and the profile drops what was not
+  there and says so (`Connection::unpicked`). A dropped database closes what
+  the profile held of it on the next frame (`Profile::left_database`), as a
+  switch does. An attached database always goes this way after a restart,
+  since `ATTACH` lasts as long as the instance.
 - **Both kinds are addressed by id, never by index.** A result comes back
   carrying the `Tab` it was issued for, and an id that no longer resolves drops
   the result rather than landing it somewhere. Indexing would put a slow query's

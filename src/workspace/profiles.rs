@@ -96,65 +96,7 @@ impl Workspace {
                 Err(message) => (Engine::Postgres, Some(message)),
             },
         };
-        let config = match engine {
-            Engine::Sqlite => ConnectionConfig::Sqlite {
-                path: stored.path.unwrap_or_default(),
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-            },
-            Engine::Turso => ConnectionConfig::Turso {
-                path: stored.path.unwrap_or_default(),
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-            },
-            Engine::DuckDb => ConnectionConfig::DuckDb {
-                path: stored.path.unwrap_or_default(),
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-            },
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::SqlServer
-            | Engine::MongoDb
-            | Engine::Redis => {
-                let server = ServerConfig {
-                    host: stored.host,
-                    port: stored.port,
-                    database: stored.database,
-                    user: stored.user,
-                    // Never on disk. Read from the Keychain when connecting.
-                    password: String::new(),
-                    sslmode,
-                    root_certificate: stored.root_certificate,
-                    statement_timeout: stored.statement_timeout.unwrap_or_default(),
-                    ssh: stored.ssh,
-                    schema: stored.schema,
-                };
-                match engine {
-                    Engine::MySql => ConnectionConfig::MySql(server),
-                    Engine::MariaDb => ConnectionConfig::MariaDb(server),
-                    Engine::SqlServer => ConnectionConfig::SqlServer(server),
-                    Engine::Redis => ConnectionConfig::Redis(server),
-                    Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
-                        server,
-                        srv: stored.srv.unwrap_or_default(),
-                        options: stored.options.unwrap_or_default(),
-                        login_database: stored.login_database,
-                    }),
-                    _ => ConnectionConfig::Postgres(server),
-                }
-            }
-            Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
-                account: stored.account.unwrap_or_default(),
-                // Blank on disk is the derived host, the same as absent.
-                host: Some(stored.host).filter(|host| !host.is_empty()),
-                user: stored.user,
-                private_key: stored.private_key.unwrap_or_default(),
-                database: stored.database,
-                warehouse: stored.warehouse,
-                role: stored.role,
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-                schema: stored.schema,
-            }),
-        };
+        let config = stored_config(&stored, engine, sslmode);
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -232,6 +174,7 @@ impl Workspace {
             session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
+            left_database: false,
             session,
         });
     }
@@ -281,6 +224,7 @@ impl Workspace {
             session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
+            left_database: false,
             session,
         });
         if let Some(password) = password
@@ -347,10 +291,9 @@ impl Workspace {
         form.last_url = url.clone();
         let text = url.trim();
         let parsed = match super::welcome::recognise(text) {
-            super::welcome::Recognised::File(Engine::DuckDb) => Ok(ConnectionConfig::DuckDb {
-                path: text.to_string(),
-                statement_timeout: 0,
-            }),
+            super::welcome::Recognised::File(Engine::DuckDb) => {
+                Ok(ConnectionConfig::duckdb(text.to_string(), 0))
+            }
             super::welcome::Recognised::File(_) => Ok(ConnectionConfig::Sqlite {
                 path: text.to_string(),
                 statement_timeout: 0,
@@ -945,16 +888,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Move the profile in front onto another database on its server.
-    ///
-    /// Object tabs go, and their grid snapshots with them: both are keyed by
-    /// schema and name within the profile, with no database in the key, so
-    /// one left open would name a relation that may not exist here and a
-    /// relation of the same name would read the old one's rows back. Query
-    /// tabs keep their SQL, which is the user's to run wherever they like, but
-    /// drop their results and a New row form open on one: those rows belong
-    /// to the database left behind, and an edit staged on them, or a row
-    /// added beside them, would be applied to this one.
+    /// Move the profile in front onto another database on its server, leaving
+    /// behind what it held of this one ([`Self::leave_database`]).
     pub(crate) fn set_database(
         &mut self,
         name: String,
@@ -1008,6 +943,50 @@ impl Workspace {
             return;
         }
 
+        self.leave_database(window, cx);
+
+        let index = self.active;
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        // The database a DuckDB file opens as is held as none picked, so the
+        // profile still opens on it once the file is renamed.
+        let opened = profile
+            .connection()
+            .and_then(|connection| connection.current_database().map(str::to_string));
+        let left = (
+            profile.config.database().unwrap_or_default().to_string(),
+            profile.config.schema().map(str::to_string),
+        );
+        profile
+            .config
+            .set_database(match opened.as_deref() == Some(name.as_str()) {
+                true => String::new(),
+                false => name,
+            });
+        let in_session = profile.config.engine().switches_database_in_session();
+        self.remember_profiles(cx);
+        match in_session {
+            true => self.use_database(index, left, cx),
+            false => self.reconnect(index, cx),
+        }
+    }
+
+    /// Close what the profile in front holds of the database it is leaving.
+    ///
+    /// Object tabs go, and their grid snapshots with them: both are keyed by
+    /// schema and name within the profile, with no database in the key, so
+    /// one left open would name a relation that may not exist here and a
+    /// relation of the same name would read the old one's rows back. Query
+    /// tabs keep their SQL, which is the user's to run wherever they like, but
+    /// drop their results and a New row form open on one: those rows belong
+    /// to the database left behind, and an edit staged on them, or a row
+    /// added beside them, would be applied to this one.
+    fn leave_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let session = &profile.session;
         let active = session.active;
         let mut closing = session.objects.iter().map(|tab| tab.id).collect::<Vec<_>>();
         // The tab in front closes last, so the one it hands the front to is a
@@ -1015,8 +994,8 @@ impl Workspace {
         closing.sort_by_key(|id| Tab::Object(*id) == active);
         let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
         let profile_id = profile.id.clone();
-        // Not running, which is refused above: the dialog names a table of
-        // the database being left.
+        // Not running, which a switch refuses and a connect cannot have: the
+        // dialog names a table of the database being left.
         self.abandon_import(&profile_id, cx);
         for id in closing {
             self.close_object(id, window, cx);
@@ -1027,7 +1006,6 @@ impl Workspace {
             self.stop_run(Tab::Query(id), cx);
         }
 
-        let index = self.active;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -1061,9 +1039,72 @@ impl Workspace {
         profile.session.apply_review = None;
         profile.session.insert_form = None;
         profile.databases = Databases::default();
-        profile.config.set_database(name);
+    }
+
+    /// The connect's half of [`Self::leave_database`], for a profile whose
+    /// picked database was gone when it opened.
+    pub(crate) fn leave_database_left_behind(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile_mut().filter(|profile| profile.left_database) else {
+            return;
+        };
+        profile.left_database = false;
+        self.leave_database(window, cx);
         self.remember_profiles(cx);
-        self.reconnect(index, cx);
+    }
+
+    /// Move the open connection onto the database the profile at `index` now
+    /// names, where that is a `USE` and not a new connection
+    /// ([`Engine::switches_database_in_session`]). The catalog is read again
+    /// under a new generation, as a connect would; a `USE` that fails puts
+    /// the profile back on `left`, the database and schema it was on.
+    fn use_database(
+        &mut self,
+        index: usize,
+        left: (String, Option<String>),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.profiles.get(index).and_then(Profile::connection) else {
+            // Opening applies the pick.
+            self.reconnect(index, cx);
+            return;
+        };
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return;
+        };
+        profile.generation = generation;
+        profile.catalog = CatalogState::Loading;
+        profile.session.structure_requests.clear();
+        let id = profile.id.clone();
+        connection.set_database(profile.config.database_name().as_deref());
+        let applying = connection.clone();
+        let set = on_own_thread(move || applying.apply_schema());
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            let result = set.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                if let Err(error) = result {
+                    let (database, schema) = left;
+                    profile.config.set_database(database);
+                    profile.config.set_schema(schema);
+                    connection.set_database(profile.config.database_name().as_deref());
+                    connection.set_schema(profile.config.schema());
+                    profile.session.notice = Some(error.message);
+                    workspace.remember_profiles(cx);
+                }
+                workspace.load_catalog(&id, generation, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Offer the schemas the catalog already holds, to pick the active one.
@@ -1431,17 +1472,35 @@ impl Workspace {
                     let Some(profile) = workspace.issued_to(&id, generation) else {
                         return;
                     };
+                    // A picked database or schema that is gone opens where
+                    // nothing is picked, and the profile follows it there.
+                    let unpicked = result.as_ref().ok().and_then(Connection::unpicked).cloned();
+                    if let Some(unpicked) = &unpicked {
+                        match unpicked.database {
+                            true => {
+                                profile.config.set_database(String::new());
+                                profile.left_database = true;
+                            }
+                            false => profile.config.set_schema(None),
+                        }
+                        profile.session.notice = Some(unpicked.message.clone());
+                    }
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
+                    if unpicked.is_some() {
+                        workspace.remember_profiles(cx);
+                    }
                     workspace.load_catalog(&id, generation, cx);
                     workspace.load_import_columns(&id, cx);
                     // The tab in front is already being looked at, so a
-                    // reconnect has no later visit to re-run it on.
-                    let active = workspace
-                        .profile()
-                        .filter(|profile| profile.id == id && profile.connection().is_some());
+                    // reconnect has no later visit to re-run it on -- unless
+                    // it names a relation of a database the connection is
+                    // not on, and is about to close.
+                    let active = workspace.profile().filter(|profile| {
+                        profile.id == id && profile.connection().is_some() && !profile.left_database
+                    });
                     if let Some(Tab::Object(object)) = active.map(|profile| profile.session.active)
                     {
                         workspace.load_relation(object, cx);
@@ -1844,6 +1903,76 @@ enum ProjectChoice {
     New,
 }
 
+/// The connection a stored profile describes, on `engine` and `sslmode` as
+/// [`Workspace::restore_profile`] read them.
+fn stored_config(
+    stored: &store::StoredProfile,
+    engine: Engine,
+    sslmode: SslMode,
+) -> ConnectionConfig {
+    match engine {
+        Engine::Sqlite => ConnectionConfig::Sqlite {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+        },
+        Engine::Turso => ConnectionConfig::Turso {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+        },
+        Engine::DuckDb => ConnectionConfig::DuckDb {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            database: stored.database.clone(),
+            schema: stored.schema.clone(),
+        },
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::SqlServer
+        | Engine::MongoDb
+        | Engine::Redis => {
+            let server = ServerConfig {
+                host: stored.host.clone(),
+                port: stored.port,
+                database: stored.database.clone(),
+                user: stored.user.clone(),
+                // Never on disk. Read from the Keychain when connecting.
+                password: String::new(),
+                sslmode,
+                root_certificate: stored.root_certificate.clone(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssh: stored.ssh.clone(),
+                schema: stored.schema.clone(),
+            };
+            match engine {
+                Engine::MySql => ConnectionConfig::MySql(server),
+                Engine::MariaDb => ConnectionConfig::MariaDb(server),
+                Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                Engine::Redis => ConnectionConfig::Redis(server),
+                Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
+                    server,
+                    srv: stored.srv.unwrap_or_default(),
+                    options: stored.options.clone().unwrap_or_default(),
+                    login_database: stored.login_database.clone(),
+                }),
+                _ => ConnectionConfig::Postgres(server),
+            }
+        }
+        Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
+            account: stored.account.clone().unwrap_or_default(),
+            // Blank on disk is the derived host, the same as absent.
+            host: Some(stored.host.clone()).filter(|host| !host.is_empty()),
+            user: stored.user.clone(),
+            private_key: stored.private_key.clone().unwrap_or_default(),
+            database: stored.database.clone(),
+            warehouse: stored.warehouse.clone(),
+            role: stored.role.clone(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            schema: stored.schema.clone(),
+        }),
+    }
+}
+
 /// Whether picking `name` would leave the profile where it is. A blank
 /// database is the login's default, which only the server can name, so that is
 /// read off the list it sent; otherwise the configured name is the truth -- on
@@ -1957,6 +2086,35 @@ pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duckdb_profiles_picked_database_and_schema_survive_a_restart() {
+        let mut picked = ConnectionConfig::duckdb("/data/dev.duckdb".into(), 30);
+        picked.set_database("other".into());
+        picked.set_schema(Some("analytics".into()));
+        let file = |fields: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = ''\nuser = ''\nengine = 'duckdb'\n\
+                 path = '/data/dev.duckdb'\n{fields}"
+            ))
+            .expect("a profile")
+        };
+        // The two fields `Profile::stored` writes from the config.
+        let stored = file(&format!(
+            "statement_timeout = 30\ndatabase = '{}'\nschema = '{}'",
+            picked.database().unwrap(),
+            picked.schema().unwrap()
+        ));
+        assert_eq!(
+            stored_config(&stored, Engine::DuckDb, SslMode::default()),
+            picked
+        );
+        // Written before either could be picked: the file's own database.
+        assert_eq!(
+            stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
+            ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
+        );
+    }
 
     #[test]
     fn only_a_recognised_url_arriving_whole_fills_the_form() {

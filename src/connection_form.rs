@@ -414,13 +414,13 @@ impl ConnectionForm {
             },
             // No file is a database in memory, which is what a profile for
             // reading CSV and Parquet files wants.
-            Engine::DuckDb => ConnectionConfig::DuckDb {
-                path: match read(&self.path) {
+            Engine::DuckDb => ConnectionConfig::duckdb(
+                match read(&self.path) {
                     path if path.is_empty() => crate::db::DUCKDB_IN_MEMORY.to_string(),
                     path => path,
                 },
                 statement_timeout,
-            },
+            ),
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
@@ -609,7 +609,22 @@ impl ConnectionForm {
 /// schemas belong to one database. Read from the profile at save time, so one
 /// picked while the form was open stays. The database is compared as the
 /// engine spells it, so `analytics` is still Snowflake's `ANALYTICS`.
+///
+/// DuckDB's database is picked in the titlebar too, among those attached to
+/// the file, and the form has no field for it: it stays while the file does.
 pub(crate) fn keep_schema(config: &mut ConnectionConfig, current: &ConnectionConfig) {
+    if let (
+        ConnectionConfig::DuckDb { path, database, .. },
+        ConnectionConfig::DuckDb {
+            path: was,
+            database: picked,
+            ..
+        },
+    ) = (&mut *config, current)
+        && path == was
+    {
+        *database = picked.clone();
+    }
     if let Some(schema) = current.schema()
         && config.engine() == current.engine()
         && config.database_name() == current.database_name()
@@ -894,6 +909,20 @@ mod tests {
             kept(&snowflake("ANALYTICS"), snowflake(r#""analytics""#)),
             None
         );
+
+        let duckdb = |path: &str| ConnectionConfig::duckdb(path.into(), 0);
+        let mut picked = duckdb("/data/dev.duckdb");
+        picked.set_database("other".into());
+        picked.set_schema(Some("sales".into()));
+        let saved = |mut saved: ConnectionConfig| {
+            keep_schema(&mut saved, &picked);
+            (saved.database_name(), saved.schema().map(str::to_string))
+        };
+        assert_eq!(
+            saved(duckdb("/data/dev.duckdb")),
+            (Some("other".into()), sales.clone())
+        );
+        assert_eq!(saved(duckdb("/data/prod.duckdb")), (None, None));
     }
 
     #[test]

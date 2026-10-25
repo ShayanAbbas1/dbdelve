@@ -37,9 +37,9 @@ use num_bigint::BigUint;
 use crate::sql::Projected;
 
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference, RowBuilder,
-    Stopped, Structure, assemble_catalog, assemble_foreign_keys, assemble_references,
-    assemble_structure, plain_error, required_cell, terminated,
+    Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    RowBuilder, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
+    assemble_references, assemble_structure, plain_error, required_cell, terminated,
 };
 
 /// What an empty path means: a database held in memory, gone when the
@@ -72,6 +72,21 @@ pub struct Connection {
     /// has to come from the same instance, since a new one would be empty.
     origin: Arc<Mutex<duckdb::Connection>>,
     statement_timeout: Option<Duration>,
+    /// Shared by every clone, so a connection opened later lands where the
+    /// latest pick says: one cloned from [`Self::origin`] starts where the
+    /// instance does, whatever `USE` the others ran.
+    pick: Arc<Mutex<Pick>>,
+    /// The database and schema a connection of this instance starts on.
+    home: Arc<(String, String)>,
+    unpicked: Option<Unpicked>,
+}
+
+/// The database and schema unqualified names resolve in, None for where the
+/// instance starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Pick {
+    database: Option<String>,
+    schema: Option<String>,
 }
 
 impl Connection {
@@ -103,26 +118,182 @@ impl Connection {
         let origin = connection
             .try_clone()
             .map_err(|error| plain_error(error.to_string()))?;
+        let home = run(
+            &connection,
+            "SELECT current_database(), current_schema()",
+            Fetch::default(),
+        )?;
+        let home = match home.rows.first() {
+            Some(row) => (
+                row.get(0).unwrap_or_default().to_string(),
+                row.get(1).unwrap_or_default().to_string(),
+            ),
+            None => return Err(plain_error("DuckDB named no current database.".into())),
+        };
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
             origin: Arc::new(Mutex::new(origin)),
             statement_timeout: (statement_timeout > 0)
                 .then(|| Duration::from_secs(u64::from(statement_timeout))),
+            pick: Arc::default(),
+            home: Arc::new(home),
+            unpicked: None,
         })
     }
 
+    /// Move onto the picked database and schema, as a profile opens. One
+    /// that is no longer there -- an attached database is gone once the
+    /// instance closes -- leaves the connection where it would be without
+    /// it, saying so in [`Self::unpicked`], rather than failing the open.
+    pub fn opened_on(mut self, database: Option<String>, schema: Option<String>) -> Self {
+        let asked = Pick { database, schema };
+        if asked == Pick::default() {
+            return self;
+        }
+        let error = match self.go_here(&asked) {
+            Ok(()) => {
+                *self.pick() = asked;
+                return self;
+            }
+            Err(error) => error,
+        };
+        // A failed `USE` moves nothing, so whatever is not tried again is
+        // where the instance starts.
+        let database = Pick {
+            schema: None,
+            ..asked.clone()
+        };
+        let landed = match asked.schema.is_some()
+            && database != Pick::default()
+            && self.go_here(&database).is_ok()
+        {
+            true => database,
+            false => Pick::default(),
+        };
+        self.unpicked = Some(Unpicked {
+            database: landed.database != asked.database,
+            message: format!(
+                "{} The connection opened on {} instead.",
+                error.message,
+                self.spelled(&landed)
+            ),
+        });
+        *self.pick() = landed;
+        self
+    }
+
     /// A second connection to the same database, for a statement to run on
-    /// beside this one's; see [`super::Connection::query_alongside`].
+    /// beside this one's; see [`super::Connection::query_alongside`]. It
+    /// starts on the picked database and schema, as this one is.
     pub fn alongside(&self) -> Result<Self, DbError> {
         let connection = lock(&self.origin)?
             .try_clone()
             .map_err(|error| plain_error(error.to_string()))?;
+        let pick = self.pick().clone();
+        if pick != Pick::default() {
+            self.go(&connection, &pick)?;
+        }
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
             ..self.clone()
         })
+    }
+
+    fn pick(&self) -> std::sync::MutexGuard<'_, Pick> {
+        self.pick
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// For every connection opened from here on; [`Self::apply_pick`] moves
+    /// this one.
+    pub fn set_database(&self, database: Option<&str>) {
+        *self.pick() = Pick {
+            database: database.map(str::to_string),
+            schema: None,
+        };
+    }
+
+    pub fn set_schema(&self, schema: Option<&str>) {
+        self.pick().schema = schema.map(str::to_string);
+    }
+
+    /// `USE` the database and schema last picked, waiting for a statement
+    /// running here to finish. Not undone by a `ROLLBACK`, and refused inside
+    /// a transaction a failure aborted.
+    pub fn apply_pick(&self) -> Result<(), DbError> {
+        let connection = lock(&self.connection)?;
+        // Read only once the connection is held: two switches whose threads
+        // take it out of order both apply the later one.
+        let pick = self.pick().clone();
+        self.go(&connection, &pick)
+    }
+
+    fn go_here(&self, pick: &Pick) -> Result<(), DbError> {
+        self.go(&*lock(&self.connection)?, pick)
+    }
+
+    /// `USE` `pick` on `connection`, naming the database every time: a bare
+    /// name could be a database's or a schema's. Nothing picked is where the
+    /// instance starts.
+    fn go(&self, connection: &duckdb::Connection, pick: &Pick) -> Result<(), DbError> {
+        let quote = |name: &str| Engine::DuckDb.quote_identifier(name);
+        let database = pick.database.as_deref().unwrap_or(&self.home.0);
+        let target = match (&pick.database, &pick.schema) {
+            (Some(_), None) => quote(database),
+            (_, schema) => format!(
+                "{}.{}",
+                quote(database),
+                quote(schema.as_deref().unwrap_or(&self.home.1))
+            ),
+        };
+        connection
+            .execute_batch(&format!("USE {target}"))
+            .map_err(query_error)
+    }
+
+    /// `pick` as the status bar names it.
+    fn spelled(&self, pick: &Pick) -> String {
+        let database = pick.database.as_deref().unwrap_or(&self.home.0);
+        match &pick.schema {
+            Some(schema) => format!("{database}.{schema}"),
+            None => database.to_string(),
+        }
+    }
+
+    pub fn current_database(&self) -> &str {
+        &self.home.0
+    }
+
+    pub fn current_schema(&self) -> &str {
+        &self.home.1
+    }
+
+    pub fn unpicked(&self) -> Option<&Unpicked> {
+        self.unpicked.as_ref()
+    }
+
+    /// The databases attached to the instance, less the two DuckDB keeps for
+    /// itself (`system` and `temp`).
+    pub fn databases(&self) -> Result<Databases, DbError> {
+        let listed = self.internal_query(
+            "SELECT database_name, current_database() AS current
+             FROM duckdb_databases()
+             WHERE NOT internal
+             ORDER BY database_name",
+        )?;
+        let names = listed
+            .rows
+            .iter()
+            .map(|row| required_cell(&listed, row, "database_name").map(str::to_string))
+            .collect::<Result<Vec<_>, _>>()?;
+        let current = match listed.rows.first() {
+            Some(row) => Some(required_cell(&listed, row, "current")?.to_string()),
+            None => None,
+        };
+        Ok(Databases { names, current })
     }
 
     /// Local and immediate, as SQLite's is: an interrupt on an idle connection
@@ -529,30 +700,38 @@ fn edit_target(
 }
 
 /// The stored schema and name of the base table `written` names in the
-/// database the connection opened, where an `UPDATE` dbdelve writes as
+/// database the connection is on, where an `UPDATE` dbdelve writes as
 /// `"schema"."table"` would land on the same table.
 ///
-/// Refused wherever that is in doubt: a search path someone set, a temporary
-/// table or view of the same name (the temporary catalog is searched first),
-/// a two-part name whose first part is also an attached database's, and a
-/// three-part one in another database.
+/// Asked of the connection that ran the statement, so a `USE` -- the
+/// profile's picked database and schema, or the user's own -- is the one in
+/// force: a one-part name is looked for in the current schema, the first
+/// place DuckDB looks after the temporary catalog.
+///
+/// Refused wherever that is in doubt: a search path other than the one entry
+/// a `USE` writes for the current database and schema (DuckDB tries each entry
+/// in turn), a temporary table or view of the same name (the temporary
+/// catalog is searched first), a schema whose name is also an attached
+/// database's, and a three-part name in another database.
 fn resolved_table(connection: &duckdb::Connection, written: &[String]) -> Option<(String, String)> {
+    let at = run(
+        connection,
+        "SELECT current_database(), current_schema(), current_setting('search_path')",
+        Fetch::default(),
+    )
+    .ok()?;
+    let [row] = at.rows.as_slice() else {
+        return None;
+    };
+    let (current_database, current_schema, path) = (row.get(0)?, row.get(1)?, row.get(2)?);
+    if !path.is_empty() && search_path(path)? != [[current_database, current_schema]] {
+        return None;
+    }
+
     let literal = |name: &str| Engine::DuckDb.quote_literal(name);
     let (schema, table, also) = match written {
-        [table] => (
-            "current_schema()".to_string(),
-            literal(table),
-            String::new(),
-        ),
-        [schema, table] => (
-            literal(schema),
-            literal(table),
-            format!(
-                "AND NOT EXISTS (SELECT 1 FROM duckdb_databases()
-                                 WHERE lower(database_name) = lower({}))",
-                literal(schema)
-            ),
-        ),
+        [table] => (literal(current_schema), literal(table), String::new()),
+        [schema, table] => (literal(schema), literal(table), String::new()),
         [database, schema, table] => (
             literal(schema),
             literal(table),
@@ -566,10 +745,12 @@ fn resolved_table(connection: &duckdb::Connection, written: &[String]) -> Option
     let result = run(
         connection,
         &format!(
-            "SELECT schema_name, table_name FROM duckdb_tables()
-             WHERE database_name = current_database()
-               AND lower(schema_name) = lower({schema}) AND lower(table_name) = lower({table})
-               AND current_setting('search_path') = ''
+            "SELECT found.schema_name, found.table_name FROM duckdb_tables() AS found
+             WHERE found.database_name = current_database()
+               AND lower(found.schema_name) = lower({schema})
+               AND lower(found.table_name) = lower({table})
+               AND NOT EXISTS (SELECT 1 FROM duckdb_databases()
+                               WHERE lower(database_name) = lower(found.schema_name))
                AND NOT EXISTS (SELECT 1 FROM duckdb_tables()
                                WHERE database_name = 'temp'
                                  AND lower(table_name) = lower({table}))
@@ -585,6 +766,47 @@ fn resolved_table(connection: &duckdb::Connection, written: &[String]) -> Option
         [row] => Some((row.get(0)?.to_string(), row.get(1)?.to_string())),
         _ => None,
     }
+}
+
+/// A `search_path` setting's entries, each a name's dotted parts unquoted.
+/// None for one DuckDB itself would not read.
+fn search_path(text: &str) -> Option<Vec<Vec<String>>> {
+    let mut entries = vec![vec![String::new()]];
+    let mut chars = text.chars().peekable();
+    // Whether the part being read has anything in it yet, quoted or not.
+    let mut started = false;
+    while let Some(next) = chars.next() {
+        let entry = entries.last_mut()?;
+        match next {
+            '"' => {
+                loop {
+                    match chars.next()? {
+                        '"' if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            entry.last_mut()?.push('"');
+                        }
+                        '"' => break,
+                        other => entry.last_mut()?.push(other),
+                    }
+                }
+                started = true;
+            }
+            '.' if started => {
+                entry.push(String::new());
+                started = false;
+            }
+            ',' if started => {
+                entries.push(vec![String::new()]);
+                started = false;
+            }
+            '.' | ',' => return None,
+            other => {
+                entry.last_mut()?.push(other);
+                started = true;
+            }
+        }
+    }
+    started.then_some(entries)
 }
 
 /// End the transaction a failed submission opened, and say so in the error,
@@ -1911,6 +2133,274 @@ mod tests {
             .query("SELECT note FROM t", Fetch::default())
             .unwrap();
         assert_eq!(cells(&read), [[Some("unset")]]);
+    }
+
+    fn at(connection: &Connection) -> Vec<Option<String>> {
+        let result = connection
+            .query(
+                "SELECT current_database(), current_schema()",
+                Fetch::default(),
+            )
+            .unwrap();
+        result.rows[0]
+            .iter()
+            .map(|cell| cell.map(str::to_string))
+            .collect()
+    }
+
+    fn on(database: &str, schema: &str) -> Vec<Option<String>> {
+        vec![Some(database.into()), Some(schema.into())]
+    }
+
+    #[test]
+    fn the_attached_databases_are_listed_without_duckdbs_own() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        let databases = connection.databases().unwrap();
+        assert_eq!(databases.names, ["memory", "other"]);
+        assert_eq!(databases.current.as_deref(), Some("memory"));
+        // An attachment belongs to the instance, so a connection cloned from
+        // it sees one made on another.
+        let beside = connection.alongside().unwrap();
+        assert_eq!(beside.databases().unwrap().names, ["memory", "other"]);
+    }
+
+    #[test]
+    fn a_use_moves_only_the_connection_that_ran_it() {
+        let connection = memory("ATTACH ':memory:' AS other; USE other");
+        assert_eq!(at(&connection), on("other", "main"));
+        assert_eq!(at(&connection.alongside().unwrap()), on("memory", "main"));
+        assert_eq!(connection.current_database(), "memory");
+        assert_eq!(connection.current_schema(), "main");
+    }
+
+    #[test]
+    fn a_picked_database_and_schema_reach_every_connection() {
+        let connection = memory(
+            "ATTACH ':memory:' AS other;
+             CREATE SCHEMA other.s;
+             CREATE TABLE other.s.t (id INTEGER PRIMARY KEY);
+             INSERT INTO other.s.t VALUES (1), (2);",
+        );
+        let profile = super::super::Connection::DuckDb(connection.clone());
+        profile.set_database(Some("other"));
+        profile.apply_schema().unwrap();
+        assert_eq!(at(&connection), on("other", "main"));
+        assert_eq!(at(&connection.alongside().unwrap()), on("other", "main"));
+
+        profile.set_schema(Some("s"));
+        profile.apply_schema().unwrap();
+        assert_eq!(at(&connection), on("other", "s"));
+        assert_eq!(count(&connection), "2");
+        let super::super::Connection::DuckDb(apart) = profile.apart().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(at(&apart), on("other", "s"));
+        let beside = profile
+            .query_alongside(
+                "SELECT count(*) FROM t",
+                &super::super::CancelToken::alongside(),
+                Fetch::default(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(cells(&beside), [[Some("2")]]);
+
+        // A database picked again leaves the schema picked in the other.
+        profile.set_database(None);
+        profile.apply_schema().unwrap();
+        assert_eq!(at(&connection), on("memory", "main"));
+        assert_eq!(at(&connection.alongside().unwrap()), on("memory", "main"));
+    }
+
+    #[test]
+    fn a_pick_is_not_undone_by_a_rollback_but_waits_out_an_aborted_transaction() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection.set_database(Some("other"));
+        connection.apply_pick().unwrap();
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+        assert_eq!(at(&connection), on("other", "main"));
+
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query("SELECT * FROM nowhere", Fetch::default())
+            .unwrap_err();
+        connection.set_database(None);
+        connection.apply_pick().unwrap_err();
+    }
+
+    #[test]
+    fn a_pick_that_is_no_longer_there_opens_where_nothing_was_picked() {
+        let open = || Connection::open(IN_MEMORY, 0).unwrap();
+        let gone = open().opened_on(Some("gone".into()), Some("s".into()));
+        assert!(gone.unpicked().unwrap().database);
+        assert!(
+            gone.unpicked().unwrap().message.contains("gone"),
+            "{:?}",
+            gone.unpicked()
+        );
+        assert_eq!(at(&gone), on("memory", "main"));
+        assert_eq!(at(&gone.alongside().unwrap()), on("memory", "main"));
+
+        let schema = open().opened_on(Some("memory".into()), Some("nowhere".into()));
+        assert!(!schema.unpicked().unwrap().database);
+        assert_eq!(at(&schema), on("memory", "main"));
+        let schema = open().opened_on(None, Some("nowhere".into()));
+        assert!(!schema.unpicked().unwrap().database);
+        assert_eq!(at(&schema.alongside().unwrap()), on("memory", "main"));
+
+        let here = open().opened_on(Some("memory".into()), Some("main".into()));
+        assert_eq!(here.unpicked(), None);
+        assert_eq!(at(&here), on("memory", "main"));
+
+        let profile = super::super::Connection::open(super::super::ConnectionConfig::DuckDb {
+            path: IN_MEMORY.into(),
+            statement_timeout: 0,
+            database: "gone".into(),
+            schema: None,
+        })
+        .unwrap();
+        assert!(profile.unpicked().is_some_and(|unpicked| unpicked.database));
+        let nothing = super::super::Connection::open(super::super::ConnectionConfig::duckdb(
+            IN_MEMORY.into(),
+            0,
+        ))
+        .unwrap();
+        assert_eq!(nothing.unpicked(), None);
+        let super::super::Connection::DuckDb(nothing) = nothing else {
+            unreachable!()
+        };
+        // Nothing picked runs nothing: the search path is DuckDB's own.
+        let path = nothing
+            .query("SELECT current_setting('search_path')", Fetch::default())
+            .unwrap();
+        assert_eq!(cells(&path), [[Some("")]]);
+    }
+
+    #[test]
+    fn a_picked_schema_keeps_a_plain_select_of_its_tables_editable() {
+        let connection = seeded();
+        connection.set_schema(Some("analytics"));
+        connection.apply_pick().unwrap();
+        for connection in [connection.clone(), connection.alongside().unwrap()] {
+            let edit = edit_of(&connection, "SELECT * FROM account_scores").expect("in analytics");
+            assert_eq!(
+                (edit.schema.as_str(), edit.table.as_str()),
+                ("analytics", "account_scores")
+            );
+            let preview =
+                crate::explorer::preview_sql(Engine::DuckDb, "main", "accounts", "", Some(10), 0);
+            let edit = edit_of(&connection, &preview).expect("qualified");
+            assert_eq!(
+                (edit.schema.as_str(), edit.table.as_str()),
+                ("main", "accounts")
+            );
+            // DuckDB finds it in `main` once the picked schema has no such
+            // table; the trace looks only where the name resolves first.
+            assert_eq!(edit_of(&connection, "SELECT * FROM accounts"), None);
+        }
+    }
+
+    #[test]
+    fn a_picked_database_traces_its_own_tables_and_an_edit_lands_there() {
+        use crate::result_grid::NewValue;
+        let connection = memory(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR);
+             INSERT INTO t VALUES (1, 'home');
+             ATTACH ':memory:' AS other;
+             CREATE TABLE other.main.t (id INTEGER PRIMARY KEY, a VARCHAR);
+             INSERT INTO other.main.t VALUES (1, 'away');",
+        );
+        connection.set_database(Some("other"));
+        connection.apply_pick().unwrap();
+        let read = connection
+            .query("SELECT * FROM t", Fetch::default())
+            .unwrap();
+        assert_eq!(cells(&read), [[Some("1"), Some("away")]]);
+        let edit = read.edit.expect("other's t has a key");
+        assert_eq!((edit.schema.as_str(), edit.table.as_str()), ("main", "t"));
+        let update = crate::sql::update_row(
+            Engine::DuckDb,
+            &edit.schema,
+            &edit.table,
+            &[("a", NewValue::Value("edited".into()))],
+            &[("id", "1")],
+            &[],
+        )
+        .unwrap();
+        assert!(crate::sql::is_generated_write_on(Engine::DuckDb, &update));
+        connection.query(&update, Fetch::default()).unwrap();
+        let both = connection
+            .query(
+                "SELECT (SELECT a FROM memory.main.t), (SELECT a FROM other.main.t)",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(cells(&both), [[Some("home"), Some("edited")]]);
+        assert_eq!(edit_of(&connection, "SELECT * FROM memory.main.t"), None);
+    }
+
+    #[test]
+    fn a_name_whose_resolution_is_in_doubt_is_not_editable_after_a_pick() {
+        for (setup, sql) in [
+            // Set by hand: DuckDB looks in the first that has the name.
+            (
+                "SET search_path = 'memory.analytics,memory.main'",
+                "SELECT * FROM account_scores",
+            ),
+            // A bare name could be a database's or a schema's.
+            (
+                "SET search_path = 'analytics'",
+                "SELECT * FROM account_scores",
+            ),
+            (
+                "USE memory.analytics; CREATE TEMP TABLE account_scores (account_id INTEGER PRIMARY KEY)",
+                "SELECT * FROM account_scores",
+            ),
+            // `"analytics"."account_scores"` would name this database too.
+            (
+                "ATTACH ':memory:' AS analytics; USE memory.analytics",
+                "SELECT * FROM account_scores",
+            ),
+        ] {
+            let connection = seeded();
+            connection.query(setup, Fetch::default()).unwrap();
+            assert_eq!(edit_of(&connection, sql), None, "{setup}");
+        }
+    }
+
+    #[test]
+    fn a_database_named_in_capitals_or_quotes_is_traced_after_a_use() {
+        let connection = memory(
+            r#"ATTACH ':memory:' AS "Other";
+               CREATE SCHEMA "Other"."Odd ""S""";
+               CREATE TABLE "Other"."Odd ""S""".t (id INTEGER PRIMARY KEY);"#,
+        );
+        connection.set_database(Some("Other"));
+        connection.set_schema(Some(r#"Odd "S""#));
+        connection.apply_pick().unwrap();
+        let edit = edit_of(&connection, "SELECT * FROM t").expect("in the picked schema");
+        assert_eq!(
+            (edit.schema.as_str(), edit.table.as_str()),
+            (r#"Odd "S""#, "t")
+        );
+    }
+
+    #[test]
+    fn a_search_path_is_read_entry_by_entry_and_part_by_part() {
+        assert_eq!(
+            search_path(r#"Other."Odd ""S""",memory.main"#),
+            Some(vec![
+                vec!["Other".to_string(), r#"Odd "S""#.to_string()],
+                vec!["memory".to_string(), "main".to_string()],
+            ])
+        );
+        assert_eq!(
+            search_path(r#""a,b".c"#),
+            Some(vec![vec!["a,b".to_string(), "c".to_string()]])
+        );
+        assert_eq!(search_path(r#""open"#), None);
+        assert_eq!(search_path("a..b"), None);
     }
 
     #[test]
