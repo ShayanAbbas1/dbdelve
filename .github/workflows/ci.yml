@@ -70,6 +70,10 @@ jobs:
     # Not 22.04: its sqlite3 (3.37) predates unhex(), which the dev seed uses.
     runs-on: ubuntu-24.04
     env:
+      # insta lets either variable rewrite or force-pass a snapshot, and CI must
+      # fail on any difference instead.
+      INSTA_UPDATE: "no"
+      INSTA_FORCE_PASS: "0"
       PGHOST: 127.0.0.1
       PGPORT: "55432"
       PGDATABASE: dbdelve_dev
@@ -159,6 +163,11 @@ jobs:
   # APPDATA paths, and no other job runs them on Windows.
   windows-build:
     runs-on: windows-latest
+    env:
+      # insta lets either variable rewrite or force-pass a snapshot, and CI must
+      # fail on any difference instead.
+      INSTA_UPDATE: "no"
+      INSTA_FORCE_PASS: "0"
     steps:
       - uses: actions/checkout@v4
         with:
