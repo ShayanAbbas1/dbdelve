@@ -207,12 +207,14 @@ mod tests {
         use crate::db::{CancelToken, Connection, Fetch};
         let dir = std::env::temp_dir().join(format!("dbdelve-files-glob-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let files = [
+        let mut files = vec![
             ("br[a].csv", "bra.csv"),
-            ("what?.csv", "what!.csv"),
-            ("star*.csv", "star2.csv"),
             ("report [2024].csv", "report 2.csv"),
         ];
+        // Windows refuses `?` and `*` in a file's name.
+        if cfg!(unix) {
+            files.extend([("what?.csv", "what!.csv"), ("star*.csv", "star2.csv")]);
+        }
         for (n, (named, near)) in files.iter().enumerate() {
             std::fs::write(dir.join(named), format!("n\n{n}\n")).unwrap();
             std::fs::write(dir.join(near), "n\n-1\n").unwrap();
