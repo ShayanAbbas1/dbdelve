@@ -6,6 +6,7 @@
 
 mod filters;
 mod previews;
+mod rows;
 mod sorts;
 mod spellings;
 
@@ -13,6 +14,7 @@ use crate::{
     db::Engine,
     filter::{self, Operator},
     redis_cmd,
+    result_grid::NewValue,
     sql::{self, Mode},
 };
 
@@ -101,6 +103,68 @@ pub(crate) fn sample_filter(engine: Engine) -> String {
         "Name"
     };
     filter::filter_predicate(engine, field, None, Operator::Equals, "it's").unwrap_or_default()
+}
+
+pub(crate) const KEY: [(&str, &str); 2] = [("id", "7"), ("Region", "eu-west 'x'")];
+
+pub(crate) fn column_types() -> Vec<(String, String)> {
+    [
+        ("id", "int"),
+        ("Region", "varchar(20)"),
+        ("Name", "nvarchar(50)"),
+        ("payload", "varbinary(16)"),
+        ("created", "datetime"),
+        ("flag", "bit"),
+    ]
+    .map(|(name, ty)| (name.to_owned(), ty.to_owned()))
+    .to_vec()
+}
+
+pub(crate) fn mongo_types() -> Vec<(String, String)> {
+    [
+        ("id", "int"),
+        ("Name", "string"),
+        ("flag", "bool"),
+        ("created", "date"),
+        ("big", "long"),
+        ("price", "decimal"),
+        ("ref", "objectId"),
+        ("score", "double"),
+        ("mixed", "int | string"),
+        ("maybe", "int | null"),
+        ("_id", "objectId"),
+    ]
+    .map(|(name, ty)| (name.to_owned(), ty.to_owned()))
+    .to_vec()
+}
+
+pub(crate) fn set(value: &str) -> NewValue {
+    NewValue::Value(value.into())
+}
+
+/// `ok` is stated at every call site so a fixture that quietly turns into an
+/// error (or into a success) fails here instead of being recorded.
+pub(crate) fn outcome(
+    out: &mut String,
+    engine: Engine,
+    case: &str,
+    text: Result<String, String>,
+    ok: bool,
+) {
+    assert_eq!(
+        text.is_ok(),
+        ok,
+        "[{}] {case}: expected ok={ok}, got {text:?}",
+        engine.as_str()
+    );
+    match text {
+        Ok(text) => statement(out, engine, case, Some(&text)),
+        Err(message) => out.push_str(&format!(
+            "\n[{}] {case}\n  error: |{}|\n",
+            engine.as_str(),
+            visible(&message)
+        )),
+    }
 }
 
 /// Backslash first, so the encoding stays injective: a real NUL records as
