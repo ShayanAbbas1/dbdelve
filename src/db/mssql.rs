@@ -4525,6 +4525,7 @@ mod tests {
                 renders: &[],
                 find: Box::new(|key| sql_find(Engine::SqlServer, "dbo", key)),
             }),
+            _guard: None,
         }
     }
 

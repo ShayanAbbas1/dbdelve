@@ -2082,6 +2082,7 @@ mod tests {
                 renders: &[],
                 find: Box::new(move |key| sql_find(engine, "dbdelve_dev", key)),
             }),
+            _guard: None,
         }
     }
 

@@ -2453,6 +2453,7 @@ mod tests {
                 ],
                 find: Box::new(|key| sql_find(Engine::Postgres, "public", key)),
             }),
+            _guard: None,
         }
     }
 

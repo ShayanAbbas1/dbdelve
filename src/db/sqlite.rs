@@ -2131,6 +2131,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 ],
                 find: Box::new(|key| sql_find(Engine::Sqlite, "main", key)),
             }),
+            _guard: None,
         }
     }
 

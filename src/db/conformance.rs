@@ -28,6 +28,8 @@ pub(super) struct Subject {
     pub runaway: &'static str,
     pub read_only_refusal: &'static str,
     pub fixture: Option<Fixture>,
+    /// Kept alive until the scenario ends, and dropped after `connection`.
+    pub _guard: Option<Box<dyn std::any::Any>>,
 }
 
 pub(super) struct Fixture {
