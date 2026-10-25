@@ -2444,6 +2444,173 @@ pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
         && !touches_session(engine, sql)
 }
 
+/// The one table a query's rows are rows of, read off the statement for an
+/// engine whose driver does not say which table a result column came from.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TableRead {
+    /// The name as written, one entry per dotted part.
+    pub(crate) table: Vec<String>,
+    pub(crate) columns: Vec<Projected>,
+}
+
+/// One entry of a [`TableRead`]'s select list.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Projected {
+    /// A `*`, which stands for every column of the table in its own order.
+    Every,
+    /// A bare or table-qualified name, as written.
+    Column(String),
+    /// Anything else, which names no column a write could land on.
+    Computed,
+}
+
+/// [`TableRead`] for the last statement of `sql`, when it is a plain select of
+/// one table: no join, subquery, table function, CTE, set operation,
+/// `DISTINCT`, grouping or window clause, and no table alias renaming the
+/// columns. Every one of those makes a result row something other than one
+/// row of the table, or a column something other than the column it names,
+/// so each refuses rather than being read past.
+pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
+    use sqlparser::ast::{
+        GroupByExpr, ObjectName, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
+        TableFactor, WildcardAdditionalOptions,
+    };
+
+    let dialect = dialect(engine)?;
+    let Statement::Query(query) = SqlParser::parse_sql(dialect.as_ref(), sql).ok()?.pop()? else {
+        return None;
+    };
+    let Query {
+        with: None,
+        body,
+        locks,
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators,
+        ..
+    } = *query
+    else {
+        return None;
+    };
+    let SetExpr::Select(select) = *body else {
+        return None;
+    };
+    let plain = select.distinct.is_none()
+        && select.select_modifiers.is_none()
+        && select.top.is_none()
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.lateral_views.is_empty()
+        && select.prewhere.is_none()
+        && select.connect_by.is_empty()
+        && matches!(&select.group_by, GroupByExpr::Expressions(by, with) if by.is_empty() && with.is_empty())
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.having.is_none()
+        && select.named_window.is_empty()
+        && select.qualify.is_none()
+        && select.value_table_mode.is_none()
+        && locks.is_empty()
+        && pipe_operators.is_empty();
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        with_hints,
+        version: None,
+        with_ordinality: false,
+        partitions,
+        json_path: None,
+        index_hints,
+        ..
+    } = &from.relation
+    else {
+        return None;
+    };
+    if !plain
+        || !from.joins.is_empty()
+        || !with_hints.is_empty()
+        || !partitions.is_empty()
+        || !index_hints.is_empty()
+        || alias
+            .as_ref()
+            .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return None;
+    }
+
+    let parts = |name: &ObjectName| -> Option<Vec<String>> {
+        name.0
+            .iter()
+            .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+            .collect()
+    };
+    let table = parts(name)?;
+    // Once aliased, the table is named by its alias alone. Unaliased, by any
+    // tail of the name it was written with.
+    let qualifiers: Vec<&[String]> = match alias {
+        Some(alias) => vec![std::slice::from_ref(&alias.name.value)],
+        None => (0..table.len()).map(|from| &table[from..]).collect(),
+    };
+    let qualifies = |written: &[String]| {
+        qualifiers.iter().any(|qualifier| {
+            qualifier.len() == written.len()
+                && qualifier
+                    .iter()
+                    .zip(written)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+    };
+    let bare = |options: &WildcardAdditionalOptions| {
+        options.opt_ilike.is_none()
+            && options.opt_exclude.is_none()
+            && options.opt_except.is_none()
+            && options.opt_replace.is_none()
+            && options.opt_rename.is_none()
+            && options.opt_alias.is_none()
+    };
+    let column = |expr: &Expr| match expr {
+        Expr::Identifier(ident) => Projected::Column(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => match idents.split_last() {
+            Some((last, qualifier))
+                if qualifies(
+                    &qualifier
+                        .iter()
+                        .map(|ident| ident.value.clone())
+                        .collect::<Vec<_>>(),
+                ) =>
+            {
+                Projected::Column(last.value.clone())
+            }
+            // A struct's field, read off a column of the table.
+            _ => Projected::Computed,
+        },
+        _ => Projected::Computed,
+    };
+
+    let mut columns = Vec::with_capacity(select.projection.len().max(1));
+    if select.projection.is_empty() && select.flavor == SelectFlavor::FromFirstNoSelect {
+        columns.push(Projected::Every);
+    }
+    for item in &select.projection {
+        columns.push(match item {
+            SelectItem::Wildcard(options) if bare(options) => Projected::Every,
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(name),
+                options,
+            ) if bare(options) && qualifies(&parts(name)?) => Projected::Every,
+            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => column(expr),
+            _ => return None,
+        });
+    }
+    Some(TableRead { table, columns })
+}
+
 /// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,
 /// transaction control, declaration or `SELECT … INTO`, no call that reads or
 /// changes what only its session holds, and nothing `classify` cannot read.

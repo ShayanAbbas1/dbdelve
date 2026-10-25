@@ -1106,8 +1106,16 @@ Decided, and not to be re-litigated:
   `ROLLBACK`, and a `COMMIT` rolls it back. A second connection (`alongside`,
   and an import's `apart`) is cloned from an idle one the profile holds,
   since opening an in-memory database again makes a new, empty one. **A
-  DuckDB result is never editable**: the driver names no column's table;
-  inserting from an object tab works. No Explain, and no Read-only backstop.
+  DuckDB result is editable only as a plain select of one keyed table**: the
+  driver names no column's table, so `sql::table_read` reads the statement
+  for one base table (no join, subquery, table function, CTE, set operation,
+  `DISTINCT`, grouping, window clause or renaming alias) whose columns are
+  `*` or bare names, and `duckdb::edit_target` takes the table and its
+  primary key from the catalog. Anything in doubt refuses: a column count
+  the parse and the driver disagree on, a column read twice, a search path
+  someone set, a temporary table of the same name, a two-part name that is
+  also an attached database's, a table in another database. DuckDB enforces
+  its keys, unlike Snowflake. No Explain, and no Read-only backstop.
   Its tests need nothing external and run under plain `cargo test`.
   `read_xlsx` is a table function of DBDelve's own over calamine (`db::xlsx`),
   registered at open, since DuckDB's excel extension cannot be linked in: a

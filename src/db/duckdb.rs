@@ -12,10 +12,12 @@
 //! file would have to keep up with. The few types Arrow has no word for are
 //! spelled out first, by [`printable`].
 //!
-//! Nothing here is editable in the grid yet: DuckDB does not say which table a
-//! result column was read from, and a predicate dbdelve cannot read off the
-//! grid is one it must not write. Inserting from an object tab works.
+//! DuckDB does not say which table a result column was read from, so a
+//! result is editable only when its statement is a plain select of one keyed
+//! table, read off the statement and checked against the catalog
+//! ([`edit_target`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -32,10 +34,12 @@ use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
 use duckdb::{Config, InterruptHandle};
 use num_bigint::BigUint;
 
+use crate::sql::Projected;
+
 use super::{
-    Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, Stopped,
-    Structure, assemble_catalog, assemble_foreign_keys, assemble_references, assemble_structure,
-    plain_error, required_cell, terminated,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference, RowBuilder,
+    Stopped, Structure, assemble_catalog, assemble_foreign_keys, assemble_references,
+    assemble_structure, plain_error, required_cell, terminated,
 };
 
 /// What an empty path means: a database held in memory, gone when the
@@ -154,13 +158,26 @@ impl Connection {
         let _deadline = self.deadline();
         let connection = lock(&self.connection)?;
         fetch.hold()?;
-        run(&connection, sql, fetch).map_err(|error| rolled_back(&connection, sql, error))
+        let mut result =
+            run(&connection, sql, fetch).map_err(|error| rolled_back(&connection, sql, error))?;
+        if !result.columns.is_empty() {
+            result.edit = edit_target(&connection, sql, &result.columns);
+        }
+        Ok(result)
+    }
+
+    /// dbdelve's own SQL, whose rows are never edited.
+    fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
+        let _deadline = self.deadline();
+        let connection = lock(&self.connection)?;
+        run(&connection, sql, Fetch::default())
+            .map_err(|error| rolled_back(&connection, sql, error))
     }
 
     /// The tables and views of the database the connection opened, less the
     /// catalogs DuckDB keeps for itself.
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.query(
+        let relations = self.internal_query(
             "SELECT schema_name, table_name AS relation_name, 'table' AS relation_kind,
                     estimated_size AS row_estimate
              FROM duckdb_tables()
@@ -170,7 +187,6 @@ impl Connection {
              FROM duckdb_views()
              WHERE NOT internal AND database_name = current_database()
              ORDER BY schema_name, relation_name",
-            Fetch::default(),
         )?;
         assemble_catalog(relations, QueryResult::default())
     }
@@ -186,35 +202,28 @@ impl Connection {
             Engine::DuckDb.quote_literal(schema),
             Engine::DuckDb.quote_literal(relation),
         );
-        let columns = self.query(
-            &format!(
-                "SELECT column_name, lower(data_type) AS data_type,
+        let columns = self.internal_query(&format!(
+            "SELECT column_name, lower(data_type) AS data_type,
                         CASE WHEN is_nullable THEN 'yes' ELSE 'no' END AS nullable,
                         COALESCE(column_default, '') AS column_default
                  FROM duckdb_columns()
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                  ORDER BY column_index"
-            ),
-            Fetch::default(),
-        )?;
-        let indexes = self.query(
-            &format!(
-                "SELECT index_name AS object_name, COALESCE(sql, '') AS definition
+        ))?;
+        let indexes = self.internal_query(&format!(
+            "SELECT index_name AS object_name, COALESCE(sql, '') AS definition
                  FROM duckdb_indexes()
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                  ORDER BY index_name"
-            ),
-            Fetch::default(),
-        )?;
+        ))?;
         // Written out of the column lists rather than taken from
         // `constraint_text`, which spells a key `PRIMARY KEY(id)`: the
         // Structure view and `Structure::primary_key` read the shape every
         // other engine gives them, `PRIMARY KEY (id)`.
-        let constraints = self.query(
-            &format!(
-                "SELECT constraint_name AS object_name,
+        let constraints = self.internal_query(&format!(
+            "SELECT constraint_name AS object_name,
                         constraint_type || ' ('
                             || array_to_string(constraint_column_names, ', ') || ')'
                             || CASE WHEN constraint_type = 'FOREIGN KEY'
@@ -228,13 +237,10 @@ impl Connection {
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                    AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
                  ORDER BY constraint_index"
-            ),
-            Fetch::default(),
-        )?;
+        ))?;
         let mut structure = assemble_structure(columns, indexes, constraints)?;
-        structure.foreign_keys = assemble_foreign_keys(&self.query(
-            &format!(
-                "SELECT unnest(constraint_column_names) AS column_name,
+        structure.foreign_keys = assemble_foreign_keys(&self.internal_query(&format!(
+            "SELECT unnest(constraint_column_names) AS column_name,
                         schema_name AS referenced_schema,
                         referenced_table,
                         unnest(referenced_column_names) AS referenced_column
@@ -242,18 +248,15 @@ impl Connection {
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                    AND constraint_type = 'FOREIGN KEY'"
-            ),
-            Fetch::default(),
-        )?)?;
+        ))?)?;
         Ok(structure)
     }
 
     /// Who points at this relation. A DuckDB foreign key names its parent by
     /// table alone, in its own schema.
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
-        let result = self.query(
-            &format!(
-                "SELECT schema_name AS source_schema, table_name AS source_table,
+        let result = self.internal_query(&format!(
+            "SELECT schema_name AS source_schema, table_name AS source_table,
                         unnest(constraint_column_names) AS column_name,
                         unnest(referenced_column_names) AS referenced_column,
                         constraint_name
@@ -261,11 +264,9 @@ impl Connection {
                  WHERE database_name = current_database()
                    AND constraint_type = 'FOREIGN KEY'
                    AND schema_name = {} AND referenced_table = {}",
-                Engine::DuckDb.quote_literal(schema),
-                Engine::DuckDb.quote_literal(relation),
-            ),
-            Fetch::default(),
-        )?;
+            Engine::DuckDb.quote_literal(schema),
+            Engine::DuckDb.quote_literal(relation),
+        ))?;
         assemble_references(&result)
     }
 
@@ -274,9 +275,8 @@ impl Connection {
             Engine::DuckDb.quote_literal(schema),
             Engine::DuckDb.quote_literal(relation),
         );
-        let listed = self.query(
-            &format!(
-                "SELECT sql FROM duckdb_tables()
+        let listed = self.internal_query(&format!(
+            "SELECT sql FROM duckdb_tables()
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                  UNION ALL
@@ -288,9 +288,7 @@ impl Connection {
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                    AND sql IS NOT NULL"
-            ),
-            Fetch::default(),
-        )?;
+        ))?;
         let statements = listed
             .rows
             .iter()
@@ -443,6 +441,150 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
     };
     result.columns = columns;
     Ok(result)
+}
+
+/// Which table these columns can be written back to, if any.
+///
+/// DuckDB names no column's table, so the statement says where each column
+/// came from, and only a select of one table's own columns
+/// ([`crate::sql::table_read`]) answers at all; the catalog says what the
+/// table is and which key names its rows. Every step may answer "no", a
+/// failed lookup included: the user's statement has already succeeded.
+fn edit_target(
+    connection: &duckdb::Connection,
+    sql: &str,
+    columns: &[Column],
+) -> Option<EditTarget> {
+    let read = crate::sql::table_read(Engine::DuckDb, sql)?;
+    let (schema, table) = resolved_table(connection, &read.table)?;
+    let lookup = |sql: String| -> Option<Vec<String>> {
+        let result = run(connection, &sql, Fetch::default()).ok()?;
+        result
+            .rows
+            .iter()
+            .map(|row| row.get(0).map(str::to_string))
+            .collect()
+    };
+    let (schema_literal, table_literal) = (
+        Engine::DuckDb.quote_literal(&schema),
+        Engine::DuckDb.quote_literal(&table),
+    );
+    let names = lookup(format!(
+        "SELECT column_name FROM duckdb_columns()
+         WHERE database_name = current_database()
+           AND schema_name = {schema_literal} AND table_name = {table_literal}
+         ORDER BY column_index"
+    ))?;
+    let key = lookup(format!(
+        "SELECT unnest(constraint_column_names) FROM duckdb_constraints()
+         WHERE database_name = current_database()
+           AND schema_name = {schema_literal} AND table_name = {table_literal}
+           AND constraint_type = 'PRIMARY KEY'"
+    ))?;
+
+    let origins: Vec<Option<String>> = read
+        .columns
+        .iter()
+        .flat_map(|projected| match projected {
+            Projected::Every => names.iter().cloned().map(Some).collect(),
+            // Case-blind, as DuckDB reads a name whether quoted or not. One
+            // that is no column of the table is something else spelled as a
+            // name: `rowid`, or the table's whole row.
+            Projected::Column(written) => vec![
+                names
+                    .iter()
+                    .find(|name| name.eq_ignore_ascii_case(written))
+                    .cloned(),
+            ],
+            Projected::Computed => vec![None],
+        })
+        .collect();
+    // The statement read one way and the driver's columns another, so neither
+    // reading can be trusted to say which column is which.
+    if origins.len() != columns.len() {
+        return None;
+    }
+    // One table column twice would be written twice by one edit.
+    let mut seen = HashSet::new();
+    if !origins.iter().flatten().all(|origin| seen.insert(origin)) {
+        return None;
+    }
+    let keys = key
+        .iter()
+        .map(|name| {
+            origins
+                .iter()
+                .position(|origin| origin.as_ref() == Some(name))
+        })
+        .collect::<Option<Vec<usize>>>()?;
+    if keys.is_empty() {
+        return None;
+    }
+    Some(EditTarget {
+        schema,
+        table,
+        columns: origins,
+        keys,
+    })
+}
+
+/// The stored schema and name of the base table `written` names in the
+/// database the connection opened, where an `UPDATE` dbdelve writes as
+/// `"schema"."table"` would land on the same table.
+///
+/// Refused wherever that is in doubt: a search path someone set, a temporary
+/// table or view of the same name (the temporary catalog is searched first),
+/// a two-part name whose first part is also an attached database's, and a
+/// three-part one in another database.
+fn resolved_table(connection: &duckdb::Connection, written: &[String]) -> Option<(String, String)> {
+    let literal = |name: &str| Engine::DuckDb.quote_literal(name);
+    let (schema, table, also) = match written {
+        [table] => (
+            "current_schema()".to_string(),
+            literal(table),
+            String::new(),
+        ),
+        [schema, table] => (
+            literal(schema),
+            literal(table),
+            format!(
+                "AND NOT EXISTS (SELECT 1 FROM duckdb_databases()
+                                 WHERE lower(database_name) = lower({}))",
+                literal(schema)
+            ),
+        ),
+        [database, schema, table] => (
+            literal(schema),
+            literal(table),
+            format!(
+                "AND lower(current_database()) = lower({})",
+                literal(database)
+            ),
+        ),
+        _ => return None,
+    };
+    let result = run(
+        connection,
+        &format!(
+            "SELECT schema_name, table_name FROM duckdb_tables()
+             WHERE database_name = current_database()
+               AND lower(schema_name) = lower({schema}) AND lower(table_name) = lower({table})
+               AND current_setting('search_path') = ''
+               AND NOT EXISTS (SELECT 1 FROM duckdb_tables()
+                               WHERE database_name = 'temp'
+                                 AND lower(table_name) = lower({table}))
+               AND NOT EXISTS (SELECT 1 FROM duckdb_views()
+                               WHERE database_name = 'temp'
+                                 AND lower(view_name) = lower({table}))
+               {also}"
+        ),
+        Fetch::default(),
+    )
+    .ok()?;
+    match result.rows.as_slice() {
+        [row] => Some((row.get(0)?.to_string(), row.get(1)?.to_string())),
+        _ => None,
+    }
 }
 
 /// End the transaction a failed submission opened, and say so in the error,
@@ -1534,6 +1676,213 @@ mod tests {
             .unwrap();
         let keyed = connection.structure("main", "keyed").unwrap();
         assert!(Engine::DuckDb.skips_duplicates_into(&keyed));
+    }
+
+    fn seeded() -> Connection {
+        memory(&std::fs::read_to_string(fixture("001-dbdelve-demo.sql")).expect("the dev seed"))
+    }
+
+    fn edit_of(connection: &Connection, sql: &str) -> Option<super::super::EditTarget> {
+        connection.query(sql, Fetch::default()).unwrap().edit
+    }
+
+    fn named(columns: &[Option<&str>]) -> Vec<Option<String>> {
+        columns
+            .iter()
+            .map(|column| column.map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn a_tables_preview_and_a_typed_select_of_it_are_editable_by_its_primary_key() {
+        let connection = seeded();
+        let preview = crate::explorer::preview_sql(
+            Engine::DuckDb,
+            "main",
+            "accounts",
+            "\"plan\" = 'team'",
+            Some(1000),
+            2000,
+        );
+        let every = named(&[
+            Some("id"),
+            Some("external_id"),
+            Some("name"),
+            Some("email"),
+            Some("plan"),
+            Some("balance"),
+            Some("active"),
+            Some("tags"),
+            Some("metadata"),
+            Some("created_at"),
+        ]);
+        for sql in [
+            preview.as_str(),
+            "SELECT * FROM accounts",
+            "select * from Main.ACCOUNTS order by name desc limit 5",
+            "SELECT a.* FROM memory.main.accounts AS a WHERE a.balance > 0",
+            "FROM accounts",
+        ] {
+            let edit = edit_of(&connection, sql).unwrap_or_else(|| panic!("{sql}"));
+            assert_eq!(
+                (edit.schema.as_str(), edit.table.as_str()),
+                ("main", "accounts")
+            );
+            assert_eq!(edit.columns, every, "{sql}");
+            assert_eq!(edit.keys, [0], "{sql}");
+        }
+
+        let edit = edit_of(
+            &connection,
+            "SELECT name, a.ID AS ident, upper(name) AS shout, \"active\" FROM accounts a",
+        )
+        .unwrap();
+        assert_eq!(
+            edit.columns,
+            named(&[Some("name"), Some("id"), None, Some("active")])
+        );
+        assert_eq!(edit.keys, [1]);
+
+        let edit = edit_of(&connection, "SELECT * FROM analytics.account_scores").unwrap();
+        assert_eq!(
+            (edit.schema.as_str(), edit.table.as_str()),
+            ("analytics", "account_scores")
+        );
+        assert_eq!(edit.keys, [0]);
+    }
+
+    #[test]
+    fn a_result_that_is_not_one_keyed_tables_rows_is_not_editable() {
+        let connection = seeded();
+        connection
+            .query(
+                "CREATE TABLE twin (id INTEGER PRIMARY KEY)",
+                Fetch::default(),
+            )
+            .unwrap();
+        for sql in [
+            "SELECT name FROM accounts",
+            "SELECT * FROM tally",
+            "SELECT * FROM contacts",
+            "SELECT * FROM account_overview",
+            "SELECT a.id, b.id FROM accounts a JOIN twin b ON a.id = b.id",
+            "SELECT * FROM accounts, twin",
+            "SELECT id, count(*) FROM accounts GROUP BY id",
+            "SELECT DISTINCT id, name FROM accounts",
+            "WITH a AS (SELECT * FROM accounts) SELECT * FROM a",
+            "SELECT * FROM (SELECT * FROM accounts)",
+            "SELECT * FROM accounts UNION ALL SELECT * FROM accounts",
+            "SELECT id, id FROM accounts",
+            "SELECT * FROM accounts AS a (ident)",
+            "SELECT * EXCLUDE (email) FROM accounts",
+            "SELECT * FROM range(3)",
+            "SELECT id + 0 AS id FROM accounts",
+            "SELECT id FROM accounts QUALIFY row_number() OVER () = 1",
+            "INSERT INTO twin VALUES (1) RETURNING *",
+        ] {
+            assert_eq!(edit_of(&connection, sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_table_a_temporary_one_shadows_is_not_editable() {
+        let connection = memory(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a VARCHAR);
+             CREATE TEMP TABLE t (id INTEGER PRIMARY KEY, a VARCHAR);",
+        );
+        assert_eq!(edit_of(&connection, "SELECT * FROM t"), None);
+        assert_eq!(edit_of(&connection, "SELECT * FROM main.t"), None);
+    }
+
+    #[test]
+    fn an_edit_dbdelve_writes_on_a_traced_row_passes_its_gates_and_lands() {
+        use crate::result_grid::{NewValue, PendingRow};
+        let connection = seeded();
+        let preview =
+            crate::explorer::preview_sql(Engine::DuckDb, "main", "accounts", "", Some(1000), 0);
+        let read = connection.query(&preview, Fetch::default()).unwrap();
+        let edit = read.edit.clone().expect("accounts has a primary key");
+        let types: Vec<(String, String)> = read
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), column.data_type.clone().unwrap()))
+            .collect();
+        let key = |row: usize| {
+            let name = edit.columns[edit.keys[0]].clone().unwrap();
+            let value = read.rows[row].get(edit.keys[0]).unwrap().to_string();
+            (name, value)
+        };
+        let (first, second) = (key(0), key(1));
+
+        let batch = crate::sql::update_batch(
+            Engine::DuckDb,
+            &[
+                PendingRow {
+                    schema: edit.schema.clone(),
+                    table: edit.table.clone(),
+                    sets: vec![
+                        ("name".into(), NewValue::Value("o'hara".into())),
+                        ("active".into(), NewValue::Value("false".into())),
+                        ("balance".into(), NewValue::Value("12.34".into())),
+                        ("email".into(), NewValue::Null),
+                    ],
+                    keys: vec![first.clone()],
+                    types: types.clone(),
+                    held: Vec::new(),
+                },
+                PendingRow {
+                    schema: edit.schema.clone(),
+                    table: edit.table.clone(),
+                    sets: vec![("name".into(), NewValue::Value(String::new().into()))],
+                    keys: vec![second.clone()],
+                    types: types.clone(),
+                    held: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+        assert!(
+            crate::sql::is_generated_write_on(Engine::DuckDb, &batch),
+            "{batch}"
+        );
+        connection.query(&batch, Fetch::default()).unwrap();
+        let after = connection
+            .query(
+                &format!(
+                    "SELECT name, active, balance, email FROM accounts WHERE id IN ({}, {}) ORDER BY id",
+                    first.1, second.1
+                ),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            cells(&after)[0],
+            [Some("o'hara"), Some("false"), Some("12.34"), None]
+        );
+        assert_eq!(cells(&after)[1][0], Some(""));
+
+        // Nothing references a score, where a referenced account refuses it.
+        let scores = connection
+            .query("SELECT * FROM analytics.account_scores", Fetch::default())
+            .unwrap();
+        let edit = scores.edit.expect("account_scores has a primary key");
+        let key = scores.rows[0].get(edit.keys[0]).unwrap();
+        let delete = crate::sql::delete_row(
+            Engine::DuckDb,
+            &edit.schema,
+            &edit.table,
+            &[("account_id", key)],
+            &[],
+        )
+        .unwrap();
+        assert!(crate::sql::is_generated_write_on(Engine::DuckDb, &delete));
+        assert!(crate::sql::delete_matches_key_on(
+            Engine::DuckDb,
+            &delete,
+            &["account_id"]
+        ));
+        let deleted = connection.query(&delete, Fetch::default()).unwrap();
+        assert_eq!(deleted.rows_affected, Some(1));
     }
 
     #[test]
