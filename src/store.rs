@@ -457,14 +457,15 @@ pub struct UnavailableProfile {
     pub name: String,
     /// The tag as written, or a tag that is not a string as TOML writes it.
     pub engine: String,
-    /// The ids of the supported profiles above it in the file, nearest last:
-    /// what [`interleaved`] puts it back after.
-    follows: Vec<String>,
+    /// The supported profiles above it in the file, nearest last, each as its
+    /// id and how many above it share that id: what [`interleaved`] puts it
+    /// back after.
+    follows: Vec<(String, usize)>,
     table: toml::Table,
 }
 
 impl UnavailableProfile {
-    fn from_table(table: toml::Table, follows: Vec<String>) -> Result<Self, String> {
+    fn from_table(table: toml::Table, follows: Vec<(String, usize)>) -> Result<Self, String> {
         let text = |key: &str| {
             table
                 .get(key)
@@ -604,7 +605,11 @@ pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
     // A file with an unavailable profile that the mixed reader cannot hold
     // takes the plain decode too, so no file an earlier build read is newly
     // refused.
+    // toml's `Value` reads a table whose first key is its private datetime
+    // marker as a datetime and drops the rest of the table, so a file that
+    // spells the marker anywhere is never read into a `Table`.
     if unavailable.contains(&true)
+        && !text.contains("__toml_private_datetime")
         && let Ok(list) = decode_mixed(text, &unavailable)
     {
         return Ok(list);
@@ -688,9 +693,20 @@ fn decode_mixed(text: &str, unavailable: &[bool]) -> Result<ProfileList, String>
         match entry {
             Entry::Supported(profile) => list.profiles.push(*profile),
             Entry::Unavailable(table) => {
-                let follows = list.profiles.iter().map(|profile| profile.id.clone());
+                let follows = list
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(at, profile)| {
+                        let before = list.profiles[..at]
+                            .iter()
+                            .filter(|earlier| earlier.id == profile.id)
+                            .count();
+                        (profile.id.clone(), before)
+                    })
+                    .collect();
                 list.unavailable
-                    .push(UnavailableProfile::from_table(table, follows.collect())?);
+                    .push(UnavailableProfile::from_table(table, follows)?);
             }
         }
     }
@@ -798,10 +814,10 @@ enum ProfileEntry<'a> {
 }
 
 /// Each unavailable profile goes back after the nearest profile above it in
-/// the file that is still there, at that id's first place; with none left, at
-/// the start. The supported order is only ever pushed to or removed from, so
-/// this needs no bookkeeping, and every unavailable profile has exactly one
-/// place, so none is written twice when ids repeat.
+/// the file that is still there -- the same occurrence of its id, when ids
+/// repeat -- or with none left, at the start. The supported order is only
+/// ever pushed to or removed from, so this needs no bookkeeping, and every
+/// unavailable profile has exactly one place, so none is written twice.
 fn interleaved<'a>(
     profiles: &'a [StoredProfile],
     unavailable: &'a [UnavailableProfile],
@@ -809,10 +825,14 @@ fn interleaved<'a>(
     let anchors = unavailable
         .iter()
         .map(|gone| {
-            gone.follows
-                .iter()
-                .rev()
-                .find_map(|id| profiles.iter().position(|profile| &profile.id == id))
+            gone.follows.iter().rev().find_map(|(id, before)| {
+                profiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, profile)| &profile.id == id)
+                    .nth(*before)
+                    .map(|(at, _)| at)
+            })
         })
         .collect::<Vec<_>>();
     let after = |anchor: Option<usize>| {
@@ -1677,6 +1697,103 @@ later = "kept"
         let before: toml::Table = toml::from_str(PLUGIN).unwrap();
         let after: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
         assert_eq!(after["profiles"], before["profiles"]);
+        // And as text, so the check does not lean on the reader under test:
+        // every nested key, its value and the bare datetime, keys sorted.
+        assert_eq!(
+            encode_profiles(&list).unwrap(),
+            r#"projects = []
+
+[[profiles]]
+created = 2026-10-01T09:00:00Z
+engine = "plugin:clickhouse"
+id = "ch"
+name = "ClickHouse prod"
+speaks = "clickhouse"
+statement_timeout = 30
+
+[profiles.fields]
+host = "ch.internal"
+port = "9440"
+
+[[profiles.open_objects]]
+name = "events"
+schema = "default"
+
+[[profiles.open_objects.bars]]
+column = "ts"
+later = "kept"
+operator = "greater"
+value = "1"
+
+[[profiles.open_queries]]
+active = true
+id = 0
+"#
+        );
+    }
+
+    #[test]
+    fn a_file_spelling_tomls_datetime_marker_decodes_as_it_does_today() {
+        // Read into a Table, `keep` would be dropped beside the marker.
+        let marked = stub("a", "postgres")
+            + &PLUGIN.replace(
+                "[profiles.fields]\n",
+                "[profiles.fields]\nodd = { \"$__toml_private_datetime\" = \"2026-10-01T09:00:00Z\", keep = \"lost\" }\n",
+            );
+        assert!(marked.contains("keep = \"lost\""));
+        assert_eq!(decode_profiles(&marked), decoded_as_before(&marked));
+        let quoted =
+            stub("a", "postgres") + "note = '__toml_private_datetime'\n" + &stub("x", "plugin:t");
+        assert_eq!(decode_profiles(&quoted), decoded_as_before(&quoted));
+    }
+
+    #[test]
+    fn engine_tags_that_are_not_strings_hold_the_profile_back_whole() {
+        for (tag, written) in [
+            ("[1, 'a']", "[1, \"a\"]"),
+            ("{ name = 'odbc' }", "{ name = \"odbc\" }"),
+            ("3", "3"),
+            ("true", "true"),
+        ] {
+            let text = stub("a", "postgres")
+                + &stub("x", "y").replace("engine = 'y'", &format!("engine = {tag}"));
+            // Before, the file would not load at all and was moved aside.
+            assert!(decoded_as_before(&text).is_err(), "{tag}");
+            let list = decode_profiles(&text).expect("held back, not failed");
+            assert_eq!(
+                (list.profiles.len(), list.unavailable.len()),
+                (1, 1),
+                "{tag}"
+            );
+            assert_eq!(list.unavailable[0].engine, written, "{tag}");
+            let again = decode_profiles(&encode_profiles(&list).unwrap()).unwrap();
+            assert_eq!(again, list, "{tag}");
+        }
+    }
+
+    #[test]
+    fn odd_top_level_shapes_decode_as_they_do_today() {
+        let plugin = "{ id = 'x', name = 'X', engine = 'plugin:t' }";
+        for text in [
+            String::new(),
+            "profiles = 3".to_string(),
+            "profiles = 'plugin:t'".to_string(),
+            format!("profiles = [1, {plugin}]"),
+            format!("profiles = [{plugin}, 'a']"),
+            "profiles = [[1]]".to_string(),
+            "[profiles]\nid = 'x'\nname = 'X'\nengine = 'plugin:t'\n".to_string(),
+            format!("profiles = {plugin}"),
+            "unknown = 1\n".to_string() + &supported_stub(Some("postgres"), ""),
+            "[elsewhere]\nengine = 'plugin:t'\n".to_string() + &supported_stub(None, ""),
+        ] {
+            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+        }
+        // An unknown top-level key beside an unavailable profile is skipped,
+        // as it is beside supported ones, and not written back.
+        let extra = "unknown = 1\n".to_string() + &stub("a", "postgres") + &stub("x", "plugin:t");
+        let list = decode_profiles(&extra).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        assert!(!encode_profiles(&list).unwrap().contains("unknown"));
     }
 
     #[test]
@@ -1773,14 +1890,44 @@ later = "kept"
         .concat();
         let list = decode_profiles(&file).expect("repeated ids load, as they do today");
         assert_eq!((list.profiles.len(), list.unavailable.len()), (2, 2));
-        // Each goes after the first surviving occurrence of its nearest anchor, so
-        // a* moves above the second a; it is never written twice.
+        // Each goes after the same occurrence of its nearest id, and only once.
         assert_eq!(
             written(&list.profiles, &list.unavailable),
-            ["a", "x*", "a*", "a"]
+            ["a", "x*", "a", "a*"]
         );
-        let again = decode_profiles(&encode_profiles(&list).unwrap()).unwrap();
-        assert_eq!((again.profiles.len(), again.unavailable.len()), (2, 2));
+        // With the first a gone, occurrences count from the a that is left:
+        // x is after it, and a*, whose second a is gone, falls back to it too.
+        assert_eq!(
+            written(&list.profiles[1..], &list.unavailable),
+            ["a", "x*", "a*"]
+        );
+    }
+
+    #[test]
+    fn a_save_that_changes_nothing_keeps_every_place_when_ids_repeat() {
+        let file = [
+            ("a", "postgres"),
+            ("b", "postgres"),
+            ("x", "plugin:t"),
+            ("a", "sqlite"),
+            ("y", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let ids = |text: &str| -> Vec<String> {
+            toml::from_str::<toml::Table>(text).unwrap()["profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = decode_profiles(&file).unwrap();
+        let saved = encode_profiles(&list).unwrap();
+        assert_eq!(ids(&saved), ["a", "b", "x", "a", "y"]);
+        let again = decode_profiles(&saved).unwrap();
+        assert_eq!(again, list);
+        assert_eq!(encode_profiles(&again).unwrap(), saved);
     }
 
     #[test]
