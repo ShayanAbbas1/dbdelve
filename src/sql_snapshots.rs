@@ -6,6 +6,7 @@
 
 mod filters;
 mod previews;
+mod sorts;
 mod spellings;
 
 use crate::{
