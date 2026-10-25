@@ -460,7 +460,13 @@ impl Workspace {
 
         let mut load_failure = None;
         match store::load_profiles() {
-            Ok((profiles, active, stored_fonts, stored_settings, projects)) => {
+            Ok(store::ProfileList {
+                profiles,
+                active,
+                fonts: stored_fonts,
+                settings: stored_settings,
+                projects,
+            }) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let stored_settings = stored_settings.unwrap_or_default();

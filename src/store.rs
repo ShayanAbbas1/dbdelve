@@ -431,15 +431,16 @@ pub struct StoredProject {
 }
 
 /// A decoded profile file: the profiles, the id of the one that was in front,
-/// the fonts, the settings and the projects. Named because it is five things
-/// and a bare tuple in the signature reads as none of them.
-type Restored = (
-    Vec<StoredProfile>,
-    Option<String>,
-    Option<StoredFonts>,
-    Option<StoredSettings>,
-    Vec<StoredProject>,
-);
+/// the fonts, the settings and the projects. No `Default`, so whoever writes
+/// one names every field.
+#[derive(Debug, PartialEq)]
+pub struct ProfileList {
+    pub profiles: Vec<StoredProfile>,
+    pub active: Option<String>,
+    pub fonts: Option<StoredFonts>,
+    pub settings: Option<StoredSettings>,
+    pub projects: Vec<StoredProject>,
+}
 
 /// Field order is load-bearing here too: `active` is a scalar, so it has to
 /// precede every table, and `fonts` and `settings` are tables, so both have to
@@ -473,7 +474,7 @@ pub struct LoadFailure {
 /// file is the first run, and reads as an empty list. Every other failure is
 /// reported, an unreachable data directory included -- `save_profiles` refuses
 /// on that too, and an empty list here is what the next save writes back.
-pub fn load_profiles() -> Result<Restored, LoadFailure> {
+pub fn load_profiles() -> Result<ProfileList, LoadFailure> {
     let path = dbdelve_directory()
         .map_err(|message| LoadFailure {
             message,
@@ -509,52 +510,54 @@ pub fn load_profiles() -> Result<Restored, LoadFailure> {
 
 /// The profile file without `load_profiles`' moving it aside on a failure,
 /// for a read that only peeks, ahead of the one that reports.
-pub fn peek_profiles() -> Option<Restored> {
+pub fn peek_profiles() -> Option<ProfileList> {
     read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE)).ok()
 }
 
 /// A failure is what could not be read -- `" as TOML"` for a file that could
 /// -- and why.
-fn read_profiles(path: &Path) -> Result<Restored, (&'static str, String)> {
+fn read_profiles(path: &Path) -> Result<ProfileList, (&'static str, String)> {
     match fs::read_to_string(path) {
         Ok(text) => decode_profiles(&text).map_err(|error| (" as TOML", error)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Ok((Vec::new(), None, None, None, Vec::new()))
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProfileList {
+            profiles: Vec::new(),
+            active: None,
+            fonts: None,
+            settings: None,
+            projects: Vec::new(),
+        }),
         Err(error) => Err(("", error.to_string())),
     }
 }
 
-pub(crate) fn decode_profiles(text: &str) -> Result<Restored, String> {
+pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
     toml::from_str::<ProfileFile>(text)
-        .map(|file| {
-            (
-                file.profiles,
-                file.active,
-                file.fonts,
-                file.settings,
-                file.projects,
-            )
+        .map(|file| ProfileList {
+            profiles: file.profiles,
+            active: file.active,
+            fonts: file.fonts,
+            settings: file.settings,
+            projects: file.projects,
         })
         .map_err(|error| error.to_string())
 }
 
-pub fn save_profiles(
-    profiles: &[StoredProfile],
-    active: Option<&str>,
-    fonts: &StoredFonts,
-    settings: &StoredSettings,
-    projects: &[StoredProject],
-) -> Result<(), String> {
-    let text = toml::to_string_pretty(&ProfileFile {
-        active: active.map(str::to_string),
-        fonts: Some(fonts.clone()),
-        settings: Some(settings.clone()),
-        projects: projects.to_vec(),
-        profiles: profiles.to_vec(),
+pub(crate) fn encode_profiles(list: &ProfileList) -> Result<String, String> {
+    toml::to_string_pretty(&ProfileFile {
+        active: list.active.clone(),
+        fonts: list.fonts.clone(),
+        settings: list.settings.clone(),
+        projects: list.projects.clone(),
+        profiles: list.profiles.clone(),
     })
-    .map_err(|error| format!("Could not encode the profile list: {error}"))?;
-    write_file(&dbdelve_directory()?.join(PROFILES_FILE), &text)
+    .map_err(|error| format!("Could not encode the profile list: {error}"))
+}
+
+pub fn save_profiles(list: &ProfileList) -> Result<(), String> {
+    write_file(
+        &dbdelve_directory()?.join(PROFILES_FILE),
+        &encode_profiles(list)?,
+    )
 }
 
 pub fn profile_id(name: &str, existing: &[String]) -> String {
@@ -1228,18 +1231,10 @@ mod tests {
     use crate::db::rows;
     use crate::theme::ConnectionColor;
 
-    /// The current code's own decode-then-encode, so the golden is what it writes.
+    /// The save path's own decode-then-encode, so the golden is what it writes.
     fn resaved(text: &str) -> String {
-        let (profiles, active, fonts, settings, projects) =
-            decode_profiles(text).expect("the fixture loads");
-        toml::to_string_pretty(&ProfileFile {
-            active,
-            fonts,
-            settings,
-            projects,
-            profiles,
-        })
-        .expect("the fixture encodes")
+        encode_profiles(&decode_profiles(text).expect("the fixture loads"))
+            .expect("the fixture encodes")
     }
 
     #[test]
@@ -1367,7 +1362,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             let profile = &profiles[0];
             assert_eq!(profile.mode, None);
             assert!(profile.confirmed.is_empty());
@@ -1404,7 +1399,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             assert_eq!(profiles.len(), 2);
             // Kept raw here; `restore_profile` is where an unreadable slug
             // becomes a mode, and where it decides which way to fail.
@@ -1447,16 +1442,16 @@ user = "shayan"
                 open_objects: Vec::new(),
             };
 
-            save_profiles(
-                std::slice::from_ref(&stored),
-                Some(&stored.id),
-                &StoredFonts::default(),
-                &StoredSettings::default(),
-                &[],
-            )
+            save_profiles(&ProfileList {
+                profiles: vec![stored.clone()],
+                active: Some(stored.id.clone()),
+                fonts: Some(StoredFonts::default()),
+                settings: Some(StoredSettings::default()),
+                projects: Vec::new(),
+            })
             .unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             assert_eq!(profiles[0], stored);
         });
     }
@@ -1558,7 +1553,9 @@ user = "shayan"
         // is the file already on disk for anyone who has run dbdelve before. A
         // decode error here reads as "no profiles", which is what the next save
         // would then write back.
-        let (profiles, active, ..) = decode_profiles(
+        let ProfileList {
+            profiles, active, ..
+        } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -1898,7 +1895,7 @@ open_objects = []
     fn an_object_written_before_the_kind_existed_loads_as_a_table() {
         // A relation's tab is opened from what is on disk now, so a profile
         // written before the kind was stored has to name a kind anyway.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -1930,7 +1927,7 @@ active = true
         // Every profile on disk before a second engine existed has no `engine`
         // key at all, and must load as Postgres -- which is what it was
         // connecting as -- rather than fail to decode.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -2150,8 +2147,9 @@ open_objects = []
         // A file written before `settings` existed has no `[settings]` table
         // at all, and that is what is on disk for everyone running dbdelve
         // today -- it has to keep reading as `None`, not as the defaults.
-        let (.., missing, _) =
-            decode_profiles("active = \"dev\"\n").expect("a file predating settings must load");
+        let missing = decode_profiles("active = \"dev\"\n")
+            .expect("a file predating settings must load")
+            .settings;
         assert_eq!(missing, None);
     }
 
@@ -2162,7 +2160,13 @@ open_objects = []
         assert!(decode_profiles("host = ").is_err());
         assert_eq!(
             decode_profiles(""),
-            Ok((Vec::new(), None, None, None, Vec::new()))
+            Ok(ProfileList {
+                profiles: Vec::new(),
+                active: None,
+                fonts: None,
+                settings: None,
+                projects: Vec::new(),
+            })
         );
     }
 
@@ -2434,7 +2438,7 @@ open_objects = []
     fn a_profile_written_before_open_queries_existed_keeps_its_open_query() {
         // The file on disk for anyone running dbdelve today: one buffer, named in
         // `open_query`. Dropping either the field or the decode loses it.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -2755,7 +2759,7 @@ open_objects = []
     fn a_stored_object_written_before_filters_reads_back_unfiltered() {
         // The tab this profile had open was showing the whole relation, and
         // absent has to mean that rather than fail the decode.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"

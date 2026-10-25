@@ -56,13 +56,13 @@ impl Workspace {
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
-        if let Err(message) = store::save_profiles(
-            &profiles,
-            active.as_deref(),
-            &fonts,
-            &settings,
-            &self.projects,
-        ) {
+        if let Err(message) = store::save_profiles(&store::ProfileList {
+            profiles,
+            active,
+            fonts: Some(fonts),
+            settings: Some(settings),
+            projects: self.projects.clone(),
+        }) {
             self.note(message, cx);
         }
     }
@@ -2088,7 +2088,8 @@ mod tests {
     use super::*;
 
     fn restored_configs(text: &str) -> String {
-        let (profiles, ..) = store::decode_profiles(text).expect("the fixture loads");
+        let store::ProfileList { profiles, .. } =
+            store::decode_profiles(text).expect("the fixture loads");
         profiles
             .iter()
             .map(|stored| {
