@@ -5,6 +5,7 @@
 //! judge it.
 
 mod batches;
+mod engines;
 mod explain;
 mod filters;
 mod gates;

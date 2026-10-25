@@ -860,6 +860,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_file_extension_names_its_engine() {
+        let cases = [
+            ("db", Engine::Sqlite),
+            ("sqlite", Engine::Sqlite),
+            ("sqlite3", Engine::Sqlite),
+            ("db3", Engine::Sqlite),
+            ("duckdb", Engine::DuckDb),
+            ("ddb", Engine::DuckDb),
+        ];
+        for (extension, engine) in cases {
+            for extension in [extension.to_owned(), extension.to_ascii_uppercase()] {
+                let path = format!("~/a.{extension}");
+                assert_eq!(recognise(&path), Recognised::File(engine), "{path}");
+            }
+        }
+        assert_eq!(recognise("~/a.turso"), Recognised::Typing);
+    }
+
+    #[test]
     fn a_url_is_recognised_by_the_scheme_the_form_reads() {
         let cases = [
             ("postgresql://ana@db.internal:5432/app", Engine::Postgres),
