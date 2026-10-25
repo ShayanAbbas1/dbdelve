@@ -2110,6 +2110,7 @@ dependencies = [
  "icondata_core",
  "icondata_lu",
  "icondata_si",
+ "insta",
  "jsonc-parser",
  "keyring",
  "libc",
@@ -4603,6 +4604,17 @@ checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
  "block-padding 0.4.2",
  "hybrid-array",
+]
+
+[[package]]
+name = "insta"
+version = "1.49.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
+dependencies = [
+ "once_cell",
+ "similar",
+ "tempfile",
 ]
 
 [[package]]

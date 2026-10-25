@@ -30,3 +30,7 @@ HANDOFF.md
 docs/grilling.md
 docs/specs/
 docs/superpowers/
+
+# insta's pending output while a snapshot is being reviewed.
+*.snap.new
+*.pending-snap
