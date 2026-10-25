@@ -1,0 +1,282 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] plain · Plan · explainable => |ok|
+
+[postgres] plain · Plan
+  |EXPLAIN SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[postgres] filtered · Plan · explainable => |ok|
+
+[postgres] filtered · Plan
+  |EXPLAIN SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[postgres] delete · Plan · explainable => |ok|
+
+[postgres] delete · Plan
+  |EXPLAIN DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[postgres] plain · Analyze · explainable => |ok|
+
+[postgres] plain · Analyze
+  |EXPLAIN ANALYZE SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[postgres] filtered · Analyze · explainable => |ok|
+
+[postgres] filtered · Analyze
+  |EXPLAIN ANALYZE SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[postgres] delete · Analyze · explainable => |ok|
+
+[postgres] delete · Analyze
+  |EXPLAIN ANALYZE DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None typed=Some(Analyze)
+[mysql] plain · Plan · explainable => |ok|
+
+[mysql] plain · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mysql] filtered · Plan · explainable => |ok|
+
+[mysql] filtered · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mysql] delete · Plan · explainable => |ok|
+
+[mysql] delete · Plan
+  |EXPLAIN DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mysql] plain · Analyze · explainable => |ok|
+
+[mysql] plain · Analyze
+  |EXPLAIN ANALYZE SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[mysql] filtered · Analyze · explainable => |ok|
+
+[mysql] filtered · Analyze
+  |EXPLAIN ANALYZE SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[mysql] delete · Analyze · explainable => |ok|
+
+[mysql] delete · Analyze
+  |EXPLAIN ANALYZE DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None typed=Some(Analyze)
+[mariadb] plain · Plan · explainable => |ok|
+
+[mariadb] plain · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mariadb] filtered · Plan · explainable => |ok|
+
+[mariadb] filtered · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mariadb] delete · Plan · explainable => |ok|
+
+[mariadb] delete · Plan
+  |EXPLAIN DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mariadb] plain · Analyze · explainable => |ok|
+
+[mariadb] plain · Analyze
+  |ANALYZE SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mariadb] filtered · Analyze · explainable => |ok|
+
+[mariadb] filtered · Analyze
+  |ANALYZE SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[mariadb] delete · Analyze · explainable => |ok|
+
+[mariadb] delete · Analyze
+  |ANALYZE DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None typed=None
+[sqlite] plain · Plan · explainable => |ok|
+
+[sqlite] plain · Plan
+  |EXPLAIN QUERY PLAN SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[sqlite] filtered · Plan · explainable => |ok|
+
+[sqlite] filtered · Plan
+  |EXPLAIN QUERY PLAN SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[sqlite] delete · Plan · explainable => |ok|
+
+[sqlite] delete · Plan
+  |EXPLAIN QUERY PLAN DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[sqlite] plain · Analyze · explainable => |ok|
+
+[sqlite] plain · Analyze
+  (none)
+[sqlite] filtered · Analyze · explainable => |ok|
+
+[sqlite] filtered · Analyze
+  (none)
+[sqlite] delete · Analyze · explainable => |ok|
+
+[sqlite] delete · Analyze
+  (none)
+[turso] plain · Plan · explainable => |ok|
+
+[turso] plain · Plan
+  (none)
+[turso] filtered · Plan · explainable => |ok|
+
+[turso] filtered · Plan
+  (none)
+[turso] delete · Plan · explainable => |ok|
+
+[turso] delete · Plan
+  (none)
+[turso] plain · Analyze · explainable => |ok|
+
+[turso] plain · Analyze
+  (none)
+[turso] filtered · Analyze · explainable => |ok|
+
+[turso] filtered · Analyze
+  (none)
+[turso] delete · Analyze · explainable => |ok|
+
+[turso] delete · Analyze
+  (none)
+[duckdb] plain · Plan · explainable => |ok|
+
+[duckdb] plain · Plan
+  (none)
+[duckdb] filtered · Plan · explainable => |ok|
+
+[duckdb] filtered · Plan
+  (none)
+[duckdb] delete · Plan · explainable => |ok|
+
+[duckdb] delete · Plan
+  (none)
+[duckdb] plain · Analyze · explainable => |ok|
+
+[duckdb] plain · Analyze
+  (none)
+[duckdb] filtered · Analyze · explainable => |ok|
+
+[duckdb] filtered · Analyze
+  (none)
+[duckdb] delete · Analyze · explainable => |ok|
+
+[duckdb] delete · Analyze
+  (none)
+[snowflake] plain · Plan · explainable => |ok|
+
+[snowflake] plain · Plan
+  (none)
+[snowflake] filtered · Plan · explainable => |ok|
+
+[snowflake] filtered · Plan
+  (none)
+[snowflake] delete · Plan · explainable => |ok|
+
+[snowflake] delete · Plan
+  (none)
+[snowflake] plain · Analyze · explainable => |ok|
+
+[snowflake] plain · Analyze
+  (none)
+[snowflake] filtered · Analyze · explainable => |ok|
+
+[snowflake] filtered · Analyze
+  (none)
+[snowflake] delete · Analyze · explainable => |ok|
+
+[snowflake] delete · Analyze
+  (none)
+[mssql] plain · Plan · explainable => |ok|
+
+[mssql] plain · Plan
+  (none)
+[mssql] filtered · Plan · explainable => |ok|
+
+[mssql] filtered · Plan
+  (none)
+[mssql] delete · Plan · explainable => |ok|
+
+[mssql] delete · Plan
+  (none)
+[mssql] plain · Analyze · explainable => |ok|
+
+[mssql] plain · Analyze
+  (none)
+[mssql] filtered · Analyze · explainable => |ok|
+
+[mssql] filtered · Analyze
+  (none)
+[mssql] delete · Analyze · explainable => |ok|
+
+[mssql] delete · Analyze
+  (none)
+[mongodb] plain · Plan · explainable => |ok|
+
+[mongodb] plain · Plan
+  |db.getCollection("accounts").find({}).limit(1000).explain("queryPlanner")|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[mongodb] filtered · Plan · explainable => |ok|
+
+[mongodb] filtered · Plan
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).limit(1000).explain("queryPlanner")|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Plan)
+[mongodb] out stage · Plan · explainable => error: |Only a statement that reads can be explained.|
+
+[mongodb] out stage · Plan
+  |db.getCollection("accounts").aggregate([{"$out": "copy"}]).explain("queryPlanner")|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) typed=Some(Plan)
+[mongodb] delete one · Plan · explainable => error: |Explain takes one find, aggregate, countDocuments or distinct statement.|
+
+[mongodb] delete one · Plan
+  |db.getCollection("accounts").deleteOne({_id: 1}).explain("queryPlanner")|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) typed=None
+[mongodb] insert one · Plan · explainable => error: |Explain takes one find, aggregate, countDocuments or distinct statement.|
+
+[mongodb] insert one · Plan
+  |db.getCollection("accounts").insertOne({a: 1}).explain("queryPlanner")|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) typed=None
+[mongodb] plain · Analyze · explainable => |ok|
+
+[mongodb] plain · Analyze
+  |db.getCollection("accounts").find({}).limit(1000).explain("executionStats")|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[mongodb] filtered · Analyze · explainable => |ok|
+
+[mongodb] filtered · Analyze
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).limit(1000).explain("executionStats")|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=Some(Analyze)
+[mongodb] out stage · Analyze · explainable => error: |Only a statement that reads can be explained.|
+
+[mongodb] out stage · Analyze
+  |db.getCollection("accounts").aggregate([{"$out": "copy"}]).explain("executionStats")|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) typed=Some(Analyze)
+[mongodb] delete one · Analyze · explainable => error: |Explain takes one find, aggregate, countDocuments or distinct statement.|
+
+[mongodb] delete one · Analyze
+  |db.getCollection("accounts").deleteOne({_id: 1}).explain("executionStats")|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) typed=None
+[mongodb] insert one · Analyze · explainable => error: |Explain takes one find, aggregate, countDocuments or distinct statement.|
+
+[mongodb] insert one · Analyze
+  |db.getCollection("accounts").insertOne({a: 1}).explain("executionStats")|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) typed=None
+[redis] plain · Plan · explainable => |ok|
+
+[redis] plain · Plan
+  (none)
+[redis] filtered · Plan · explainable => |ok|
+
+[redis] filtered · Plan
+  (none)
+[redis] plain · Analyze · explainable => |ok|
+
+[redis] plain · Analyze
+  (none)
+[redis] filtered · Analyze · explainable => |ok|
+
+[redis] filtered · Analyze
+  (none)

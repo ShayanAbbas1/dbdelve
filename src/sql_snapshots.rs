@@ -5,6 +5,7 @@
 //! judge it.
 
 mod batches;
+mod explain;
 mod filters;
 mod previews;
 mod rows;
