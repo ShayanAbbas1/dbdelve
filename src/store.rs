@@ -1228,6 +1228,7 @@ fn secure(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
     use crate::db::rows;
     use crate::theme::ConnectionColor;
 
@@ -1243,6 +1244,115 @@ mod tests {
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         // Saving what was saved changes nothing.
         assert_eq!(resaved(golden), golden);
+    }
+
+    /// `decode_profiles` as it was before any profile could be unavailable:
+    /// the reference every file with no unavailable profile must still match.
+    fn decoded_as_before(text: &str) -> Result<ProfileList, String> {
+        toml::from_str::<ProfileFile>(text)
+            .map(|file| ProfileList {
+                profiles: file.profiles,
+                active: file.active,
+                fonts: file.fonts,
+                settings: file.settings,
+                projects: file.projects,
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn supported_stub(engine: Option<&str>, extra: &str) -> String {
+        let engine = engine.map_or(String::new(), |engine| format!("engine = \"{engine}\"\n"));
+        format!(
+            "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\n{engine}{extra}\n"
+        )
+    }
+
+    #[test]
+    fn every_engine_spelling_decodes_as_it_does_today() {
+        let mut engines = vec![None];
+        for (spelling, _) in Engine::SCHEMES {
+            engines.extend([
+                Some(spelling.to_string()),
+                Some(spelling.to_uppercase()),
+                // A basic-string tab, which Engine::parse's trim reads past.
+                Some(format!("  {spelling}\\t")),
+            ]);
+        }
+        for engine in engines {
+            let text = supported_stub(engine.as_deref(), "");
+            let now = decode_profiles(&text);
+            assert_eq!(now, decoded_as_before(&text), "{text}");
+            assert_eq!(
+                now.expect("a supported profile loads").profiles.len(),
+                1,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_edges_decode_as_they_do_today() {
+        for extra in [
+            "port = 0",
+            "port = 65535",
+            "port = 65536",
+            "port = -1",
+            "statement_timeout = 0",
+            "statement_timeout = 4294967295",
+            "statement_timeout = 4294967296",
+            "next_query_id = 0",
+            "next_query_id = 9223372036854775807",
+            "next_query_id = 18446744073709551615",
+            "next_query_id = 18446744073709551616",
+            "next_query_id = -1",
+            "editor_font_size = 14",
+            "editor_font_size = 15.5",
+            "srv = 1",
+        ] {
+            let text = supported_stub(Some("postgres"), extra);
+            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+        }
+        // Today reads a u64 above i64::MAX, which a detour through toml::Value
+        // would refuse ("u64 value was too large"): the new reader must not take one.
+        assert_eq!(
+            decoded_as_before(&supported_stub(
+                None,
+                "next_query_id = 18446744073709551615"
+            ))
+            .unwrap()
+            .profiles[0]
+                .next_query_id,
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn the_every_engine_file_decodes_as_it_does_today() {
+        // Nested ssh, open_queries, open_objects and bars, the legacy entry, the alias.
+        for text in [
+            include_str!("testdata/every-engine.toml"),
+            include_str!("testdata/every-engine.resaved.toml"),
+        ] {
+            assert_eq!(decode_profiles(text), decoded_as_before(text));
+        }
+        // Ids were never checked for uniqueness, and a repeated one still loads.
+        let twice = supported_stub(Some("postgres"), "") + &supported_stub(Some("sqlite"), "");
+        assert_eq!(decode_profiles(&twice), decoded_as_before(&twice));
+        assert_eq!(decode_profiles(&twice).unwrap().profiles.len(), 2);
+        // And what fails today fails with today's words.
+        for broken in [
+            "host = ",
+            "[[profiles]]\nid = 'a'\n",
+            "profiles = 3",
+            "[[profiles]]\nport = 'x'\n",
+        ] {
+            assert_eq!(
+                decode_profiles(broken),
+                decoded_as_before(broken),
+                "{broken}"
+            );
+            assert!(decode_profiles(broken).is_err(), "{broken}");
+        }
     }
 
     #[test]
