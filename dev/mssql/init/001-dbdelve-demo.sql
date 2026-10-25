@@ -367,6 +367,28 @@ INSERT INTO daily_totals VALUES
     ('2024-06-12', 890.10);
 GO
 
+-- The engine conformance suite's fixture (src/db/conformance.rs): one table,
+-- the same shape in every seed. `whole` is above 2^53 on purpose. Ids 900 and
+-- up belong to the suite's write scenarios.
+
+CREATE TABLE conformance (
+    id int PRIMARY KEY,
+    label nvarchar(100) NOT NULL,
+    whole bigint,
+    fraction decimal(10, 2),
+    ratio float,
+    flag bit,
+    day date,
+    moment datetime2(0),
+    bytes varbinary(16)
+);
+
+INSERT INTO conformance (id, label, whole, fraction, ratio, flag, day, moment, bytes) VALUES
+    (1, N'alpha', 9007199254740993, 12.50, 0.5, 1, '2024-02-29', '2024-02-29 12:34:56', 0x00FF),
+    (2, N'Zoë 李 🐉 ''quoted''', -42, -0.01, -1.25, 0, '1999-12-31', '1999-12-31 23:59:59', 0xDEADBEEF),
+    (3, N'nulls', NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+GO
+
 -- A million rows and two hundred columns: the fixtures the grid's paging and
 -- horizontal scrolling are measured against, not the hand-written rows above.
 
