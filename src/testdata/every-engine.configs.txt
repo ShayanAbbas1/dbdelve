@@ -1,0 +1,185 @@
+legacy Postgres(
+    ServerConfig {
+        host: "old.internal",
+        port: Some(
+            5432,
+        ),
+        database: "app",
+        user: "ada",
+        password: "",
+        sslmode: Prefer,
+        root_certificate: None,
+        statement_timeout: 0,
+        ssh: None,
+        schema: None,
+    },
+)
+pg Postgres(
+    ServerConfig {
+        host: "db.internal",
+        port: Some(
+            5432,
+        ),
+        database: "orders",
+        user: "ada",
+        password: "",
+        sslmode: VerifyFull,
+        root_certificate: Some(
+            "/certs/ca.pem",
+        ),
+        statement_timeout: 30,
+        ssh: Some(
+            SshTunnel {
+                host: "bastion.internal",
+                port: Some(
+                    2222,
+                ),
+                user: "jump",
+                identity_file: Some(
+                    "~/.ssh/id_ed25519",
+                ),
+            },
+        ),
+        schema: Some(
+            "billing",
+        ),
+    },
+)
+alias Postgres(
+    ServerConfig {
+        host: "localhost",
+        port: None,
+        database: "postgres",
+        user: "postgres",
+        password: "",
+        sslmode: Prefer,
+        root_certificate: None,
+        statement_timeout: 0,
+        ssh: None,
+        schema: None,
+    },
+)
+mysql MySql(
+    ServerConfig {
+        host: "mysql.internal",
+        port: Some(
+            3306,
+        ),
+        database: "shop",
+        user: "root",
+        password: "",
+        sslmode: Require,
+        root_certificate: None,
+        statement_timeout: 0,
+        ssh: None,
+        schema: None,
+    },
+)
+maria MariaDb(
+    ServerConfig {
+        host: "127.0.0.1",
+        port: Some(
+            3307,
+        ),
+        database: "dbdelve_dev",
+        user: "dbdelve",
+        password: "",
+        sslmode: Prefer,
+        root_certificate: None,
+        statement_timeout: 0,
+        ssh: None,
+        schema: None,
+    },
+)
+lite Sqlite {
+    path: "/Users/ada/data/app.sqlite",
+    statement_timeout: 10,
+}
+turso Turso {
+    path: "/Users/ada/data/edge.db",
+    statement_timeout: 0,
+}
+duck DuckDb {
+    path: "/Users/ada/data/lake.duckdb",
+    statement_timeout: 60,
+    database: "other",
+    schema: Some(
+        "analytics",
+    ),
+}
+snow Snowflake(
+    SnowflakeConfig {
+        account: "acme-prod",
+        host: None,
+        user: "ADA",
+        private_key: "/Users/ada/.ssh/snowflake.p8",
+        database: "PROD",
+        warehouse: Some(
+            "COMPUTE_WH",
+        ),
+        role: Some(
+            "ANALYST",
+        ),
+        statement_timeout: 120,
+        schema: Some(
+            "PUBLIC",
+        ),
+    },
+)
+mssql SqlServer(
+    ServerConfig {
+        host: "sql.internal",
+        port: Some(
+            1433,
+        ),
+        database: "dbdelve_dev",
+        user: "sa",
+        password: "",
+        sslmode: VerifyCa,
+        root_certificate: Some(
+            "/certs/mssql.pem",
+        ),
+        statement_timeout: 0,
+        ssh: None,
+        schema: Some(
+            "dbo",
+        ),
+    },
+)
+mongo MongoDb(
+    MongoConfig {
+        server: ServerConfig {
+            host: "cluster0.example.net",
+            port: None,
+            database: "app",
+            user: "ada",
+            password: "",
+            sslmode: Require,
+            root_certificate: None,
+            statement_timeout: 0,
+            ssh: None,
+            schema: None,
+        },
+        srv: true,
+        options: "retryWrites=true&w=majority",
+        login_database: Some(
+            "admin",
+        ),
+    },
+)
+redis Redis(
+    ServerConfig {
+        host: "cache.internal",
+        port: Some(
+            6379,
+        ),
+        database: "2",
+        user: "default",
+        password: "",
+        sslmode: Disable,
+        root_certificate: None,
+        statement_timeout: 0,
+        ssh: None,
+        schema: None,
+    },
+)

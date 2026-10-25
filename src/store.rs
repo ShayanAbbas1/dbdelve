@@ -525,7 +525,7 @@ fn read_profiles(path: &Path) -> Result<Restored, (&'static str, String)> {
     }
 }
 
-fn decode_profiles(text: &str) -> Result<Restored, String> {
+pub(crate) fn decode_profiles(text: &str) -> Result<Restored, String> {
     toml::from_str::<ProfileFile>(text)
         .map(|file| {
             (
@@ -1227,6 +1227,28 @@ mod tests {
     use super::*;
     use crate::db::rows;
     use crate::theme::ConnectionColor;
+
+    /// The current code's own decode-then-encode, so the golden is what it writes.
+    fn resaved(text: &str) -> String {
+        let (profiles, active, fonts, settings, projects) =
+            decode_profiles(text).expect("the fixture loads");
+        toml::to_string_pretty(&ProfileFile {
+            active,
+            fonts,
+            settings,
+            projects,
+            profiles,
+        })
+        .expect("the fixture encodes")
+    }
+
+    #[test]
+    fn every_engines_profile_saves_back_as_it_did() {
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        // Saving what was saved changes nothing.
+        assert_eq!(resaved(golden), golden);
+    }
 
     #[test]
     fn a_leading_tilde_is_the_home_directory() {

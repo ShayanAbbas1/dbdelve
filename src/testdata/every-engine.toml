@@ -1,0 +1,256 @@
+active = "pg"
+
+[fonts]
+chrome = "Inter"
+editor = "Berkeley Mono"
+grid = "Inter"
+
+[settings]
+theme = "Dark"
+match_system_appearance = true
+light_theme = "GitHub Light"
+dark_theme = "Dark"
+chrome_font_size = 14
+editor_font_size = 15.5
+grid_font_size = 13.0
+preview_rows = 500
+opacity = 0.85
+check_for_updates = false
+color_titlebar = true
+client_sort = false
+welcomed = true
+
+# One entry each: both are HashMaps, and a second entry would make the
+# written order, and so the golden, depend on the hasher.
+[settings.custom_keybindings]
+apply_edits = "secondary-shift-s"
+
+[settings.theme_opacity]
+Dark = 0.7
+
+[[projects]]
+name = "Billing"
+connections = ["pg", "mongo", "legacy"]
+
+[[projects]]
+name = "Empty"
+connections = []
+
+# Written before engines existed: no engine key, the legacy open_query
+# scalar, and the per-profile zoom as an integer.
+[[profiles]]
+id = "legacy"
+name = "Legacy"
+host = "old.internal"
+port = 5432
+database = "app"
+user = "ada"
+editor_font_size = 14
+open_query = "daily"
+
+[[profiles]]
+id = "pg"
+name = "Postgres prod"
+host = "db.internal"
+port = 5432
+database = "orders"
+user = "ada"
+sslmode = "verify-full"
+root_certificate = "/certs/ca.pem"
+engine = "postgres"
+schema = "billing"
+statement_timeout = 30
+next_query_id = 3
+color = "blue"
+mode = "read-only"
+confirmed = ["drop", "stale-rows"]
+
+[profiles.ssh]
+host = "bastion.internal"
+port = 2222
+user = "jump"
+identity_file = "~/.ssh/id_ed25519"
+
+[[profiles.open_queries]]
+id = 0
+name = "daily"
+queued_results = 2
+
+[[profiles.open_queries]]
+id = 2
+active = true
+
+[[profiles.open_objects]]
+schema = "public"
+name = "orders"
+kind = "table"
+filter = "\"status\" = 'paid' AND \"total\" > 100"
+filter_engine = "postgres"
+active = true
+
+[[profiles.open_objects.bars]]
+column = "status"
+value = "paid"
+operator = "equals"
+conjunction = "AND"
+
+[[profiles.open_objects.bars]]
+column = "total"
+value = "100"
+operator = "greater"
+conjunction = "AND"
+
+[[profiles.open_objects]]
+schema = "public"
+name = "orders"
+structure = true
+origin = "\"status\" = 'paid' AND \"total\" > 100"
+
+[[profiles.open_objects]]
+schema = "billing"
+name = "refund"
+routine = true
+
+[[profiles.open_objects]]
+schema = "public"
+name = "monthly"
+kind = "materialized_view"
+
+# An alias Engine::parse reads: must stay a supported profile.
+[[profiles]]
+id = "alias"
+name = "Alias"
+host = "localhost"
+database = "postgres"
+user = "postgres"
+engine = "postgresql"
+
+[[profiles]]
+id = "mysql"
+name = "MySQL shop"
+host = "mysql.internal"
+port = 3306
+database = "shop"
+user = "root"
+sslmode = "require"
+engine = "mysql"
+statement_timeout = 0
+color = "orange"
+
+[[profiles.open_objects]]
+schema = "shop"
+name = "orders"
+filters = [["status", "paid"]]
+filter_engine = "mysql"
+
+[[profiles]]
+id = "maria"
+name = "MariaDB"
+host = "127.0.0.1"
+port = 3307
+database = "dbdelve_dev"
+user = "dbdelve"
+sslmode = "prefer"
+engine = "mariadb"
+mode = "full"
+confirmed = ["unfiltered-delete"]
+
+[[profiles]]
+id = "lite"
+name = "Local SQLite"
+host = ""
+database = ""
+user = ""
+engine = "sqlite"
+path = "/Users/ada/data/app.sqlite"
+statement_timeout = 10
+next_query_id = 1
+
+[[profiles.open_queries]]
+id = 0
+active = true
+
+[[profiles.open_objects]]
+schema = "main"
+name = "recent"
+kind = "view"
+
+[[profiles.open_objects.bars]]
+column = "note"
+value = "draft"
+operator = "contains"
+
+[[profiles.open_objects.bars]]
+value = "length(note) > 3"
+conjunction = "OR"
+raw = true
+
+[[profiles]]
+id = "turso"
+name = "Turso edge"
+host = ""
+database = ""
+user = ""
+engine = "turso"
+path = "/Users/ada/data/edge.db"
+
+[[profiles]]
+id = "duck"
+name = "Lake"
+host = ""
+database = "other"
+user = ""
+engine = "duckdb"
+path = "/Users/ada/data/lake.duckdb"
+schema = "analytics"
+statement_timeout = 60
+
+[[profiles]]
+id = "snow"
+name = "Snowflake"
+host = ""
+database = "PROD"
+user = "ADA"
+engine = "snowflake"
+account = "acme-prod"
+private_key = "/Users/ada/.ssh/snowflake.p8"
+warehouse = "COMPUTE_WH"
+role = "ANALYST"
+schema = "PUBLIC"
+statement_timeout = 120
+color = "purple"
+
+[[profiles]]
+id = "mssql"
+name = "SQL Server"
+host = "sql.internal"
+port = 1433
+database = "dbdelve_dev"
+user = "sa"
+sslmode = "verify-ca"
+root_certificate = "/certs/mssql.pem"
+engine = "mssql"
+schema = "dbo"
+
+[[profiles]]
+id = "mongo"
+name = "Mongo Atlas"
+host = "cluster0.example.net"
+database = "app"
+user = "ada"
+sslmode = "require"
+engine = "mongodb"
+srv = true
+options = "retryWrites=true&w=majority"
+login_database = "admin"
+
+[[profiles]]
+id = "redis"
+name = "Cache"
+host = "cache.internal"
+port = 6379
+database = "2"
+user = "default"
+sslmode = "disable"
+engine = "redis"
+color = "red"

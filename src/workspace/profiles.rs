@@ -2087,6 +2087,35 @@ pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn restored_configs(text: &str) -> String {
+        let (profiles, ..) = store::decode_profiles(text).expect("the fixture loads");
+        profiles
+            .iter()
+            .map(|stored| {
+                let engine = Engine::parse(stored.engine.as_deref().unwrap_or("postgres"))
+                    .expect("a known engine");
+                let sslmode = stored
+                    .sslmode
+                    .as_deref()
+                    .map_or(Ok(SslMode::default()), SslMode::parse)
+                    .expect("a known sslmode");
+                format!(
+                    "{} {:#?}\n",
+                    stored.id,
+                    stored_config(stored, engine, sslmode)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_engines_profile_restores_the_connection_it_did() {
+        assert_eq!(
+            restored_configs(include_str!("../testdata/every-engine.toml")),
+            include_str!("../testdata/every-engine.configs.txt")
+        );
+    }
+
     #[test]
     fn a_duckdb_profiles_picked_database_and_schema_survive_a_restart() {
         let mut picked = ConnectionConfig::duckdb("/data/dev.duckdb".into(), 30);

@@ -1,0 +1,2 @@
+# Byte-compared by tests: include_str! does not normalize line endings.
+src/testdata/* text eol=lf
