@@ -7,6 +7,7 @@
 mod batches;
 mod explain;
 mod filters;
+mod gates;
 mod previews;
 mod rows;
 mod sorts;

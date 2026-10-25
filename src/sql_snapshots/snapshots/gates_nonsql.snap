@@ -1,0 +1,446 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[mongodb] "db.getCollection(\"accounts\").find({})"
+  |db.getCollection("accounts").find({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({}).limit(1000)"
+  |db.getCollection("accounts").find({}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({}).sort({\"id\": 1})"
+  |db.getCollection("accounts").find({}).sort({"id": 1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$match\": {}}])"
+  |db.getCollection("accounts").aggregate([{"$match": {}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": 1})"
+  |db.getCollection("accounts").insertOne({"a": 1})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertMany([{\"a\": 1}, {\"a\": 2}])"
+  |db.getCollection("accounts").insertMany([{"a": 1}, {"a": 2}])|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$set: {\"a\": 1}});"
+  |db.getCollection("accounts").updateOne({_id: 1}, {$set: {"a": 1}});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").deleteOne({_id: 1})"
+  |db.getCollection("accounts").deleteOne({_id: 1})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({}); db.getCollection(\"accounts\").drop()"
+  |db.getCollection("accounts").find({}); db.getCollection("accounts").drop()|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({})\ndb.getCollection(\"accounts\").drop()"
+  |db.getCollection("accounts").find({})|
+  |db.getCollection("accounts").drop()|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": 1}); db.getCollection(\"accounts\").insertOne({\"a\": 2})"
+  |db.getCollection("accounts").insertOne({"a": 1}); db.getCollection("accounts").insertOne({"a": 2})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$set: {\"a\": 1}}); db.getCollection(\"accounts\").deleteMany({})"
+  |db.getCollection("accounts").updateOne({_id: 1}, {$set: {"a": 1}}); db.getCollection("accounts").deleteMany({})|
+  = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$out\": \"copy\"}])"
+  |db.getCollection("accounts").aggregate([{"$out": "copy"}])|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$merge\": {\"into\": \"copy\"}}])"
+  |db.getCollection("accounts").aggregate([{"$merge": {"into": "copy"}}])|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$match\": {}}, {\"$out\": \"x\"}])"
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$out": "x"}])|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$lookup\": {\"from\": \"o\", \"pipeline\": [{\"$out\": \"y\"}], \"as\": \"z\"}}])"
+  |db.getCollection("accounts").aggregate([{"$lookup": {"from": "o", "pipeline": [{"$out": "y"}], "as": "z"}}])|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({\"$where\": \"sleep(1000)\"})"
+  |db.getCollection("accounts").find({"$where": "sleep(1000)"})|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").aggregate([{\"$function\": {\"body\": \"x\", \"args\": [], \"lang\": \"js\"}}])"
+  |db.getCollection("accounts").aggregate([{"$function": {"body": "x", "args": [], "lang": "js"}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({"
+  |db.getCollection("accounts").find({|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").find({}"
+  |db.getCollection("accounts").find({}|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": })"
+  |db.getCollection("accounts").insertOne({"a": })|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": ObjectId(\"zz\")})"
+  |db.getCollection("accounts").insertOne({"a": ObjectId("zz")})|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": NumberLong(\"x\")})"
+  |db.getCollection("accounts").insertOne({"a": NumberLong("x")})|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$set: {\"a\": 1}}"
+  |db.getCollection("accounts").updateOne({_id: 1}, {$set: {"a": 1}}|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] ""
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({})"
+  |db.getCollection("accounts").insertOne({})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertOne({\"$set\": 1})"
+  |db.getCollection("accounts").insertOne({"$set": 1})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").insertMany([])"
+  |db.getCollection("accounts").insertMany([])|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({}, {$set: {\"a\": 1}})"
+  |db.getCollection("accounts").updateOne({}, {$set: {"a": 1}})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$unset: {\"a\": 1}})"
+  |db.getCollection("accounts").updateOne({_id: 1}, {$unset: {"a": 1}})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$set: {\"a\": 1}}, {upsert: true})"
+  |db.getCollection("accounts").updateOne({_id: 1}, {$set: {"a": 1}}, {upsert: true})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").updateMany({_id: 1}, {$set: {\"a\": 1}})"
+  |db.getCollection("accounts").updateMany({_id: 1}, {$set: {"a": 1}})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").deleteOne({})"
+  |db.getCollection("accounts").deleteOne({})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=true
+
+[mongodb] "db.getCollection(\"accounts\").deleteMany({})"
+  |db.getCollection("accounts").deleteMany({})|
+  = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").deleteOne({_id: {\"$gt\": 1}})"
+  |db.getCollection("accounts").deleteOne({_id: {"$gt": 1}})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").deleteOne({_id: 1, \"a\": 2})"
+  |db.getCollection("accounts").deleteOne({_id: 1, "a": 2})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").deleteOne({\"a\": 2})"
+  |db.getCollection("accounts").deleteOne({"a": 2})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").drop()"
+  |db.getCollection("accounts").drop()|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").remove({})"
+  |db.getCollection("accounts").remove({})|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.dropDatabase()"
+  |db.dropDatabase()|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").createIndex({\"a\": 1})"
+  |db.getCollection("accounts").createIndex({"a": 1})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").renameCollection(\"x\")"
+  |db.getCollection("accounts").renameCollection("x")|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.runCommand({drop: \"accounts\"})"
+  |db.runCommand({drop: "accounts"})|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").bulkWrite([])"
+  |db.getCollection("accounts").bulkWrite([])|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mongodb] "db.getCollection(\"accounts\").findOneAndDelete({})"
+  |db.getCollection("accounts").findOneAndDelete({})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET k"
+  |GET k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SCAN 0 MATCH * COUNT 1000"
+  |SCAN 0 MATCH * COUNT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "TYPE k"
+  |TYPE k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "TTL k"
+  |TTL k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HGETALL k"
+  |HGETALL k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET k\nDEL k"
+  |GET k|
+  |DEL k|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET k; DEL k"
+  |GET k; DEL k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SCAN 0 MATCH a*; FLUSHALL"
+  |SCAN 0 MATCH a*; FLUSHALL|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET k\n\nFLUSHALL"
+  |GET k|
+  ||
+  |FLUSHALL|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "DEL k"
+  |DEL k|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "UNLINK k"
+  |UNLINK k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "FLUSHALL"
+  |FLUSHALL|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "FLUSHDB"
+  |FLUSHDB|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "FLUSHALL ASYNC"
+  |FLUSHALL ASYNC|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "EVAL \"return redis.call('flushall')\" 0"
+  |EVAL "return redis.call('flushall')" 0|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "EVALSHA abc 0"
+  |EVALSHA abc 0|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SCRIPT FLUSH"
+  |SCRIPT FLUSH|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "CONFIG SET dir /tmp"
+  |CONFIG SET dir /tmp|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SHUTDOWN"
+  |SHUTDOWN|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "DEBUG SLEEP 5"
+  |DEBUG SLEEP 5|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "KEYS *"
+  |KEYS *|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SLAVEOF NO ONE"
+  |SLAVEOF NO ONE|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "RENAME a b"
+  |RENAME a b|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "MOVE k 1"
+  |MOVE k 1|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SELECT 1"
+  |SELECT 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v NX EX 30"
+  |SET k v NX EX 30|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v"
+  |SET k v|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v XX KEEPTTL GET"
+  |SET k v XX KEEPTTL GET|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HSET h f v"
+  |HSET h f v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HSETNX h f v"
+  |HSETNX h f v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HDEL h f"
+  |HDEL h f|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SADD s m"
+  |SADD s m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SREM s m"
+  |SREM s m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "ZADD z NX 1 m"
+  |ZADD z NX 1 m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "ZADD z XX CH 1 m"
+  |ZADD z XX CH 1 m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "ZREM z m"
+  |ZREM z m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "RPUSH l v"
+  |RPUSH l v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "LSET l 0 v"
+  |LSET l 0 v|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "EXPIRE k 10"
+  |EXPIRE k 10|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "PERSIST k"
+  |PERSIST k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "RENAMENX a b"
+  |RENAMENX a b|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "WATCH l\nLPOS l v COUNT 0 MAXLEN 1\nMULTI\nLSET l 0 v\nEXEC"
+  |WATCH l|
+  |LPOS l v COUNT 0 MAXLEN 1|
+  |MULTI|
+  |LSET l 0 v|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "LPOS l v COUNT 0 MAXLEN 1\nMULTI\nLSET l 0 v\nEXEC"
+  |LPOS l v COUNT 0 MAXLEN 1|
+  |MULTI|
+  |LSET l 0 v|
+  |EXEC|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "MULTI\nDEL k\nEXEC"
+  |MULTI|
+  |DEL k|
+  |EXEC|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "MULTI\nEXEC"
+  |MULTI|
+  |EXEC|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "EXEC"
+  |EXEC|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k \"unterminated"
+  |SET k "unterminated|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET"
+  |SET|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET"
+  |GET|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v NX EX abc"
+  |SET k v NX EX abc|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v NX EX 0"
+  |SET k v NX EX 0|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HSET h f"
+  |HSET h f|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "ZADD z NX abc m"
+  |ZADD z NX abc m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "FROBNICATE"
+  |FROBNICATE|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "set k v nx"
+  |set k v nx|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] ""
+  ||
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "LRANGE l 0 -1"
+  |LRANGE l 0 -1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "GET k \0"
+  |GET k \u{0}|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v NX EX 30\nSET k2 v NX EX 30"
+  |SET k v NX EX 30|
+  |SET k2 v NX EX 30|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "SET k v NX EX 30; DEL k"
+  |SET k v NX EX 30; DEL k|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "UNLINK k j"
+  |UNLINK k j|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[redis] "HDEL h f g"
+  |HDEL h f g|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
