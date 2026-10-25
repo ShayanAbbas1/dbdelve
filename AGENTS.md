@@ -184,7 +184,7 @@ require it, stop and raise it instead.
    and has to spell it the way the server will read it. It holds no connection.
    Views and workspace code _ask_ it (`quote_identifier`, `quote_literal`, `quote_value`,
    `is_binary_type`, `qualified`, `transaction_start`, `explain_prefix`, `assigns_default`,
-   `boolean_literal`, `skips_duplicates`, `all_or_nothing`, `takes_new_fields`,
+   `boolean_literal`, `skips_duplicates`, `skips_duplicates_into`, `all_or_nothing`, `takes_new_fields`,
    `fields`, `syntax`, `edits_query_rows`, `takes_imports`, `logo`, `brand`, and `filter::Operator::on` for the filter dropdown) and never
    match on it. Where an engine question
    is missing, add a method to `Engine` rather than a `match` at the caller. The
@@ -277,8 +277,10 @@ mysql = "28"               # rust-mysql-simple, blocking. default-features = fal
 rusqlite = "0.40"          # bundled + column_metadata + column_decltype. dff = false
 turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }  # Turso, blocking rsapi
 turso_core = "=0.8.2"      # its Value
-duckdb = { version = "=1.10506.0", features = ["bundled", "parquet", "json", "vtab"] }  # DuckDB, Arrow results
+duckdb = { version = "=1.20000.0", default-features = false, features = ["bundled", "parquet", "json", "vtab"] }  # DuckDB, Arrow results
 calamine = { version = "=0.36.1", features = ["dates"] }  # spreadsheets, for DuckDB's read_xlsx
+uuid = "=1.24.1"           # a DuckDB UUID's sixteen bytes, as text
+num-bigint = "=0.4.8"      # a DuckDB BIGNUM's base-256 digits, as text
 
 rustls = "0.23"            # TLS; the driver ships none. default-features = false
 rustls-native-certs = "0.8"     # the platform trust store, for Postgres
@@ -1132,7 +1134,7 @@ Decided, and not to be re-litigated:
   Snowflake. No Explain, and no Read-only backstop.
   Its tests need nothing external and run under plain `cargo test`.
   `read_xlsx` is a table function of DBDelve's own over calamine (`db::xlsx`),
-  registered at open, since DuckDB's excel extension cannot be linked in: a
+  registered at open, since DuckDB's `excel` extension cannot be linked in: a
   column whose filled cells are all numbers is a `DOUBLE`, anything else text
   as the sheet shows it. A data file dropped on the window or picked from the
   palette (`workspace::files`) opens in a DuckDB profile held in memory, made
