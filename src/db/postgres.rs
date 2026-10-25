@@ -2432,6 +2432,7 @@ mod tests {
             read: sql_read(Engine::Postgres, "public"),
             endless: "SELECT generate_series(1, 500000000) AS n",
             runaway: "SELECT pg_sleep(30)",
+            read_only_refusal: "read-only transaction",
             fixture: Some(Fixture {
                 types: &[
                     "int4",

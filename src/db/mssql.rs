@@ -4509,6 +4509,7 @@ mod tests {
                       CROSS JOIN sys.all_columns b",
             runaway: "SELECT MAX(CHECKSUM(a.name, b.name, c.name)) FROM sys.all_objects a \
                       CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c",
+            read_only_refusal: "",
             fixture: Some(Fixture {
                 types: &[
                     "int",

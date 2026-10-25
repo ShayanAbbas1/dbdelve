@@ -26,6 +26,7 @@ pub(super) struct Subject {
     pub read: String,
     pub endless: &'static str,
     pub runaway: &'static str,
+    pub read_only_refusal: &'static str,
     pub fixture: Option<Fixture>,
 }
 
@@ -33,6 +34,36 @@ pub(super) struct Fixture {
     pub types: &'static [&'static str],
     pub renders: &'static [(&'static str, usize, &'static str)],
     pub find: Box<dyn Fn(&str) -> String>,
+}
+
+/// Puts the fixture back when a scenario ends, panicking or not: whatever
+/// transaction it left open is rolled back, the session is made writable
+/// again and the ids it wrote are deleted. Errors are ignored, since the
+/// scenario's own failure is the one worth reading.
+struct Cleanup<'a> {
+    connection: &'a Connection,
+    statements: Vec<String>,
+    rollback: bool,
+    read_write: bool,
+}
+
+impl Drop for Cleanup<'_> {
+    fn drop(&mut self) {
+        let run = |sql: &str| {
+            let _ = self
+                .connection
+                .query(sql, &CancelToken::default(), Fetch::default());
+        };
+        if self.rollback {
+            run("ROLLBACK");
+        }
+        if self.read_write {
+            let _ = self.connection.set_read_only(false);
+        }
+        for statement in &self.statements {
+            run(statement);
+        }
+    }
 }
 
 pub(super) const COLUMNS: [&str; 9] = [
@@ -336,47 +367,76 @@ pub(super) fn capped_read_keeps_the_users_transaction(subject: &Subject) {
     let at = format!("{scenario} on {:?}", subject.engine);
     let engine = subject.engine;
     let delete = sql_delete(engine, subject.schema, 950);
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: vec![delete.clone()],
+        rollback: true,
+        read_write: false,
+    };
     let run = |sql: &str| subject.run(scenario, sql, Fetch::default());
-    run(&delete);
-    run(engine.transaction_start().unwrap_or("BEGIN"));
-    run(&sql_insert(engine, subject.schema, 950, "in transaction"));
-    let capped = subject.run(
-        scenario,
-        &subject.read,
-        Fetch {
-            limit: Some(2),
-            reads_only: sql::stoppable(engine, &subject.read),
-            ..Fetch::default()
-        },
-    );
-    assert_eq!(capped.rows.len(), 2, "{at}");
+    let begin = engine.transaction_start().unwrap_or("BEGIN");
+    let capped_read_in_a_transaction = || {
+        run(&delete);
+        run(begin);
+        run(&sql_insert(engine, subject.schema, 950, "in transaction"));
+        let capped = subject.run(
+            scenario,
+            &subject.read,
+            Fetch {
+                limit: Some(2),
+                reads_only: sql::stoppable(engine, &subject.read),
+                ..Fetch::default()
+            },
+        );
+        assert_eq!(capped.rows.len(), 2, "{at}");
+        assert!(
+            (capped.stopped == Some(Stopped::AtLimit) && capped.capped_from.is_none())
+                || (capped.stopped.is_none() && capped.capped_from == Some(3)),
+            "{at}: stopped {:?}, capped_from {:?}",
+            capped.stopped,
+            capped.capped_from
+        );
+        assert_eq!(
+            subject.label_of(scenario, "950"),
+            [Some("in transaction".to_string())],
+            "{at}: the open transaction lost its own write"
+        );
+    };
+    let seen_apart = || {
+        let apart = subject
+            .connection
+            .apart()
+            .unwrap_or_else(|error| panic!("{at}: {error}"));
+        let find = (subject.fixture(scenario).find)("950");
+        let seen = apart
+            .query(&find, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("{at}: {error}"));
+        seen.rows
+            .iter()
+            .map(|row| row.get(0).map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+
+    // A read that had quietly committed would leave nothing for ROLLBACK to
+    // undo, so the row surviving it is the proof the transaction was cut short.
+    capped_read_in_a_transaction();
+    run("ROLLBACK");
     assert!(
-        (capped.stopped == Some(Stopped::AtLimit) && capped.capped_from.is_none())
-            || (capped.stopped.is_none() && capped.capped_from == Some(3)),
-        "{at}: stopped {:?}, capped_from {:?}",
-        capped.stopped,
-        capped.capped_from
+        subject.label_of(scenario, "950").is_empty(),
+        "{at}: ROLLBACK left the row, so the capped read ended the transaction"
     );
-    assert_eq!(
-        subject.label_of(scenario, "950"),
-        [Some("in transaction".to_string())],
-        "{at}: the open transaction lost its own write"
+    assert!(
+        seen_apart().is_empty(),
+        "{at}: another session sees the row"
     );
+
+    capped_read_in_a_transaction();
     run("COMMIT");
-    let apart = subject
-        .connection
-        .apart()
-        .unwrap_or_else(|error| panic!("{at}: {error}"));
-    let find = (subject.fixture(scenario).find)("950");
-    let seen = apart
-        .query(&find, &CancelToken::default(), Fetch::default())
-        .unwrap_or_else(|error| panic!("{at}: {error}"));
     assert_eq!(
-        seen.rows.iter().map(|row| row.get(0)).collect::<Vec<_>>(),
-        [Some("in transaction")],
+        seen_apart(),
+        [Some("in transaction".to_string())],
         "{at}: a fresh session does not see the committed row"
     );
-    run(&delete);
 }
 
 pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
@@ -396,6 +456,12 @@ pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
     }
     let delete = sql_delete(engine, subject.schema, 960);
     let insert = sql_insert(engine, subject.schema, 960, "read-only");
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: vec![delete.clone()],
+        rollback: false,
+        read_write: true,
+    };
     subject.run(scenario, &delete, Fetch::default());
     subject
         .connection
@@ -408,9 +474,13 @@ pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
         .connection
         .set_read_only(false)
         .unwrap_or_else(|error| panic!("{at}: {error}"));
-    assert!(refused.is_err(), "{at}: a read-only session took a write");
+    let error = refused.expect_err(&format!("{at}: a read-only session took a write"));
+    assert!(
+        error.message.contains(subject.read_only_refusal),
+        "{at}: refused for another reason: {}",
+        error.message
+    );
     subject.run(scenario, &insert, Fetch::default());
-    subject.run(scenario, &delete, Fetch::default());
 }
 
 pub(super) fn generated_writes_round_trip(subject: &Subject) {
@@ -434,8 +504,15 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
     };
 
-    if let Some(delete) = sql::delete_row(engine, schema, relation, &[(key, "901")], &types) {
-        generated(&delete);
+    let cleanup = sql::delete_row(engine, schema, relation, &[(key, "901")], &types);
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: cleanup.iter().cloned().collect(),
+        rollback: false,
+        read_write: false,
+    };
+    if let Some(delete) = &cleanup {
+        generated(delete);
     }
 
     if engine.takes_inserts(RelationKind::Table) {

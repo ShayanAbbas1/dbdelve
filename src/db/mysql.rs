@@ -2066,6 +2066,7 @@ mod tests {
             read: sql_read(engine, "dbdelve_dev"),
             endless: LIVE_ENDLESS_SELECT,
             runaway: LIVE_SLOW_SELECT,
+            read_only_refusal: "READ ONLY",
             fixture: Some(Fixture {
                 types: &[
                     "int",
