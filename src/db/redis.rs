@@ -3880,4 +3880,36 @@ mod tests {
         let error = blocked_then_cancelled(&connection);
         assert!(is_cancel(Engine::Redis, &error), "{}", error.message);
     }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        crate::db::conformance::Subject {
+            connection: crate::db::Connection::open(crate::db::ConnectionConfig::Redis(
+                live_config(),
+            ))
+            .expect("connection should open"),
+            engine: Engine::Redis,
+            schema: "db0",
+            relation: KEYS,
+            key: "key",
+            columns: &["key", "type", "ttl", "value"],
+            read: "SCAN 0 MATCH item:* COUNT 10".to_string(),
+            endless: "SCAN 0 MATCH item:* COUNT 10",
+            runaway: "BLPOP live:never 0",
+            read_only_refusal: "",
+            fixture: None,
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires the repository development database configured through dbdelve_REDIS_URL",
+        conformance_subject:
+        connects,
+        catalog_round_trip,
+        structure_round_trip,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        read_only_session_refuses_a_write,
+    );
 }
