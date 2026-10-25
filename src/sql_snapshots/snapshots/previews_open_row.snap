@@ -1,0 +1,1115 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] rows=100 key=k type=string
+  (none)
+
+[postgres] rows=100 key=k type=hash
+  (none)
+
+[postgres] rows=100 key=k type=list
+  (none)
+
+[postgres] rows=100 key=k type=set
+  (none)
+
+[postgres] rows=100 key=k type=zset
+  (none)
+
+[postgres] rows=100 key=k type=stream
+  (none)
+
+[postgres] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[postgres] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[postgres] rows=100 key=k type=unknown
+  (none)
+
+[postgres] rows=100 key=a key "q" type=string
+  (none)
+
+[postgres] rows=100 key=a key "q" type=hash
+  (none)
+
+[postgres] rows=100 key=a key "q" type=list
+  (none)
+
+[postgres] rows=100 key=a key "q" type=set
+  (none)
+
+[postgres] rows=100 key=a key "q" type=zset
+  (none)
+
+[postgres] rows=100 key=a key "q" type=stream
+  (none)
+
+[postgres] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[postgres] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[postgres] rows=100 key=a key "q" type=unknown
+  (none)
+
+[postgres] rows=0 key=k type=string
+  (none)
+
+[postgres] rows=0 key=k type=hash
+  (none)
+
+[postgres] rows=0 key=k type=list
+  (none)
+
+[postgres] rows=0 key=k type=set
+  (none)
+
+[postgres] rows=0 key=k type=zset
+  (none)
+
+[postgres] rows=0 key=k type=stream
+  (none)
+
+[postgres] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[postgres] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[postgres] rows=0 key=k type=unknown
+  (none)
+
+[postgres] rows=0 key=a key "q" type=string
+  (none)
+
+[postgres] rows=0 key=a key "q" type=hash
+  (none)
+
+[postgres] rows=0 key=a key "q" type=list
+  (none)
+
+[postgres] rows=0 key=a key "q" type=set
+  (none)
+
+[postgres] rows=0 key=a key "q" type=zset
+  (none)
+
+[postgres] rows=0 key=a key "q" type=stream
+  (none)
+
+[postgres] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[postgres] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[postgres] rows=0 key=a key "q" type=unknown
+  (none)
+
+[mysql] rows=100 key=k type=string
+  (none)
+
+[mysql] rows=100 key=k type=hash
+  (none)
+
+[mysql] rows=100 key=k type=list
+  (none)
+
+[mysql] rows=100 key=k type=set
+  (none)
+
+[mysql] rows=100 key=k type=zset
+  (none)
+
+[mysql] rows=100 key=k type=stream
+  (none)
+
+[mysql] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[mysql] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[mysql] rows=100 key=k type=unknown
+  (none)
+
+[mysql] rows=100 key=a key "q" type=string
+  (none)
+
+[mysql] rows=100 key=a key "q" type=hash
+  (none)
+
+[mysql] rows=100 key=a key "q" type=list
+  (none)
+
+[mysql] rows=100 key=a key "q" type=set
+  (none)
+
+[mysql] rows=100 key=a key "q" type=zset
+  (none)
+
+[mysql] rows=100 key=a key "q" type=stream
+  (none)
+
+[mysql] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mysql] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mysql] rows=100 key=a key "q" type=unknown
+  (none)
+
+[mysql] rows=0 key=k type=string
+  (none)
+
+[mysql] rows=0 key=k type=hash
+  (none)
+
+[mysql] rows=0 key=k type=list
+  (none)
+
+[mysql] rows=0 key=k type=set
+  (none)
+
+[mysql] rows=0 key=k type=zset
+  (none)
+
+[mysql] rows=0 key=k type=stream
+  (none)
+
+[mysql] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[mysql] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[mysql] rows=0 key=k type=unknown
+  (none)
+
+[mysql] rows=0 key=a key "q" type=string
+  (none)
+
+[mysql] rows=0 key=a key "q" type=hash
+  (none)
+
+[mysql] rows=0 key=a key "q" type=list
+  (none)
+
+[mysql] rows=0 key=a key "q" type=set
+  (none)
+
+[mysql] rows=0 key=a key "q" type=zset
+  (none)
+
+[mysql] rows=0 key=a key "q" type=stream
+  (none)
+
+[mysql] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mysql] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mysql] rows=0 key=a key "q" type=unknown
+  (none)
+
+[mariadb] rows=100 key=k type=string
+  (none)
+
+[mariadb] rows=100 key=k type=hash
+  (none)
+
+[mariadb] rows=100 key=k type=list
+  (none)
+
+[mariadb] rows=100 key=k type=set
+  (none)
+
+[mariadb] rows=100 key=k type=zset
+  (none)
+
+[mariadb] rows=100 key=k type=stream
+  (none)
+
+[mariadb] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[mariadb] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[mariadb] rows=100 key=k type=unknown
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=string
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=hash
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=list
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=set
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=zset
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=stream
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mariadb] rows=100 key=a key "q" type=unknown
+  (none)
+
+[mariadb] rows=0 key=k type=string
+  (none)
+
+[mariadb] rows=0 key=k type=hash
+  (none)
+
+[mariadb] rows=0 key=k type=list
+  (none)
+
+[mariadb] rows=0 key=k type=set
+  (none)
+
+[mariadb] rows=0 key=k type=zset
+  (none)
+
+[mariadb] rows=0 key=k type=stream
+  (none)
+
+[mariadb] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[mariadb] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[mariadb] rows=0 key=k type=unknown
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=string
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=hash
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=list
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=set
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=zset
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=stream
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mariadb] rows=0 key=a key "q" type=unknown
+  (none)
+
+[sqlite] rows=100 key=k type=string
+  (none)
+
+[sqlite] rows=100 key=k type=hash
+  (none)
+
+[sqlite] rows=100 key=k type=list
+  (none)
+
+[sqlite] rows=100 key=k type=set
+  (none)
+
+[sqlite] rows=100 key=k type=zset
+  (none)
+
+[sqlite] rows=100 key=k type=stream
+  (none)
+
+[sqlite] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[sqlite] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[sqlite] rows=100 key=k type=unknown
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=string
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=hash
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=list
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=set
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=zset
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=stream
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[sqlite] rows=100 key=a key "q" type=unknown
+  (none)
+
+[sqlite] rows=0 key=k type=string
+  (none)
+
+[sqlite] rows=0 key=k type=hash
+  (none)
+
+[sqlite] rows=0 key=k type=list
+  (none)
+
+[sqlite] rows=0 key=k type=set
+  (none)
+
+[sqlite] rows=0 key=k type=zset
+  (none)
+
+[sqlite] rows=0 key=k type=stream
+  (none)
+
+[sqlite] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[sqlite] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[sqlite] rows=0 key=k type=unknown
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=string
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=hash
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=list
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=set
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=zset
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=stream
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[sqlite] rows=0 key=a key "q" type=unknown
+  (none)
+
+[turso] rows=100 key=k type=string
+  (none)
+
+[turso] rows=100 key=k type=hash
+  (none)
+
+[turso] rows=100 key=k type=list
+  (none)
+
+[turso] rows=100 key=k type=set
+  (none)
+
+[turso] rows=100 key=k type=zset
+  (none)
+
+[turso] rows=100 key=k type=stream
+  (none)
+
+[turso] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[turso] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[turso] rows=100 key=k type=unknown
+  (none)
+
+[turso] rows=100 key=a key "q" type=string
+  (none)
+
+[turso] rows=100 key=a key "q" type=hash
+  (none)
+
+[turso] rows=100 key=a key "q" type=list
+  (none)
+
+[turso] rows=100 key=a key "q" type=set
+  (none)
+
+[turso] rows=100 key=a key "q" type=zset
+  (none)
+
+[turso] rows=100 key=a key "q" type=stream
+  (none)
+
+[turso] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[turso] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[turso] rows=100 key=a key "q" type=unknown
+  (none)
+
+[turso] rows=0 key=k type=string
+  (none)
+
+[turso] rows=0 key=k type=hash
+  (none)
+
+[turso] rows=0 key=k type=list
+  (none)
+
+[turso] rows=0 key=k type=set
+  (none)
+
+[turso] rows=0 key=k type=zset
+  (none)
+
+[turso] rows=0 key=k type=stream
+  (none)
+
+[turso] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[turso] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[turso] rows=0 key=k type=unknown
+  (none)
+
+[turso] rows=0 key=a key "q" type=string
+  (none)
+
+[turso] rows=0 key=a key "q" type=hash
+  (none)
+
+[turso] rows=0 key=a key "q" type=list
+  (none)
+
+[turso] rows=0 key=a key "q" type=set
+  (none)
+
+[turso] rows=0 key=a key "q" type=zset
+  (none)
+
+[turso] rows=0 key=a key "q" type=stream
+  (none)
+
+[turso] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[turso] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[turso] rows=0 key=a key "q" type=unknown
+  (none)
+
+[duckdb] rows=100 key=k type=string
+  (none)
+
+[duckdb] rows=100 key=k type=hash
+  (none)
+
+[duckdb] rows=100 key=k type=list
+  (none)
+
+[duckdb] rows=100 key=k type=set
+  (none)
+
+[duckdb] rows=100 key=k type=zset
+  (none)
+
+[duckdb] rows=100 key=k type=stream
+  (none)
+
+[duckdb] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[duckdb] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[duckdb] rows=100 key=k type=unknown
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=string
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=hash
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=list
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=set
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=zset
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=stream
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[duckdb] rows=100 key=a key "q" type=unknown
+  (none)
+
+[duckdb] rows=0 key=k type=string
+  (none)
+
+[duckdb] rows=0 key=k type=hash
+  (none)
+
+[duckdb] rows=0 key=k type=list
+  (none)
+
+[duckdb] rows=0 key=k type=set
+  (none)
+
+[duckdb] rows=0 key=k type=zset
+  (none)
+
+[duckdb] rows=0 key=k type=stream
+  (none)
+
+[duckdb] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[duckdb] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[duckdb] rows=0 key=k type=unknown
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=string
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=hash
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=list
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=set
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=zset
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=stream
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[duckdb] rows=0 key=a key "q" type=unknown
+  (none)
+
+[snowflake] rows=100 key=k type=string
+  (none)
+
+[snowflake] rows=100 key=k type=hash
+  (none)
+
+[snowflake] rows=100 key=k type=list
+  (none)
+
+[snowflake] rows=100 key=k type=set
+  (none)
+
+[snowflake] rows=100 key=k type=zset
+  (none)
+
+[snowflake] rows=100 key=k type=stream
+  (none)
+
+[snowflake] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[snowflake] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[snowflake] rows=100 key=k type=unknown
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=string
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=hash
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=list
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=set
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=zset
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=stream
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[snowflake] rows=100 key=a key "q" type=unknown
+  (none)
+
+[snowflake] rows=0 key=k type=string
+  (none)
+
+[snowflake] rows=0 key=k type=hash
+  (none)
+
+[snowflake] rows=0 key=k type=list
+  (none)
+
+[snowflake] rows=0 key=k type=set
+  (none)
+
+[snowflake] rows=0 key=k type=zset
+  (none)
+
+[snowflake] rows=0 key=k type=stream
+  (none)
+
+[snowflake] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[snowflake] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[snowflake] rows=0 key=k type=unknown
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=string
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=hash
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=list
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=set
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=zset
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=stream
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[snowflake] rows=0 key=a key "q" type=unknown
+  (none)
+
+[mssql] rows=100 key=k type=string
+  (none)
+
+[mssql] rows=100 key=k type=hash
+  (none)
+
+[mssql] rows=100 key=k type=list
+  (none)
+
+[mssql] rows=100 key=k type=set
+  (none)
+
+[mssql] rows=100 key=k type=zset
+  (none)
+
+[mssql] rows=100 key=k type=stream
+  (none)
+
+[mssql] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[mssql] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[mssql] rows=100 key=k type=unknown
+  (none)
+
+[mssql] rows=100 key=a key "q" type=string
+  (none)
+
+[mssql] rows=100 key=a key "q" type=hash
+  (none)
+
+[mssql] rows=100 key=a key "q" type=list
+  (none)
+
+[mssql] rows=100 key=a key "q" type=set
+  (none)
+
+[mssql] rows=100 key=a key "q" type=zset
+  (none)
+
+[mssql] rows=100 key=a key "q" type=stream
+  (none)
+
+[mssql] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mssql] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mssql] rows=100 key=a key "q" type=unknown
+  (none)
+
+[mssql] rows=0 key=k type=string
+  (none)
+
+[mssql] rows=0 key=k type=hash
+  (none)
+
+[mssql] rows=0 key=k type=list
+  (none)
+
+[mssql] rows=0 key=k type=set
+  (none)
+
+[mssql] rows=0 key=k type=zset
+  (none)
+
+[mssql] rows=0 key=k type=stream
+  (none)
+
+[mssql] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[mssql] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[mssql] rows=0 key=k type=unknown
+  (none)
+
+[mssql] rows=0 key=a key "q" type=string
+  (none)
+
+[mssql] rows=0 key=a key "q" type=hash
+  (none)
+
+[mssql] rows=0 key=a key "q" type=list
+  (none)
+
+[mssql] rows=0 key=a key "q" type=set
+  (none)
+
+[mssql] rows=0 key=a key "q" type=zset
+  (none)
+
+[mssql] rows=0 key=a key "q" type=stream
+  (none)
+
+[mssql] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mssql] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mssql] rows=0 key=a key "q" type=unknown
+  (none)
+
+[mongodb] rows=100 key=k type=string
+  (none)
+
+[mongodb] rows=100 key=k type=hash
+  (none)
+
+[mongodb] rows=100 key=k type=list
+  (none)
+
+[mongodb] rows=100 key=k type=set
+  (none)
+
+[mongodb] rows=100 key=k type=zset
+  (none)
+
+[mongodb] rows=100 key=k type=stream
+  (none)
+
+[mongodb] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[mongodb] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[mongodb] rows=100 key=k type=unknown
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=string
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=hash
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=list
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=set
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=zset
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=stream
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mongodb] rows=100 key=a key "q" type=unknown
+  (none)
+
+[mongodb] rows=0 key=k type=string
+  (none)
+
+[mongodb] rows=0 key=k type=hash
+  (none)
+
+[mongodb] rows=0 key=k type=list
+  (none)
+
+[mongodb] rows=0 key=k type=set
+  (none)
+
+[mongodb] rows=0 key=k type=zset
+  (none)
+
+[mongodb] rows=0 key=k type=stream
+  (none)
+
+[mongodb] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[mongodb] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[mongodb] rows=0 key=k type=unknown
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=string
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=hash
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=list
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=set
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=zset
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=stream
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[mongodb] rows=0 key=a key "q" type=unknown
+  (none)
+
+[redis] rows=100 key=k type=string
+  |GET k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=hash
+  |HSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=list
+  |LRANGE k 0 99|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=set
+  |SSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=zset
+  |ZSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=stream
+  |XRANGE k - + COUNT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=ReJSON-RL
+  |JSON.GET k $|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=TSDB-TYPE
+  |TS.RANGE k - + COUNT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=k type=unknown
+  (none)
+
+[redis] rows=100 key=a key "q" type=string
+  |GET "a key \\"q\\""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=hash
+  |HSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=list
+  |LRANGE "a key \\"q\\"" 0 99|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=set
+  |SSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=zset
+  |ZSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=stream
+  |XRANGE "a key \\"q\\"" - + COUNT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=ReJSON-RL
+  |JSON.GET "a key \\"q\\"" $|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=TSDB-TYPE
+  |TS.RANGE "a key \\"q\\"" - + COUNT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=100 key=a key "q" type=unknown
+  (none)
+
+[redis] rows=0 key=k type=string
+  |GET k|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=hash
+  |HSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=list
+  |LRANGE k 0 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=set
+  |SSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=zset
+  |ZSCAN k 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=stream
+  |XRANGE k - + COUNT 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=ReJSON-RL
+  |JSON.GET k $|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=TSDB-TYPE
+  |TS.RANGE k - + COUNT 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=k type=unknown
+  (none)
+
+[redis] rows=0 key=a key "q" type=string
+  |GET "a key \\"q\\""|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=hash
+  |HSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=list
+  |LRANGE "a key \\"q\\"" 0 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=set
+  |SSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=zset
+  |ZSCAN "a key \\"q\\"" 0 COUNT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=stream
+  |XRANGE "a key \\"q\\"" - + COUNT 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=ReJSON-RL
+  |JSON.GET "a key \\"q\\"" $|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=TSDB-TYPE
+  |TS.RANGE "a key \\"q\\"" - + COUNT 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[redis] rows=0 key=a key "q" type=unknown
+  (none)

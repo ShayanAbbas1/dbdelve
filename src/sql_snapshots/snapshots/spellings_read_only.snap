@@ -1,0 +1,23 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] read_only=true => |SET default_transaction_read_only = on|
+[postgres] read_only=false => |SET default_transaction_read_only = off|
+[mysql] read_only=true => |SET SESSION TRANSACTION READ ONLY|
+[mysql] read_only=false => |SET SESSION TRANSACTION READ WRITE|
+[mariadb] read_only=true => |SET SESSION TRANSACTION READ ONLY|
+[mariadb] read_only=false => |SET SESSION TRANSACTION READ WRITE|
+[sqlite] read_only=true => (none)
+[sqlite] read_only=false => (none)
+[turso] read_only=true => (none)
+[turso] read_only=false => (none)
+[duckdb] read_only=true => (none)
+[duckdb] read_only=false => (none)
+[snowflake] read_only=true => (none)
+[snowflake] read_only=false => (none)
+[mssql] read_only=true => (none)
+[mssql] read_only=false => (none)
+[mongodb] read_only=true => (none)
+[mongodb] read_only=false => (none)
+[redis] read_only=true => (none)
+[redis] read_only=false => (none)

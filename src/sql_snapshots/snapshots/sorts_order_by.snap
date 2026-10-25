@@ -1,0 +1,1330 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] union · []
+  (none)
+
+[postgres] unparseable · []
+  (none)
+
+[postgres] update · []
+  (none)
+
+[postgres] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] union · [id asc]
+  (none)
+
+[postgres] unparseable · [id asc]
+  (none)
+
+[postgres] update · [id asc]
+  (none)
+
+[postgres] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] union · [Name desc]
+  (none)
+
+[postgres] unparseable · [Name desc]
+  (none)
+
+[postgres] update · [Name desc]
+  (none)
+
+[postgres] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[postgres] union · [id asc, Name desc]
+  (none)
+
+[postgres] unparseable · [id asc, Name desc]
+  (none)
+
+[postgres] update · [id asc, Name desc]
+  (none)
+
+[mysql] preview · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] preview page 3 · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] filtered · []
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] existing order · []
+  |SELECT * FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] trailing comment · []
+  |SELECT * FROM `public`.`accounts` -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] union · []
+  (none)
+
+[mysql] unparseable · []
+  (none)
+
+[mysql] update · []
+  (none)
+
+[mysql] preview · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] preview page 3 · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] filtered · [id asc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] existing order · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] trailing comment · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] union · [id asc]
+  (none)
+
+[mysql] unparseable · [id asc]
+  (none)
+
+[mysql] update · [id asc]
+  (none)
+
+[mysql] preview · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] preview page 3 · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] filtered · [Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] existing order · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] trailing comment · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] union · [Name desc]
+  (none)
+
+[mysql] unparseable · [Name desc]
+  (none)
+
+[mysql] update · [Name desc]
+  (none)
+
+[mysql] preview · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] filtered · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] existing order · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] trailing comment · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mysql] union · [id asc, Name desc]
+  (none)
+
+[mysql] unparseable · [id asc, Name desc]
+  (none)
+
+[mysql] update · [id asc, Name desc]
+  (none)
+
+[mariadb] preview · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] preview page 3 · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] filtered · []
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] existing order · []
+  |SELECT * FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] trailing comment · []
+  |SELECT * FROM `public`.`accounts` -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] union · []
+  (none)
+
+[mariadb] unparseable · []
+  (none)
+
+[mariadb] update · []
+  (none)
+
+[mariadb] preview · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] preview page 3 · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] filtered · [id asc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] existing order · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] trailing comment · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] union · [id asc]
+  (none)
+
+[mariadb] unparseable · [id asc]
+  (none)
+
+[mariadb] update · [id asc]
+  (none)
+
+[mariadb] preview · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] preview page 3 · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] filtered · [Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] existing order · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] trailing comment · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] union · [Name desc]
+  (none)
+
+[mariadb] unparseable · [Name desc]
+  (none)
+
+[mariadb] update · [Name desc]
+  (none)
+
+[mariadb] preview · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] filtered · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] existing order · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] trailing comment · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mariadb] union · [id asc, Name desc]
+  (none)
+
+[mariadb] unparseable · [id asc, Name desc]
+  (none)
+
+[mariadb] update · [id asc, Name desc]
+  (none)
+
+[sqlite] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] union · []
+  (none)
+
+[sqlite] unparseable · []
+  (none)
+
+[sqlite] update · []
+  (none)
+
+[sqlite] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] union · [id asc]
+  (none)
+
+[sqlite] unparseable · [id asc]
+  (none)
+
+[sqlite] update · [id asc]
+  (none)
+
+[sqlite] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] union · [Name desc]
+  (none)
+
+[sqlite] unparseable · [Name desc]
+  (none)
+
+[sqlite] update · [Name desc]
+  (none)
+
+[sqlite] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[sqlite] union · [id asc, Name desc]
+  (none)
+
+[sqlite] unparseable · [id asc, Name desc]
+  (none)
+
+[sqlite] update · [id asc, Name desc]
+  (none)
+
+[turso] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] union · []
+  (none)
+
+[turso] unparseable · []
+  (none)
+
+[turso] update · []
+  (none)
+
+[turso] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] union · [id asc]
+  (none)
+
+[turso] unparseable · [id asc]
+  (none)
+
+[turso] update · [id asc]
+  (none)
+
+[turso] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] union · [Name desc]
+  (none)
+
+[turso] unparseable · [Name desc]
+  (none)
+
+[turso] update · [Name desc]
+  (none)
+
+[turso] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[turso] union · [id asc, Name desc]
+  (none)
+
+[turso] unparseable · [id asc, Name desc]
+  (none)
+
+[turso] update · [id asc, Name desc]
+  (none)
+
+[duckdb] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] union · []
+  (none)
+
+[duckdb] unparseable · []
+  (none)
+
+[duckdb] update · []
+  (none)
+
+[duckdb] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] union · [id asc]
+  (none)
+
+[duckdb] unparseable · [id asc]
+  (none)
+
+[duckdb] update · [id asc]
+  (none)
+
+[duckdb] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] union · [Name desc]
+  (none)
+
+[duckdb] unparseable · [Name desc]
+  (none)
+
+[duckdb] update · [Name desc]
+  (none)
+
+[duckdb] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[duckdb] union · [id asc, Name desc]
+  (none)
+
+[duckdb] unparseable · [id asc, Name desc]
+  (none)
+
+[duckdb] update · [id asc, Name desc]
+  (none)
+
+[snowflake] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] union · []
+  (none)
+
+[snowflake] unparseable · []
+  (none)
+
+[snowflake] update · []
+  (none)
+
+[snowflake] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] union · [id asc]
+  (none)
+
+[snowflake] unparseable · [id asc]
+  (none)
+
+[snowflake] update · [id asc]
+  (none)
+
+[snowflake] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] union · [Name desc]
+  (none)
+
+[snowflake] unparseable · [Name desc]
+  (none)
+
+[snowflake] update · [Name desc]
+  (none)
+
+[snowflake] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[snowflake] union · [id asc, Name desc]
+  (none)
+
+[snowflake] unparseable · [id asc, Name desc]
+  (none)
+
+[snowflake] update · [id asc, Name desc]
+  (none)
+
+[mssql] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = N'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] union · []
+  (none)
+
+[mssql] unparseable · []
+  (none)
+
+[mssql] update · []
+  (none)
+
+[mssql] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = N'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] union · [id asc]
+  (none)
+
+[mssql] unparseable · [id asc]
+  (none)
+
+[mssql] update · [id asc]
+  (none)
+
+[mssql] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = N'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] union · [Name desc]
+  (none)
+
+[mssql] unparseable · [Name desc]
+  (none)
+
+[mssql] update · [Name desc]
+  (none)
+
+[mssql] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = N'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mssql] union · [id asc, Name desc]
+  (none)
+
+[mssql] unparseable · [id asc, Name desc]
+  (none)
+
+[mssql] update · [id asc, Name desc]
+  (none)
+
+[mongodb] find · []
+  |db.getCollection("accounts").find({}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find skip · []
+  |db.getCollection("accounts").find({}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find filtered · []
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted · []
+  |db.getCollection("accounts").find({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, paged · []
+  |db.getCollection("accounts").find({}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted on own line · []
+  |db.getCollection("accounts").find({})|
+  |  .limit(1000)|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, two keys · []
+  |db.getCollection("accounts").find({})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate empty · []
+  |db.getCollection("accounts").aggregate([])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate no sort · []
+  |db.getCollection("accounts").aggregate([{"$match": {}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate paging only · []
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort only · []
+  |db.getCollection("accounts").aggregate([])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort last · []
+  |db.getCollection("accounts").aggregate([{"$match": {}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort then paging · []
+  |db.getCollection("accounts").aggregate([{"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort mid-pipeline · []
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}, {"$match": {}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate other stages · []
+  |db.getCollection("accounts").aggregate([{"$group": {"_id": "$a"}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] not a query · []
+  (none)
+
+[mongodb] find · [id asc]
+  |db.getCollection("accounts").find({}).sort({"id": 1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find skip · [id asc]
+  |db.getCollection("accounts").find({}).sort({"id": 1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find filtered · [id asc]
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).sort({"id": 1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted · [id asc]
+  |db.getCollection("accounts").find({}).sort({"id": 1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, paged · [id asc]
+  |db.getCollection("accounts").find({}).sort({"id": 1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted on own line · [id asc]
+  |db.getCollection("accounts").find({})|
+  |  .sort({"id": 1})|
+  |  .limit(1000)|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, two keys · [id asc]
+  |db.getCollection("accounts").find({}).sort({"id": 1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate empty · [id asc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate no sort · [id asc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate paging only · [id asc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort only · [id asc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort last · [id asc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort then paging · [id asc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort mid-pipeline · [id asc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}, {"$match": {}}, {"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate other stages · [id asc]
+  |db.getCollection("accounts").aggregate([{"$group": {"_id": "$a"}}, {"$sort": {"id": 1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] not a query · [id asc]
+  (none)
+
+[mongodb] find · [Name desc]
+  |db.getCollection("accounts").find({}).sort({"Name": -1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find skip · [Name desc]
+  |db.getCollection("accounts").find({}).sort({"Name": -1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find filtered · [Name desc]
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).sort({"Name": -1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted · [Name desc]
+  |db.getCollection("accounts").find({}).sort({"Name": -1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, paged · [Name desc]
+  |db.getCollection("accounts").find({}).sort({"Name": -1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted on own line · [Name desc]
+  |db.getCollection("accounts").find({})|
+  |  .sort({"Name": -1})|
+  |  .limit(1000)|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, two keys · [Name desc]
+  |db.getCollection("accounts").find({}).sort({"Name": -1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate empty · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate no sort · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate paging only · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"Name": -1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort only · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort last · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort then paging · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"Name": -1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort mid-pipeline · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}, {"$match": {}}, {"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate other stages · [Name desc]
+  |db.getCollection("accounts").aggregate([{"$group": {"_id": "$a"}}, {"$sort": {"Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] not a query · [Name desc]
+  (none)
+
+[mongodb] find · [id asc, Name desc]
+  |db.getCollection("accounts").find({}).sort({"id": 1, "Name": -1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find skip · [id asc, Name desc]
+  |db.getCollection("accounts").find({}).sort({"id": 1, "Name": -1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find filtered · [id asc, Name desc]
+  |db.getCollection("accounts").find({"Name": {"$eq": "it's"}}).sort({"id": 1, "Name": -1}).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted · [id asc, Name desc]
+  |db.getCollection("accounts").find({}).sort({"id": 1, "Name": -1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, paged · [id asc, Name desc]
+  |db.getCollection("accounts").find({}).sort({"id": 1, "Name": -1}).skip(200).limit(1000)|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted on own line · [id asc, Name desc]
+  |db.getCollection("accounts").find({})|
+  |  .sort({"id": 1, "Name": -1})|
+  |  .limit(1000)|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] find sorted, two keys · [id asc, Name desc]
+  |db.getCollection("accounts").find({}).sort({"id": 1, "Name": -1})|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate empty · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate no sort · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate paging only · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1, "Name": -1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort only · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort last · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$match": {}}, {"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort then paging · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1, "Name": -1}}, {"$skip": 5}, {"$limit": 10}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate sort mid-pipeline · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$sort": {"id": 1}}, {"$match": {}}, {"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] aggregate other stages · [id asc, Name desc]
+  |db.getCollection("accounts").aggregate([{"$group": {"_id": "$a"}}, {"$sort": {"id": 1, "Name": -1}}])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[mongodb] not a query · [id asc, Name desc]
+  (none)
+
+[redis] preview · []
+  (none)
+
+[redis] preview · [id asc]
+  (none)
+
+[redis] preview · [Name desc]
+  (none)
+
+[redis] preview · [id asc, Name desc]
+  (none)

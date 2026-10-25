@@ -4818,4 +4818,20 @@ mod tests {
              CONSTRAINT \"by_note\" CHECK (note <> N'')\n);\nCREATE INDEX by_note;"
         );
     }
+
+    #[test]
+    fn read_only_statements_are_recorded_per_engine() {
+        let mut out = String::new();
+        for engine in Engine::ALL {
+            for read_only in [true, false] {
+                crate::sql_snapshots::fragment(
+                    &mut out,
+                    engine,
+                    &format!("read_only={read_only}"),
+                    read_only_statement(engine, read_only),
+                );
+            }
+        }
+        crate::sql_snapshots::check("spellings_read_only", &out);
+    }
 }

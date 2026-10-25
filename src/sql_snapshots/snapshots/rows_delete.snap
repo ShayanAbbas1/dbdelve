@@ -1,0 +1,507 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[postgres] empty keys
+  (none)
+
+[postgres] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[postgres] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[postgres] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] id
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] composite
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7' AND `Region` = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] awkward column
+  |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mysql] empty keys
+  (none)
+
+[mysql] value single quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] value backslash before quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '\\\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] value unicode
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] binary
+  |DELETE FROM `public`.`accounts` WHERE `payload` = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] relation plain
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] relation quotes
+  |DELETE FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mysql] relation unicode
+  |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mysql] relation reserved
+  |DELETE FROM `select`.`order` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] relation mixed case
+  |DELETE FROM `Sales`.`OrderLines` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mysql] relation brackets and dots
+  |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mysql] relation backslash
+  |DELETE FROM `back\\slash`.`trail\\` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mariadb] id
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] composite
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7' AND `Region` = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] awkward column
+  |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mariadb] empty keys
+  (none)
+
+[mariadb] value single quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] value backslash before quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '\\\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] value unicode
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] binary
+  |DELETE FROM `public`.`accounts` WHERE `payload` = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] relation plain
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] relation quotes
+  |DELETE FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mariadb] relation unicode
+  |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mariadb] relation reserved
+  |DELETE FROM `select`.`order` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] relation mixed case
+  |DELETE FROM `Sales`.`OrderLines` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mariadb] relation brackets and dots
+  |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mariadb] relation backslash
+  |DELETE FROM `back\\slash`.`trail\\` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[sqlite] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[sqlite] empty keys
+  (none)
+
+[sqlite] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[sqlite] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[sqlite] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[turso] empty keys
+  (none)
+
+[turso] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[turso] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[turso] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[duckdb] empty keys
+  (none)
+
+[duckdb] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[duckdb] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[duckdb] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[snowflake] empty keys
+  (none)
+
+[snowflake] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[snowflake] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[snowflake] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = N'1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mssql] empty keys
+  (none)
+
+[mssql] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = N'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = N'\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = N'李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = 0xDEADbeef|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[mssql] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mssql] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mongodb] mongo objectid
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65f0c0ffee0000000000abcd")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mongodb] mongo bad objectid
+  (none)
+
+[mongodb] mongo int
+  |db.getCollection("accounts").deleteOne({"id": 7})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mongodb] mongo bad int
+  (none)
+
+[mongodb] mongo composite
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65f0c0ffee0000000000abcd"), "flag": true})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mongodb] mongo quoted field
+  |db.getCollection("accounts").deleteOne({"we\\"ird": 1})|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[mongodb] mongo empty keys
+  (none)
+
+[redis] redis keys grid
+  |UNLINK k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[redis] redis other table
+  (none)

@@ -1,0 +1,1203 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] no columns
+  error: |There is nothing in this row to insert.|
+
+[postgres] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] four columns
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `created`) VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] every name
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `select`, `we"ird`, `back``tick`, `with space`, `ümlaut`, `it's`, `[x]`, `a.b`, ``, `_id`) VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] null
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] long
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] no columns
+  error: |There is nothing in this row to insert.|
+
+[mysql] value plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value single quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value backslash
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('back\\\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value backslash before quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('\\\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value odd backslashes then quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\\\\\\\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value unicode
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value empty
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value newline and tab
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value control characters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value like metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value glob metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('*?[a]\\\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value number
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value negative float
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value boolean
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value date
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value timestamp
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] value hex
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation quotes
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation unicode
+  |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation reserved
+  |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation mixed case
+  |INSERT INTO `Sales`.`OrderLines` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation brackets and dots
+  |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] relation backslash
+  |INSERT INTO `back\\slash`.`trail\\` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] four columns
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `created`) VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] every name
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `select`, `we"ird`, `back``tick`, `with space`, `ümlaut`, `it's`, `[x]`, `a.b`, ``, `_id`) VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] null
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] long
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] no columns
+  error: |There is nothing in this row to insert.|
+
+[mariadb] value plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value single quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value backslash
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('back\\\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value backslash before quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('\\\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value odd backslashes then quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\\\\\\\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value unicode
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value empty
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value newline and tab
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value control characters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value like metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value glob metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('*?[a]\\\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value number
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value negative float
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value boolean
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value date
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value timestamp
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] value hex
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation quotes
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation unicode
+  |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation reserved
+  |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation mixed case
+  |INSERT INTO `Sales`.`OrderLines` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation brackets and dots
+  |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] relation backslash
+  |INSERT INTO `back\\slash`.`trail\\` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] no columns
+  error: |There is nothing in this row to insert.|
+
+[sqlite] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] no columns
+  error: |There is nothing in this row to insert.|
+
+[turso] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] no columns
+  error: |There is nothing in this row to insert.|
+
+[duckdb] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] no columns
+  error: |There is nothing in this row to insert.|
+
+[snowflake] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('\\\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] four columns
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', N'it''s', 'true', '2024-01-02T03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] every name
+  |INSERT INTO "public"."accounts" ("id", "Name", "select", "we""ird", "back`tick", "with space", "ümlaut", "it's", "[x]", "a.b", "", "_id") VALUES ('v', N'v', N'v', N'v', N'v', N'v', N'v', N'v', N'v', N'v', N'v', N'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] null
+  |INSERT INTO "public"."accounts" ("Name") VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] long
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] no columns
+  error: |There is nothing in this row to insert.|
+
+[mssql] value plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value single quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value backslash
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'back\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value backslash before quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value odd backslashes then quote
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'a\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value unicode
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value empty
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value newline and tab
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value control characters
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value like metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value glob metacharacters
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'*?[a]\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value number
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value negative float
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value boolean
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value date
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value timestamp
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] value hex
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation plain
+  |INSERT INTO "public"."accounts" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation quotes
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("Name") VALUES (N'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation unicode
+  |INSERT INTO "données"."Ünïcødé 表" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation reserved
+  |INSERT INTO "select"."order" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation mixed case
+  |INSERT INTO "Sales"."OrderLines" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation brackets and dots
+  |INSERT INTO "[dbo]"."a.b" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] relation backslash
+  |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES (N'v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo four columns
+  |db.getCollection("accounts").insertOne({"id": 42, "Name": "it's", "flag": true, "created": ISODate("2024-01-02T03:04:05.123Z")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo null alone
+  |db.getCollection("accounts").insertOne({"Name": null})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo lone empty
+  error: |There is nothing in this row to insert.|
+
+[mongodb] mongo only empty values
+  error: |There is nothing in this row to insert.|
+
+[mongodb] mongo no columns
+  error: |There is nothing in this row to insert.|
+
+[mongodb] mongo operator field name
+  error: |`$set` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator.|
+
+[mongodb] mongo operator value
+  error: |x: a field name starting with `$` inside a value is an operator, which DBDelve does not write.|
+
+[mongodb] mongo name id
+  |db.getCollection("accounts").insertOne({"id": 42})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name Name
+  |db.getCollection("accounts").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name select
+  |db.getCollection("accounts").insertOne({"select": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name we"ird
+  |db.getCollection("accounts").insertOne({"we\\"ird": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name back`tick
+  |db.getCollection("accounts").insertOne({"back`tick": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name with space
+  |db.getCollection("accounts").insertOne({"with space": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name ümlaut
+  |db.getCollection("accounts").insertOne({"ümlaut": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name it's
+  |db.getCollection("accounts").insertOne({"it's": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name [x]
+  |db.getCollection("accounts").insertOne({"[x]": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name a.b
+  |db.getCollection("accounts").insertOne({"a.b": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo name _id
+  |db.getCollection("accounts").insertOne({"_id": ObjectId("507f1f77bcf86cd799439011")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value plain
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "ok"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value single quote
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "it's"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value backslash
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "back\\\\slash"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value backslash before quote
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "\\\\'"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value odd backslashes then quote
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "a\\\\\\\\\\\\'b"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value unicode
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "李小龍 ünï 😀"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value empty
+  |db.getCollection("accounts").insertOne({"id": 1})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value newline and tab
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "a\\nb\\tc"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value control characters
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "a\\u0000b\\u0007"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value like metacharacters
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "100%_[x]"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value glob metacharacters
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "*?[a]\\\\"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value number
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "42"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value negative float
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "-3.5e10"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value boolean
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "true"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value date
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "2024-01-02"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value timestamp
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "2024-01-02 03:04:05.123"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo value hex
+  |db.getCollection("accounts").insertOne({"id": 1, "Name": "0xDEADbeef"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation plain
+  |db.getCollection("accounts").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation quotes
+  |db.getCollection("it's `tick` \\"dq\\"").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation unicode
+  |db.getCollection("Ünïcødé 表").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation reserved
+  |db.getCollection("order").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation mixed case
+  |db.getCollection("OrderLines").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation brackets and dots
+  |db.getCollection("a.b").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo relation backslash
+  |db.getCollection("trail\\\\").insertOne({"Name": "v"})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed id
+  |db.getCollection("accounts").insertOne({"id": 42})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed flag
+  |db.getCollection("accounts").insertOne({"flag": true})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed created
+  |db.getCollection("accounts").insertOne({"created": ISODate("2024-01-02T03:04:05.123Z")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed big
+  |db.getCollection("accounts").insertOne({"big": NumberLong("9007199254740993")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed price
+  |db.getCollection("accounts").insertOne({"price": NumberDecimal("19.99")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed ref
+  |db.getCollection("accounts").insertOne({"ref": ObjectId("507f1f77bcf86cd799439011")})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed score
+  |db.getCollection("accounts").insertOne({"score": 1.5})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed mixed
+  |db.getCollection("accounts").insertOne({"mixed": 42})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed maybe
+  |db.getCollection("accounts").insertOne({"maybe": 7})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo typed all
+  |db.getCollection("accounts").insertOne({"id": 42, "flag": true, "created": ISODate("2024-01-02T03:04:05.123Z"), "big": NumberLong("9007199254740993"), "price": NumberDecimal("19.99"), "ref": ObjectId("507f1f77bcf86cd799439011"), "score": 1.5, "mixed": 42, "maybe": 7})|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] mongo invalid id
+  error: |id: `abc` does not read as a value of type int.|
+
+[mongodb] mongo invalid flag
+  error: |flag: `maybe` does not read as a value of type bool.|
+
+[mongodb] mongo invalid created
+  error: |created: `yesterday` does not read as a value of type date.|
+
+[mongodb] mongo invalid big
+  error: |big: `1.5` does not read as a value of type long.|
+
+[mongodb] mongo invalid price
+  error: |price: `abc` does not read as a value of type decimal.|
+
+[mongodb] mongo invalid ref
+  error: |ref: `xyz` does not read as a value of type objectId.|
+
+[redis] redis string, empty value
+  |SET "a b" "" NX|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis string with ttl
+  |SET k v NX EX 30|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis hash
+  |HSETNX h f v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis list
+  |RPUSH l v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis set
+  |SADD s m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis zset
+  |ZADD z NX -inf m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] redis no value
+  error: |A new row needs a value.|
+
+[redis] redis null value
+  error: |value cannot be NULL: Redis has no NULL to store.|
+
+[redis] redis typed
+  error: |A new row is a string key: leave its type empty.|
+
+[redis] redis ttl zero
+  error: |0 is not a TTL: it is a number of seconds above zero, and zero or less would delete the key.|
+
+[redis] redis other table
+  error: |other is not a grid DBDelve writes to.|
+
+[redis] redis list index
+  error: |A new item goes at the end of the list: leave its index empty.|
+
+[redis] redis string family
+  error: |A string holds one value: edit it rather than adding a row.|
+
+[redis] redis zset no score
+  error: |A new row needs a score.|
+
+[redis] redis two words
+  error: |two words does not name one key.|

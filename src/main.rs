@@ -22,6 +22,8 @@ mod scroller;
 mod session;
 mod settings_panel;
 mod sql;
+#[cfg(test)]
+mod sql_snapshots;
 mod store;
 mod structure_grid;
 mod tab_drag;

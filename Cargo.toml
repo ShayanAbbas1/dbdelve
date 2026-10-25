@@ -334,6 +334,13 @@ gpui_platform = { version = "=0.3.9", package = "gpui-pre-platform", features = 
     "wayland",
 ] }
 
+[dev-dependencies]
+# The SQL snapshots are the net that lets the engine-spec refactor prove it
+# changed no generated statement by one character. insta brings the diff,
+# accept and CI-strict behaviour instead of hand-rolled golden files; no
+# default features, so the colored-diff console stack stays out.
+insta = { version = "=1.49.0", default-features = false }
+
 # The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits, however
 # it exits: Windows has no pipe-closing watchdog like the `sh` one on Unix.
 # Pinned to the version already locked, so naming it adds no copy.

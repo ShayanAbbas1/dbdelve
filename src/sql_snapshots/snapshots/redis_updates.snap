@@ -1,0 +1,193 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[redis] hash value
+  |HSET h f v|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash awkward value
+  |HSET h f "a b \\"q\\"\\nü 😀"|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash empty value
+  |HSET h f ""|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash null
+  error: |value cannot be NULL: Redis has no NULL to store.|
+
+[redis] hash default
+  error: |Redis has no default for value to take.|
+
+[redis] hash field edit
+  error: |value was not edited.|
+
+[redis] hash no field key
+  error: |This row's field is not known.|
+
+[redis] list index 3
+  |WATCH l|
+  |LPOS l "a b" COUNT 0 MAXLEN 4|
+  |MULTI|
+  |LSET l 3 z|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] list index 0
+  |WATCH l|
+  |LPOS l "a b" COUNT 0 MAXLEN 1|
+  |MULTI|
+  |LSET l 0 z|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] list large index
+  |WATCH l|
+  |LPOS l "a b" COUNT 0 MAXLEN 4294967297|
+  |MULTI|
+  |LSET l 4294967296 z|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] list index x
+  error: |x is not a list index.|
+
+[redis] list index -1
+  error: |-1 is not a list index.|
+
+[redis] list index overflow
+  error: |18446744073709551615 is not a list index.|
+
+[redis] list no value key
+  error: |This row's value is not known.|
+
+[redis] set member
+  |SADD s new|
+  |SREM s old|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] set spaced member
+  |SADD s "a b"|
+  |SREM s old|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] set null member
+  |SADD s NULL|
+  |SREM s old|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] set real null member
+  error: |member cannot be NULL: Redis has no NULL to store.|
+
+[redis] zset rescore
+  |ZADD z XX CH 2.5 m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset score "-inf"
+  |ZADD z XX CH -inf m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset score "inf"
+  |ZADD z XX CH inf m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset score "1e3"
+  |ZADD z XX CH 1e3 m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset score "0"
+  |ZADD z XX CH 0 m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset score "nan"
+  error: |nan is not a score: a score is a number.|
+
+[redis] zset score "abc"
+  error: |abc is not a score: a score is a number.|
+
+[redis] zset score ""
+  error: | is not a score: a score is a number.|
+
+[redis] zset rename
+  |ZADD z NX 1 n|
+  |ZREM z m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset rename and rescore
+  |ZADD z NX 3 n|
+  |ZREM z m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset rename without score key
+  error: |This row's score is not known.|
+
+[redis] string value
+  |SET s v XX KEEPTTL GET|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] string unspelled table
+  error: |two words does not name one key.|
+
+[redis] string spelled table
+  |SET "two words" v XX KEEPTTL GET|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys value
+  |SET k v XX KEEPTTL GET|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys stream value
+  error: |value does not hold its whole value as text, so it is not written back.|
+
+[redis] keys type column
+  error: |type does not hold its whole value as text, so it is not written back.|
+
+[redis] keys ttl 60
+  |EXPIRE k 60|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys ttl null
+  |PERSIST k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys ttl empty
+  |PERSIST k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys ttl 0
+  error: |0 is not a TTL: it is a number of seconds above zero, and zero or less would delete the key.|
+
+[redis] keys ttl -1
+  error: |-1 is not a TTL: it is a number of seconds above zero, and zero or less would delete the key.|
+
+[redis] keys ttl abc
+  error: |abc is not a TTL: it is a number of seconds above zero, and zero or less would delete the key.|
+
+[redis] keys ttl default
+  error: |Redis has no default for ttl to take.|
+
+[redis] keys rename
+  |RENAMENX k k2|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys everything
+  |SET k v XX KEEPTTL GET|
+  |EXPIRE k 60|
+  |RENAMENX k k2|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] keys other table
+  error: |other is not a grid DBDelve writes to.|
+
+[redis] mixed families
+  |HSET h f v|
+  |SADD s new|
+  |SREM s old|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] empty batch
+  error: |There are no edits to apply.|
+
+[redis] no changes
+  error: |The edits change nothing.|

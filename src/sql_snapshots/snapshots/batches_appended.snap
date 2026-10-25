@@ -1,0 +1,55 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[postgres] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[postgres] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[postgres] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[postgres] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mysql] buffer "" => |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mysql] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mysql] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mysql] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mysql] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mariadb] buffer "" => |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mariadb] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mariadb] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mariadb] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[mariadb] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[sqlite] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[sqlite] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[sqlite] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[sqlite] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[sqlite] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[turso] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[turso] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[turso] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[turso] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[turso] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[duckdb] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[duckdb] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[duckdb] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[duckdb] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[duckdb] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[snowflake] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[snowflake] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[snowflake] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[snowflake] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[snowflake] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mssql] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mssql] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mssql] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mssql] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mssql] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[mongodb] buffer "" => |db.getCollection("accounts").deleteOne({"id": 7})|
+[mongodb] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}db.getCollection("accounts").deleteOne({"id": 7})|
+[mongodb] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}db.getCollection("accounts").deleteOne({"id": 7})|
+[mongodb] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}db.getCollection("accounts").deleteOne({"id": 7})|
+[mongodb] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}db.getCollection("accounts").deleteOne({"id": 7})|
+[mongodb] buffer "db.getCollection(\"a\").find({})" => |db.getCollection("a").find({});\u{a}\u{a}db.getCollection("accounts").deleteOne({"id": 7})|
+[redis] buffer "" => |UNLINK k|
+[redis] buffer "SELECT 1" => |SELECT 1\u{a}\u{a}UNLINK k|
+[redis] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}UNLINK k|
+[redis] buffer "SELECT 1 -- note" => |SELECT 1 -- note\u{a}\u{a}UNLINK k|
+[redis] buffer "SELECT 1\n/* c */\n" => |SELECT 1\u{a}/* c */\u{a}\u{a}UNLINK k|
+[redis] buffer "GET k" => |GET k\u{a}\u{a}UNLINK k|
