@@ -481,11 +481,14 @@ impl Engine {
     /// of those inside `src/db/` — the caller asks, and never matches.
     pub fn assigns_default(self) -> bool {
         match self {
-            Self::Postgres | Self::MySql | Self::MariaDb | Self::Snowflake | Self::SqlServer => {
-                true
-            }
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::DuckDb
+            | Self::Snowflake
+            | Self::SqlServer => true,
             // A document has no column defaults to fall back to.
-            Self::Sqlite | Self::Turso | Self::DuckDb | Self::MongoDb | Self::Redis => false,
+            Self::Sqlite | Self::Turso | Self::MongoDb | Self::Redis => false,
         }
     }
 

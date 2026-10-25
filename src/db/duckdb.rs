@@ -1886,6 +1886,34 @@ mod tests {
     }
 
     #[test]
+    fn a_default_dbdelve_assigns_passes_its_gate_and_lands() {
+        use crate::result_grid::NewValue;
+        assert!(Engine::DuckDb.assigns_default());
+        let connection = memory(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, note VARCHAR DEFAULT 'unset');
+             INSERT INTO t VALUES (1, 'set');",
+        );
+        let statement = crate::sql::update_row(
+            Engine::DuckDb,
+            "main",
+            "t",
+            &[("note", NewValue::Default)],
+            &[("id", "1")],
+            &[],
+        )
+        .unwrap();
+        assert!(crate::sql::is_generated_write_on(
+            Engine::DuckDb,
+            &statement
+        ));
+        connection.query(&statement, Fetch::default()).unwrap();
+        let read = connection
+            .query("SELECT note FROM t", Fetch::default())
+            .unwrap();
+        assert_eq!(cells(&read), [[Some("unset")]]);
+    }
+
+    #[test]
     fn an_import_round_trips_on_duckdb() {
         crate::import_rows::live_round_trip(
             super::super::Connection::DuckDb(memory("")),
