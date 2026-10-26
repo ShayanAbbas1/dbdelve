@@ -39,10 +39,10 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-use spec::{
-    BooleanLiteral, CountAll, DefaultMarker, ExplainPrefix, Paging, ReadOnlySession, SkipDuplicates,
+use spec::{BooleanLiteral, CountAll, DefaultMarker, Paging, ReadOnlySession, SkipDuplicates};
+pub use spec::{
+    EngineSpec, ExplainPrefix, FormatDialect, ParserDialect, StatementSplit, TypedExplain,
 };
-pub use spec::{EngineSpec, StatementSplit};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.

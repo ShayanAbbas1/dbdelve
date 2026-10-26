@@ -323,12 +323,16 @@ pub enum StatementSplit {
 pub enum ExplainPrefix {
     Explain,
     ExplainAnalyze,
+    /// `ANALYZE <statement>` runs the statement, so `sql::classify` reads it as
+    /// the statement it runs.
     Analyze,
     ExplainQueryPlan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypedExplain {
+    /// Turso and DuckDB have no Explain at all, and Snowflake's and SQL
+    /// Server's plans are shapes the parser does not read.
     None,
     Postgres,
     MySql,

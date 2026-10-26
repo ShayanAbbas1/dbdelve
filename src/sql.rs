@@ -23,15 +23,18 @@ use sqlparser::ast::{
     Merge, Query, SetExpr, Statement, Update, UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, DuckDbDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
-    SnowflakeDialect,
+    Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+    SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
 use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::db::{ColumnDefinition, Engine, ExplainMode, StatementSplit, Syntax};
+use crate::db::{
+    ColumnDefinition, Engine, ExplainMode, ExplainPrefix, FormatDialect, ParserDialect,
+    StatementSplit, Syntax, TypedExplain,
+};
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
 
@@ -2068,8 +2071,8 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
     if !word(tokens.next().as_ref(), "EXPLAIN") {
         return None;
     }
-    match engine {
-        Engine::Postgres if tokens.next_if(|token| **token == Token::LParen).is_some() => {
+    match engine.spec().sql.typed_explain {
+        TypedExplain::Postgres if tokens.next_if(|token| **token == Token::LParen).is_some() => {
             let mut mode = ExplainMode::Plan;
             loop {
                 let name = tokens.next()?;
@@ -2097,13 +2100,13 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
                 }
             }
         }
-        Engine::Postgres => Some(
+        TypedExplain::Postgres => Some(
             match word(tokens.peek(), "ANALYZE") || word(tokens.peek(), "ANALYSE") {
                 true => ExplainMode::Analyze,
                 false => ExplainMode::Plan,
             },
         ),
-        Engine::MySql => {
+        TypedExplain::MySql => {
             let analyze = tokens
                 .next_if(|token| word(Some(token), "ANALYZE"))
                 .is_some();
@@ -2116,18 +2119,10 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
                 false => ExplainMode::Plan,
             })
         }
-        Engine::Sqlite => (word(tokens.next().as_ref(), "QUERY")
+        TypedExplain::Sqlite => (word(tokens.next().as_ref(), "QUERY")
             && word(tokens.next().as_ref(), "PLAN"))
         .then_some(ExplainMode::Plan),
-        // Turso and DuckDB have no Explain at all (`Engine::explain_prefix`), and
-        // Snowflake's and SQL Server's plans are shapes the parser does not read.
-        Engine::MariaDb
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer
-        | Engine::MongoDb
-        | Engine::Redis => None,
+        TypedExplain::None => None,
     }
 }
 
@@ -2146,7 +2141,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return crate::mql::classify(sql);
     };
 
-    if engine == Engine::MariaDb
+    if engine.spec().sql.explain_analyze == Some(ExplainPrefix::Analyze)
         && let Some(explain) = mariadb_analyze_as_explain(dialect.as_ref(), sql)
     {
         return classify(engine, &explain);
@@ -2179,15 +2174,19 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
 /// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB
 /// and Redis, which are not SQL.
 fn dialect(engine: Engine) -> Option<Box<dyn Dialect>> {
-    Some(match engine {
-        Engine::Postgres => Box::new(PostgreSqlDialect {}),
-        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
-        Engine::Sqlite | Engine::Turso => Box::new(SQLiteDialect {}),
-        Engine::DuckDb => Box::new(DuckDbDialect {}),
-        Engine::Snowflake => Box::new(SnowflakeDialect {}),
-        Engine::SqlServer => Box::new(MsSqlDialect {}),
-        Engine::MongoDb | Engine::Redis => return None,
-    })
+    (engine.syntax() == Syntax::Sql).then(|| parser(engine.spec().sql.parser_dialect))
+}
+
+fn parser(dialect: ParserDialect) -> Box<dyn Dialect> {
+    match dialect {
+        ParserDialect::Generic => Box::new(GenericDialect {}),
+        ParserDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
+        ParserDialect::MySql => Box::new(MySqlDialect {}),
+        ParserDialect::Sqlite => Box::new(SQLiteDialect {}),
+        ParserDialect::DuckDb => Box::new(DuckDbDialect {}),
+        ParserDialect::Snowflake => Box::new(SnowflakeDialect {}),
+        ParserDialect::MsSql => Box::new(MsSqlDialect {}),
+    }
 }
 
 /// MariaDB's `ANALYZE <statement>` respelled as the `EXPLAIN ANALYZE` sqlparser
@@ -2627,7 +2626,7 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
         return crate::redis_cmd::leaves(sql);
     }
     let mut leaves = Leaves::default();
-    let Some(dialect) = dialect(engine).filter(|_| engine != Engine::Snowflake) else {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
         return leaves;
     };
     match SqlParser::parse_sql(dialect.as_ref(), sql) {
@@ -3096,12 +3095,13 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // multi-line string literal through as one token, and a prefix would edit its
 // value.
 pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
-    let (Some(reader), Some(layout)) = (dialect(engine), sqlformat_dialect(engine)) else {
-        return match engine.syntax() {
-            Syntax::Redis => Err("Not formatting: a Redis command is one line, as typed."),
-            _ => crate::mql::format(sql),
-        };
-    };
+    match engine.syntax() {
+        Syntax::Sql => {}
+        Syntax::Mongo => return crate::mql::format(sql),
+        Syntax::Redis => return Err("Not formatting: a Redis command is one line, as typed."),
+    }
+    let reader = parser(engine.spec().sql.parser_dialect);
+    let layout = sqlformat_dialect(engine.spec().sql.format_dialect);
     if has_dollar_quote(sql) {
         return Err(DOLLAR_QUOTED);
     }
@@ -3151,20 +3151,11 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
     }
 }
 
-/// The sqlformat dialect an engine's SQL is laid out in; `None` for MongoDB
-/// and Redis, which are not SQL.
-fn sqlformat_dialect(engine: Engine) -> Option<sqlformat::Dialect> {
-    Some(match engine {
-        Engine::SqlServer => sqlformat::Dialect::SQLServer,
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake => sqlformat::Dialect::Generic,
-        Engine::MongoDb | Engine::Redis => return None,
-    })
+fn sqlformat_dialect(dialect: FormatDialect) -> sqlformat::Dialect {
+    match dialect {
+        FormatDialect::Generic => sqlformat::Dialect::Generic,
+        FormatDialect::SqlServer => sqlformat::Dialect::SQLServer,
+    }
 }
 
 const DOLLAR_QUOTED: &str = "Not formatting: a dollar-quoted body would be rewritten.";
