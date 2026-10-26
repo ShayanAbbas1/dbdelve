@@ -25,7 +25,7 @@ use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body, Timeout};
 
 use self::edit::{
-    DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Table,
+    DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Stage, Table,
     TableFacts, UNCOUNTED, Write, count_refusal, explained, halted,
 };
 pub(super) use self::edit::{match_value, review_notes};
@@ -287,6 +287,8 @@ enum Failed {
     Unreached(ureq::Error),
     Error(DbError),
     Broken(DbError),
+    /// Never sent: a Cancel or a hold came first.
+    Unsent(DbError),
 }
 
 impl From<DbError> for Failed {
@@ -431,9 +433,7 @@ impl Connection {
             let statement = &sql[range.clone()];
             let ran = match guarded(statement) {
                 true => self.guarded_write(statement, cancel),
-                false => self
-                    .request(statement, Kind::Generated, cancel, Fetch::default())
-                    .map_err(Halt::Failed),
+                false => self.submit(statement, cancel),
             };
             match ran {
                 Ok(result) => {
@@ -461,14 +461,16 @@ impl Connection {
         let uncounted = || Halt::Refused(UNCOUNTED.into());
         let guard = row_guard(Engine::ClickHouse, statement).ok_or_else(uncounted)?;
         let (schema, table) = counted_table(&guard).ok_or_else(uncounted)?;
-        if let Some(described) = self.describe(&schema, &table).map_err(Halt::Failed)?
+        if let Some(described) = self
+            .describe(&schema, &table)
+            .map_err(|error| Halt::Failed(Stage::Describe, error))?
             && let Some(reason) = described.refuses(write_of(statement))
         {
             return Err(Halt::Refused(reason));
         }
         let counted = self
             .request(&guard, Kind::Generated, cancel, Fetch::default())
-            .map_err(Halt::Failed)?;
+            .map_err(|error| Halt::Failed(Stage::Count, error))?;
         let count = counted
             .rows
             .first()
@@ -477,8 +479,20 @@ impl Connection {
         if let Some(reason) = count_refusal(count) {
             return Err(Halt::Refused(reason));
         }
-        self.request(statement, Kind::Generated, cancel, Fetch::default())
-            .map_err(|error| Halt::Failed(explained(error)))
+        self.submit(statement, cancel).map_err(|halt| match halt {
+            Halt::Failed(Stage::Write, error) => Halt::Failed(Stage::Write, explained(error)),
+            halt => halt,
+        })
+    }
+
+    /// One statement of a submission, and whether it failed before it went
+    /// out.
+    fn submit(&self, statement: &str, cancel: &CancelToken) -> Result<QueryResult, Halt> {
+        self.run(statement, Kind::Generated, cancel, Fetch::default())
+            .map_err(|failed| match failed {
+                Failed::Unsent(error) => Halt::Failed(Stage::Unsent, error),
+                failed => Halt::Failed(Stage::Write, self.explain(failed)),
+            })
     }
 
     /// The edit target of a preview's result, or the reason it has none. The
@@ -790,7 +804,7 @@ impl Connection {
     ) -> Result<QueryResult, Failed> {
         let started = Instant::now();
         let mut session = matches!(kind, Kind::User).then(|| lock(&self.session));
-        fetch.hold()?;
+        fetch.hold().map_err(Failed::Unsent)?;
         if let Some(session) = session.as_deref_mut() {
             if session.id.is_none() {
                 *session = Session {
@@ -823,7 +837,8 @@ impl Connection {
         };
         let bounds = kind.bounds(self.config.statement_timeout);
         let watch = Watch::new(Arc::default(), bounds.limit());
-        let _running = Running::register(cancel, &self.running, &query_id, &watch)?;
+        let _running =
+            Running::register(cancel, &self.running, &query_id, &watch).map_err(Failed::Unsent)?;
         let _watching = watch.enter();
         let outcome = loop {
             let params = self.params(&query_id, session.as_deref(), read_only);
@@ -1078,7 +1093,7 @@ impl Connection {
 
     fn explain(&self, failed: Failed) -> DbError {
         let error = match failed {
-            Failed::Error(error) | Failed::Broken(error) => return error,
+            Failed::Error(error) | Failed::Broken(error) | Failed::Unsent(error) => return error,
             Failed::Unreached(error) => error,
         };
         let endpoint = self.endpoint();
@@ -2411,6 +2426,115 @@ mod tests {
             .filter(|statement| statement.contains(&row("1")))
             .collect();
         assert_eq!(statements, [guard("1"), alter, guard("1"), delete]);
+    }
+
+    fn alter(id: &str) -> String {
+        format!(
+            "ALTER TABLE `d`.`t` UPDATE `label` = 'b' {} SETTINGS mutations_sync = 2",
+            row(id)
+        )
+    }
+
+    /// Two mutations of `` `d`.`t` ``, cancelled once `stalls` arrives.
+    fn cancelled_at(mock: &Mock, connection: &Connection, stalls: &str) -> DbError {
+        let cancel = CancelToken::default();
+        let batch = format!("{};\n{};", alter("1"), alter("2"));
+        std::thread::scope(|scope| {
+            let writing = scope.spawn(|| connection.generated(&batch, &cancel, Fetch::default()));
+            until(stalls, || mock.hits(stalls) == 1);
+            connection.cancel(&cancel).unwrap();
+            writing.join().unwrap().unwrap_err()
+        })
+    }
+
+    const APPLIED_ONE: &str =
+        "1 of 2 edits was applied and stays; ClickHouse has no transaction. The second";
+
+    #[test]
+    fn a_cancel_while_a_mutations_guard_counts_says_the_mutation_was_never_sent() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement("ALTER TABLE `d`.`t`", [Response::empty()]);
+        counts(&mock, "1", "1");
+        mock.on_statement(&guard("2"), [sleeping()]);
+        let error = cancelled_at(&mock, &connection, &guard("2"));
+        assert_eq!(
+            error.message,
+            format!(
+                "{APPLIED_ONE} failed before it was sent, while DBDelve counted its rows: \
+                 Cancelled."
+            )
+        );
+        assert_eq!(mock.hits(&alter("2")), 0);
+    }
+
+    #[test]
+    fn a_cancel_that_lands_before_the_mutation_goes_out_says_it_was_never_sent() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement("ALTER TABLE `d`.`t`", [Response::empty()]);
+        counts(&mock, "1", "1");
+        mock.on_statement(
+            &guard("2"),
+            [Response::rows(&[("COUNT()", "UInt64")], &[&["1"]])
+                .delayed(Duration::from_millis(500))],
+        );
+        let error = cancelled_at(&mock, &connection, &guard("2"));
+        assert_eq!(
+            error.message,
+            format!("{APPLIED_ONE} failed before it was sent: Cancelled.")
+        );
+        assert_eq!(mock.hits(&alter("2")), 0);
+    }
+
+    #[test]
+    fn a_cancel_while_the_mutation_runs_says_it_keeps_running() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement("ALTER TABLE `d`.`t`", [Response::empty()]);
+        counts(&mock, "1", "1");
+        counts(&mock, "2", "1");
+        mock.on_statement(&alter("2"), [sleeping()]);
+        let error = cancelled_at(&mock, &connection, &alter("2"));
+        assert_eq!(
+            error.message,
+            format!(
+                "{APPLIED_ONE} failed: Cancelled. The mutation keeps running in the background; \
+                 KILL MUTATION stops it."
+            )
+        );
+    }
+
+    #[test]
+    fn a_describe_that_fails_part_way_says_the_edit_was_never_sent() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        counts(&mock, "1", "1");
+        mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+        mock.on_statement(
+            "AND name = 'u'",
+            [Response::error(
+                500,
+                241,
+                "MEMORY_LIMIT_EXCEEDED",
+                "Memory limit exceeded",
+            )],
+        );
+        let other = format!("UPDATE `d`.`u` SET `label` = 'b' {}", row("1"));
+        let error = write(&connection, &format!("{};\n{other};", update("1"))).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "{APPLIED_ONE} failed before it was sent, while DBDelve read its table: Memory \
+                 limit exceeded (MEMORY_LIMIT_EXCEEDED)"
+            )
+        );
+        assert_eq!(error.position, None);
+        assert_eq!(mock.hits("`d`.`u`"), 0);
     }
 
     #[test]

@@ -358,8 +358,28 @@ pub(super) fn count_refusal(count: u64) -> Option<String> {
 pub(super) enum Halt {
     /// Not sent: its guard or the table's describe would not have it.
     Refused(String),
-    Failed(DbError),
+    Failed(Stage, DbError),
 }
+
+/// How far a statement of a submission got before it failed. Only at
+/// [`Stage::Write`] did the server have it, so only there can it have
+/// written anything or started a mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stage {
+    /// Describing the table it writes to.
+    Describe,
+    /// Its guard, counting the rows it names.
+    Count,
+    /// About to be sent, when a Cancel came first.
+    Unsent,
+    Write,
+}
+
+/// A lone statement cancelled before it went out. Not [`CANCELLED`]'s words,
+/// so nothing adds what a cancel of the statement itself would cost.
+///
+/// [`CANCELLED`]: super::CANCELLED
+const CANCELLED_UNSENT: &str = "Cancelled before it was sent.";
 
 /// The error of a submission of `total` statements that stopped at the one
 /// at index `at`, `offset` bytes into it. The ones before it ran and, with no
@@ -373,16 +393,24 @@ pub(super) fn halted(
 ) -> DbError {
     let (verb, reason, position) = match halt {
         // A lone statement's refusal or failure is said as it is, and a
-        // cancel stays one.
+        // cancel of the statement itself stays one.
         Halt::Refused(reason) if total == 1 => return plain_error(reason),
-        Halt::Failed(error) if total == 1 => {
+        Halt::Failed(Stage::Write, error) if total == 1 => {
             return DbError {
                 position: error.position.map(|position| position + offset),
                 ..error
             };
         }
+        // A position here would point into the guard or the describe, not
+        // into the statement the user was shown.
+        Halt::Failed(_, error) if total == 1 => {
+            return match is_cancel(Engine::ClickHouse, &error) {
+                true => plain_error(CANCELLED_UNSENT.into()),
+                false => plain_error(error.message),
+            };
+        }
         Halt::Refused(reason) => ("was refused", reason, None),
-        Halt::Failed(error) => {
+        Halt::Failed(Stage::Write, error) => {
             let mut reason = error.message.clone();
             if is_cancel(Engine::ClickHouse, &error)
                 && let Some(cost) = cancel_cost(Engine::ClickHouse, &error, false, statement)
@@ -392,6 +420,17 @@ pub(super) fn halted(
             let position = error.position.map(|position| position + offset);
             ("failed", reason, position)
         }
+        Halt::Failed(Stage::Describe, error) => (
+            "failed before it was sent, while DBDelve read its table",
+            error.message,
+            None,
+        ),
+        Halt::Failed(Stage::Count, error) => (
+            "failed before it was sent, while DBDelve counted its rows",
+            error.message,
+            None,
+        ),
+        Halt::Failed(Stage::Unsent, error) => ("failed before it was sent", error.message, None),
     };
     let after = match total - at - 1 {
         0 => String::new(),
@@ -984,10 +1023,13 @@ mod tests {
     #[test]
     fn a_lone_failure_is_the_servers_and_a_batchs_points_into_the_submission() {
         let failed = || {
-            Halt::Failed(DbError {
-                message: "Syntax error (SYNTAX_ERROR)".into(),
-                position: Some(4),
-            })
+            Halt::Failed(
+                Stage::Write,
+                DbError {
+                    message: "Syntax error (SYNTAX_ERROR)".into(),
+                    position: Some(4),
+                },
+            )
         };
         let lone = halted(0, 1, failed(), "", 10);
         assert_eq!(lone.message, "Syntax error (SYNTAX_ERROR)");
@@ -1001,14 +1043,18 @@ mod tests {
         assert_eq!(batch.position, Some(14));
     }
 
+    const MUTATION_SQL: &str = "ALTER TABLE `d`.`t` UPDATE `a` = 'x' WHERE `a` = 'y' \
+                                SETTINGS mutations_sync = 2";
+
+    fn cancelled(stage: Stage) -> Halt {
+        Halt::Failed(stage, plain_error(super::super::CANCELLED.into()))
+    }
+
     #[test]
     fn a_cancel_stays_one_alone_and_says_what_a_mutation_keeps_doing_in_a_batch() {
-        let cancel = || Halt::Failed(plain_error(super::super::CANCELLED.into()));
-        let lone = halted(0, 1, cancel(), "", 0);
+        let lone = halted(0, 1, cancelled(Stage::Write), MUTATION_SQL, 0);
         assert!(is_cancel(Engine::ClickHouse, &lone));
-        let mutation = "ALTER TABLE `d`.`t` UPDATE `a` = 'x' WHERE `a` = 'y' \
-                        SETTINGS mutations_sync = 2";
-        let batch = halted(1, 2, cancel(), mutation, 0);
+        let batch = halted(1, 2, cancelled(Stage::Write), MUTATION_SQL, 0);
         assert!(
             batch.message.ends_with(
                 "The second failed: Cancelled. The mutation keeps running in the background; \
@@ -1017,6 +1063,60 @@ mod tests {
             "{}",
             batch.message
         );
+    }
+
+    #[test]
+    fn a_cancel_before_the_mutation_was_sent_says_it_was_not_sent_and_nothing_of_its_cost() {
+        for (stage, verb) in [
+            (
+                Stage::Describe,
+                "failed before it was sent, while DBDelve read its table",
+            ),
+            (
+                Stage::Count,
+                "failed before it was sent, while DBDelve counted its rows",
+            ),
+            (Stage::Unsent, "failed before it was sent"),
+        ] {
+            let batch = halted(1, 3, cancelled(stage), MUTATION_SQL, 10);
+            assert_eq!(
+                batch.message,
+                format!(
+                    "1 of 3 edits was applied and stays; ClickHouse has no transaction. The \
+                     second {verb}, and the one after it was not run: Cancelled."
+                ),
+                "{stage:?}"
+            );
+            assert_eq!(batch.position, None);
+
+            let lone = halted(0, 1, cancelled(stage), MUTATION_SQL, 0);
+            assert_eq!(lone.message, CANCELLED_UNSENT, "{stage:?}");
+            // The run adds what a cancel costs only to a cancel.
+            assert!(!is_cancel(Engine::ClickHouse, &lone));
+        }
+    }
+
+    #[test]
+    fn a_guard_or_describe_failure_keeps_its_words_but_not_its_position() {
+        let failed = |stage| {
+            Halt::Failed(
+                stage,
+                DbError {
+                    message: "Memory limit exceeded (MEMORY_LIMIT_EXCEEDED)".into(),
+                    position: Some(4),
+                },
+            )
+        };
+        for stage in [Stage::Describe, Stage::Count] {
+            let lone = halted(0, 1, failed(stage), MUTATION_SQL, 10);
+            assert_eq!(
+                (lone.message.as_str(), lone.position),
+                ("Memory limit exceeded (MEMORY_LIMIT_EXCEEDED)", None)
+            );
+            let batch = halted(1, 2, failed(stage), MUTATION_SQL, 10);
+            assert!(!batch.message.contains("KILL MUTATION"));
+            assert_eq!(batch.position, None);
+        }
     }
 
     fn noted(sql: &str) -> Vec<String> {
