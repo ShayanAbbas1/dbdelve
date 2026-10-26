@@ -3468,6 +3468,12 @@ mod tests {
         ));
         assert_eq!(hint_of(&items, "Menlo"), "current");
         assert_eq!(hint_of(&items, "Lilex"), "");
+
+        let names = ["IBM Plex Sans", "Lilex"].map(String::from);
+        let items = font_items_from(FontSlot::Chrome, "IBM Plex Sans", names.to_vec());
+        assert_eq!(items[0].label, "Default (IBM Plex Sans)");
+        assert_eq!(hint_of(&items, "Default (IBM Plex Sans)"), "");
+        assert_eq!(hint_of(&items, "IBM Plex Sans"), "current");
     }
 
     #[test]

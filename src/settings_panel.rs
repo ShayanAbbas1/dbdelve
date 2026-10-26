@@ -859,8 +859,7 @@ fn render_opacity(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) 
 }
 
 /// The family, picked from the palette, which lists every family the text
-/// system resolved, marks the one in use and leads with the default; then the
-/// size, and a reset that puts the size back.
+/// system resolved and marks the one in use; then the size.
 fn render_font(
     workspace: &Workspace,
     slot: FontSlot,
