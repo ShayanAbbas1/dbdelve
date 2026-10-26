@@ -22,6 +22,8 @@ const FAKE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec::ANSI,
     abilities: Abilities::NONE,

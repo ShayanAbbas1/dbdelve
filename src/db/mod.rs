@@ -699,6 +699,13 @@ impl Engine {
         self.spec().is_binary_type(data_type)
     }
 
+    /// Whether a column of `data_type` holds numbers on this engine: the names
+    /// [`is_numeric_type`] knows, plus the ones its spec adds, read through
+    /// the wrappers its spec peels.
+    pub fn is_numeric_type(self, data_type: &str) -> bool {
+        self.spec().is_numeric_type(data_type)
+    }
+
     /// Whether a cell whose type is known as each of `types` -- none, where
     /// no driver named one -- holds what an edit of it would write back: on an
     /// engine that edits rows at all, not bytes ([`Engine::is_binary_type`]),
@@ -3360,6 +3367,25 @@ mod tests {
                 "{engine:?}"
             );
         }
+    }
+
+    #[test]
+    fn numeric_types_are_per_engine_and_clickhouse_peels_its_wrappers() {
+        for numeric in [
+            "Nullable(UInt64)",
+            "LowCardinality(Nullable(Float64))",
+            "Decimal(10, 2)",
+            "Decimal256(4)",
+            "Int256",
+            "BFloat16",
+        ] {
+            assert!(Engine::ClickHouse.is_numeric_type(numeric), "{numeric}");
+        }
+        for other in ["Nullable(String)", "LowCardinality(String)", "Date"] {
+            assert!(!Engine::ClickHouse.is_numeric_type(other), "{other}");
+        }
+        assert!(!Engine::Sqlite.is_numeric_type("int32"));
+        assert!(!Engine::Sqlite.is_numeric_type("float64"));
     }
 
     #[test]

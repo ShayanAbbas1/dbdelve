@@ -167,7 +167,7 @@ fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String
     match cell {
         None => "NULL".to_string(),
         Some(value)
-            if data_type.is_some_and(crate::db::is_numeric_type)
+            if data_type.is_some_and(|data_type| engine.is_numeric_type(data_type))
                 && value.parse::<f64>().is_ok_and(f64::is_finite) =>
         {
             value.to_string()

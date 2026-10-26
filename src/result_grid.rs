@@ -413,6 +413,18 @@ pub struct PendingRow {
     pub held: Vec<(String, String)>,
 }
 
+fn numeric_columns(engine: db::Engine, columns: &[db::Column]) -> Vec<bool> {
+    columns
+        .iter()
+        .map(|column| {
+            column
+                .data_type
+                .as_deref()
+                .is_some_and(|data_type| engine.is_numeric_type(data_type))
+        })
+        .collect()
+}
+
 fn next_rows_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -499,6 +511,7 @@ impl ResultGrid {
 
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
         self.engine = engine;
+        self.numeric = numeric_columns(engine, &self.result.columns);
         self
     }
 
@@ -613,10 +626,7 @@ impl ResultGrid {
     /// Their values are rendered apart, off the frame thread
     /// ([`db::unrendered`]).
     pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
-        self.numeric = columns
-            .iter()
-            .map(|column| column.data_type.as_deref().is_some_and(db::is_numeric_type))
-            .collect();
+        self.numeric = numeric_columns(self.engine, &columns);
         self.result.columns = columns;
         self.refit_from_the_top();
     }
@@ -1425,7 +1435,7 @@ impl ResultGrid {
             .get(row)
             .and_then(|types| types.get(col));
         let numeric = match (tag, self.column_type(col)) {
-            (Some(tag), _) => db::is_numeric_type(tag),
+            (Some(tag), _) => self.engine.is_numeric_type(tag),
             (None, Some(_)) => self.is_numeric_column(col),
             (None, None) => true,
         };

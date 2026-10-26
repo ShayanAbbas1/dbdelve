@@ -34,6 +34,12 @@ pub struct EngineSpec {
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
     pub binary_types: &'static [&'static str],
+    /// Exact lower-cased type names that are numbers beyond the families every
+    /// engine shares, without their precision.
+    pub numeric_types: &'static [&'static str],
+    /// Wrappers that leave what a type holds unchanged, by the name that opens
+    /// them: `nullable` for `Nullable(UInt64)`.
+    pub type_wrappers: &'static [&'static str],
     pub hints: Hints,
     /// Meaningful only where `syntax` is [`Syntax::Sql`].
     pub sql: SqlSpec,
@@ -108,6 +114,24 @@ impl EngineSpec {
             || self.binary_types.contains(&name.as_str())
     }
 
+    /// [`Engine::is_numeric_type`](super::Engine::is_numeric_type). Wrappers
+    /// come off first, so `Nullable(UInt64)` answers as `UInt64` does.
+    pub fn is_numeric_type(&self, data_type: &str) -> bool {
+        let mut name = data_type.to_ascii_lowercase();
+        while let Some(inner) = self
+            .type_wrappers
+            .iter()
+            .find_map(|wrapper| unwrap_type_wrapper(&name, wrapper))
+        {
+            name = inner.to_string();
+        }
+        let base = name
+            .split_once('(')
+            .map_or(name.as_str(), |(base, _)| base)
+            .trim();
+        super::is_numeric_type(&name) || self.numeric_types.contains(&base)
+    }
+
     /// [`Engine::writes_back`](super::Engine::writes_back). The ability is
     /// asked apart from the types, so a cell nobody typed is no way past it.
     pub fn writes_back<'a>(&self, types: impl IntoIterator<Item = &'a str>) -> bool {
@@ -136,6 +160,13 @@ impl EngineSpec {
                 DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
             })
     }
+}
+
+fn unwrap_type_wrapper<'a>(name: &'a str, wrapper: &str) -> Option<&'a str> {
+    name.strip_prefix(wrapper)?
+        .strip_prefix('(')?
+        .strip_suffix(')')
+        .map(str::trim)
 }
 
 /// What the connection form says a blank field means.
@@ -540,6 +571,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     // `postgres` is an ordinary database people work in.
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints {
         database: "postgres",
         ..Hints::DEFAULT
@@ -589,6 +622,8 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         identifier_quote: IdentifierQuote::Backtick,
@@ -641,6 +676,8 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         identifier_quote: IdentifierQuote::Backtick,
@@ -690,6 +727,8 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         boolean_literal: BooleanLiteral::OneZero,
@@ -736,6 +775,8 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         boolean_literal: BooleanLiteral::OneZero,
@@ -772,6 +813,8 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints {
         path: "Blank for a database in memory",
         ..Hints::DEFAULT
@@ -823,6 +866,8 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     // share too, but one people query.
     system_databases: &["SNOWFLAKE"],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints {
         host: "Implied by the account",
         database: "Required",
@@ -883,6 +928,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     // `image` is the legacy binary type here; elsewhere it is a name anyone
     // may give a column or a domain, and a SQLite `image` column holds text.
     binary_types: &["image", "rowversion", "timestamp"],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         national_strings: true,
@@ -943,6 +990,8 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
     binary_types: &["bindata"],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints {
         user: "Optional",
         ..Hints::DEFAULT
@@ -978,6 +1027,8 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    numeric_types: &[],
+    type_wrappers: &[],
     hints: Hints {
         name: "Named after the host",
         database: "0",
@@ -1015,6 +1066,28 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
     binary_types: &[],
+    numeric_types: &[
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "int128",
+        "int256",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uint128",
+        "uint256",
+        "float32",
+        "float64",
+        "bfloat16",
+        "decimal32",
+        "decimal64",
+        "decimal128",
+        "decimal256",
+    ],
+    type_wrappers: &["nullable", "lowcardinality"],
     hints: Hints {
         database: "default",
         user: "default",
