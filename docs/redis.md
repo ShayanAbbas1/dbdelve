@@ -59,7 +59,9 @@ ask the server for, so every command is looked up by name (and subcommand:
 nothing, writes need Read-write, `FLUSHDB`, `FLUSHALL`, `SHUTDOWN`, `DEBUG`,
 `CONFIG SET` and the like need Full and ask first, and a command the table does
 not know is refused in Read-only and asks once elsewhere. Scripts (`EVAL`,
-`FCALL`) count as writes. A write-less ACL user is the only real boundary.
+`EVALSHA`, `FCALL`) need Full, since DBDelve cannot see what their
+`redis.call`s do; their `_RO` forms, which the server holds to reads, are
+reads. A write-less ACL user is the only real boundary.
 
 Results: a reply's shape becomes the grid's columns (a hash is `field` and
 `value`, a sorted set with scores `member` and `score`, `INFO` is `section`,

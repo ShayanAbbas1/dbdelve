@@ -2117,7 +2117,7 @@ impl Verdict {
         mode: Mode::ReadWrite,
         destructive: Vec::new(),
     };
-    const FULL: Self = Self {
+    pub(crate) const FULL: Self = Self {
         mode: Mode::Full,
         destructive: Vec::new(),
     };
