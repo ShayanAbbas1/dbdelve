@@ -95,6 +95,16 @@ fn statement_units_per_engine() {
                 "batch_repeats 0",
                 sql::batch_repeats(engine, sql, 0).map(|()| "ok"),
             );
+            let (second, place) = match sql.find("SELECT 2") {
+                Some(offset) => (offset, "at SELECT 2"),
+                None => (sql.len(), "at the end"),
+            };
+            result(
+                &mut out,
+                engine,
+                &format!("batch_repeats {second} {place}"),
+                sql::batch_repeats(engine, sql, second).map(|()| "ok"),
+            );
         }
     }
     check("sessions_units", &out);
