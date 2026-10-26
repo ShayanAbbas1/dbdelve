@@ -46,12 +46,13 @@ impl Workspace {
     /// [`Workspace::has_editable_cell`] is.
     pub(crate) fn has_nameable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.session.active_results().is_some_and(|results| {
-                let grid = results.read(cx);
-                grid.delegate()
-                    .active()
-                    .is_some_and(|(row, _)| grid.delegate().row_key(row).is_some())
-            })
+            profile.config.engine().edits_rows()
+                && profile.session.active_results().is_some_and(|results| {
+                    let grid = results.read(cx);
+                    grid.delegate()
+                        .active()
+                        .is_some_and(|(row, _)| grid.delegate().row_key(row).is_some())
+                })
         })
     }
 

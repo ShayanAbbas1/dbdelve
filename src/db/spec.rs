@@ -28,7 +28,6 @@ pub struct EngineSpec {
     pub default_port: Option<u16>,
     pub takes_options: bool,
     pub resolves_srv: bool,
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
     pub binary_types: &'static [&'static str],
@@ -295,8 +294,15 @@ impl Transaction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipDuplicates {
+    /// SQL Server and Snowflake have no such clause short of `MERGE`, and
+    /// MongoDB's `insertMany` would stop at the first collision.
     None,
-    OnConflictDoNothing { needs_unique_key: bool },
+    OnConflictDoNothing {
+        /// DuckDB refuses `ON CONFLICT DO NOTHING` on a table with no primary
+        /// key, unique constraint or unique index, where the others take it as
+        /// a clause with nothing to do.
+        needs_unique_key: bool,
+    },
     OnDuplicateKey,
 }
 
@@ -373,10 +379,11 @@ pub enum ReadOnlySession {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
 pub struct Abilities {
     pub edits: bool,
     pub inserts: bool,
+    /// A SQL view can take an insert (an updatable view, or a trigger behind
+    /// it), so the server is left to say; a MongoDB view never does.
     pub inserts_into_views: bool,
     pub imports: bool,
     pub assigns_default: bool,
@@ -432,6 +439,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     default_port: Some(postgres::DEFAULT_PORT),
     takes_options: false,
     resolves_srv: false,
+    // `postgres` is an ordinary database people work in.
     system_databases: &[],
     binary_types: &[],
     hints: Hints {
@@ -514,6 +522,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         assigns_default: true,
         copies_ddl: true,
         switches_database: true,
+        // No `picks_schema`: the database is the schema.
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -598,6 +607,8 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         typed_explain: TypedExplain::Sqlite,
         parser_dialect: ParserDialect::Sqlite,
         substring: SubstringMatch::Instr,
+        // No `generated_defaults`: `table_info` leaves generated columns out
+        // altogether.
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -606,6 +617,8 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         inserts_into_views: true,
         imports: true,
         copies_ddl: true,
+        // No `assigns_default`: `UPDATE` takes an expression on the right and
+        // `DEFAULT` is not one there.
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -685,7 +698,10 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        // The databases attached to the instance the profile opened.
         switches_database: true,
+        // Reopening a file detaches everything attached to it, and an
+        // in-memory database opened again is a new, empty one.
         switches_database_in_session: true,
         picks_schema: true,
         ..Abilities::NONE
@@ -705,6 +721,8 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     resolves_srv: false,
+    // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA` is a
+    // share too, but one people query.
     system_databases: &["SNOWFLAKE"],
     binary_types: &[],
     hints: Hints {
@@ -726,7 +744,8 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         // Every statement autocommits unless the submission brackets it, so
         // there is no `implicit_transaction`. No Explain: its plan is a fourth
         // shape `explain.rs` does not read yet. No `read_only_session`: there
-        // is no session to set anything on.
+        // is no session to set anything on. No `generated_defaults`: an
+        // identity takes a supplied value.
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -738,6 +757,8 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         picks_schema: true,
+        // An exact `ROW_COUNT` per table, where the others' numbers are as of
+        // the last time statistics were gathered, and SQLite keeps none.
         exact_row_estimates: true,
         chunk_refusal: Some(
             "Snowflake runs each request on its own, so no transaction can span the chunks.",
@@ -775,6 +796,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         // A bare `BEGIN` opens a statement block in T-SQL, not a transaction.
         // The gate's grammar reads this spelling too.
         transaction: Transaction::BeginTransaction,
+        // A default constraint's definition always comes wrapped in
+        // parentheses, so neither prefix can be one.
         generated_defaults: &[
             DefaultMarker::Prefix("IDENTITY("),
             DefaultMarker::Prefix("AS "),
@@ -800,6 +823,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         assigns_default: true,
         copies_ddl: true,
         switches_database: true,
+        // No `picks_schema`: the default schema is the login's.
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -835,6 +859,8 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
         chunk_refusal: Some(
             "MongoDB has no transaction on a standalone server, so each chunk is kept as it goes.",
         ),
+        // No `assigns_default`: a document has no column defaults to fall
+        // back to.
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -869,6 +895,9 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
         chunk_refusal: Some(
             "Redis has no transaction that rolls back, so each chunk is kept as it goes.",
         ),
+        // No `imports`: its new rows are keys that each name their own value,
+        // not rows under a file's columns. No `copies_ddl`: a keyspace is
+        // declared nowhere.
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,

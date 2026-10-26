@@ -40,7 +40,9 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 pub use spec::EngineSpec;
-use spec::{BooleanLiteral, CountAll, ExplainPrefix, Paging, ReadOnlySession};
+use spec::{
+    BooleanLiteral, CountAll, DefaultMarker, ExplainPrefix, Paging, ReadOnlySession, SkipDuplicates,
+};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -379,22 +381,12 @@ impl Engine {
 
     /// Whether `SET column = DEFAULT` is an assignment this engine accepts.
     ///
-    /// SQLite's `UPDATE` takes an expression on the right and `DEFAULT` is not
-    /// one there, so the gesture has to be withheld rather than attempted. It
-    /// answers here for the reason [`Engine::transaction_start`] does: the
+    /// Where it is not, the gesture has to be withheld rather than attempted.
+    /// It answers here for the reason [`Engine::transaction_start`] does: the
     /// question is about which engine is connected, and rule 4 keeps every one
     /// of those inside `src/db/` — the caller asks, and never matches.
     pub fn assigns_default(self) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer => true,
-            // A document has no column defaults to fall back to.
-            Self::Sqlite | Self::Turso | Self::MongoDb | Self::Redis => false,
-        }
+        self.spec().abilities.assigns_default
     }
 
     /// Whether the server fills `column` itself and an insert leaves it out:
@@ -406,23 +398,16 @@ impl Engine {
         let Some(default) = column.default.as_deref() else {
             return false;
         };
-        match self {
-            Self::Postgres => default.starts_with("GENERATED ALWAYS AS "),
-            Self::MySql | Self::MariaDb => {
-                default == "AUTO_INCREMENT" || default.starts_with("GENERATED ALWAYS AS (")
-            }
-            // A default constraint's definition always comes wrapped in
-            // parentheses, so neither prefix can be one.
-            Self::SqlServer => default.starts_with("IDENTITY(") || default.starts_with("AS "),
-            // SQLite's `table_info` leaves generated columns out altogether, and
-            // a Snowflake identity takes a supplied value.
-            Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::MongoDb
-            | Self::Redis => false,
-        }
+        // MongoDB's and Redis's spec carry no markers, which is their answer
+        // too.
+        self.spec()
+            .sql
+            .generated_defaults
+            .iter()
+            .any(|marker| match *marker {
+                DefaultMarker::Exact(exact) => default == exact,
+                DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
+            })
     }
 
     /// Whether New row's form leaves `column` out because no value of it is
@@ -435,40 +420,16 @@ impl Engine {
         }
     }
 
-    /// Whether New row may insert into a relation of `kind`. A SQL view can
-    /// take an insert (an updatable view, or a trigger behind it), so the
-    /// server is left to say; a MongoDB view never does.
+    /// Whether New row may insert into a relation of `kind`.
     pub fn takes_inserts(self, kind: RelationKind) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer => true,
-            Self::MongoDb => kind != RelationKind::View,
-            Self::Redis => true,
-        }
+        let abilities = &self.spec().abilities;
+        abilities.inserts && (kind != RelationKind::View || abilities.inserts_into_views)
     }
 
     /// Whether Import Rows may insert a file's rows into a relation of
-    /// `kind`: where New row may, bar Redis, whose new rows are keys that
-    /// each name their own value and not rows under a file's columns.
+    /// `kind`: where New row may, on an engine that takes imports at all.
     pub fn takes_imports(self, kind: RelationKind) -> bool {
-        match self {
-            Self::Redis => false,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => self.takes_inserts(kind),
-        }
+        self.spec().abilities.imports && self.takes_inserts(kind)
     }
 
     /// How a boolean is spelled as an Import Rows value.
@@ -487,37 +448,34 @@ impl Engine {
     }
 
     /// Whether an insert can be told to leave a row that collides with an
-    /// existing key alone. SQL Server and Snowflake have no such clause short
-    /// of `MERGE`, and MongoDB's `insertMany` would stop at the first collision.
+    /// existing key alone.
     pub fn skips_duplicates(self) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb => true,
-            Self::SqlServer | Self::Snowflake | Self::MongoDb | Self::Redis => false,
-        }
+        // MongoDB's and Redis's spec say `None`, which is their answer too.
+        self.spec().sql.skip_duplicates != SkipDuplicates::None
     }
 
     /// [`Engine::skips_duplicates`] for an insert into a table of `structure`.
-    /// DuckDB refuses `ON CONFLICT DO NOTHING` on a table with no primary key,
-    /// unique constraint or unique index, where the others take it as a clause
-    /// with nothing to do.
     pub fn skips_duplicates_into(self, structure: &Structure) -> bool {
-        self.skips_duplicates()
-            && (self != Self::DuckDb
-                || structure.constraints.iter().any(|constraint| {
+        match self.spec().sql.skip_duplicates {
+            SkipDuplicates::None => false,
+            SkipDuplicates::OnConflictDoNothing {
+                needs_unique_key: true,
+            } => {
+                structure.constraints.iter().any(|constraint| {
                     constraint.definition.starts_with("PRIMARY KEY (")
                         || constraint.definition.starts_with("UNIQUE (")
-                })
-                || structure.indexes.iter().any(|index| {
+                }) || structure.indexes.iter().any(|index| {
                     index
                         .definition
                         .get(..20)
                         .is_some_and(|start| start.eq_ignore_ascii_case("CREATE UNIQUE INDEX "))
-                }))
+                })
+            }
+            SkipDuplicates::OnConflictDoNothing {
+                needs_unique_key: false,
+            }
+            | SkipDuplicates::OnDuplicateKey => true,
+        }
     }
 
     /// The statement that opens a transaction spanning an import's chunks, or
@@ -580,22 +538,9 @@ impl Engine {
     }
 
     /// Whether the row count the catalog carries for a table is exact rather
-    /// than the statistics' estimate. Snowflake keeps an exact `ROW_COUNT` per
-    /// table; the others' numbers are as of the last time statistics were
-    /// gathered, and SQLite keeps none.
+    /// than the statistics' estimate.
     pub fn exact_row_estimates(self) -> bool {
-        match self {
-            Self::Snowflake => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::SqlServer
-            | Self::MongoDb
-            | Self::Redis => false,
-        }
+        self.spec().abilities.exact_row_estimates
     }
 
     /// The aggregate a relation's row count is written with.
@@ -655,69 +600,30 @@ impl Engine {
     }
 
     /// Whether a relation has a definition [`Connection::ddl`] can write out.
-    /// A Redis keyspace is declared nowhere.
     pub fn copies_ddl(self) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => true,
-            Self::Redis => false,
-        }
+        self.spec().abilities.copies_ddl
     }
 
     /// Whether one server holds several databases a profile can be moved
-    /// between, which [`Connection::databases`] lists. DuckDB's are the ones
-    /// attached to the instance the profile opened.
+    /// between, which [`Connection::databases`] lists.
     pub fn switches_database(self) -> bool {
-        matches!(
-            self,
-            Self::Postgres
-                | Self::MySql
-                | Self::MariaDb
-                | Self::SqlServer
-                | Self::MongoDb
-                | Self::Redis
-                | Self::Snowflake
-                | Self::DuckDb
-        )
+        self.spec().abilities.switches_database
     }
 
     /// Whether moving the profile onto another database is a `USE` on the
-    /// connection already open rather than a new connection. Reopening a
-    /// DuckDB file detaches everything attached to it, and an in-memory
-    /// database opened again is a new, empty one.
+    /// connection already open rather than a new connection.
     pub fn switches_database_in_session(self) -> bool {
-        matches!(self, Self::DuckDb)
+        self.spec().abilities.switches_database_in_session
     }
 
     /// Whether a profile picks the schema unqualified names resolve in.
-    /// MySQL's database is its schema, and SQL Server's default schema is the
-    /// login's.
     pub fn picks_schema(self) -> bool {
-        matches!(self, Self::Postgres | Self::Snowflake | Self::DuckDb)
+        self.spec().abilities.picks_schema
     }
 
     /// A database the server keeps for itself, listed after the user's own.
-    /// Postgres's `postgres` is an ordinary database people work in.
     pub fn is_system_database(self, name: &str) -> bool {
-        let system: &[&str] = match self {
-            Self::MySql | Self::MariaDb => {
-                &["information_schema", "mysql", "performance_schema", "sys"]
-            }
-            Self::SqlServer => &["master", "tempdb", "model", "msdb"],
-            Self::MongoDb => &["admin", "local", "config"],
-            // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA`
-            // is a share too, but one people query.
-            Self::Snowflake => &["SNOWFLAKE"],
-            _ => &[],
-        };
-        system.contains(&name)
+        self.spec().system_databases.contains(&name)
     }
 
     pub fn quote_identifier(self, identifier: &str) -> String {
@@ -793,10 +699,17 @@ impl Engine {
     /// that is the whole of its value, never the start of a long one, a
     /// collection's size or the spelling of bytes that are not text.
     pub fn writes_back(self, data_type: &str) -> bool {
-        match self.syntax() {
-            Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
-            Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
-        }
+        self.edits_rows()
+            && match self.syntax() {
+                Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
+                Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
+            }
+    }
+
+    /// Whether a grid's cells and rows may be written back at all, which an
+    /// engine in the read-only tier never is.
+    pub fn edits_rows(self) -> bool {
+        self.spec().abilities.edits
     }
 
     /// Whether a query tab's grid takes a deleted row, as a relation's preview
