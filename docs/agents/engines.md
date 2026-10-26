@@ -43,7 +43,7 @@ Decided, and not to be re-litigated:
   its DDL rather than asking the server for it) quotes through `Engine` too,
   though none of it is ever run.
 - **An engine is one `EngineSpec` in `src/db/spec.rs`, and `Engine::spec()` is
-  the only per-variant match.** A SQL engine's `SqlSpec` is `SqlSpec::ANSI`
+  the only per-variant match in `impl Engine`.** A SQL engine's `SqlSpec` is `SqlSpec::ANSI`
   plus overrides, so a field it leaves alone is the shared behaviour and the
   writers in `sql.rs`, `filter.rs` and `explorer.rs` read the spec, not the
   engine. Its `Abilities` start from `Abilities::NONE`, the read-only tier, and

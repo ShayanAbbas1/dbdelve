@@ -77,9 +77,10 @@ require it, stop and raise it instead.
    trait for the same reason in miniature: an arm per engine the compiler makes
    every match enumerate, instead of an open extension point.
 
-   The one thing that crosses out is `db::Engine` (`src/db/mod.rs`), because
-   DBDelve writes SQL and has to spell it the way the server will read it. It
-   holds no connection. Views and workspace code _ask_ it, through its
+   What crosses out is `db::Engine` (`src/db/mod.rs`) and the data that
+   describes it, `EngineSpec` and its strategy types (`src/db/spec.rs`),
+   because DBDelve writes SQL and has to spell it the way the server will read
+   it. Neither holds a connection or a driver type. Views and workspace code _ask_ it, through its
    methods, and never match on it. Where an engine question is missing, add a
    method to `Engine` rather than a `match` at the caller. `sql.rs`,
    `filter.rs` and `explorer.rs` branch on `Engine::syntax()` and read the
