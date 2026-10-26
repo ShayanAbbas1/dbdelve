@@ -423,7 +423,18 @@ impl Connection {
             self.internal_query(&structure_sql(STRUCTURE_INDEXES_SQL, schema, relation))?;
         let constraints =
             self.internal_query(&structure_sql(STRUCTURE_CONSTRAINTS_SQL, schema, relation))?;
-        assemble_structure(columns, indexes, constraints)
+        let mut structure = assemble_structure(columns, indexes, constraints)?;
+        for constraint in &mut structure.constraints {
+            if let Some(columns) = constraint
+                .definition
+                .strip_prefix("PRIMARY KEY (")
+                .and_then(|list| list.strip_suffix(')'))
+                .and_then(key_columns)
+            {
+                constraint.definition = format!("PRIMARY KEY ({})", columns.join(", "));
+            }
+        }
+        Ok(structure)
     }
 
     pub fn ddl(
@@ -897,9 +908,72 @@ impl Connection {
 /// limit the first set is drained to its end and counted, never kept, or for
 /// a read that may stop there, left unread for the caller to `KILL`.
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    template
-        .replace("{schema}", &Engine::ClickHouse.quote_literal(schema))
-        .replace("{relation}", &Engine::ClickHouse.quote_literal(relation))
+    let mut sql = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        sql.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let (placeholder, value) = if rest.starts_with("{schema}") {
+            ("{schema}", schema)
+        } else if rest.starts_with("{relation}") {
+            ("{relation}", relation)
+        } else {
+            sql.push('{');
+            rest = &rest[1..];
+            continue;
+        };
+        sql.push_str(&Engine::ClickHouse.quote_literal(value));
+        rest = &rest[placeholder.len()..];
+    }
+    sql.push_str(rest);
+    sql
+}
+
+/// The columns of a key the server printed as SQL: `system.tables` gives
+/// `user id` as `` `user id` ``, with backslash escapes inside. `None` when
+/// any part is an expression rather than a bare or quoted name, so the key is
+/// left as written and never taken for columns.
+fn key_columns(list: &str) -> Option<Vec<String>> {
+    let list = match list
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        Some(inner) => inner,
+        None => list,
+    };
+    let mut names = Vec::new();
+    let mut chars = list.trim().chars().peekable();
+    loop {
+        let name = match chars.peek()? {
+            quote @ ('`' | '"') => {
+                let quote = *quote;
+                chars.next();
+                let mut name = String::new();
+                loop {
+                    match chars.next()? {
+                        '\\' => name.push(chars.next()?),
+                        c if c == quote => break,
+                        c => name.push(c),
+                    }
+                }
+                name
+            }
+            c if c.is_alphabetic() || *c == '_' => {
+                let mut name = String::new();
+                while let Some(c) = chars.next_if(|c| c.is_alphanumeric() || *c == '_') {
+                    name.push(c);
+                }
+                name
+            }
+            _ => return None,
+        };
+        names.push(name);
+        match chars.next() {
+            None => return Some(names),
+            Some(',') => while chars.next_if(|c| *c == ' ').is_some() {},
+            Some(_) => return None,
+        }
+    }
 }
 
 fn collect<R: BufRead>(
@@ -3265,6 +3339,22 @@ mod live {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_key_column_named_with_a_space_or_a_backtick_still_orders_paging() {
+        let connection = live();
+        ran(
+            &connection,
+            "CREATE OR REPLACE TABLE dbdelve_dev.fix2_keys (`user id` UInt64, `we\\`ird` UInt64, n UInt64) \
+             ENGINE = MergeTree ORDER BY (`user id`, `we\\`ird`)",
+        );
+        let structure = live_any(live_config())
+            .structure("dbdelve_dev", "fix2_keys")
+            .unwrap();
+        ran(&connection, "DROP TABLE dbdelve_dev.fix2_keys");
+        assert_eq!(structure.row_key(), ["user id", "we`ird"]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_every_seeded_kind_lands_right_and_the_system_databases_stay_out() {
         let catalog = live_any(live_config()).catalog().unwrap();
         let seeded = kinds_of(&catalog, "dbdelve_dev");
@@ -3607,6 +3697,29 @@ mod live {
             .collect();
         assert_eq!(lines.len(), result.rows.len() + 1);
         assert_eq!(lines[0], header.join(","));
+    }
+
+    #[test]
+    fn a_structure_query_leaves_placeholder_text_inside_a_name_alone() {
+        assert_eq!(
+            structure_sql("{schema}.{relation}", "{relation}", "{schema}"),
+            "'{relation}'.'{schema}'"
+        );
+    }
+
+    #[test]
+    fn a_key_list_is_read_into_the_columns_it_names() {
+        let columns = |list: &str| key_columns(list);
+        assert_eq!(columns("a, b"), Some(vec!["a".into(), "b".into()]));
+        assert_eq!(columns("(a, b)"), Some(vec!["a".into(), "b".into()]));
+        assert_eq!(
+            columns(r#"`user id`, `we\`ird`, "q""#),
+            Some(vec!["user id".into(), "we`ird".into(), "q".into()])
+        );
+        assert_eq!(columns("toDate(ts)"), None);
+        assert_eq!(columns("a, toDate(ts)"), None);
+        assert_eq!(columns("a + b"), None);
+        assert_eq!(columns("`open"), None);
     }
 
     #[test]
