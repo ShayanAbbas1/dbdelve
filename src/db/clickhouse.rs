@@ -24,11 +24,11 @@ use ring::rand::{SecureRandom, SystemRandom};
 use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body, Timeout};
 
-pub(super) use self::edit::match_value;
 use self::edit::{
     DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Table,
-    TableFacts, UNCOUNTED, Write, count_refusal, halted,
+    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted,
 };
+pub(super) use self::edit::{match_value, review_notes};
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
@@ -470,7 +470,7 @@ impl Connection {
             return Err(Halt::Refused(reason));
         }
         self.request(statement, Kind::Generated, cancel, Fetch::default())
-            .map_err(Halt::Failed)
+            .map_err(|error| Halt::Failed(explained(error)))
     }
 
     /// The edit target of a preview's result, or the reason it has none. The
@@ -5107,6 +5107,15 @@ mod live {
                     "{user} {settings:?}: {}",
                     error.message
                 );
+                if refusal == "READONLY" {
+                    assert!(
+                        error
+                            .message
+                            .starts_with("This ClickHouse user is read-only"),
+                        "{}",
+                        error.message
+                    );
+                }
             }
             assert_eq!(labels(&owner, &table), "one\ntwo");
             ran(&owner, &format!("DROP TABLE dbdelve_dev.{table}"));

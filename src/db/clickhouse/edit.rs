@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use super::tsv::peel;
+use super::{opens_with, queued_statements, write_of};
 use crate::db::{
     Column, DbError, EditTarget, Engine, RowMatch, UpdateSpelling, cancel_cost, is_cancel,
     plain_error,
@@ -260,6 +261,71 @@ impl Table {
             Write::Update(spelling) => (spelling != self.update).then(|| RESPELLED.to_string()),
         }
     }
+}
+
+const NO_TRANSACTION: &str = "ClickHouse has no transaction. The statements run one at a time and \
+                              stop at the first one refused or failed; the ones before it stay applied.";
+
+const ONE_ROW: &str = "Each row is matched by all of its values. Just before each statement runs, \
+                       DBDelve counts the rows that match and runs it only if exactly one does.";
+
+const MUTATION: &str = "This table cannot take a lightweight UPDATE, so the change is an ALTER TABLE \
+                        ... UPDATE mutation. It rewrites the parts holding the row, which can be \
+                        slow on a large table, and it returns once every replica has applied it.";
+
+const PROJECTION_DELETE: &str = "A table with projections deletes rows only when \
+                                 lightweight_mutation_projection_mode is not throw; DBDelve refuses \
+                                 the delete before it runs otherwise.";
+
+const WRITTEN_AS_TEXT: &str = "Values go to the server as quoted text and it converts each to its \
+                               column's type. A Variant or Dynamic value is stored as a String. A \
+                               FixedString holding a NUL byte, a Nested column's dotted parts and \
+                               an AggregateFunction state cannot be written, and a Map cannot be \
+                               edited, only inserted.";
+
+/// The server's refusal of a write, with `readonly` said in words a user can
+/// act on: the server names the setting the write needed (`mutations_sync`),
+/// not the user's mode. A missing grant is already plain.
+pub(super) fn explained(error: DbError) -> DbError {
+    if !error.message.contains("(READONLY)") {
+        return error;
+    }
+    DbError {
+        message: format!(
+            "This ClickHouse user is read-only, so it cannot change rows. The server said: {}",
+            error.message
+        ),
+        ..error
+    }
+}
+
+/// What the review of a batch of generated writes tells the user beyond the
+/// statements themselves.
+pub(in crate::db) fn review_notes(sql: &str) -> Vec<String> {
+    let statements = queued_statements(Engine::ClickHouse, sql, None);
+    let writes: Vec<&str> = statements
+        .iter()
+        .map(|range| &sql[range.clone()])
+        .filter(|statement| !opens_with(statement, &["INSERT"]))
+        .collect();
+    let any = |write: fn(Write) -> bool| writes.iter().any(|statement| write(write_of(statement)));
+    let mut notes = Vec::new();
+    if statements.len() > writes.len() {
+        notes.push(WRITTEN_AS_TEXT.to_string());
+    }
+    if !writes.is_empty() {
+        notes.push(ONE_ROW.to_string());
+    }
+    if any(|write| matches!(write, Write::Update(UpdateSpelling::AlterUpdate))) {
+        notes.push(MUTATION.to_string());
+    }
+    if any(|write| matches!(write, Write::Delete)) {
+        notes.push(PROJECTION_DELETE.to_string());
+    }
+    if statements.len() > 1 {
+        notes.push(NO_TRANSACTION.to_string());
+    }
+    notes
 }
 
 /// What a generated write does to the rows its predicate names.
@@ -928,6 +994,86 @@ mod tests {
             "{}",
             batch.message
         );
+    }
+
+    fn noted(sql: &str) -> Vec<String> {
+        review_notes(sql)
+    }
+
+    const UPDATE: &str = "UPDATE `d`.`t` SET `a` = 'x' WHERE `id` = '1'";
+    const ALTER: &str =
+        "ALTER TABLE `d`.`t` UPDATE `a` = 'x' WHERE `id` = '1' SETTINGS mutations_sync = 2";
+    const DELETE: &str = "DELETE FROM `d`.`t` WHERE `id` = '1'";
+    const INSERT: &str = "INSERT INTO `d`.`t` (`a`) VALUES ('x')";
+
+    #[test]
+    fn an_update_says_it_is_matched_by_every_value_and_counted_first() {
+        assert_eq!(noted(UPDATE), [ONE_ROW]);
+    }
+
+    #[test]
+    fn a_mutation_says_it_rewrites_parts() {
+        assert_eq!(noted(ALTER), [ONE_ROW, MUTATION]);
+        assert!(MUTATION.contains("rewrites the parts"));
+    }
+
+    #[test]
+    fn a_delete_says_what_a_projection_does() {
+        assert_eq!(noted(DELETE), [ONE_ROW, PROJECTION_DELETE]);
+    }
+
+    #[test]
+    fn an_insert_says_what_cannot_be_written_faithfully() {
+        assert_eq!(noted(INSERT), [WRITTEN_AS_TEXT]);
+        for words in [
+            "Variant",
+            "Dynamic",
+            "NUL",
+            "Nested",
+            "AggregateFunction",
+            "Map",
+        ] {
+            assert!(WRITTEN_AS_TEXT.contains(words), "{words}");
+        }
+    }
+
+    #[test]
+    fn a_batch_says_nothing_stays_undone_and_each_note_once() {
+        let batch = format!("{UPDATE};\n{ALTER};\n{UPDATE};");
+        assert_eq!(noted(&batch), [ONE_ROW, MUTATION, NO_TRANSACTION]);
+        assert!(NO_TRANSACTION.contains("stay applied"));
+    }
+
+    #[test]
+    fn the_ten_engines_add_nothing_to_a_review() {
+        for engine in Engine::ALL {
+            if engine != Engine::ClickHouse {
+                assert!(engine.review_notes(UPDATE).is_empty(), "{engine:?}");
+                assert!(engine.review_notes(INSERT).is_empty(), "{engine:?}");
+            }
+        }
+        assert!(!Engine::ClickHouse.review_notes(UPDATE).is_empty());
+    }
+
+    #[test]
+    fn a_readonly_user_is_told_so_and_a_missing_grant_is_left_as_the_server_said() {
+        let readonly = explained(plain_error(
+            "Code: 164. DB::Exception: Cannot modify 'mutations_sync' setting in readonly mode. \
+             (READONLY)"
+                .into(),
+        ));
+        assert!(
+            readonly
+                .message
+                .starts_with("This ClickHouse user is read-only")
+        );
+        assert!(readonly.message.contains("mutations_sync"));
+        let denied = plain_error(
+            "Code: 497. DB::Exception: u: Not enough privileges. To execute this query, it's \
+             necessary to have the grant ALTER UPDATE ON d.t. (ACCESS_DENIED)"
+                .into(),
+        );
+        assert_eq!(explained(denied.clone()).message, denied.message);
     }
 
     #[test]

@@ -418,6 +418,16 @@ impl Engine {
         }
     }
 
+    /// What the review of a generated batch says beyond its statements: how
+    /// the engine matches rows, what it cannot undo, what it cannot write.
+    /// Empty for every engine that has nothing to add.
+    pub fn review_notes(self, sql: &str) -> Vec<String> {
+        match self {
+            Self::ClickHouse => clickhouse::review_notes(sql),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether New row may insert into a relation of `kind`.
     pub fn takes_inserts(self, kind: RelationKind) -> bool {
         self.spec().takes_inserts(kind)

@@ -1489,6 +1489,18 @@ impl Workspace {
                                 // is one run of text to the layout.
                                 .children(lines.into_iter().map(|line| div().child(line))),
                         )
+                        .children((!review.notes.is_empty()).then(|| {
+                            div()
+                                .id("apply-review-notes")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .children(review.notes.iter().map(|note| div().child(note.clone())))
+                        }))
                         .children(error.map(|message| {
                             div()
                                 .id("apply-review-error")

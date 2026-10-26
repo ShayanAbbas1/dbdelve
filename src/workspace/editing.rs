@@ -193,6 +193,7 @@ impl Workspace {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Insert",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -1256,6 +1257,7 @@ impl Workspace {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Delete row",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -1676,6 +1678,7 @@ impl Workspace {
             return;
         }
 
+        let notes = self.engine().review_notes(&batch);
         match tab {
             Tab::Query(_) if own_review => {}
             Tab::Query(_) => self.apply_in_buffer(batch, window, cx),
@@ -1685,6 +1688,7 @@ impl Workspace {
                     profile.session.apply_review = Some(ApplyReview {
                         tab,
                         title: "Apply edits",
+                        notes,
                         sql: batch,
                     });
                     cx.notify();
