@@ -2039,6 +2039,8 @@ pub enum RelationKind {
     View,
     MaterializedView,
     ForeignTable,
+    /// ClickHouse only: dropped with `DROP DICTIONARY`, and never truncated.
+    Dictionary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2691,6 +2693,7 @@ pub(super) fn assemble_catalog(
             "view" => RelationKind::View,
             "materialized_view" => RelationKind::MaterializedView,
             "foreign_table" => RelationKind::ForeignTable,
+            "dictionary" => RelationKind::Dictionary,
             kind => return Err(unexpected_catalog_value("relation kind", kind)),
         };
 

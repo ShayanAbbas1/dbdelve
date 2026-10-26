@@ -1107,9 +1107,10 @@ impl Connection {
         let view = match kind {
             RelationKind::View => Some("VIEW"),
             RelationKind::MaterializedView => Some("MATERIALIZED VIEW"),
-            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-                None
-            }
+            RelationKind::Table
+            | RelationKind::PartitionedTable
+            | RelationKind::ForeignTable
+            | RelationKind::Dictionary => None,
         };
         if let Some(view) = view {
             let result = self.internal_query(&format!(

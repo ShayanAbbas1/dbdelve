@@ -1125,9 +1125,10 @@ impl Connection {
         );
         let kind = match kind {
             RelationKind::View | RelationKind::MaterializedView => "VIEW",
-            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-                "TABLE"
-            }
+            RelationKind::Table
+            | RelationKind::PartitionedTable
+            | RelationKind::ForeignTable
+            | RelationKind::Dictionary => "TABLE",
         };
         let result = self.internal_query(&format!(
             "SELECT GET_DDL('{kind}', {})",

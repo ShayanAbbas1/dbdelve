@@ -21,12 +21,13 @@ pub const PREVIEW_ROW_LIMIT: usize = ROW_LIMITS[1];
 /// `LIMIT`, and Postgres reads that as a `bigint`.
 pub const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
-const RELATION_CATEGORIES: [(RelationKind, &str); 5] = [
+const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
     (RelationKind::Table, "Tables"),
     (RelationKind::PartitionedTable, "Partitioned Tables"),
     (RelationKind::View, "Views"),
     (RelationKind::MaterializedView, "Materialized Views"),
     (RelationKind::ForeignTable, "Foreign Tables"),
+    (RelationKind::Dictionary, "Dictionaries"),
 ];
 
 const ROUTINE_CATEGORIES: [(RoutineKind, &str); 2] = [
@@ -377,6 +378,7 @@ pub fn drop_sql(
         (Syntax::Redis, _) => return None,
         (Syntax::Sql, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
         (Syntax::Sql, RelationKind::View) => "VIEW",
+        (Syntax::Sql, RelationKind::Dictionary) => "DICTIONARY",
         (Syntax::Sql, RelationKind::MaterializedView) => {
             match engine.spec().sql.materialized_view {
                 MaterializedViewDrop::MaterializedView => "MATERIALIZED VIEW",
@@ -867,6 +869,10 @@ mod tests {
         assert_eq!(
             drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable).unwrap(),
             r#"DROP EXTERNAL TABLE "S"."e";"#
+        );
+        assert_eq!(
+            drop_sql(Engine::ClickHouse, "db", "d", RelationKind::Dictionary).unwrap(),
+            "DROP DICTIONARY `db`.`d`;"
         );
         assert_eq!(
             truncate_sql(Engine::Sqlite, "main", "t"),

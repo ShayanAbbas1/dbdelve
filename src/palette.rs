@@ -3198,6 +3198,7 @@ fn kind_label(kind: ObjectKind) -> &'static str {
         ObjectKind::Relation(RelationKind::View) => "view",
         ObjectKind::Relation(RelationKind::MaterializedView) => "materialized view",
         ObjectKind::Relation(RelationKind::ForeignTable) => "foreign table",
+        ObjectKind::Relation(RelationKind::Dictionary) => "dictionary",
         ObjectKind::Routine(RoutineKind::Function) => "function",
         ObjectKind::Routine(RoutineKind::Procedure) => "procedure",
     }

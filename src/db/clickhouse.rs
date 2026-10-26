@@ -85,6 +85,7 @@ SELECT
     multiIf(
         engine IN ('View', 'LiveView', 'WindowView'), 'view',
         engine = 'MaterializedView', 'materialized_view',
+        engine = 'Dictionary', 'dictionary',
         engine IN ('MySQL', 'PostgreSQL', 'MongoDB', 'S3', 'S3Queue', 'URL', 'HDFS', 'Kafka',
                    'RabbitMQ', 'NATS', 'JDBC', 'ODBC', 'Hudi', 'Redis', 'AzureBlobStorage')
             OR startsWith(engine, 'Iceberg') OR startsWith(engine, 'DeltaLake'), 'foreign_table',
@@ -3368,7 +3369,7 @@ mod live {
         assert_eq!(kind("accounts"), RelationKind::Table);
         assert_eq!(kind("events"), RelationKind::Table);
         assert_eq!(kind("scratch"), RelationKind::Table);
-        assert_eq!(kind("plan_seats"), RelationKind::Table);
+        assert_eq!(kind("plan_seats"), RelationKind::Dictionary);
         assert_eq!(kind("events_per_kind"), RelationKind::Table);
         assert_eq!(kind("active_accounts"), RelationKind::View);
         assert_eq!(kind("events_per_kind_mv"), RelationKind::MaterializedView);
@@ -3639,6 +3640,12 @@ mod live {
         );
         ran(
             &connection,
+            "CREATE OR REPLACE DICTIONARY dbdelve_dev.copy_drop_dictionary (n UInt64) PRIMARY KEY n \
+             SOURCE(CLICKHOUSE(DB 'dbdelve_dev' TABLE 'copy_drop_source' USER 'dbdelve' PASSWORD 'dbdelve')) \
+             LAYOUT(FLAT()) LIFETIME(0)",
+        );
+        ran(
+            &connection,
             "INSERT INTO dbdelve_dev.copy_drop_table VALUES (1), (2)",
         );
 
@@ -3657,6 +3664,7 @@ mod live {
             ("copy_drop_foreign", RelationKind::ForeignTable),
             ("copy_drop_view", RelationKind::View),
             ("copy_drop_mv", RelationKind::MaterializedView),
+            ("copy_drop_dictionary", RelationKind::Dictionary),
         ] {
             let statement = drop_sql(Engine::ClickHouse, schema, name, kind).unwrap();
             ran(&connection, &statement);

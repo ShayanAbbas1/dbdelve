@@ -41,6 +41,7 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
         ObjectKind::Relation(RelationKind::View) => icon::VIEW,
         ObjectKind::Relation(RelationKind::MaterializedView) => icon::MATERIALIZED_VIEW,
         ObjectKind::Relation(RelationKind::ForeignTable) => icon::FOREIGN_TABLE,
+        ObjectKind::Relation(RelationKind::Dictionary) => icon::TABLE,
         ObjectKind::Routine(RoutineKind::Function) => icon::FUNCTION,
         ObjectKind::Routine(RoutineKind::Procedure) => icon::PROCEDURE,
     }
