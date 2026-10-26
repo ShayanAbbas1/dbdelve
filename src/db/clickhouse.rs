@@ -192,13 +192,19 @@ pub struct Connection {
     /// Each request in flight, by query id, so a Cancel that cannot reach a
     /// statement on the server can still end its read here.
     running: Arc<Mutex<HashMap<String, Watch>>>,
-    /// What each table allows writing, by schema and name. Emptied when a
-    /// statement that may change a table's definition runs.
+    /// What each table allows writing. Emptied when a statement that may
+    /// change a table's definition starts, and again when it ends.
     described: Arc<Mutex<Tables>>,
 }
 
-/// Each described table, by schema and name.
-type Tables = HashMap<(String, String), Arc<Table>>;
+#[derive(Default)]
+struct Tables {
+    /// Each described table, by schema and name.
+    known: HashMap<(String, String), Arc<Table>>,
+    /// How many times `known` was emptied, so a describe that began before
+    /// one does not keep what it may have read from before the change.
+    forgotten: u64,
+}
 
 /// What the connect learned, fixed for the connection's life.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -385,7 +391,9 @@ impl Connection {
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
         self.forget_if_changing(sql);
-        self.request(sql, Kind::User, cancel, fetch)
+        let result = self.request(sql, Kind::User, cancel, fetch);
+        self.forget_if_changing(sql);
+        result
     }
 
     /// A preview of a table also says whether its rows can be written back, or
@@ -492,9 +500,13 @@ impl Connection {
     /// where the server has no such table.
     fn describe(&self, schema: &str, table: &str) -> Result<Option<Arc<Table>>, DbError> {
         let key = (schema.to_string(), table.to_string());
-        if let Some(known) = lock(&self.described).get(&key) {
-            return Ok(Some(known.clone()));
-        }
+        let began = {
+            let described = lock(&self.described);
+            if let Some(known) = described.known.get(&key) {
+                return Ok(Some(known.clone()));
+            }
+            described.forgotten
+        };
         let ask = |template| self.internal_query(&structure_sql(template, schema, table));
         let tables = ask(DESCRIBE_TABLE_SQL)?;
         let Some(row) = tables.rows.first() else {
@@ -529,18 +541,27 @@ impl Connection {
                 })
                 .collect::<Result<_, DbError>>()?,
         };
-        let described = Arc::new(Table::of(facts));
-        lock(&self.described).insert(key, described.clone());
-        Ok(Some(described))
+        let table = Arc::new(Table::of(facts));
+        let mut described = lock(&self.described);
+        if described.forgotten == began {
+            described.known.insert(key, table.clone());
+        }
+        Ok(Some(table))
     }
 
     /// A definition may have changed under any statement that does not open
     /// as a plain read, so what was described is asked again. Read off the
     /// first word alone: a statement can be megabytes of `VALUES`, and
     /// parsing it here would delay its send.
+    ///
+    /// Called as the statement starts and again as it ends: a describe from
+    /// another tab, which takes no session, can run while an `ALTER` does and
+    /// read the settings from before it.
     fn forget_if_changing(&self, sql: &str) {
         if !opens_with(sql, &READS) {
-            lock(&self.described).clear();
+            let mut described = lock(&self.described);
+            described.known.clear();
+            described.forgotten += 1;
         }
     }
 
@@ -554,7 +575,9 @@ impl Connection {
         read_only: bool,
     ) -> Result<QueryResult, DbError> {
         self.forget_if_changing(sql);
-        self.request(sql, Kind::Alongside { read_only }, cancel, fetch)
+        let result = self.request(sql, Kind::Alongside { read_only }, cancel, fetch);
+        self.forget_if_changing(sql);
+        result
     }
 
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
@@ -2085,6 +2108,53 @@ mod tests {
             "ALTER TABLE d.t MODIFY SETTING enable_block_number_column = 1",
         )
         .unwrap();
+        preview(&connection, PREVIEW);
+        assert_eq!(mock.hits("FROM system.tables"), 2);
+    }
+
+    const MODIFY: &str = "ALTER TABLE d.t MODIFY SETTING enable_block_number_column = 1";
+
+    #[test]
+    fn a_describe_while_a_definition_changes_is_asked_again_once_the_change_ends() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement("ALTER", [Response::empty().held("alter")]);
+        std::thread::scope(|scope| {
+            let altering = scope.spawn(|| run(&connection, MODIFY));
+            until("the ALTER to arrive", || mock.hits("ALTER") == 1);
+            preview(&connection, PREVIEW);
+            assert_eq!(mock.hits("FROM system.tables"), 1);
+            mock.release("alter");
+            altering.join().unwrap().unwrap();
+        });
+        preview(&connection, PREVIEW);
+        assert_eq!(mock.hits("FROM system.tables"), 2);
+    }
+
+    #[test]
+    fn a_describe_begun_before_a_change_ended_keeps_nothing_it_read() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement(
+            "FROM system.merge_tree_settings",
+            [Response::rows(
+                &[("name", "String"), ("value", "String")],
+                &[&["server.enable_lightweight_update", "1"]],
+            )
+            .held("settings")],
+        );
+        mock.on_statement("ALTER", [Response::empty()]);
+        std::thread::scope(|scope| {
+            let previewing = scope.spawn(|| preview(&connection, PREVIEW));
+            until("the describe to read the settings", || {
+                mock.hits("FROM system.merge_tree_settings") == 1
+            });
+            run(&connection, MODIFY).unwrap();
+            mock.release("settings");
+            previewing.join().unwrap();
+        });
         preview(&connection, PREVIEW);
         assert_eq!(mock.hits("FROM system.tables"), 2);
     }

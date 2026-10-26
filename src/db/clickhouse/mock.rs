@@ -35,6 +35,8 @@ enum Delivery {
     Stalled(usize, Duration),
     /// No byte at all: the connection is closed once the request is read.
     Dropped,
+    /// All of it, once the test calls [`Mock::release`] with this name.
+    Held(String),
 }
 
 /// What a response does when a `KILL` for its query arrives while it waits.
@@ -178,6 +180,15 @@ impl Response {
         }
     }
 
+    /// Nothing until the test calls [`Mock::release`] with `gate`, then the
+    /// whole response: a statement the test lets finish when it is ready.
+    pub fn held(self, gate: &str) -> Self {
+        Self {
+            delivery: Delivery::Held(gate.into()),
+            ..self
+        }
+    }
+
     /// The request read and its query registered, then the connection closed
     /// before any answer, as a proxy that lost the server after forwarding
     /// the request does.
@@ -285,6 +296,8 @@ struct State {
     /// A body longer than this is never read.
     swallow_over: Option<usize>,
     swallowed: usize,
+    /// The gates [`Mock::release`] opened.
+    released: HashSet<String>,
 }
 
 pub struct Mock {
@@ -312,6 +325,7 @@ impl Mock {
             readonly: HashSet::new(),
             swallow_over: None,
             swallowed: 0,
+            released: HashSet::new(),
         }));
         let shared = Arc::clone(&state);
         // ponytail: never joined. The listener lives until the test binary
@@ -408,6 +422,11 @@ impl Mock {
     /// How many requests [`Self::swallow_bodies_over`] has swallowed.
     pub fn swallowed(&self) -> usize {
         self.state().swallowed
+    }
+
+    /// Lets every response [`Response::held`] at `gate` go out.
+    pub fn release(&self, gate: &str) {
+        self.state().released.insert(gate.into());
     }
 
     /// Every request so far, in the order they arrived.
@@ -711,6 +730,16 @@ fn write_response(
     if let Delivery::Delayed(pause) = response.delivery {
         aftermath = wait(pause, response, query_id, state);
     }
+    if let Delivery::Held(gate) = &response.delivery {
+        while !state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .released
+            .contains(gate)
+        {
+            std::thread::sleep(POLL);
+        }
+    }
 
     let mut body = response.body.clone();
     if let Some(message) = &response.late_exception {
@@ -756,7 +785,7 @@ fn write_response(
         return end_killed(stream, aftermath, tag, write, finish);
     }
     match response.delivery {
-        Delivery::Whole | Delivery::Delayed(_) | Delivery::Dropped => {
+        Delivery::Whole | Delivery::Delayed(_) | Delivery::Held(_) | Delivery::Dropped => {
             write(&mut stream, &body)?;
             finish(&mut stream)
         }
