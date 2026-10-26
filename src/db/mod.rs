@@ -39,9 +39,10 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-use spec::{BooleanLiteral, CountAll, DefaultMarker, Paging, ReadOnlySession, SkipDuplicates};
+use spec::{CountAll, Paging, ReadOnlySession};
 pub use spec::{
-    EngineSpec, ExplainPrefix, FormatDialect, ParserDialect, StatementSplit, TypedExplain,
+    EngineSpec, ExplainPrefix, FormatDialect, Params, ParserDialect, SkipDuplicates,
+    StatementSplit, TypedExplain,
 };
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
@@ -395,19 +396,9 @@ impl Engine {
     /// write into `default`, so a plain default -- `now()`, a serial's
     /// `nextval`, an identity `BY DEFAULT` -- is not one.
     pub fn generates(self, column: &ColumnDefinition) -> bool {
-        let Some(default) = column.default.as_deref() else {
-            return false;
-        };
         // MongoDB's and Redis's spec carry no markers, which is their answer
         // too.
-        self.spec()
-            .sql
-            .generated_defaults
-            .iter()
-            .any(|marker| match *marker {
-                DefaultMarker::Exact(exact) => default == exact,
-                DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
-            })
+        self.spec().generates(column)
     }
 
     /// Whether New row's form leaves `column` out because no value of it is
@@ -432,19 +423,17 @@ impl Engine {
         self.spec().abilities.imports && self.takes_inserts(kind)
     }
 
-    /// How a boolean is spelled as an Import Rows value.
+    /// How a boolean is spelled as an Import Rows value. Import Rows reads
+    /// `spec().sql.boolean_literal` itself (`sql::sql_insert_rows`), so this is
+    /// the per-engine readout the tests pin.
+    #[cfg(test)]
     pub fn boolean_literal(self, value: bool) -> &'static str {
         let literal = match self.syntax() {
             Syntax::Sql => self.spec().sql.boolean_literal,
-            Syntax::Mongo => BooleanLiteral::TrueFalse,
-            Syntax::Redis => BooleanLiteral::OneZero,
+            Syntax::Mongo => spec::BooleanLiteral::TrueFalse,
+            Syntax::Redis => spec::BooleanLiteral::OneZero,
         };
-        match (literal, value) {
-            (BooleanLiteral::TrueFalse, true) => "true",
-            (BooleanLiteral::TrueFalse, false) => "false",
-            (BooleanLiteral::OneZero, true) => "1",
-            (BooleanLiteral::OneZero, false) => "0",
-        }
+        literal.spelled(value)
     }
 
     /// Whether an insert can be told to leave a row that collides with an

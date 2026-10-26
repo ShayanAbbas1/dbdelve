@@ -32,8 +32,8 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
-    ColumnDefinition, Engine, ExplainMode, ExplainPrefix, FormatDialect, ParserDialect,
-    StatementSplit, Syntax, TypedExplain,
+    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Params,
+    ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -436,6 +436,12 @@ pub fn unpaged(statement: &str) -> String {
 /// row in the table and one with no `SET` is not a statement at all, so a caller
 /// that has lost the row's key gets nothing to run rather than something that
 /// runs.
+///
+/// The grid's edits reach the server through [`update_batch`], whose SQL arm
+/// writes this same statement from the spec (`sql_update_statement`). This
+/// `Engine`-typed spelling, MongoDB's and Redis's SQL-shaped text included, is
+/// what the tests pin.
+#[cfg(test)]
 pub fn update_row(
     engine: Engine,
     schema: &str,
@@ -483,25 +489,37 @@ pub fn insert_row(
     types: &[(String, String)],
 ) -> Result<String, String> {
     match engine.syntax() {
-        Syntax::Mongo => return crate::mql::insert_row(table, columns, types),
-        Syntax::Redis => return crate::redis_cmd::edit::insert_row(schema, table, columns),
-        Syntax::Sql => {}
+        Syntax::Sql => sql_insert_row(engine.spec(), schema, table, columns, types),
+        Syntax::Mongo => crate::mql::insert_row(table, columns, types),
+        Syntax::Redis => crate::redis_cmd::edit::insert_row(schema, table, columns),
     }
+}
+
+/// [`insert_row`] for a SQL engine, written from its spec alone: nothing here
+/// asks which engine it is, so an engine with no arm of its own writes through
+/// it too. The same holds for every `sql_` writer below.
+pub(crate) fn sql_insert_row(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, Option<&str>)],
+    types: &[(String, String)],
+) -> Result<String, String> {
     if columns.is_empty() {
         return Err("There is nothing in this row to insert.".into());
     }
 
     let names: Vec<String> = columns
         .iter()
-        .map(|&(column, _)| engine.quote_identifier(column))
+        .map(|&(column, _)| spec.quote_identifier(column))
         .collect();
     let values: Vec<String> = columns
         .iter()
         // An insert leaves a default to apply by omitting the column outright,
         // so the third state the grid's edits carry has nothing to mean here.
         .map(|&(column, value)| {
-            literal(
-                engine,
+            sql_literal(
+                spec,
                 &value.map_or(NewValue::Null, |value| NewValue::Value(value.into())),
                 type_of(types, column),
             )
@@ -509,7 +527,7 @@ pub fn insert_row(
         .collect();
     Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        engine.qualified(schema, table),
+        spec.qualified(schema, table),
         names.join(", "),
         values.join(", ")
     ))
@@ -517,8 +535,8 @@ pub fn insert_row(
 
 /// One multi-row `INSERT` for an import chunk. `columns` holds `(name,
 /// data_type)`, each row its values in that order; a `None` has no SQL
-/// spelling, so it is an error. Every value is quoted through `Engine`, which
-/// is what the write gate's literal check relies on.
+/// spelling, so it is an error. Every value is quoted as the engine quotes it,
+/// which is what the write gate's literal check relies on.
 pub(crate) fn insert_rows(
     engine: Engine,
     schema: &str,
@@ -527,13 +545,24 @@ pub(crate) fn insert_rows(
     rows: &[Vec<Option<&Value>>],
     skip: bool,
 ) -> Result<String, String> {
-    if engine.syntax() == Syntax::Mongo {
-        let names: Vec<&str> = columns.iter().map(|&(name, _)| name).collect();
-        return crate::mql::insert_many(table, &names, rows);
+    match engine.syntax() {
+        Syntax::Sql => sql_insert_rows(engine.spec(), schema, table, columns, rows, skip),
+        Syntax::Mongo => {
+            let names: Vec<&str> = columns.iter().map(|&(name, _)| name).collect();
+            crate::mql::insert_many(table, &names, rows)
+        }
+        Syntax::Redis => Err("Redis takes no imported rows.".into()),
     }
-    if engine.syntax() == Syntax::Redis {
-        return Err("Redis takes no imported rows.".into());
-    }
+}
+
+pub(crate) fn sql_insert_rows(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, &str)],
+    rows: &[Vec<Option<&Value>>],
+    skip: bool,
+) -> Result<String, String> {
     let Some(&(first, _)) = columns.first() else {
         return Err("There is nothing in this row to insert.".into());
     };
@@ -542,7 +571,7 @@ pub(crate) fn insert_rows(
     }
     let names: Vec<String> = columns
         .iter()
-        .map(|&(name, _)| engine.quote_identifier(name))
+        .map(|&(name, _)| spec.quote_identifier(name))
         .collect();
     let mut tuples = Vec::with_capacity(rows.len());
     for row in rows {
@@ -551,33 +580,31 @@ pub(crate) fn insert_rows(
             let value = value.ok_or("A value is missing from a row to insert.")?;
             let new = match value {
                 Value::Null => NewValue::Null,
-                Value::Bool(b) => NewValue::Value(engine.boolean_literal(*b).into()),
+                Value::Bool(b) => NewValue::Value(spec.sql.boolean_literal.spelled(*b).into()),
                 Value::Json(json) => NewValue::Value(json.to_string().into()),
                 Value::Text(text) | Value::Number(text) | Value::Date { text, .. } => {
                     NewValue::Value(text.clone().into())
                 }
             };
-            values.push(literal(engine, &new, Some(data_type)));
+            values.push(sql_literal(spec, &new, Some(data_type)));
         }
         tuples.push(format!("({})", values.join(", ")));
     }
     // ponytail: Stop and Skip only. Update-existing-row is deferred: Postgres cannot spell ON CONFLICT (pk) DO UPDATE under the pinned grammar, MySQL's matches any unique key, SQL Server and Snowflake would need MERGE.
-    let tail = match (skip, engine) {
+    let tail = match (skip, spec.sql.skip_duplicates) {
         (false, _) => String::new(),
-        (true, Engine::Postgres | Engine::Sqlite | Engine::Turso | Engine::DuckDb) => {
-            " ON CONFLICT DO NOTHING".into()
-        }
-        (true, Engine::MySql | Engine::MariaDb) => {
-            let first = engine.quote_identifier(first);
+        (true, SkipDuplicates::OnConflictDoNothing { .. }) => " ON CONFLICT DO NOTHING".into(),
+        (true, SkipDuplicates::OnDuplicateKey) => {
+            let first = spec.quote_identifier(first);
             format!(" ON DUPLICATE KEY UPDATE {first} = {first}")
         }
-        (true, Engine::Snowflake | Engine::SqlServer | Engine::MongoDb | Engine::Redis) => {
+        (true, SkipDuplicates::None) => {
             return Err("This engine cannot skip rows that already exist.".into());
         }
     };
     Ok(format!(
         "INSERT INTO {} ({}) VALUES {}{tail}",
-        engine.qualified(schema, table),
+        spec.qualified(schema, table),
         names.join(", "),
         tuples.join(",\n")
     ))
@@ -593,21 +620,27 @@ pub fn insert_template(
     table: &str,
     columns: &[ColumnDefinition],
 ) -> Option<String> {
-    let placeholder: fn(usize) -> String = match engine {
-        Engine::Postgres => |n| format!("${n}"),
-        Engine::SqlServer => |n| format!("@p{n}"),
-        Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake => |_| "?".into(),
-        Engine::MongoDb | Engine::Redis => return None,
+    match engine.syntax() {
+        Syntax::Sql => sql_insert_template(engine.spec(), schema, table, columns),
+        Syntax::Mongo | Syntax::Redis => None,
+    }
+}
+
+pub(crate) fn sql_insert_template(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[ColumnDefinition],
+) -> Option<String> {
+    let placeholder: fn(usize) -> String = match spec.sql.params {
+        Params::Question => |_| "?".into(),
+        Params::Dollar => |n| format!("${n}"),
+        Params::AtP => |n| format!("@p{n}"),
     };
     let names: Vec<String> = columns
         .iter()
-        .filter(|column| !engine.generates(column))
-        .map(|column| engine.quote_identifier(&column.name))
+        .filter(|column| !spec.generates(column))
+        .map(|column| spec.quote_identifier(&column.name))
         .collect();
     if names.is_empty() {
         return None;
@@ -615,7 +648,7 @@ pub fn insert_template(
     let values: Vec<String> = (1..=names.len()).map(placeholder).collect();
     Some(format!(
         "INSERT INTO {} ({}) VALUES ({});",
-        engine.qualified(schema, table),
+        spec.qualified(schema, table),
         names.join(", "),
         values.join(", ")
     ))
@@ -639,12 +672,19 @@ pub fn delete_row(
     types: &[(String, String)],
 ) -> Option<String> {
     match engine.syntax() {
-        Syntax::Mongo => return crate::mql::delete_row(table, keys, types).ok(),
-        Syntax::Redis => {
-            return crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok();
-        }
-        Syntax::Sql => {}
+        Syntax::Sql => sql_delete_row(engine.spec(), schema, table, keys, types),
+        Syntax::Mongo => crate::mql::delete_row(table, keys, types).ok(),
+        Syntax::Redis => crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok(),
     }
+}
+
+pub(crate) fn sql_delete_row(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    keys: &[(&str, &str)],
+    types: &[(String, String)],
+) -> Option<String> {
     if keys.is_empty() {
         return None;
     }
@@ -655,8 +695,8 @@ pub fn delete_row(
         .collect();
     Some(format!(
         "DELETE FROM {} WHERE {}",
-        engine.qualified(schema, table),
-        assignments(engine, &keys, types, " AND ")
+        spec.qualified(schema, table),
+        sql_assignments(spec, &keys, types, " AND ")
     ))
 }
 
@@ -692,7 +732,7 @@ pub fn is_generated_write(sql: &str) -> bool {
 
 /// `backslash_escapes` is [`Engine::backslash_escapes`] for the engine the
 /// statement is bound for.
-fn generated_write(sql: &str, backslash_escapes: bool) -> bool {
+pub(crate) fn generated_write(sql: &str, backslash_escapes: bool) -> bool {
     // An exact-text whitelist rather than a parse, so nothing can ride along.
     if is_transaction_bracket(sql) {
         return true;
@@ -989,6 +1029,7 @@ fn generated_statements<'tree>(root: &Node<'tree>) -> Option<Vec<Node<'tree>>> {
     }
 }
 
+#[cfg(test)]
 fn assignments(
     engine: Engine,
     columns: &[(&str, NewValue)],
@@ -1008,6 +1049,25 @@ fn assignments(
         .join(separator)
 }
 
+fn sql_assignments(
+    spec: &EngineSpec,
+    columns: &[(&str, NewValue)],
+    types: &[(String, String)],
+    separator: &str,
+) -> String {
+    columns
+        .iter()
+        .map(|(column, value)| {
+            format!(
+                "{} = {}",
+                spec.quote_identifier(column),
+                sql_literal(spec, value, type_of(types, column))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
     types
         .iter()
@@ -1015,13 +1075,22 @@ fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
         .map(|(_, data_type)| data_type.as_str())
 }
 
+#[cfg(test)]
+fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String {
+    match value {
+        NewValue::Value(value) => engine.quote_value(value, data_type),
+        NewValue::Null => "NULL".to_string(),
+        NewValue::Default => "DEFAULT".to_string(),
+    }
+}
+
 /// A value as it goes into a statement: quoted, or one of the two keywords that
 /// stand for there being no value to quote. Unquoted is the only way to write
 /// either — `'NULL'` and `'DEFAULT'` are the words, and a user who typed one of
 /// them into a cell meant the word.
-fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String {
+fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> String {
     match value {
-        NewValue::Value(value) => engine.quote_value(value, data_type),
+        NewValue::Value(value) => spec.quote_value(value, data_type),
         NewValue::Null => "NULL".to_string(),
         NewValue::Default => "DEFAULT".to_string(),
     }
@@ -1765,7 +1834,7 @@ fn repeats(count: u64) -> Result<(), String> {
 /// Every pending row as one `UPDATE`, joined into a single string.
 ///
 /// All-or-nothing, which each engine reaches differently, and
-/// `Engine::transaction_start` is where that per-engine answer lives. Postgres
+/// `SqlSpec::transaction_opening` is where that per-engine answer lives. Postgres
 /// runs one submission as a single implicit transaction and needs nothing;
 /// MySQL and SQLite commit every statement on its own, so a batch of more than
 /// one is bracketed — in the statement text itself, where the user can read,
@@ -1778,10 +1847,13 @@ fn repeats(count: u64) -> Result<(), String> {
 /// it ran.
 pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
     match engine.syntax() {
-        Syntax::Mongo => return crate::mql::update_batch(rows),
-        Syntax::Redis => return crate::redis_cmd::edit::update_batch(rows),
-        Syntax::Sql => {}
+        Syntax::Sql => sql_update_batch(engine.spec(), rows),
+        Syntax::Mongo => crate::mql::update_batch(rows),
+        Syntax::Redis => crate::redis_cmd::edit::update_batch(rows),
     }
+}
+
+pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
         return Err("There are no edits to apply.".into());
     }
@@ -1801,8 +1873,8 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     let statements: Option<Vec<String>> = rows
         .iter()
         .map(|row| {
-            update_row(
-                engine,
+            sql_update_statement(
+                spec,
                 &row.schema,
                 &row.table,
                 &borrowed_sets(&row.sets),
@@ -1819,11 +1891,36 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     let batch = statements
         .ok_or("dbdelve cannot name an edited row by its primary key.")?
         .join("\n");
-    let bracket = engine.transaction_start().filter(|_| rows.len() > 1);
+    let bracket = spec.sql.transaction_opening().filter(|_| rows.len() > 1);
     Ok(match bracket {
         Some(start) => format!("{start};\n{batch}\nCOMMIT;"),
         None => batch,
     })
+}
+
+/// `update_row`'s statement for the `sql_` writers.
+fn sql_update_statement(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    sets: &[(&str, NewValue)],
+    keys: &[(&str, &str)],
+    types: &[(String, String)],
+) -> Option<String> {
+    if sets.is_empty() || keys.is_empty() {
+        return None;
+    }
+
+    let keys: Vec<(&str, NewValue)> = keys
+        .iter()
+        .map(|&(column, value)| (column, NewValue::Value(value.into())))
+        .collect();
+    Some(format!(
+        "UPDATE {} SET {} WHERE {}",
+        spec.qualified(schema, table),
+        sql_assignments(spec, sets, types, ", "),
+        sql_assignments(spec, &keys, types, " AND ")
+    ))
 }
 
 /// A statement at the front of the history, and there only once however many

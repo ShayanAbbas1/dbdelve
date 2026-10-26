@@ -6,7 +6,7 @@
 //! spec only says which spelling that code picks. A new engine that fits the
 //! existing strategies is one more value here and its driver.
 
-use super::{Fields, Syntax, mongo, mssql, mysql, postgres, redis};
+use super::{ColumnDefinition, Fields, Syntax, mongo, mssql, mysql, postgres, redis};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EngineSpec {
@@ -93,6 +93,20 @@ impl EngineSpec {
             || name.contains("blob")
             || name.contains("binary")
             || self.binary_types.contains(&name.as_str())
+    }
+
+    /// [`Engine::generates`](super::Engine::generates).
+    pub fn generates(&self, column: &ColumnDefinition) -> bool {
+        let Some(default) = column.default.as_deref() else {
+            return false;
+        };
+        self.sql
+            .generated_defaults
+            .iter()
+            .any(|marker| match *marker {
+                DefaultMarker::Exact(exact) => default == exact,
+                DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
+            })
     }
 }
 
@@ -227,6 +241,17 @@ impl IdentifierQuote {
 pub enum BooleanLiteral {
     TrueFalse,
     OneZero,
+}
+
+impl BooleanLiteral {
+    pub fn spelled(self, value: bool) -> &'static str {
+        match (self, value) {
+            (Self::TrueFalse, true) => "true",
+            (Self::TrueFalse, false) => "false",
+            (Self::OneZero, true) => "1",
+            (Self::OneZero, false) => "0",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
