@@ -93,6 +93,12 @@ fn engine_answers_per_engine() {
         answer(
             &mut out,
             engine,
+            "schema_switch_waits_for_transaction",
+            engine.schema_switch_waits_for_transaction(),
+        );
+        answer(
+            &mut out,
+            engine,
             "skips_duplicates",
             engine.skips_duplicates(),
         );

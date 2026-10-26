@@ -669,6 +669,13 @@ impl Engine {
         read_only_statement(self, true).is_some()
     }
 
+    /// Whether switching the schema has to wait for an open transaction to
+    /// end, because the switch would be sent inside it and undone by the
+    /// user's `ROLLBACK`.
+    pub fn schema_switch_waits_for_transaction(self) -> bool {
+        matches!(self, Self::Postgres)
+    }
+
     /// What the filter bar's raw input asks for.
     pub fn raw_filter_placeholder(self) -> &'static str {
         match self.syntax() {

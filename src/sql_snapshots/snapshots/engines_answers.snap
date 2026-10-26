@@ -12,6 +12,7 @@ source: src/sql_snapshots.rs
 [postgres] resolves_srv => |false|
 [postgres] assigns_default => |true|
 [postgres] holds_read_only => |true|
+[postgres] schema_switch_waits_for_transaction => |true|
 [postgres] skips_duplicates => |true|
 [postgres] takes_new_fields => |false|
 [postgres] opened_column => |None|
@@ -160,6 +161,7 @@ source: src/sql_snapshots.rs
 [mysql] resolves_srv => |false|
 [mysql] assigns_default => |true|
 [mysql] holds_read_only => |true|
+[mysql] schema_switch_waits_for_transaction => |false|
 [mysql] skips_duplicates => |true|
 [mysql] takes_new_fields => |false|
 [mysql] opened_column => |None|
@@ -308,6 +310,7 @@ source: src/sql_snapshots.rs
 [mariadb] resolves_srv => |false|
 [mariadb] assigns_default => |true|
 [mariadb] holds_read_only => |true|
+[mariadb] schema_switch_waits_for_transaction => |false|
 [mariadb] skips_duplicates => |true|
 [mariadb] takes_new_fields => |false|
 [mariadb] opened_column => |None|
@@ -456,6 +459,7 @@ source: src/sql_snapshots.rs
 [sqlite] resolves_srv => |false|
 [sqlite] assigns_default => |false|
 [sqlite] holds_read_only => |false|
+[sqlite] schema_switch_waits_for_transaction => |false|
 [sqlite] skips_duplicates => |true|
 [sqlite] takes_new_fields => |false|
 [sqlite] opened_column => |None|
@@ -604,6 +608,7 @@ source: src/sql_snapshots.rs
 [turso] resolves_srv => |false|
 [turso] assigns_default => |false|
 [turso] holds_read_only => |false|
+[turso] schema_switch_waits_for_transaction => |false|
 [turso] skips_duplicates => |true|
 [turso] takes_new_fields => |false|
 [turso] opened_column => |None|
@@ -752,6 +757,7 @@ source: src/sql_snapshots.rs
 [duckdb] resolves_srv => |false|
 [duckdb] assigns_default => |true|
 [duckdb] holds_read_only => |false|
+[duckdb] schema_switch_waits_for_transaction => |false|
 [duckdb] skips_duplicates => |true|
 [duckdb] takes_new_fields => |false|
 [duckdb] opened_column => |None|
@@ -900,6 +906,7 @@ source: src/sql_snapshots.rs
 [snowflake] resolves_srv => |false|
 [snowflake] assigns_default => |true|
 [snowflake] holds_read_only => |false|
+[snowflake] schema_switch_waits_for_transaction => |false|
 [snowflake] skips_duplicates => |false|
 [snowflake] takes_new_fields => |false|
 [snowflake] opened_column => |None|
@@ -1048,6 +1055,7 @@ source: src/sql_snapshots.rs
 [mssql] resolves_srv => |false|
 [mssql] assigns_default => |true|
 [mssql] holds_read_only => |false|
+[mssql] schema_switch_waits_for_transaction => |false|
 [mssql] skips_duplicates => |false|
 [mssql] takes_new_fields => |false|
 [mssql] opened_column => |None|
@@ -1196,6 +1204,7 @@ source: src/sql_snapshots.rs
 [mongodb] resolves_srv => |true|
 [mongodb] assigns_default => |false|
 [mongodb] holds_read_only => |false|
+[mongodb] schema_switch_waits_for_transaction => |false|
 [mongodb] skips_duplicates => |false|
 [mongodb] takes_new_fields => |true|
 [mongodb] opened_column => |None|
@@ -1344,6 +1353,7 @@ source: src/sql_snapshots.rs
 [redis] resolves_srv => |false|
 [redis] assigns_default => |false|
 [redis] holds_read_only => |false|
+[redis] schema_switch_waits_for_transaction => |false|
 [redis] skips_duplicates => |false|
 [redis] takes_new_fields => |false|
 [redis] opened_column => |Some("key")|

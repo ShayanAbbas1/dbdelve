@@ -1169,7 +1169,12 @@ impl Workspace {
         // which would leave the titlebar naming a schema the session left.
         // Snowflake's rides on each request instead, out of a ROLLBACK's reach.
         // The session checks again once a statement still running lets go.
-        if profile.in_transaction && profile.config.engine() == Engine::Postgres {
+        if profile.in_transaction
+            && profile
+                .config
+                .engine()
+                .schema_switch_waits_for_transaction()
+        {
             self.note(
                 "A transaction is open on this connection, so the schema was not switched.".into(),
                 cx,
