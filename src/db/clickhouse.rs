@@ -16,18 +16,18 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ring::rand::{SecureRandom, SystemRandom};
 use ureq::http::{HeaderMap, Response};
-use ureq::{Agent, Body};
+use ureq::{Agent, Body, Timeout};
 
-use self::http::{Bounds, Scheme, Watch};
-use self::tsv::{Framed, Next, Reader, Untagged};
+use self::http::{Bounds, Scheme, Stop, Watch};
+use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Databases, DbError, Fetch, QueryResult, RelationKind,
-    RowBuilder, ServerConfig, Structure, plain_error, required_cell,
+    RowBuilder, ServerConfig, Stopped, Structure, plain_error, required_cell,
 };
 use crate::tls::SslMode;
 
@@ -45,6 +45,24 @@ const SESSION_TIMEOUT: &str = "3600";
 
 const SESSION_NOT_FOUND: i64 = 372;
 const INVALID_SESSION_TIMEOUT: i64 = 374;
+
+/// How a killed query's error ends, before the body or in the tagged frame.
+const WAS_CANCELLED: &str = "(QUERY_WAS_CANCELLED)";
+/// A `KILL` that matched nothing, where `kill_throw_if_noop` makes that an
+/// error rather than no rows.
+const NOTHING_TO_KILL: &str = "(NOTHING_TO_KILL)";
+
+/// How long a Cancel keeps sending `KILL` to a statement the server has not
+/// registered yet, before it lets go of the read instead. Short under test,
+/// where it is waited out for real.
+const KILL_WITHIN: Duration = match cfg!(test) {
+    true => Duration::from_secs(2),
+    false => Duration::from_secs(10),
+};
+const KILL_RETRY: Duration = Duration::from_millis(100);
+
+const UNREACHED: &str =
+    "Cancel could not reach the statement on the server; it may still be running.";
 
 const SESSION_ENDED: &str = "The server ended the session after it sat idle; USE, SET and \
                              temporary tables from earlier runs are gone. Run it again to run it \
@@ -81,6 +99,9 @@ pub struct Connection {
     /// Locked for the whole of a user's request, body and all: the server
     /// holds the session for as long, and refuses a second request on it.
     session: Arc<Mutex<Session>>,
+    /// Each request in flight, by query id, so a Cancel that cannot reach a
+    /// statement on the server can still end its read here.
+    running: Arc<Mutex<HashMap<String, Watch>>>,
 }
 
 /// What the connect learned, fixed for the connection's life.
@@ -117,13 +138,41 @@ enum Kind {
     Internal,
     /// A statement of a queue run at once, under that run's hold.
     Alongside { read_only: bool },
+    /// DBDelve's `KILL` of another request, never stopped or killed itself.
+    Kill { within: Duration },
+}
+
+impl Kind {
+    fn bounds(self, statement_timeout: u32) -> Bounds {
+        match self {
+            Self::Internal => Bounds::internal(),
+            Self::Kill { within } => Bounds::within(within),
+            Self::User | Self::Generated | Self::Alongside { .. } => {
+                Bounds::user(statement_timeout)
+            }
+        }
+    }
+}
+
+/// What a `KILL QUERY … SYNC` found.
+#[derive(Debug, PartialEq, Eq)]
+enum Kill {
+    /// Stopped, or ended before the `KILL` reached it.
+    Finished,
+    /// Not on the server: not registered yet, or already gone.
+    NotFound,
+    /// Found and asked to stop, and not stopped yet.
+    Waiting,
+    CannotCancel,
 }
 
 /// How a request failed: before any answer, kept whole so the connect can
-/// tell a plaintext answer to a TLS handshake, or in the server's words.
+/// tell a plaintext answer to a TLS handshake; in the server's words before
+/// the body; or once the body had begun, with the query perhaps still running.
 enum Failed {
     Unreached(ureq::Error),
     Error(DbError),
+    Broken(DbError),
 }
 
 impl From<DbError> for Failed {
@@ -132,23 +181,33 @@ impl From<DbError> for Failed {
     }
 }
 
-/// Takes a query id back out of its run's handles however the request ends.
+/// Takes a query id back out of its run's handles, and its watch out of the
+/// connection's, however the request ends.
 struct Running<'a> {
-    running: &'a Mutex<Cancelling>,
+    token: &'a Mutex<Cancelling>,
+    watches: &'a Mutex<HashMap<String, Watch>>,
     query_id: String,
 }
 
 impl<'a> Running<'a> {
     /// Registered before the request is sent, so a Cancel from then on finds
     /// it; a Cancel already asked drops it unsent.
-    fn register(cancel: &'a CancelToken, query_id: &str) -> Result<Self, DbError> {
-        let mut running = cancel.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if running.asked {
+    fn register(
+        cancel: &'a CancelToken,
+        watches: &'a Mutex<HashMap<String, Watch>>,
+        query_id: &str,
+        watch: &Watch,
+    ) -> Result<Self, DbError> {
+        let mut token = lock(&cancel.0);
+        if token.asked {
             return Err(plain_error(CANCELLED.into()));
         }
-        running.handles.push(query_id.to_string());
+        // The watch first: a Cancel that finds the handle finds the watch.
+        lock(watches).insert(query_id.to_string(), watch.clone());
+        token.handles.push(query_id.to_string());
         Ok(Self {
-            running: &cancel.0,
+            token: &cancel.0,
+            watches,
             query_id: query_id.to_string(),
         })
     }
@@ -156,8 +215,10 @@ impl<'a> Running<'a> {
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
-        running.handles.retain(|handle| *handle != self.query_id);
+        lock(self.token)
+            .handles
+            .retain(|handle| *handle != self.query_id);
+        lock(self.watches).remove(&self.query_id);
     }
 }
 
@@ -208,6 +269,7 @@ impl Connection {
             server: Arc::default(),
             read_only: Arc::default(),
             session: Arc::default(),
+            running: Arc::default(),
         }
     }
 
@@ -279,8 +341,100 @@ impl Connection {
         unwired()
     }
 
-    pub fn cancel(&self, _cancel: &CancelToken) -> Result<(), DbError> {
-        unwired()
+    /// Stop the statements running under `cancel`, side by side, each by
+    /// `KILL`. Without a session, which would queue it behind the very
+    /// statement it is for.
+    ///
+    /// The query id is chosen here, so a `KILL` can arrive before the server
+    /// has registered the request it names, and find nothing: it is sent
+    /// again until it lands or the request has returned. One that never
+    /// lands ends the read here instead, and says the statement may still be
+    /// running; the run itself ends as cancelled either way.
+    pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
+        let handles = {
+            let mut token = lock(&cancel.0);
+            token.asked = true;
+            token.handles.clone()
+        };
+        std::thread::scope(|scope| {
+            let stops: Vec<_> = handles
+                .iter()
+                .map(|query_id| scope.spawn(|| self.stop(cancel, query_id)))
+                .collect();
+            stops
+                .into_iter()
+                .map(|stop| {
+                    stop.join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .fold(Ok(()), Result::and)
+        })
+    }
+
+    fn stop(&self, cancel: &CancelToken, query_id: &str) -> Result<(), DbError> {
+        let deadline = Instant::now() + KILL_WITHIN;
+        let on_token = || lock(&cancel.0).handles.iter().any(|id| id == query_id);
+        loop {
+            if !on_token() {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            let outcome = match left.is_zero() {
+                true => Ok(Kill::Waiting),
+                false => self.kill(query_id, left),
+            };
+            let failed = match outcome {
+                Ok(Kill::Finished) => return Ok(()),
+                Ok(Kill::NotFound | Kill::Waiting) if Instant::now() + KILL_RETRY < deadline => {
+                    std::thread::sleep(KILL_RETRY);
+                    continue;
+                }
+                Ok(_) => None,
+                Err(error) => Some(error),
+            };
+            if !on_token() {
+                return Ok(());
+            }
+            if let Some(watch) = lock(&self.running).get(query_id) {
+                watch.abort();
+            }
+            return Err(plain_error(match failed {
+                Some(error) => format!("{UNREACHED} The KILL QUERY failed: {}", error.message),
+                None => UNREACHED.into(),
+            }));
+        }
+    }
+
+    /// One `KILL QUERY … SYNC`, its outcome read from the row it returns.
+    /// `query_id` is one of ours, `dbdelve-` and hex, so it is spliced as is.
+    fn kill(&self, query_id: &str, within: Duration) -> Result<Kill, DbError> {
+        let sql = format!("KILL QUERY WHERE query_id = '{query_id}' SYNC");
+        let found = match self.request(
+            &sql,
+            Kind::Kill { within },
+            &CancelToken::default(),
+            Fetch::default(),
+        ) {
+            Err(error) if error.message.ends_with(NOTHING_TO_KILL) => return Ok(Kill::NotFound),
+            found => found?,
+        };
+        let Some(row) = found.rows.first() else {
+            return Ok(Kill::NotFound);
+        };
+        Ok(match required_cell(&found, row, "kill_status")? {
+            "finished" => Kill::Finished,
+            "cant_cancel" => Kill::CannotCancel,
+            _ => Kill::Waiting,
+        })
+    }
+
+    /// Kills a statement whose response was given up on: dropping the
+    /// connection alone does not stop it on the server.
+    fn abandon(&self, query_id: &str) -> Result<(), DbError> {
+        match self.kill(query_id, KILL_WITHIN)? {
+            Kill::CannotCancel => Err(plain_error("the server cannot cancel it".into())),
+            Kill::Finished | Kill::NotFound | Kill::Waiting => Ok(()),
+        }
     }
 
     /// Every request from here on carries `readonly=2`, which the user's own
@@ -312,18 +466,16 @@ impl Connection {
         let mut session = matches!(kind, Kind::User).then(|| lock(&self.session));
         fetch.hold()?;
         let query_id = random_id()?;
-        let _running = Running::register(cancel, &query_id)?;
         let read_only = match kind {
             Kind::Alongside { read_only } => read_only,
+            Kind::Kill { .. } => false,
             _ => self.read_only.load(Ordering::SeqCst),
         };
-        let bounds = match kind {
-            Kind::Internal => Bounds::internal(),
-            _ => Bounds::user(self.config.statement_timeout),
-        };
+        let bounds = kind.bounds(self.config.statement_timeout);
         let watch = Watch::new(Arc::default(), bounds.limit());
+        let _running = Running::register(cancel, &self.running, &query_id, &watch)?;
         let _watching = watch.enter();
-        loop {
+        let outcome = loop {
             if let Some(session) = session.as_deref_mut()
                 && session.id.is_none()
             {
@@ -334,13 +486,18 @@ impl Connection {
                 };
             }
             let params = self.params(&query_id, session.as_deref(), read_only);
-            let response = self.post(sql, &params, bounds).map_err(Failed::Unreached)?;
+            let response = match self.post(sql, &params, bounds) {
+                Ok(response) => response,
+                Err(error) => break Err(Failed::Unreached(error)),
+            };
             let status = response.status().as_u16();
             if !http::failed(status, response.headers()) {
                 if let Some(session) = session.as_deref_mut() {
                     session.opened = true;
                 }
-                return Ok(self.read(response, sql, fetch, started)?);
+                break self
+                    .read(response, sql, &query_id, fetch, started)
+                    .map_err(Failed::Broken);
             }
             if let Some(session) = session.as_deref_mut() {
                 match http::exception_code(response.headers()) {
@@ -355,12 +512,73 @@ impl Connection {
                     Some(SESSION_NOT_FOUND) if session.opened => {
                         session.id = None;
                         session.opened = false;
-                        return Err(plain_error(SESSION_ENDED.into()).into());
+                        break Err(plain_error(SESSION_ENDED.into()).into());
                     }
                     _ => {}
                 }
             }
-            return Err(failure(response, sql).into());
+            break Err(failure(response, sql).into());
+        };
+        match kind {
+            Kind::Kill { .. } => outcome,
+            _ => outcome.map_err(|failed| self.ended(failed, &query_id, cancel, &watch, bounds)),
+        }
+    }
+
+    /// What a request that did not end cleanly reports, and the `KILL` it
+    /// owes when it may still be running.
+    ///
+    /// `DbError` has no code for `is_cancel` to read, so the cancelled ends
+    /// are made [`CANCELLED`] here: a run whose Cancel was asked that ended
+    /// in the server's `QUERY_WAS_CANCELLED`, in a body cut off, or without
+    /// an answer, and a read the Cancel had to let go of. A
+    /// `QUERY_WAS_CANCELLED` nobody here asked for keeps the server's words.
+    fn ended(
+        &self,
+        failed: Failed,
+        query_id: &str,
+        cancel: &CancelToken,
+        watch: &Watch,
+        bounds: Bounds,
+    ) -> Failed {
+        let asked = lock(&cancel.0).asked;
+        let cancelled = || Failed::Error(plain_error(CANCELLED.into()));
+        let idle = watch.stopped() == Some(Stop::Idle)
+            || matches!(
+                failed,
+                Failed::Unreached(ureq::Error::Timeout(Timeout::RecvResponse))
+            );
+        match failed {
+            _ if watch.stopped() == Some(Stop::Aborted) => cancelled(),
+            Failed::Error(error) | Failed::Broken(error)
+                if asked && error.message.ends_with(WAS_CANCELLED) =>
+            {
+                cancelled()
+            }
+            Failed::Broken(error) if asked && is_cut(&error) => cancelled(),
+            Failed::Unreached(_) if asked => cancelled(),
+            _ if idle => {
+                let seconds = bounds.limit().unwrap_or_default().as_secs();
+                let message = match self.abandon(query_id) {
+                    Ok(()) => format!(
+                        "The server sent nothing for {seconds} seconds; the statement was stopped."
+                    ),
+                    Err(error) => format!(
+                        "The server sent nothing for {seconds} seconds, and stopping the \
+                         statement failed ({}); it may still be running.",
+                        error.message
+                    ),
+                };
+                Failed::Error(plain_error(message))
+            }
+            Failed::Broken(error) if !asked => Failed::Broken(match self.abandon(query_id) {
+                Ok(()) => error,
+                Err(stop) => plain_error(format!(
+                    "{} It may still be running: stopping it failed too ({}).",
+                    error.message, stop.message
+                )),
+            }),
+            failed => failed,
         }
     }
 
@@ -415,6 +633,7 @@ impl Connection {
         &self,
         response: Response<Body>,
         sql: &str,
+        query_id: &str,
         fetch: Fetch,
         started: Instant,
     ) -> Result<QueryResult, DbError> {
@@ -446,12 +665,25 @@ impl Connection {
                 ..QueryResult::default()
             });
         }
-        collect(&mut reader, fetch, started)
+        let mut result = collect(&mut reader, fetch, started)?;
+        if result.stopped == Some(Stopped::AtLimit) {
+            // Closed before the `KILL`: a server blocked writing to a socket
+            // nobody reads would not get to the cancel.
+            drop(reader);
+            if let Err(error) = self.abandon(query_id) {
+                result.notice = Some(format!(
+                    "Stopping the statement at the row limit failed ({}); it may still be \
+                     running on the server.",
+                    error.message
+                ));
+            }
+        }
+        Ok(result)
     }
 
     fn explain(&self, failed: Failed) -> DbError {
         let error = match failed {
-            Failed::Error(error) => return error,
+            Failed::Error(error) | Failed::Broken(error) => return error,
             Failed::Unreached(error) => error,
         };
         let endpoint = format!("{}:{}", self.config.host.trim(), http::port(&self.config));
@@ -470,7 +702,8 @@ impl Connection {
 
 /// The rows of a body, the first set into `fetch`'s feed, and the sets after
 /// an empty line (`WITH TOTALS`, `extremes`) as further results. Past the
-/// limit the first set is drained and counted, never kept.
+/// limit the first set is drained and counted, never kept, or for a read that
+/// may stop there, left unread for the caller to `KILL`.
 fn collect<R: BufRead>(
     reader: &mut Reader<R>,
     fetch: Fetch,
@@ -487,6 +720,7 @@ fn collect<R: BufRead>(
     let mut sets = vec![open()];
     let (mut returned, mut kept) = (0, 0);
     let mut filled = None;
+    let mut at_limit = false;
     let mut builder = RowBuilder::default();
     loop {
         match reader.next_row(&mut builder)? {
@@ -501,6 +735,10 @@ fn collect<R: BufRead>(
                 let first = sets.len() == 1;
                 returned += 1;
                 if fetch.limit.is_some_and(|limit| kept >= limit) {
+                    if first && fetch.reads_only {
+                        at_limit = true;
+                        break;
+                    }
                     if first {
                         returned += reader.drain()?;
                         break;
@@ -527,8 +765,13 @@ fn collect<R: BufRead>(
     let mut sets = sets.into_iter();
     let mut result = sets.next().expect("the first set");
     result.rest = sets.collect();
+    if at_limit {
+        // How many rows there were is what stopping does not find out.
+        result.capped_from = None;
+        result.stopped = Some(Stopped::AtLimit);
+    }
     result.elapsed = match filled {
-        Some(filled) if result.capped_from.is_some() => filled,
+        Some(filled) if result.capped_from.is_some() || at_limit => filled,
         _ => started.elapsed(),
     };
     Ok(result)
@@ -649,9 +892,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::mock::{Mock, Request, Response};
+    use super::mock::{Aftermath, Mock, Registration, Request, Response};
     use super::*;
-    use crate::db::{Column, Feed};
+    use crate::db::{Column, Engine, Feed, is_cancel};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
@@ -1361,5 +1604,351 @@ mod tests {
                 .starts_with(&format!("127.0.0.1:{port} was not reached: ")),
             "{error}"
         );
+    }
+
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "waited too long for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn handles(cancel: &CancelToken) -> Vec<String> {
+        cancel.0.lock().unwrap().handles.clone()
+    }
+
+    fn kills(mock: &Mock) -> Vec<Request> {
+        sent(mock, "KILL QUERY")
+    }
+
+    /// A response that holds its headers back until a `KILL` for it lands,
+    /// then ends as a killed query's does.
+    fn sleeping() -> Response {
+        Response::body("")
+            .delayed(Duration::from_secs(30))
+            .killed_by(Aftermath::Cancelled)
+    }
+
+    fn three_rows() -> Response {
+        Response::rows(&[("n", "UInt8")], &[&["1"], &["2"], &["3"]])
+    }
+
+    #[test]
+    fn a_cancel_before_the_send_drops_the_statement_unsent() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        let cancel = CancelToken::default();
+        connection.cancel(&cancel).unwrap();
+        let error = connection
+            .query("SELECT n", &cancel, Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, CANCELLED);
+        assert!(sent(&mock, "SELECT n").is_empty());
+        assert!(kills(&mock).is_empty());
+    }
+
+    #[test]
+    fn a_kill_sent_before_the_server_registered_the_query_is_sent_again_until_it_lands() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.registration(Registration::Signal);
+        mock.on_statement("SELECT sleep", [sleeping()]);
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| connection.query("SELECT sleep(30)", &cancel, Fetch::default()));
+            // On the token, so a Cancel finds it, whether or not the POST has
+            // reached the server yet.
+            until("the query id on the token", || !handles(&cancel).is_empty());
+            let id = handles(&cancel)[0].clone();
+            let cancelling = scope.spawn(|| connection.cancel(&cancel));
+            until("a second KILL, and the POST", || {
+                kills(&mock).len() >= 2 && mock.hits("SELECT sleep") == 1
+            });
+            assert!(mock.killed().is_empty());
+            mock.register(&id);
+            cancelling.join().unwrap().unwrap();
+            let error = running.join().unwrap().unwrap_err();
+            assert_eq!(error.message, CANCELLED);
+            assert!(is_cancel(Engine::ClickHouse, &error));
+            assert_eq!(mock.killed(), [id]);
+        });
+        for kill in kills(&mock) {
+            assert_eq!(kill.param("session_id"), None);
+            assert!(kill.statement.ends_with("' SYNC"), "{}", kill.statement);
+        }
+    }
+
+    #[test]
+    fn a_query_the_server_never_registers_is_let_go_after_the_deadline() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.registration(Registration::Signal);
+        mock.on_statement("SELECT sleep", [sleeping()]);
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| connection.query("SELECT sleep(30)", &cancel, Fetch::default()));
+            until("the query id on the token", || !handles(&cancel).is_empty());
+            let started = Instant::now();
+            let error = connection.cancel(&cancel).unwrap_err();
+            assert_eq!(error.message, UNREACHED);
+            let run = running.join().unwrap().unwrap_err();
+            let took = started.elapsed();
+            assert_eq!(run.message, CANCELLED);
+            assert!(took >= KILL_WITHIN - KILL_RETRY * 2, "{took:?}");
+            assert!(took < KILL_WITHIN + Duration::from_secs(1), "{took:?}");
+        });
+        assert!(kills(&mock).len() > 2);
+    }
+
+    #[test]
+    fn a_query_the_server_cannot_cancel_is_let_go_at_once() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.kill_status("cant_cancel");
+        mock.on_statement("SELECT sleep", [sleeping()]);
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| connection.query("SELECT sleep(30)", &cancel, Fetch::default()));
+            until("the request", || mock.hits("SELECT sleep") == 1);
+            let started = Instant::now();
+            assert_eq!(connection.cancel(&cancel).unwrap_err().message, UNREACHED);
+            assert_eq!(running.join().unwrap().unwrap_err().message, CANCELLED);
+            assert!(started.elapsed() < Duration::from_secs(1));
+        });
+        assert_eq!(kills(&mock).len(), 1);
+    }
+
+    #[test]
+    fn a_body_cut_short_is_an_error_and_its_query_is_killed() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement("SELECT n", [three_rows().truncated(11)]);
+        let error = run(&connection, "SELECT n").unwrap_err();
+        assert!(is_cut(&error), "{error}");
+        let id = sent(&mock, "SELECT n")[0].query_id().unwrap().to_string();
+        assert_eq!(mock.killed(), [id]);
+    }
+
+    #[test]
+    fn a_body_cut_after_a_cancel_is_the_cancel() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement(
+            "SELECT n",
+            [three_rows()
+                .stalled(10, Duration::from_secs(30))
+                .killed_by(Aftermath::Cut)],
+        );
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| connection.query("SELECT n", &cancel, Fetch::default()));
+            until("the request", || mock.hits("SELECT n") == 1);
+            connection.cancel(&cancel).unwrap();
+            assert_eq!(running.join().unwrap().unwrap_err().message, CANCELLED);
+        });
+        assert_eq!(kills(&mock).len(), 1);
+    }
+
+    #[test]
+    fn a_stalled_body_without_a_bound_is_ended_by_cancel() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement(
+            "SELECT n",
+            [three_rows()
+                .stalled(10, Duration::from_secs(30))
+                .killed_by(Aftermath::Cancelled)],
+        );
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| connection.query("SELECT n", &cancel, Fetch::default()));
+            until("the request", || mock.hits("SELECT n") == 1);
+            let started = Instant::now();
+            connection.cancel(&cancel).unwrap();
+            let error = running.join().unwrap().unwrap_err();
+            assert_eq!(error.message, CANCELLED);
+            assert!(started.elapsed() < Duration::from_secs(1));
+        });
+    }
+
+    #[test]
+    fn a_server_that_goes_quiet_past_the_bound_is_stopped_and_killed() {
+        let mock = Mock::start();
+        let server = ServerConfig {
+            statement_timeout: 1,
+            ..profile(&mock)
+        };
+        let connection = open_with(&mock, writer(), &server).unwrap();
+        mock.on_statement(
+            "SELECT n",
+            [three_rows().stalled(10, Duration::from_secs(30))],
+        );
+        // Not even the headers.
+        mock.on_statement(
+            "SELECT m",
+            [Response::body("").delayed(Duration::from_secs(30))],
+        );
+        for statement in ["SELECT n", "SELECT m"] {
+            let started = Instant::now();
+            // Sessionless: what is tested is the bound, not how soon the
+            // server lets go of a session after the `KILL`.
+            let error = connection
+                .generated(statement, &CancelToken::default(), Fetch::default())
+                .unwrap_err();
+            assert_eq!(
+                error.message, "The server sent nothing for 1 seconds; the statement was stopped.",
+                "{statement}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(4), "{statement}");
+        }
+        let ids: Vec<String> = ["SELECT n", "SELECT m"]
+            .iter()
+            .map(|statement| sent(&mock, statement)[0].query_id().unwrap().to_string())
+            .collect();
+        assert_eq!(mock.killed(), ids);
+    }
+
+    #[test]
+    fn a_late_error_past_the_cap_fails_the_drain_tagged_or_not() {
+        for tagged in [true, false] {
+            let mock = Mock::start();
+            mock.tagged(tagged);
+            let connection = open(&mock);
+            mock.on_statement(
+                "SELECT n",
+                [Response::rows(
+                    &[("n", "UInt8"), ("m", "UInt8")],
+                    &[&["1", "1"], &["2", "2"], &["3", "3"]],
+                )
+                .then_fails(
+                    395,
+                    "FUNCTION_THROW_IF_VALUE_IS_NON_ZERO",
+                    "Value passed to 'throwIf' function is non-zero",
+                )],
+            );
+            let error = connection
+                .query(
+                    "SELECT n, m",
+                    &CancelToken::default(),
+                    Fetch {
+                        limit: Some(1),
+                        ..Fetch::default()
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "Value passed to 'throwIf' function is non-zero \
+                 (FUNCTION_THROW_IF_VALUE_IS_NON_ZERO)",
+                "tagged: {tagged}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_stopped_at_the_limit_is_killed_once_and_its_own_cancel_ignored() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement(
+            "SELECT n",
+            [
+                Response::rows(&[("n", "UInt8")], &[&["1"], &["2"], &["3"], &["4"]]).then_fails(
+                    394,
+                    "QUERY_WAS_CANCELLED",
+                    "Query was cancelled.",
+                ),
+            ],
+        );
+        let capped = Fetch {
+            limit: Some(2),
+            reads_only: true,
+            ..Fetch::default()
+        };
+        let result = connection
+            .query("SELECT n", &CancelToken::default(), capped)
+            .unwrap();
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.notice, None);
+        let [kill] = kills(&mock).try_into().unwrap();
+        assert_eq!(kill.param("session_id"), None);
+        let id = sent(&mock, "SELECT n")[0].query_id().unwrap().to_string();
+        assert_eq!(mock.killed(), [id]);
+
+        mock.kill_status("cant_cancel");
+        let result = connection
+            .query("SELECT n", &CancelToken::default(), capped)
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        let notice = result.notice.unwrap();
+        assert!(
+            notice.starts_with("Stopping the statement at the row limit failed"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn an_at_once_runs_statements_are_all_killed_and_the_session_left_alone() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        run(&connection, "SELECT n").unwrap();
+        mock.on_statement("SELECT sleep", [sleeping()]);
+        let cancel = CancelToken::alongside();
+        std::thread::scope(|scope| {
+            let runs: Vec<_> = ["SELECT sleep(1)", "SELECT sleep(2)"]
+                .into_iter()
+                .map(|sql| {
+                    let (connection, cancel) = (&connection, &cancel);
+                    scope.spawn(move || {
+                        connection.query_alongside(sql, cancel, Fetch::default(), false)
+                    })
+                })
+                .collect();
+            until("both requests", || {
+                handles(&cancel).len() == 2 && mock.hits("SELECT sleep") == 2
+            });
+            let mut ids = handles(&cancel);
+            connection.cancel(&cancel).unwrap();
+            for run in runs {
+                assert_eq!(run.join().unwrap().unwrap_err().message, CANCELLED);
+            }
+            let mut killed = mock.killed();
+            killed.sort();
+            ids.sort();
+            assert_eq!(killed, ids);
+        });
+        for kill in kills(&mock) {
+            assert_eq!(kill.param("session_id"), None);
+        }
+        assert!(connection.running.lock().unwrap().is_empty());
+        run(&connection, "SELECT n").unwrap();
+        let [before, after] = sent(&mock, "SELECT n").try_into().unwrap();
+        assert_eq!(after.param("session_id"), before.param("session_id"));
+        assert_eq!(after.param("session_check"), Some("1"));
+    }
+
+    #[test]
+    fn a_cancel_nobody_here_asked_for_keeps_the_servers_words() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement(
+            "SELECT n",
+            [Response::error(
+                500,
+                394,
+                "QUERY_WAS_CANCELLED",
+                "Query was cancelled.",
+            )],
+        );
+        let error = run(&connection, "SELECT n").unwrap_err();
+        assert_eq!(error.message, "Query was cancelled. (QUERY_WAS_CANCELLED)");
+        assert!(!is_cancel(Engine::ClickHouse, &error));
     }
 }

@@ -18,7 +18,6 @@ use crate::db::{Column, DbError, RowBuilder, plain_error};
 /// [`is_cut`].
 pub const CUT: &str = "The server closed the response before it ended";
 
-#[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
 pub fn is_cut(error: &DbError) -> bool {
     error.message.starts_with(CUT)
 }

@@ -42,7 +42,6 @@ pub enum Aftermath {
     /// does.
     Cancelled,
     /// The connection just closes.
-    #[expect(dead_code, reason = "a body cut after a KILL is tested with Task 1.7")]
     Cut,
 }
 

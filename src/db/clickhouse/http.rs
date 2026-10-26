@@ -37,8 +37,12 @@ const TICK: Duration = Duration::from_millis(250);
 /// What DBDelve's own catalog and structure requests wait for.
 const INTERNAL_BOUND: Duration = Duration::from_secs(120);
 
-/// A user's timeout and the client's slack around it (design 4.5).
-const SLACK: Duration = Duration::from_secs(30);
+/// A user's timeout and the client's slack around it (design 4.5). Short under
+/// test, where the idle bound is waited out for real.
+const SLACK: Duration = match cfg!(test) {
+    true => Duration::from_millis(500),
+    false => Duration::from_secs(30),
+};
 
 /// The HTTP interface's own split: 8123 in the clear, 8443 under TLS. Prefer
 /// is the first, as the server answers the plain port to it first.
@@ -91,6 +95,10 @@ impl Bounds {
     /// DBDelve's own catalog and structure requests.
     pub fn internal() -> Self {
         Self(Some(INTERNAL_BOUND))
+    }
+
+    pub fn within(limit: Duration) -> Self {
+        Self(Some(limit))
     }
 
     pub fn limit(self) -> Option<Duration> {
@@ -239,13 +247,11 @@ impl Watch {
     }
 
     /// Ends the read in progress, within a tick, and every later one.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
     pub fn abort(&self) {
         self.abort.store(true, Ordering::SeqCst);
     }
 
     /// What ended a read, if one was ended.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
     pub fn stopped(&self) -> Option<Stop> {
         *self
             .stopped
@@ -515,7 +521,10 @@ EHziqoisXzppWwn2vAWvoTkc
     #[test]
     fn bounds_are_the_timeout_plus_slack_or_none() {
         assert_eq!(Bounds::user(0).limit(), None);
-        assert_eq!(Bounds::user(10).limit(), Some(Duration::from_secs(40)));
+        assert_eq!(
+            Bounds::user(10).limit(),
+            Some(Duration::from_secs(10) + SLACK)
+        );
         assert_eq!(Bounds::internal().limit(), Some(Duration::from_secs(120)));
     }
 
