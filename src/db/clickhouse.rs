@@ -617,14 +617,30 @@ impl Connection {
                 };
                 Failed::Error(plain_error(message))
             }
-            Failed::Broken(error) if !asked => Failed::Broken(match self.abandon(query_id, true) {
-                Ok(()) => error,
-                Err(stop) => plain_error(format!(
-                    "{} It may still be running: stopping it failed too ({}).",
-                    error.message, stop.message
-                )),
-            }),
+            Failed::Broken(error) if !asked => {
+                Failed::Broken(self.abandoned(error, query_id, true))
+            }
+            // Lost after the request went out, before any answer: the server
+            // may have it, and dropping the connection does not stop it. A
+            // connect or handshake that failed sent nothing, and `prefer`
+            // reads its error whole.
+            Failed::Unreached(error) if watch.sent() => {
+                let error = plain_error(format!("{} did not answer: {error}.", self.endpoint()));
+                Failed::Broken(self.abandoned(error, query_id, false))
+            }
             failed => failed,
+        }
+    }
+
+    /// `error`, and when the `KILL` it owes fails, that it may still be
+    /// running.
+    fn abandoned(&self, error: DbError, query_id: &str, answered: bool) -> DbError {
+        match self.abandon(query_id, answered) {
+            Ok(()) => error,
+            Err(stop) => plain_error(format!(
+                "{} It may still be running: stopping it failed too ({}).",
+                error.message, stop.message
+            )),
         }
     }
 
@@ -760,12 +776,16 @@ impl Connection {
         Ok(result)
     }
 
+    fn endpoint(&self) -> String {
+        format!("{}:{}", self.config.host.trim(), http::port(&self.config))
+    }
+
     fn explain(&self, failed: Failed) -> DbError {
         let error = match failed {
             Failed::Error(error) | Failed::Broken(error) => return error,
             Failed::Unreached(error) => error,
         };
-        let endpoint = format!("{}:{}", self.config.host.trim(), http::port(&self.config));
+        let endpoint = self.endpoint();
         match error {
             ureq::Error::Other(inner) => match inner.downcast::<DbError>() {
                 Ok(error) => *error,
@@ -1954,6 +1974,33 @@ mod tests {
         );
         let took = started.elapsed();
         assert!(took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    #[test]
+    fn a_connection_lost_after_the_request_went_out_is_killed() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement("SELECT n", [Response::dropped()]);
+        let error = connection
+            .generated("SELECT n", &CancelToken::default(), Fetch::default())
+            .unwrap_err();
+        let endpoint = format!("127.0.0.1:{} did not answer: ", mock.server().port.unwrap());
+        assert!(error.message.starts_with(&endpoint), "{error}");
+        let id = sent(&mock, "SELECT n")[0].query_id().unwrap().to_string();
+        assert_eq!(mock.killed(), [id]);
+
+        // Never found: it may have been lost on the way, or be on its way.
+        mock.registration(Registration::Signal);
+        let error = connection
+            .generated("SELECT n", &CancelToken::default(), Fetch::default())
+            .unwrap_err();
+        assert!(
+            error.message.ends_with(
+                "It may still be running: stopping it failed too (the server did not \
+                 confirm that it stopped)."
+            ),
+            "{error}"
+        );
     }
 
     #[test]

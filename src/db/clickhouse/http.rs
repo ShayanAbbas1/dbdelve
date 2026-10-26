@@ -17,7 +17,7 @@ use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver
 use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, RustlsConnector, Transport,
 };
-use ureq::{Agent, Error};
+use ureq::{Agent, Error, Timeout};
 
 use crate::db::ssh::Tunnel;
 use crate::db::{DbError, ServerConfig, plain_error};
@@ -220,6 +220,8 @@ pub struct Watch {
     abort: Arc<AtomicBool>,
     idle: Option<Duration>,
     stopped: Arc<Mutex<Option<Stop>>>,
+    /// A byte of the request went out, so the server may be running it.
+    sent: Arc<AtomicBool>,
 }
 
 thread_local! {
@@ -241,6 +243,7 @@ impl Watch {
             abort,
             idle,
             stopped: Arc::default(),
+            sent: Arc::default(),
         }
     }
 
@@ -252,6 +255,11 @@ impl Watch {
     /// Ends the read or write in progress, within a tick, and every later one.
     pub fn abort(&self) {
         self.abort.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the request began to go out, past any TLS handshake.
+    pub fn sent(&self) -> bool {
+        self.sent.load(Ordering::SeqCst)
     }
 
     /// What ended a read, if one was ended.
@@ -408,6 +416,13 @@ impl Transport for Watched {
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
         let watch = WATCHING.with(|slot| slot.borrow().clone());
+        // A write on the connect's budget is the TLS handshake; any other is
+        // the request, which the server may act on once it is whole.
+        if let Some(watch) = &watch
+            && timeout.reason != Timeout::Connect
+        {
+            watch.sent.store(true, Ordering::SeqCst);
+        }
         let called = Instant::now();
         let mut progressed = called;
         let mut written = 0;
@@ -815,6 +830,33 @@ EHziqoisXzppWwn2vAWvoTkc
             started.elapsed()
         );
         assert_eq!(watch.stopped(), Some(Stop::Idle));
+    }
+
+    #[test]
+    fn a_tls_handshake_is_not_the_request_going_out() {
+        let port = listener(drop);
+        let agent = agent(
+            &server(port, SslMode::Require),
+            None,
+            Scheme::Https,
+            Bounds::user(0),
+        )
+        .unwrap();
+        let watch = Watch::new(Arc::default(), None);
+        let _watching = watch.enter();
+        assert!(
+            agent
+                .post(&format!("https://127.0.0.1:{port}/"))
+                .send("SELECT 1")
+                .is_err()
+        );
+        assert!(!watch.sent());
+
+        let port = listener(drop);
+        let watch = Watch::new(Arc::default(), None);
+        let _watching = watch.enter();
+        assert!(post(&plain_agent(port, Bounds::user(0)), port).is_err());
+        assert!(watch.sent());
     }
 
     #[test]
