@@ -530,6 +530,9 @@ impl Connection {
                 }
                 Ok(Kill::NotFound | Kill::Waiting) => return Settled::Unconfirmed,
                 Ok(Kill::CannotCancel) => return Settled::CannotCancel,
+                // An attempt that ran out of the time left is the deadline
+                // arriving, not the server failing it.
+                Err(_) if Instant::now() >= deadline => return Settled::Unconfirmed,
                 Err(error) => return Settled::Failed(error),
             }
         }
@@ -2010,28 +2013,24 @@ mod tests {
     fn a_kill_sent_before_the_server_registered_the_query_is_sent_again_until_it_lands() {
         let mock = Mock::start();
         let connection = open(&mock);
-        mock.registration(Registration::Signal);
+        mock.registration(Registration::OnKill(2));
         mock.on_statement("SELECT sleep", [sleeping()]);
         let cancel = CancelToken::default();
         std::thread::scope(|scope| {
             let running =
                 scope.spawn(|| connection.query("SELECT sleep(30)", &cancel, Fetch::default()));
-            // On the token, so a Cancel finds it, whether or not the POST has
-            // reached the server yet.
-            until("the query id on the token", || !handles(&cancel).is_empty());
+            // A Cancel that comes before the send drops the statement unsent,
+            // so it waits for the POST; what it races is the registration.
+            until("the POST", || mock.hits("SELECT sleep") == 1);
             let id = handles(&cancel)[0].clone();
-            let cancelling = scope.spawn(|| connection.cancel(&cancel));
-            until("a second KILL, and the POST", || {
-                kills(&mock).len() >= 2 && mock.hits("SELECT sleep") == 1
-            });
-            assert!(mock.killed().is_empty());
-            mock.register(&id);
-            cancelling.join().unwrap().unwrap();
+            connection.cancel(&cancel).unwrap();
             let error = running.join().unwrap().unwrap_err();
             assert_eq!(error.message, CANCELLED);
             assert!(is_cancel(Engine::ClickHouse, &error));
+            assert_eq!(mock.hits("SELECT sleep"), 1);
             assert_eq!(mock.killed(), [id]);
         });
+        assert!(kills(&mock).len() >= 2);
         for kill in kills(&mock) {
             assert_eq!(kill.param("session_id"), None);
             assert!(kill.statement.ends_with("' SYNC"), "{}", kill.statement);
@@ -2074,7 +2073,7 @@ mod tests {
         std::thread::scope(|scope| {
             let running =
                 scope.spawn(|| connection.query("SELECT sleep(30)", &cancel, Fetch::default()));
-            until("the query id on the token", || !handles(&cancel).is_empty());
+            until("the POST", || mock.hits("SELECT sleep") == 1);
             let started = Instant::now();
             let error = connection.cancel(&cancel).unwrap_err();
             assert_eq!(error.message, UNREACHED);
@@ -2117,8 +2116,7 @@ mod tests {
         let cancel = CancelToken::default();
         std::thread::scope(|scope| {
             let running = scope.spawn(|| connection.query(&insert, &cancel, Fetch::default()));
-            until("the query id on the token", || !handles(&cancel).is_empty());
-            std::thread::sleep(Duration::from_millis(200));
+            until("the server to stop reading", || mock.swallowed() == 1);
             let started = Instant::now();
             assert_eq!(connection.cancel(&cancel).unwrap_err().message, UNREACHED);
             assert_eq!(running.join().unwrap().unwrap_err().message, CANCELLED);

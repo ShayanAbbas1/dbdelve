@@ -255,6 +255,10 @@ pub enum Registration {
     After(Duration),
     /// Only when the test calls [`Mock::register`].
     Signal,
+    /// At the `n`th `KILL` for it, or the first after the request arrived,
+    /// whichever is later. Counted by the mock, so no test thread has to win a
+    /// race to register it in time.
+    OnKill(usize),
 }
 
 struct Route {
@@ -280,6 +284,7 @@ struct State {
     readonly: HashSet<String>,
     /// A body longer than this is never read.
     swallow_over: Option<usize>,
+    swallowed: usize,
 }
 
 pub struct Mock {
@@ -306,6 +311,7 @@ impl Mock {
             max_session_timeout: 3600,
             readonly: HashSet::new(),
             swallow_over: None,
+            swallowed: 0,
         }));
         let shared = Arc::clone(&state);
         // ponytail: never joined. The listener lives until the test binary
@@ -397,6 +403,11 @@ impl Mock {
     /// is never seen, registered or answered.
     pub fn swallow_bodies_over(&self, bytes: usize) {
         self.state().swallow_over = Some(bytes);
+    }
+
+    /// How many requests [`Self::swallow_bodies_over`] has swallowed.
+    pub fn swallowed(&self) -> usize {
+        self.state().swallowed
     }
 
     /// Every request so far, in the order they arrived.
@@ -505,7 +516,7 @@ fn decide(request: &Request, state: &mut State) -> Decision {
         let effective = match state.registration {
             Registration::Immediately => Some(Instant::now()),
             Registration::After(delay) => Some(Instant::now() + delay),
-            Registration::Signal => None,
+            Registration::Signal | Registration::OnKill(_) => None,
         };
         if let Some(effective) = effective {
             state.registered.entry(id.clone()).or_insert(effective);
@@ -513,6 +524,22 @@ fn decide(request: &Request, state: &mut State) -> Decision {
     }
 
     if let Some(target) = kill_target(&request.statement) {
+        if let Registration::OnKill(nth) = state.registration {
+            let arrived = state.requests.iter().any(|sent| {
+                sent.query_id() == Some(&target) && kill_target(&sent.statement).is_none()
+            });
+            let kills = state
+                .requests
+                .iter()
+                .filter(|sent| kill_target(&sent.statement).as_deref() == Some(&target))
+                .count();
+            if arrived && kills >= nth {
+                state
+                    .registered
+                    .entry(target.clone())
+                    .or_insert_with(Instant::now);
+            }
+        }
         let found = state
             .registered
             .get(&target)
@@ -560,11 +587,7 @@ fn kill_target(statement: &str) -> Option<String> {
 }
 
 fn serve(stream: TcpStream, state: &Mutex<State>) {
-    let swallow_over = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .swallow_over;
-    let Some(request) = read_request(&stream, swallow_over) else {
+    let Some(request) = read_request(&stream, state) else {
         return;
     };
     let decision = {
@@ -585,7 +608,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     }
 }
 
-fn read_request(stream: &TcpStream, swallow_over: Option<usize>) -> Option<Request> {
+fn read_request(stream: &TcpStream, state: &Mutex<State>) -> Option<Request> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
@@ -611,7 +634,15 @@ fn read_request(stream: &TcpStream, swallow_over: Option<usize>) -> Option<Reque
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0);
-    if swallow_over.is_some_and(|over| length > over) {
+    let swallowed = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let over = state.swallow_over.is_some_and(|over| length > over);
+        state.swallowed += usize::from(over);
+        over
+    };
+    if swallowed {
         std::thread::sleep(Duration::from_secs(60));
         return None;
     }
