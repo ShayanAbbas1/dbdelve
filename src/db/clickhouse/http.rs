@@ -2,11 +2,6 @@
 //! resolver, the transport that lets one thread end another's read, and the
 //! server's errors.
 
-#![expect(
-    dead_code,
-    reason = "the driver that sends requests arrives with Task 1.6"
-)]
-
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
@@ -244,11 +239,13 @@ impl Watch {
     }
 
     /// Ends the read in progress, within a tick, and every later one.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
     pub fn abort(&self) {
         self.abort.store(true, Ordering::SeqCst);
     }
 
     /// What ended a read, if one was ended.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
     pub fn stopped(&self) -> Option<Stop> {
         *self
             .stopped
@@ -356,7 +353,7 @@ impl<T: Transport> Transport for Watched<T> {
 
 const CODE_HEADER: &str = "X-ClickHouse-Exception-Code";
 
-fn exception_code(headers: &HeaderMap) -> Option<i64> {
+pub fn exception_code(headers: &HeaderMap) -> Option<i64> {
     headers
         .get(CODE_HEADER)?
         .to_str()

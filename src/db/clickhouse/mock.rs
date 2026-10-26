@@ -11,8 +11,6 @@
 //! A test needs no `http://` host: the profile is `sslmode=disable` on
 //! [`Mock::server`]'s port.
 
-#![expect(dead_code, reason = "the requests that use it arrive with Task 1.6")]
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -44,6 +42,7 @@ pub enum Aftermath {
     /// does.
     Cancelled,
     /// The connection just closes.
+    #[expect(dead_code, reason = "a body cut after a KILL is tested with Task 1.7")]
     Cut,
 }
 
@@ -403,7 +402,6 @@ impl Mock {
 struct Decision {
     response: Response,
     tag: Option<String>,
-    tagged: bool,
     /// Held while the response is written; the session is free after.
     session: Option<String>,
     query_id: Option<String>,
@@ -421,7 +419,6 @@ fn decide(request: &Request, state: &mut State) -> Decision {
     let mut decision = Decision {
         response: Response::empty(),
         tag,
-        tagged: state.tagged,
         session: None,
         query_id: query_id.clone(),
     };

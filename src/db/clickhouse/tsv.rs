@@ -3,11 +3,6 @@
 //!
 //! Pure: it reads a `Read` and builds rows, and knows nothing of HTTP.
 
-#![expect(
-    dead_code,
-    reason = "the driver that reads results arrives with Task 1.6"
-)]
-
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read};
@@ -23,6 +18,7 @@ use crate::db::{Column, DbError, RowBuilder, plain_error};
 /// [`is_cut`].
 pub const CUT: &str = "The server closed the response before it ended";
 
+#[cfg_attr(not(test), expect(dead_code, reason = "Cancel arrives with Task 1.7"))]
 pub fn is_cut(error: &DbError) -> bool {
     error.message.starts_with(CUT)
 }
@@ -193,6 +189,7 @@ fn unescape(field: &[u8]) -> Cow<'_, [u8]> {
 
 /// A cell's text: the bytes as UTF-8, else `0x` and upper-case hex, the
 /// spelling the other engines use for binary.
+#[cfg(test)]
 pub fn render<'a>(bytes: &'a [u8], data_type: &str) -> Cow<'a, str> {
     render_as(bytes, Decoder::of(data_type).binary)
 }
