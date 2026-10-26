@@ -28,7 +28,7 @@ use super::ssh::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Databases, DbError, Engine, Fetch, QueryResult, RelationKind,
     RowBuilder, ServerConfig, Stopped, Structure, assemble_catalog, assemble_databases,
-    plain_error, required_cell, terminated,
+    assemble_structure, plain_error, required_cell, terminated,
 };
 use crate::tls::SslMode;
 
@@ -97,6 +97,56 @@ WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
     AND NOT is_temporary
     AND NOT startsWith(name, '.inner')
 ORDER BY database, name";
+
+// The structure queries name one relation, so they carry `{schema}` and
+// `{relation}` placeholders substituted by `structure_sql`.
+
+/// A column is nullable when its type is, through `LowCardinality` or not. The
+/// three kinds of computed default are written with their keyword, so the grid
+/// and New row can tell a column the server fills in from a plain default.
+const STRUCTURE_COLUMNS_SQL: &str = "
+SELECT
+    name AS column_name,
+    type AS data_type,
+    if(match(type, '^(LowCardinality[(])?Nullable[(]'), 'yes', 'no') AS nullable,
+    multiIf(
+        default_kind = '', '',
+        default_kind = 'DEFAULT', default_expression,
+        trim(concat(default_kind, ' ', default_expression))
+    ) AS column_default
+FROM system.columns
+WHERE database = {schema} AND table = {relation}
+ORDER BY position";
+
+/// What the table is stored by, then each skip index. A view and a dictionary
+/// have none of these keys and so give no row.
+const STRUCTURE_INDEXES_SQL: &str = "
+SELECT object_name, definition FROM (
+    SELECT 0 AS position, 'sorting key' AS object_name,
+        concat('ORDER BY (', sorting_key, ')') AS definition
+    FROM system.tables
+    WHERE database = {schema} AND name = {relation} AND sorting_key != ''
+    UNION ALL
+    SELECT 1, 'partition key', concat('PARTITION BY ', partition_key)
+    FROM system.tables
+    WHERE database = {schema} AND name = {relation} AND partition_key != ''
+    UNION ALL
+    SELECT 2, 'sampling key', concat('SAMPLE BY ', sampling_key)
+    FROM system.tables
+    WHERE database = {schema} AND name = {relation} AND sampling_key != ''
+    UNION ALL
+    SELECT 3, name, concat(expr, ' TYPE ', type_full, ' GRANULARITY ', toString(granularity))
+    FROM system.data_skipping_indices
+    WHERE database = {schema} AND table = {relation}
+)
+ORDER BY position, object_name";
+
+/// Not unique: ClickHouse takes a repeated primary key. It orders paging and
+/// marks the key columns, and is never what an edit matches a row by.
+const STRUCTURE_CONSTRAINTS_SQL: &str = "
+SELECT 'PRIMARY' AS object_name, concat('PRIMARY KEY (', primary_key, ')') AS definition
+FROM system.tables
+WHERE database = {schema} AND name = {relation} AND primary_key != ''";
 
 /// The server's version, and the settings a request may carry, with whether
 /// this user may change each.
@@ -264,10 +314,6 @@ impl Drop for Running<'_> {
     }
 }
 
-fn unwired<T>() -> Result<T, DbError> {
-    Err(plain_error("ClickHouse is not wired yet.".into()))
-}
-
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
         let port = http::port(server);
@@ -370,8 +416,14 @@ impl Connection {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
-    pub fn structure(&self, _schema: &str, _relation: &str) -> Result<Structure, DbError> {
-        unwired()
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        let columns =
+            self.internal_query(&structure_sql(STRUCTURE_COLUMNS_SQL, schema, relation))?;
+        let indexes =
+            self.internal_query(&structure_sql(STRUCTURE_INDEXES_SQL, schema, relation))?;
+        let constraints =
+            self.internal_query(&structure_sql(STRUCTURE_CONSTRAINTS_SQL, schema, relation))?;
+        assemble_structure(columns, indexes, constraints)
     }
 
     pub fn ddl(
@@ -844,6 +896,12 @@ impl Connection {
 /// an empty line (`WITH TOTALS`, `extremes`) as further results. Past the
 /// limit the first set is drained to its end and counted, never kept, or for
 /// a read that may stop there, left unread for the caller to `KILL`.
+fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
+    template
+        .replace("{schema}", &Engine::ClickHouse.quote_literal(schema))
+        .replace("{relation}", &Engine::ClickHouse.quote_literal(relation))
+}
+
 fn collect<R: BufRead>(
     reader: &mut Reader<R>,
     fetch: Fetch,
@@ -3155,6 +3213,156 @@ mod live {
         assert!(view.contains("VIEW dbdelve_dev.active_accounts"), "{view}");
     }
 
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_ddl_of_a_materialized_view_and_a_dictionary_is_the_servers_own() {
+        let connection = live_any(live_config());
+        let view = connection
+            .ddl(
+                "dbdelve_dev",
+                "events_per_kind_mv",
+                RelationKind::MaterializedView,
+            )
+            .unwrap();
+        let dictionary = connection
+            .ddl("dbdelve_dev", "plan_seats", RelationKind::Table)
+            .unwrap();
+        assert!(
+            view.starts_with("CREATE MATERIALIZED VIEW dbdelve_dev.events_per_kind_mv"),
+            "{view}"
+        );
+        assert!(view.ends_with(';'), "{view}");
+        assert!(
+            dictionary.starts_with("CREATE DICTIONARY dbdelve_dev.plan_seats"),
+            "{dictionary}"
+        );
+        assert!(
+            dictionary.contains('\n') && dictionary.ends_with(';'),
+            "{dictionary}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_events_shows_its_keys_and_accounts_keys_its_rows() {
+        let connection = live_any(live_config());
+        let events = connection.structure("dbdelve_dev", "events").unwrap();
+        let named = |name: &str| {
+            events
+                .indexes
+                .iter()
+                .find(|index| index.name == name)
+                .map(|index| index.definition.as_str())
+        };
+        assert_eq!(
+            named("sorting key"),
+            Some("ORDER BY (account_id, occurred_at)")
+        );
+        assert_eq!(
+            named("partition key"),
+            Some("PARTITION BY toYYYYMM(occurred_at)")
+        );
+        assert_eq!(named("sampling key"), None);
+        assert_eq!(events.row_key(), ["account_id", "occurred_at"]);
+        let kind = events.columns.iter().find(|c| c.name == "kind").unwrap();
+        assert_eq!(kind.data_type, "LowCardinality(String)");
+        assert!(!kind.nullable);
+
+        let accounts = connection.structure("dbdelve_dev", "accounts").unwrap();
+        assert_eq!(accounts.row_key(), ["id"]);
+        let email = accounts.columns.iter().find(|c| c.name == "email").unwrap();
+        assert!(email.nullable);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_computed_column_a_skip_index_and_a_sample_key_are_shown() {
+        let connection = live_any(live_config());
+        let table = "dbdelve_structure_probe";
+        let create = format!(
+            "CREATE TABLE dbdelve_dev.{table} (
+                id UInt64,
+                ts DateTime,
+                kept String MATERIALIZED toString(id),
+                spelled String ALIAS concat('x', toString(id)),
+                plain UInt8 DEFAULT 3,
+                fed UInt8 EPHEMERAL 5,
+                maybe LowCardinality(Nullable(String)),
+                INDEX by_ts ts TYPE minmax GRANULARITY 2
+            ) ENGINE = MergeTree ORDER BY (id, toDate(ts)) SAMPLE BY id"
+        );
+        let drop = format!("DROP TABLE IF EXISTS dbdelve_dev.{table}");
+        let cancel = CancelToken::default();
+        connection.query(&drop, &cancel, Fetch::default()).unwrap();
+        connection
+            .query(&create, &cancel, Fetch::default())
+            .unwrap();
+        let structure = connection.structure("dbdelve_dev", table);
+        connection.query(&drop, &cancel, Fetch::default()).unwrap();
+        let structure = structure.unwrap();
+
+        let default = |name: &str| {
+            structure
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            default("kept").default.as_deref(),
+            Some("MATERIALIZED toString(id)")
+        );
+        assert_eq!(
+            default("spelled").default.as_deref(),
+            Some("ALIAS concat('x', toString(id))")
+        );
+        assert_eq!(default("plain").default.as_deref(), Some("3"));
+        assert_eq!(default("fed").default.as_deref(), Some("EPHEMERAL 5"));
+        assert_eq!(default("id").default, None);
+        assert!(default("maybe").nullable);
+        assert!(!default("ts").nullable);
+        assert!(Engine::ClickHouse.generates(&default("kept")));
+        assert!(Engine::ClickHouse.generates(&default("spelled")));
+        assert!(!Engine::ClickHouse.generates(&default("plain")));
+        assert!(!Engine::ClickHouse.generates(&default("id")));
+
+        let definitions: Vec<(&str, &str)> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.definition.as_str()))
+            .collect();
+        assert_eq!(
+            definitions,
+            [
+                ("sorting key", "ORDER BY (id, toDate(ts))"),
+                ("sampling key", "SAMPLE BY id"),
+                ("by_ts", "ts TYPE minmax GRANULARITY 2"),
+            ]
+        );
+        assert!(structure.row_key().is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_view_and_a_dictionary_have_columns_and_no_keys() {
+        let connection = live_any(live_config());
+        for relation in ["active_accounts", "plan_seats", "events_per_kind_mv"] {
+            let structure = connection.structure("dbdelve_dev", relation).unwrap();
+            assert!(!structure.columns.is_empty(), "{relation}");
+            assert!(structure.indexes.is_empty(), "{relation}");
+            assert!(structure.constraints.is_empty(), "{relation}");
+        }
+    }
+
+    #[test]
+    fn a_structure_query_quotes_a_name_holding_a_quote_and_a_backslash() {
+        assert_eq!(
+            structure_sql("{schema}.{relation}", "a'b", r"c\d"),
+            r"'a''b'.'c\\d'"
+        );
+    }
+
     fn conformance_subject() -> crate::db::conformance::Subject {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
@@ -3198,6 +3406,7 @@ mod live {
         connects,
         query_round_trip,
         catalog_round_trip,
+        structure_round_trip,
         types_render_as_expected,
         cancel_stops_a_long_query,
         row_limit_stops_an_eligible_read,
