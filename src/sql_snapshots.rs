@@ -7,6 +7,7 @@
 mod batches;
 mod engines;
 mod explain;
+mod fake_spec;
 mod filters;
 mod gates;
 mod previews;

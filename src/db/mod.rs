@@ -40,6 +40,8 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 use spec::ReadOnlySession;
+#[cfg(test)]
+pub use spec::{Abilities, Hints, Hooks, SqlSpec};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
     RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
