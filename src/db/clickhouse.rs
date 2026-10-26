@@ -169,6 +169,15 @@ enum Kill {
     CannotCancel,
 }
 
+/// Where [`Connection::settle`]'s `KILL`s left a query.
+enum Settled {
+    Stopped,
+    /// Still not found, or found and not stopped, at the deadline.
+    Unconfirmed,
+    CannotCancel,
+    Failed(DbError),
+}
+
 /// How a request failed: before any answer, kept whole so the connect can
 /// tell a plaintext answer to a TLS handshake; in the server's words before
 /// the body; or once the body had begun, with the query perhaps still running.
@@ -375,36 +384,49 @@ impl Connection {
     }
 
     fn stop(&self, cancel: &CancelToken, query_id: &str) -> Result<(), DbError> {
-        let deadline = Instant::now() + KILL_WITHIN;
         let on_token = || lock(&cancel.0).handles.iter().any(|id| id == query_id);
+        let failed = match self.settle(query_id, false, on_token) {
+            Settled::Stopped => return Ok(()),
+            Settled::Failed(error) => Some(error),
+            Settled::Unconfirmed | Settled::CannotCancel => None,
+        };
+        if !on_token() {
+            return Ok(());
+        }
+        if let Some(watch) = lock(&self.running).get(query_id) {
+            watch.abort();
+        }
+        Err(plain_error(match failed {
+            Some(error) => format!("{UNREACHED} The KILL QUERY failed: {}", error.message),
+            None => UNREACHED.into(),
+        }))
+    }
+
+    /// `KILL`s `query_id` until it is known to be over, for at most
+    /// [`KILL_WITHIN`], while `wanted` holds; a query no longer wanted counts
+    /// as stopped. A query the server has `answered` for was registered
+    /// before it answered, so not finding it means it is over; one it has not
+    /// answered may be on its way, and is looked for again.
+    fn settle(&self, query_id: &str, answered: bool, wanted: impl Fn() -> bool) -> Settled {
+        let deadline = Instant::now() + KILL_WITHIN;
         loop {
-            if !on_token() {
-                return Ok(());
+            if !wanted() {
+                return Settled::Stopped;
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            let outcome = match left.is_zero() {
-                true => Ok(Kill::Waiting),
-                false => self.kill(query_id, left),
-            };
-            let failed = match outcome {
-                Ok(Kill::Finished) => return Ok(()),
+            if left.is_zero() {
+                return Settled::Unconfirmed;
+            }
+            match self.kill(query_id, left) {
+                Ok(Kill::Finished) => return Settled::Stopped,
+                Ok(Kill::NotFound) if answered => return Settled::Stopped,
                 Ok(Kill::NotFound | Kill::Waiting) if Instant::now() + KILL_RETRY < deadline => {
                     std::thread::sleep(KILL_RETRY);
-                    continue;
                 }
-                Ok(_) => None,
-                Err(error) => Some(error),
-            };
-            if !on_token() {
-                return Ok(());
+                Ok(Kill::NotFound | Kill::Waiting) => return Settled::Unconfirmed,
+                Ok(Kill::CannotCancel) => return Settled::CannotCancel,
+                Err(error) => return Settled::Failed(error),
             }
-            if let Some(watch) = lock(&self.running).get(query_id) {
-                watch.abort();
-            }
-            return Err(plain_error(match failed {
-                Some(error) => format!("{UNREACHED} The KILL QUERY failed: {}", error.message),
-                None => UNREACHED.into(),
-            }));
         }
     }
 
@@ -432,11 +454,16 @@ impl Connection {
     }
 
     /// Kills a statement whose response was given up on: dropping the
-    /// connection alone does not stop it on the server.
-    fn abandon(&self, query_id: &str) -> Result<(), DbError> {
-        match self.kill(query_id, KILL_WITHIN)? {
-            Kill::CannotCancel => Err(plain_error("the server cannot cancel it".into())),
-            Kill::Finished | Kill::NotFound | Kill::Waiting => Ok(()),
+    /// connection alone does not stop it on the server. `answered` as in
+    /// [`Self::settle`].
+    fn abandon(&self, query_id: &str, answered: bool) -> Result<(), DbError> {
+        match self.settle(query_id, answered, || true) {
+            Settled::Stopped => Ok(()),
+            Settled::Unconfirmed => Err(plain_error(
+                "the server did not confirm that it stopped".into(),
+            )),
+            Settled::CannotCancel => Err(plain_error("the server cannot cancel it".into())),
+            Settled::Failed(error) => Err(error),
         }
     }
 
@@ -566,6 +593,7 @@ impl Connection {
                 failed,
                 Failed::Unreached(ureq::Error::Timeout(Timeout::RecvResponse))
             );
+        let answered = !matches!(failed, Failed::Unreached(_));
         match failed {
             _ if watch.stopped() == Some(Stop::Aborted) => cancelled(),
             Failed::Error(error) | Failed::Broken(error)
@@ -577,7 +605,7 @@ impl Connection {
             Failed::Unreached(_) if asked => cancelled(),
             _ if idle => {
                 let seconds = bounds.limit().unwrap_or_default().as_secs();
-                let message = match self.abandon(query_id) {
+                let message = match self.abandon(query_id, answered) {
                     Ok(()) => format!(
                         "The server sent nothing for {seconds} seconds; the statement was stopped."
                     ),
@@ -589,7 +617,7 @@ impl Connection {
                 };
                 Failed::Error(plain_error(message))
             }
-            Failed::Broken(error) if !asked => Failed::Broken(match self.abandon(query_id) {
+            Failed::Broken(error) if !asked => Failed::Broken(match self.abandon(query_id, true) {
                 Ok(()) => error,
                 Err(stop) => plain_error(format!(
                     "{} It may still be running: stopping it failed too ({}).",
@@ -721,7 +749,7 @@ impl Connection {
             // Closed before the `KILL`: a server blocked writing to a socket
             // nobody reads would not get to the cancel.
             drop(reader);
-            if let Err(error) = self.abandon(query_id) {
+            if let Err(error) = self.abandon(query_id, true) {
                 result.notice = Some(format!(
                     "Stopping the statement at the row limit failed ({}); it may still be \
                      running on the server.",
@@ -2016,6 +2044,72 @@ mod tests {
             .map(|statement| sent(&mock, statement)[0].query_id().unwrap().to_string())
             .collect();
         assert_eq!(mock.killed(), ids);
+    }
+
+    #[test]
+    fn a_timeout_before_the_server_registered_the_query_kills_it_once_it_is_or_says_so() {
+        let mock = Mock::start();
+        let server = ServerConfig {
+            statement_timeout: 1,
+            ..profile(&mock)
+        };
+        let connection = open_with(&mock, writer(), &server).unwrap();
+        mock.on_statement(
+            "SELECT m",
+            [Response::body("").delayed(Duration::from_secs(30))],
+        );
+        // Past the bound (1.5 s here), and within the KILLs' deadline after.
+        mock.registration(Registration::After(Duration::from_millis(2500)));
+        let error = connection
+            .generated("SELECT m", &CancelToken::default(), Fetch::default())
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "The server sent nothing for 1 seconds; the statement was stopped."
+        );
+        let id = sent(&mock, "SELECT m")[0].query_id().unwrap().to_string();
+        assert_eq!(mock.killed(), [id]);
+        assert!(kills(&mock).len() > 1);
+
+        mock.registration(Registration::Signal);
+        let error = connection
+            .generated("SELECT m", &CancelToken::default(), Fetch::default())
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "The server sent nothing for 1 seconds, and stopping the statement failed (the \
+             server did not confirm that it stopped); it may still be running."
+        );
+    }
+
+    #[test]
+    fn a_read_stopped_at_the_limit_whose_kill_keeps_waiting_may_still_be_running() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.kill_status("waiting");
+        mock.on_statement(
+            "SELECT n",
+            [Response::rows(&[("n", "UInt8")], &[&["1"], &["2"], &["3"]])],
+        );
+        let result = connection
+            .query(
+                "SELECT n",
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(2),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        let notice = result.notice.unwrap();
+        assert!(notice.contains("did not confirm"), "{notice}");
+        assert!(
+            notice.ends_with("it may still be running on the server."),
+            "{notice}"
+        );
+        assert!(kills(&mock).len() > 2);
     }
 
     #[test]
