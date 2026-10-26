@@ -5,7 +5,10 @@ use std::{
 
 use gpui_component::tree::TreeItem;
 
-use crate::db::{Catalog, Engine, RelationKind, Routine, RoutineKind, Schema, Syntax};
+use crate::db::{
+    Catalog, Engine, EngineSpec, ForeignTable, RelationKind, Routine, RoutineKind, Schema,
+    SelectTop, Syntax, Truncate,
+};
 use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
 
@@ -310,12 +313,25 @@ pub fn preview_sql(
     offset: usize,
 ) -> String {
     match engine.syntax() {
-        Syntax::Mongo => return mql::browse::find_preview(relation, filter, limit, offset),
+        Syntax::Sql => sql_preview(engine.spec(), schema, relation, filter, limit, offset),
+        Syntax::Mongo => mql::browse::find_preview(relation, filter, limit, offset),
         // No limit or offset to write: see `Engine::pages`.
-        Syntax::Redis => return redis_cmd::browse::preview(filter),
-        Syntax::Sql => {}
+        Syntax::Redis => redis_cmd::browse::preview(filter),
     }
-    let mut sql = format!("SELECT *{}", from_where(engine, schema, relation, filter));
+}
+
+pub(crate) fn sql_preview(
+    spec: &EngineSpec,
+    schema: &str,
+    relation: &str,
+    filter: &str,
+    limit: Option<usize>,
+    offset: usize,
+) -> String {
+    let mut sql = format!(
+        "SELECT *{}",
+        from_where(&spec.qualified(schema, relation), filter)
+    );
     let Some(limit) = limit else {
         return sql;
     };
@@ -333,20 +349,18 @@ pub fn preview_sql(
 
 /// `None` where no command reads a hundred rows: a Redis `SCAN` has no limit.
 pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> Option<String> {
-    Some(match engine {
-        Engine::SqlServer => format!(
-            "SELECT TOP 100 * FROM {}",
-            engine.qualified(schema, relation)
-        ),
-        Engine::MongoDb => mql::browse::find_preview(relation, "", Some(100), 0),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake => preview_sql(engine, schema, relation, "", Some(100), 0),
-        Engine::Redis => return None,
+    Some(match engine.syntax() {
+        Syntax::Sql => {
+            let spec = engine.spec();
+            match spec.sql.select_top {
+                SelectTop::Limit => sql_preview(spec, schema, relation, "", Some(100), 0),
+                SelectTop::Top => {
+                    format!("SELECT TOP 100 * FROM {}", spec.qualified(schema, relation))
+                }
+            }
+        }
+        Syntax::Mongo => mql::browse::find_preview(relation, "", Some(100), 0),
+        Syntax::Redis => return None,
     })
 }
 
@@ -358,14 +372,16 @@ pub fn drop_sql(
     relation: &str,
     kind: RelationKind,
 ) -> Option<String> {
-    let keyword = match (engine, kind) {
-        (Engine::MongoDb, _) => return Some(format!("{}.drop()", mql::browse::handle(relation))),
-        (Engine::Redis, _) => return None,
-        (_, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
-        (_, RelationKind::View) => "VIEW",
-        (_, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
-        (Engine::Snowflake, RelationKind::ForeignTable) => "EXTERNAL TABLE",
-        (_, RelationKind::ForeignTable) => "FOREIGN TABLE",
+    let keyword = match (engine.syntax(), kind) {
+        (Syntax::Mongo, _) => return Some(format!("{}.drop()", mql::browse::handle(relation))),
+        (Syntax::Redis, _) => return None,
+        (Syntax::Sql, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
+        (Syntax::Sql, RelationKind::View) => "VIEW",
+        (Syntax::Sql, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
+        (Syntax::Sql, RelationKind::ForeignTable) => match engine.spec().sql.foreign_table {
+            ForeignTable::Foreign => "FOREIGN TABLE",
+            ForeignTable::External => "EXTERNAL TABLE",
+        },
     };
     Some(format!(
         "DROP {keyword} {};",
@@ -375,17 +391,13 @@ pub fn drop_sql(
 
 pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     let qualified = engine.qualified(schema, relation);
-    match engine {
-        Engine::MongoDb => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
-        Engine::Redis => "FLUSHDB".into(),
-        // SQLite has no TRUNCATE.
-        Engine::Sqlite | Engine::Turso => format!("DELETE FROM {qualified};"),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => format!("TRUNCATE TABLE {qualified};"),
+    match engine.syntax() {
+        Syntax::Sql => match engine.spec().sql.truncate {
+            Truncate::Truncate => format!("TRUNCATE TABLE {qualified};"),
+            Truncate::DeleteFrom => format!("DELETE FROM {qualified};"),
+        },
+        Syntax::Mongo => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
+        Syntax::Redis => "FLUSHDB".into(),
     }
 }
 
@@ -409,7 +421,7 @@ pub fn open_row_sql<'a>(
 pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
     format!(
         "SELECT 1{} LIMIT 1",
-        from_where(engine, schema, relation, filter)
+        from_where(&engine.qualified(schema, relation), filter)
     )
 }
 
@@ -417,14 +429,17 @@ pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 /// Count. Never run unasked: on a large table it is a full scan.
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
     match engine.syntax() {
-        Syntax::Mongo => return mql::browse::count_documents(relation, filter),
-        Syntax::Redis => return redis_cmd::browse::count(filter),
-        Syntax::Sql => {}
+        Syntax::Sql => sql_count(engine.spec(), schema, relation, filter),
+        Syntax::Mongo => mql::browse::count_documents(relation, filter),
+        Syntax::Redis => redis_cmd::browse::count(filter),
     }
+}
+
+pub(crate) fn sql_count(spec: &EngineSpec, schema: &str, relation: &str, filter: &str) -> String {
     format!(
         "SELECT {}{}",
-        engine.count_all(),
-        from_where(engine, schema, relation, filter)
+        spec.sql.count_all.aggregate(),
+        from_where(&spec.qualified(schema, relation), filter)
     )
 }
 
@@ -432,8 +447,8 @@ pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 /// place that knows where the clause goes. `sql::with_order_by` anchors on the
 /// `limit` node, so the sort still lands after the filter without knowing a
 /// filter exists.
-fn from_where(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
-    let mut sql = format!(" FROM {}", engine.qualified(schema, relation));
+fn from_where(qualified: &str, filter: &str) -> String {
+    let mut sql = format!(" FROM {qualified}");
     let filter = filter.trim();
     if !filter.is_empty() {
         sql.push_str(&format!(" WHERE {filter}"));

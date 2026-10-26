@@ -133,7 +133,6 @@ impl Hints {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
 pub struct SqlSpec {
     pub identifier_quote: IdentifierQuote,
     /// Whether a backslash in a single-quoted literal escapes the character
@@ -279,6 +278,7 @@ pub enum SelectTop {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Truncate {
     Truncate,
+    /// SQLite has no `TRUNCATE`.
     DeleteFrom,
 }
 
@@ -294,6 +294,15 @@ pub enum CountAll {
     /// T-SQL's `COUNT` is an `int` and fails past 2,147,483,647 rows; every
     /// other engine's is already 64-bit.
     CountBig,
+}
+
+impl CountAll {
+    pub fn aggregate(self) -> &'static str {
+        match self {
+            Self::Count => "COUNT(*)",
+            Self::CountBig => "COUNT_BIG(*)",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

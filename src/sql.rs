@@ -32,8 +32,8 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
-    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Params,
-    ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain,
+    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
+    Params, ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -338,7 +338,16 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
     Some(splice(sql, &tree, insert_at..insert_at, &clause))
 }
 
-/// A generated preview's page, spelled the way `engine` reads one.
+/// [`sql_paged`] for `engine`. A MongoDB or Redis preview comes back as it
+/// is.
+pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_paged(engine.spec(), statement, key),
+        Syntax::Mongo | Syntax::Redis => Some(statement.to_string()),
+    }
+}
+
+/// A generated preview's page, spelled the way `spec` reads one.
 ///
 /// Every engine but SQL Server takes the `LIMIT … OFFSET …` a preview is
 /// generated with. T-SQL has no `LIMIT`, and the grammar the gates parse with
@@ -354,8 +363,8 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
 /// preview with no limit is one page already, and comes back as it is.
 ///
 /// `None` for a statement this cannot read, or whose limit it cannot.
-pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
-    if engine != Engine::SqlServer {
+pub(crate) fn sql_paged(spec: &EngineSpec, statement: &str, key: &[String]) -> Option<String> {
+    if spec.sql.paging == Paging::LimitOffset {
         return Some(statement.to_string());
     }
     let tree = parse(statement)?;
@@ -379,7 +388,7 @@ pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> 
         None => {
             key.iter()
                 .fold("ORDER BY (SELECT NULL)".to_string(), |order, column| {
-                    format!("{order}, {}", engine.quote_identifier(column))
+                    format!("{order}, {}", spec.quote_identifier(column))
                 })
                 + " "
         }

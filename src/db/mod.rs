@@ -39,10 +39,10 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-use spec::{CountAll, Paging, ReadOnlySession};
+use spec::ReadOnlySession;
 pub use spec::{
-    EngineSpec, ExplainPrefix, FormatDialect, Params, ParserDialect, RegexMatch, SkipDuplicates,
-    StatementSplit, SubstringMatch, TypedExplain,
+    EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
+    RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
 };
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
@@ -533,13 +533,11 @@ impl Engine {
     }
 
     /// The aggregate a relation's row count is written with.
+    #[cfg(test)]
     pub fn count_all(self) -> &'static str {
         // MongoDB and Redis write no SQL, so their spec's answer is never
         // what their count runs.
-        match self.spec().sql.count_all {
-            CountAll::Count => "COUNT(*)",
-            CountAll::CountBig => "COUNT_BIG(*)",
-        }
+        self.spec().sql.count_all.aggregate()
     }
 
     /// Whether the server holds a Read-only session to reads -- the backstop
