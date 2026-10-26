@@ -41,6 +41,17 @@ Decided, and not to be re-litigated:
   `explorer::truncate_sql`, and `Connection::ddl` where an engine assembles
   its DDL rather than asking the server for it) quotes through `Engine` too,
   though none of it is ever run.
+- **An engine is one `EngineSpec` in `src/db/spec.rs`, and `Engine::spec()` is
+  the only per-variant match.** A SQL engine's `SqlSpec` is `SqlSpec::ANSI`
+  plus overrides, so a field it leaves alone is the shared behaviour and the
+  writers in `sql.rs`, `filter.rs` and `explorer.rs` read the spec, not the
+  engine. Its `Abilities` start from `Abilities::NONE`, the read-only tier, and
+  switch on only what the engine does. The one hook, `Hooks::quote_value`,
+  covers a literal that depends on the column's type (SQL Server) and returns
+  `None` to fall back to `quote_literal`. A spec field is a bool, a strategy
+  enum or a list of names DBDelve's own code reads, never SQL text. Per-engine
+  snapshots in `src/sql_snapshots` hold the generated text, and
+  `fake_spec.rs` shows a spec nobody wrote an arm for generating SQL.
 - **A relation tab's row number is the catalog's, never a count run unasked.**
   An unfiltered tab shows the row estimate that rides along with the explorer's
   sizes (Postgres `reltuples`, MySQL `TABLE_ROWS`, SQL Server

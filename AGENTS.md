@@ -81,10 +81,11 @@ require it, stop and raise it instead.
    DBDelve writes SQL and has to spell it the way the server will read it. It
    holds no connection. Views and workspace code _ask_ it, through its
    methods, and never match on it. Where an engine question is missing, add a
-   method to `Engine` rather than a `match` at the caller. The SQL writers in
-   `sql.rs` and `filter.rs`, `explorer.rs`'s generators, the code that builds
-   a `ConnectionConfig`, and `import::already_have`'s MariaDB-is-MySQL check
-   are the only places above `src/db/` that match on it.
+   method to `Engine` rather than a `match` at the caller. `sql.rs`,
+   `filter.rs` and `explorer.rs` branch on `Engine::syntax()` and read the
+   engine's `EngineSpec`; they never name an engine. The only places above
+   `src/db/` that do are the code that builds or persists a `ConnectionConfig`,
+   the importers, and the few file-opening and `PG*` connect paths.
 
 5. **Blank passwords are valid.** Never warn about them. Usernames containing `@`
    must work. Both are required by cloud IAM auth and both are commonly broken.
