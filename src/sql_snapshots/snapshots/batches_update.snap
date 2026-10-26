@@ -199,17 +199,13 @@ source: src/sql_snapshots.rs
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] two rows
-  |BEGIN;|
   |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
   |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '8';|
-  |COMMIT;|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] composite keys
-  |BEGIN;|
   |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''';|
   |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '8' AND `Region` = 'us';|
-  |COMMIT;|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] default
@@ -239,17 +235,13 @@ source: src/sql_snapshots.rs
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] alter update, two rows
-  |BEGIN;|
   |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '7' AND `Region` IS NULL SETTINGS mutations_sync = 2;|
   |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '8' SETTINGS mutations_sync = 2;|
-  |COMMIT;|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] both spellings
-  |BEGIN;|
   |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
   |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '8' AND `Region` IS NULL SETTINGS mutations_sync = 2;|
-  |COMMIT;|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] delete, null terms

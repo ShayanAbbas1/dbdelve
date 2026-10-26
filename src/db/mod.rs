@@ -3384,25 +3384,26 @@ mod tests {
 
     #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
-        // ClickHouse takes no insert until its write gate exists; Task 3.5
-        // lifts the exception.
         for engine in Engine::ALL {
-            assert_eq!(
-                engine.takes_inserts(RelationKind::Table),
-                engine != Engine::ClickHouse,
-                "{engine:?}"
-            );
+            assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
             assert_eq!(
                 engine.takes_inserts(RelationKind::View),
-                !matches!(engine, Engine::MongoDb | Engine::ClickHouse),
+                engine != Engine::MongoDb,
                 "{engine:?}"
             );
             assert_eq!(
                 engine.takes_imports(RelationKind::Table),
-                !matches!(engine, Engine::Redis | Engine::ClickHouse),
+                engine != Engine::Redis,
                 "{engine:?}"
             );
         }
+    }
+
+    #[test]
+    fn clickhouse_brackets_no_batch_and_says_why_an_import_has_no_transaction() {
+        let spec = Engine::ClickHouse.spec();
+        assert_eq!(spec.sql.transaction_opening(), None);
+        assert!(spec.abilities.chunk_refusal.is_some());
     }
 
     #[test]

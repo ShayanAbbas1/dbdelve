@@ -4743,6 +4743,229 @@ mod live {
         ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
     }
 
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_new_row_lands_each_gallery_type_through_a_quoted_literal() {
+        let connection = live();
+        let table = format!("edit_gallery_{}", marker());
+        ran(
+            &connection,
+            &format!("CREATE TABLE dbdelve_dev.{table} AS dbdelve_dev.type_gallery"),
+        );
+        let seeded = ran(
+            &connection,
+            "SELECT * FROM dbdelve_dev.type_gallery WHERE id = 1",
+        );
+        let types: Vec<(String, String)> = connection
+            .structure("dbdelve_dev", &table)
+            .unwrap()
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), column.data_type.clone()))
+            .collect();
+        // Landing is checked by reading each column back as the grid shows it.
+        let mut refused: Vec<String> = Vec::new();
+        for (at, column) in seeded.columns.iter().enumerate().skip(1) {
+            let value = seeded.rows[0].get(at);
+            let insert = crate::sql::insert_row(
+                Engine::ClickHouse,
+                "dbdelve_dev",
+                &table,
+                &[("id", Some("1")), (column.name.as_str(), value)],
+                &types,
+            )
+            .unwrap();
+            if !crate::sql::is_generated_write_on(Engine::ClickHouse, &insert) {
+                refused.push(column.name.clone());
+                continue;
+            }
+            match written(&connection, &insert) {
+                Err(_) => refused.push(column.name.clone()),
+                Ok(_) => {
+                    let back = ran(
+                        &connection,
+                        &format!(
+                            "SELECT `{0}` FROM dbdelve_dev.{table} WHERE id = 1",
+                            column.name
+                        ),
+                    );
+                    if back.rows[0].get(0) != value {
+                        refused.push(column.name.clone());
+                    }
+                }
+            }
+            ran(&connection, &format!("TRUNCATE TABLE dbdelve_dev.{table}"));
+        }
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+        // A NUL the gate refuses, Nested's dotted subcolumns it cannot name, a
+        // state the server cannot parse from text, and two types whose text
+        // reads back escaped once more (backslashes inside a Variant or JSON).
+        assert_eq!(
+            refused,
+            ["fixed", "nested.k", "nested.v", "variant", "doc", "state"]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_imported_rows_land_in_one_insert() {
+        use crate::import_rows::Value;
+        let connection = live();
+        let table = scratch(
+            &connection,
+            "id UInt32, label String, flag Bool, day Date",
+            "",
+            "(0, 'zero', false, '2000-01-01')",
+        );
+        let (one, two, quoted, yes, no, day) = (
+            Value::Number("1".into()),
+            Value::Number("2".into()),
+            Value::Text("it's \\ here".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Text("2024-01-02".into()),
+        );
+        let columns = [
+            ("id", "UInt32"),
+            ("label", "String"),
+            ("flag", "Bool"),
+            ("day", "Date"),
+        ];
+        let insert = crate::sql::insert_rows(
+            Engine::ClickHouse,
+            "dbdelve_dev",
+            &table,
+            &columns,
+            &[
+                vec![Some(&one), Some(&quoted), Some(&yes), Some(&day)],
+                vec![Some(&two), Some(&Value::Null), Some(&no), Some(&day)],
+            ],
+            false,
+        )
+        .unwrap();
+        assert!(crate::sql::is_generated_write_on(
+            Engine::ClickHouse,
+            &insert
+        ));
+        written(&connection, &insert).unwrap_or_else(|error| panic!("{insert}: {error}"));
+        assert_eq!(
+            cells(&ran(
+                &connection,
+                &format!("SELECT id, label, flag, day FROM dbdelve_dev.{table} ORDER BY id")
+            )),
+            [
+                ["0", "zero", "false", "2000-01-01"].map(|cell| Some(cell.to_string())),
+                ["1", "it's \\ here", "true", "2024-01-02"].map(|cell| Some(cell.to_string())),
+                ["2", "", "false", "2024-01-02"].map(|cell| Some(cell.to_string())),
+            ]
+        );
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_row_with_every_awkward_value_is_edited_and_deleted_by_its_values() {
+        let connection = live();
+        for settings in [BLOCKS, ""] {
+            let table = format!("edit_awkward_{}", marker());
+            ran(
+                &connection,
+                &format!(
+                    "CREATE TABLE dbdelve_dev.{table} (id UInt32, label String, \
+                     ns Nullable(String), f Float64, d DateTime64(6, 'UTC'), \
+                     arr Array(String), m Map(String, UInt8)) \
+                     ENGINE = MergeTree ORDER BY id{settings}"
+                ),
+            );
+            ran(
+                &connection,
+                &format!(
+                    "INSERT INTO dbdelve_dev.{table} VALUES \
+                     (1, 'one', NULL, nan, '2024-01-02 03:04:05.123456', ['a\\'b', ''], {{'k': 1}}), \
+                     (2, 'two', 'x', 1.5, '2024-01-02 03:04:05.000001', [], {{}})"
+                ),
+            );
+            let read = previewed(&connection, &table);
+            let update = relabel(&table, &read, "1", "uno");
+            written(&connection, &update).unwrap_or_else(|error| panic!("{update}: {error}"));
+            assert_eq!(labels(&connection, &table), "uno\ntwo");
+            let delete = format!(
+                "DELETE FROM `dbdelve_dev`.`{table}` WHERE {}",
+                named(&previewed(&connection, &table), "1")
+            );
+            written(&connection, &delete).unwrap_or_else(|error| panic!("{delete}: {error}"));
+            assert_eq!(labels(&connection, &table), "two");
+            ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_sorting_key_and_a_partition_key_column_cannot_be_edited() {
+        let connection = live();
+        let table = format!("edit_keys_{}", marker());
+        ran(
+            &connection,
+            &format!(
+                "CREATE TABLE dbdelve_dev.{table} (id UInt32, part UInt8, label String) \
+                 ENGINE = MergeTree PARTITION BY part ORDER BY id"
+            ),
+        );
+        ran(
+            &connection,
+            &format!("INSERT INTO dbdelve_dev.{table} VALUES (1, 1, 'one')"),
+        );
+        let target = previewed(&connection, &table).edit.unwrap();
+        assert_eq!(
+            target.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![0, 1] }
+        );
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_user_without_the_privilege_is_refused_after_the_guard_and_nothing_is_written() {
+        let owner = live();
+        for settings in [BLOCKS, ""] {
+            let table = scratch(
+                &owner,
+                "id UInt32, label String",
+                settings,
+                "(1, 'one'), (2, 'two')",
+            );
+            // The reader holds no ALTER grant, and the mutation's own setting
+            // is what `readonly` refuses first.
+            for (user, refusal) in [
+                ("dbdelve_noalter", "ACCESS_DENIED"),
+                (
+                    "dbdelve_reader",
+                    if settings.is_empty() {
+                        "READONLY"
+                    } else {
+                        "ACCESS_DENIED"
+                    },
+                ),
+            ] {
+                let connection = Connection::open(&ServerConfig {
+                    user: user.into(),
+                    ..live_config()
+                })
+                .unwrap();
+                let read = previewed(&connection, &table);
+                let update = relabel(&table, &read, "1", "denied");
+                let error = written(&connection, &update).unwrap_err();
+                assert!(
+                    error.message.contains(refusal),
+                    "{user} {settings:?}: {}",
+                    error.message
+                );
+            }
+            assert_eq!(labels(&owner, &table), "one\ntwo");
+            ran(&owner, &format!("DROP TABLE dbdelve_dev.{table}"));
+        }
+    }
+
     crate::db::conformance::suite!(
         live_conformance,
         "requires the repository development database configured through dbdelve_CLICKHOUSE_URL",
@@ -4756,5 +4979,6 @@ mod live {
         row_limit_stops_an_eligible_read,
         row_limit_drains_an_ineligible_read,
         read_only_session_refuses_a_write,
+        generated_writes_round_trip,
     );
 }

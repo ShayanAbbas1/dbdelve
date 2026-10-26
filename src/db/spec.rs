@@ -1192,14 +1192,19 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         regex: RegexMatch::Match,
         substring: SubstringMatch::LikeToString,
         row_terms: true,
+        transactions: false,
         // No Explain yet, and no `skip_duplicates`: there is no clause that
         // skips a row on a key, because there is no unique key.
         ..SqlSpec::ANSI
     },
-    // Edits arrive with the write gate that can name a row.
     abilities: Abilities {
+        edits: true,
+        inserts: true,
+        inserts_into_views: true,
+        imports: true,
         copies_ddl: true,
         switches_database: true,
+        chunk_refusal: Some("ClickHouse has no transaction, so each chunk is kept as it lands."),
         ..Abilities::NONE
     },
     hooks: Hooks {
