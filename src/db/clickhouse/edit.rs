@@ -305,6 +305,26 @@ pub(super) fn explained(error: DbError) -> DbError {
     }
 }
 
+pub(super) const LIGHTWEIGHT_UPDATE_HINT: &str = "ALTER TABLE ... UPDATE ... WHERE ... SETTINGS \
+     mutations_sync = 2 changes the rows of a table without the block columns.";
+
+/// The server's refusal of a typed lightweight `UPDATE` on a table that lacks
+/// the block columns, with its words kept and one line added. The error's code
+/// (48) is gone from the message by now, so it is read by its name beside the
+/// wording that says which refusal it is. The statement is never rewritten.
+pub(super) fn hinted(error: DbError) -> DbError {
+    let message = &error.message;
+    if !message.contains("(NOT_IMPLEMENTED)")
+        || !message.contains("Lightweight updates are not supported")
+    {
+        return error;
+    }
+    DbError {
+        message: format!("{message}\n{LIGHTWEIGHT_UPDATE_HINT}"),
+        ..error
+    }
+}
+
 /// What the review of a batch of generated writes tells the user beyond the
 /// statements themselves.
 pub(in crate::db) fn review_notes(sql: &str) -> Vec<String> {
@@ -1176,6 +1196,31 @@ mod tests {
             }
         }
         assert!(!Engine::ClickHouse.review_notes(UPDATE).is_empty());
+    }
+
+    #[test]
+    fn a_refused_lightweight_update_keeps_the_servers_words_and_gains_one_line() {
+        let refused = plain_error(
+            "Lightweight updates are not supported. Lightweight updates are supported only for \
+             tables with materialized _block_number column. Run 'MODIFY SETTING \
+             enable_block_number_column = 1' command to enable it. (NOT_IMPLEMENTED)"
+                .into(),
+        );
+        let hinted = hinted(refused.clone());
+        assert_eq!(
+            hinted.message,
+            format!("{}\n{LIGHTWEIGHT_UPDATE_HINT}", refused.message)
+        );
+        assert!(hinted.message.starts_with(&refused.message));
+
+        for other in [
+            "Cannot modify 'mutations_sync' setting in readonly mode. (READONLY)",
+            "Method read is not supported by storage Memory. (NOT_IMPLEMENTED)",
+            "Lightweight updates are not supported. (BAD_ARGUMENTS)",
+        ] {
+            let error = plain_error(other.into());
+            assert_eq!(super::hinted(error.clone()), error, "{other}");
+        }
     }
 
     #[test]

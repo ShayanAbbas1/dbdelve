@@ -26,7 +26,7 @@ use ureq::{Agent, Body, Timeout};
 
 use self::edit::{
     DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Stage, Table,
-    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted,
+    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted,
 };
 pub(super) use self::edit::{match_value, review_notes};
 use self::http::{Bounds, Scheme, Stop, Watch};
@@ -395,7 +395,7 @@ impl Connection {
         self.forget_if_changing(sql);
         let result = self.request(sql, Kind::User, cancel, fetch);
         self.forget_if_changing(sql);
-        result
+        result.map_err(hinted)
     }
 
     /// A preview of a table also says whether its rows can be written back, or
@@ -4668,6 +4668,42 @@ mod live {
             ),
         );
         assert_eq!(update(&connection), Update);
+        ran(&connection, &format!("DROP TABLE {name}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_typed_update_the_server_refuses_gains_the_alter_hint() {
+        let connection = live();
+        let name = format!("dbdelve_dev.typed_update_{}", marker());
+        ran(
+            &connection,
+            &format!("CREATE TABLE {name} (id UInt32, v String) ENGINE = MergeTree ORDER BY id"),
+        );
+        ran(&connection, &format!("INSERT INTO {name} VALUES (1, 'a')"));
+        let typed = format!("UPDATE {name} SET v = 'b' WHERE id = 1");
+        let error = run(&connection, &typed).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("Lightweight updates are not supported"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("(NOT_IMPLEMENTED)"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.ends_with(edit::LIGHTWEIGHT_UPDATE_HINT),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            text(&ran(&connection, &format!("SELECT v FROM {name}"))),
+            "a"
+        );
         ran(&connection, &format!("DROP TABLE {name}"));
     }
 
