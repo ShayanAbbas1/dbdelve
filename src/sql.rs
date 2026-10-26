@@ -273,18 +273,11 @@ impl SortKey {
 /// that could carry one and does not; `None` is a statement dbdelve cannot read
 /// well enough to say without guessing.
 pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::order_by(statement),
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::order_by(statement),
         // A reply's order is the command's own; nothing sorts it.
-        Engine::Redis => return None,
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Redis => return None,
+        Syntax::Sql => {}
     }
     let sql = statement;
     let tree = parse(sql)?;
