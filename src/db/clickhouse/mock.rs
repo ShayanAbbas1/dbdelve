@@ -33,6 +33,8 @@ enum Delivery {
     Delayed(Duration),
     Truncated(usize),
     Stalled(usize, Duration),
+    /// No byte at all: the connection is closed once the request is read.
+    Dropped,
 }
 
 /// What a response does when a `KILL` for its query arrives while it waits.
@@ -173,6 +175,16 @@ impl Response {
         Self {
             delivery: Delivery::Delayed(pause),
             ..self
+        }
+    }
+
+    /// The request read and its query registered, then the connection closed
+    /// before any answer, as a proxy that lost the server after forwarding
+    /// the request does.
+    pub fn dropped() -> Self {
+        Self {
+            delivery: Delivery::Dropped,
+            ..Self::empty()
         }
     }
 
@@ -662,6 +674,9 @@ fn write_response(
     let query_id = decision.query_id.as_deref();
     let tag = decision.tag.as_deref();
     let mut aftermath = None;
+    if let Delivery::Dropped = response.delivery {
+        return stream.shutdown(Shutdown::Both);
+    }
     if let Delivery::Delayed(pause) = response.delivery {
         aftermath = wait(pause, response, query_id, state);
     }
@@ -710,7 +725,7 @@ fn write_response(
         return end_killed(stream, aftermath, tag, write, finish);
     }
     match response.delivery {
-        Delivery::Whole | Delivery::Delayed(_) => {
+        Delivery::Whole | Delivery::Delayed(_) | Delivery::Dropped => {
             write(&mut stream, &body)?;
             finish(&mut stream)
         }

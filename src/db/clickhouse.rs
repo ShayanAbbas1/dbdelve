@@ -140,12 +140,15 @@ enum Kind {
     Alongside { read_only: bool },
     /// DBDelve's `KILL` of another request, never stopped or killed itself.
     Kill { within: Duration },
+    /// The `USE` that puts a new session in the profile's database, on the
+    /// session and under the run's Cancel.
+    Enter,
 }
 
 impl Kind {
     fn bounds(self, statement_timeout: u32) -> Bounds {
         match self {
-            Self::Internal => Bounds::internal(),
+            Self::Internal | Self::Enter => Bounds::internal(),
             Self::Kill { within } => Bounds::within(within),
             Self::User | Self::Generated | Self::Alongside { .. } => {
                 Bounds::user(statement_timeout)
@@ -465,6 +468,30 @@ impl Connection {
         let started = Instant::now();
         let mut session = matches!(kind, Kind::User).then(|| lock(&self.session));
         fetch.hold()?;
+        if let Some(session) = session.as_deref_mut() {
+            if session.id.is_none() {
+                *session = Session {
+                    id: Some(random_id()?),
+                    opened: false,
+                    default_timeout: session.default_timeout,
+                };
+            }
+            self.enter(session, cancel)?;
+        }
+        self.send(sql, kind, cancel, fetch, session.as_deref_mut(), started)
+    }
+
+    /// One statement, under `cancel` and its own watch, and on `session` when
+    /// there is one.
+    fn send(
+        &self,
+        sql: &str,
+        kind: Kind,
+        cancel: &CancelToken,
+        fetch: Fetch,
+        mut session: Option<&mut Session>,
+        started: Instant,
+    ) -> Result<QueryResult, Failed> {
         let query_id = random_id()?;
         let read_only = match kind {
             Kind::Alongside { read_only } => read_only,
@@ -476,18 +503,6 @@ impl Connection {
         let _running = Running::register(cancel, &self.running, &query_id, &watch)?;
         let _watching = watch.enter();
         let outcome = loop {
-            if let Some(session) = session.as_deref_mut()
-                && session.id.is_none()
-            {
-                *session = Session {
-                    id: Some(random_id()?),
-                    opened: false,
-                    default_timeout: session.default_timeout,
-                };
-            }
-            if let Some(session) = session.as_deref_mut() {
-                self.enter(session, read_only);
-            }
             let params = self.params(&query_id, session.as_deref(), read_only);
             let response = match self.post(sql, &params, bounds) {
                 Ok(response) => response,
@@ -591,30 +606,30 @@ impl Connection {
     /// first did. A `USE` does, and a later `USE` of the user's is then the
     /// session's own, which a per-request parameter would override.
     ///
-    /// A failure is left to the statement, which still carries the parameter
-    /// until the session is open and fails in the server's words.
-    fn enter(&self, session: &mut Session, read_only: bool) {
+    /// The `USE` is a request of the run's like any other: a Cancel finds and
+    /// stops it, and its failure fails the run before the statement is sent.
+    /// A statement sent anyway would mark the session open while it is still
+    /// in `default`, where every later one would then run.
+    fn enter(&self, session: &mut Session, cancel: &CancelToken) -> Result<(), Failed> {
         let database = self.config.database.trim();
         if session.opened || database.is_empty() {
-            return;
+            return Ok(());
         }
         let sql = format!("USE {}", Engine::ClickHouse.quote_identifier(database));
-        while let Ok(query_id) = random_id() {
-            let params = self.params(&query_id, Some(session), read_only);
-            let Ok(response) = self.post(&sql, &params, Bounds::internal()) else {
-                return;
-            };
-            if !http::failed(response.status().as_u16(), response.headers()) {
-                session.opened = true;
-                return;
-            }
-            match http::exception_code(response.headers()) {
-                Some(INVALID_SESSION_TIMEOUT) if !session.default_timeout => {
-                    session.default_timeout = true;
-                }
-                _ => return,
-            }
+        let entered = self.send(
+            &sql,
+            Kind::Enter,
+            cancel,
+            Fetch::default(),
+            Some(&mut *session),
+            Instant::now(),
+        );
+        // Open from its headers, but in the database only once its body has
+        // ended cleanly.
+        if entered.is_err() {
+            session.opened = false;
         }
+        entered.map(drop)
     }
 
     /// The URL's query: what to answer in, which session, and the settings
@@ -1368,6 +1383,30 @@ mod tests {
     }
 
     #[test]
+    fn a_use_that_fails_fails_the_run_unsent_and_the_next_run_enters_again() {
+        for failure in [Response::text(502, "Bad Gateway"), Response::dropped()] {
+            let mock = Mock::start();
+            let connection = open(&mock);
+            numbers(&mock);
+            mock.on_statement("USE `", [failure, Response::empty()]);
+            assert!(run(&connection, "SELECT n").is_err());
+            assert!(sent(&mock, "SELECT n").is_empty());
+            // Unqualified, so each would run in `default` had the session
+            // been taken as open without its `USE`.
+            run(&connection, "SELECT n").unwrap();
+            run(&connection, "SELECT n").unwrap();
+            let [failed, entered] = sent(&mock, "USE `").try_into().unwrap();
+            assert_eq!(entered.param("session_id"), failed.param("session_id"));
+            assert_eq!(entered.param("session_check"), None);
+            assert_eq!(entered.param("database"), Some("dbdelve_dev"));
+            for request in sent(&mock, "SELECT n") {
+                assert_eq!(request.param("session_id"), entered.param("session_id"));
+                assert_eq!(request.param("session_check"), Some("1"));
+            }
+        }
+    }
+
+    #[test]
     fn a_session_timeout_over_the_servers_ceiling_is_dropped_and_the_open_sent_again() {
         let mock = Mock::start();
         mock.max_session_timeout(60);
@@ -1725,6 +1764,32 @@ mod tests {
             assert_eq!(kill.param("session_id"), None);
             assert!(kill.statement.ends_with("' SYNC"), "{}", kill.statement);
         }
+    }
+
+    #[test]
+    fn a_cancel_while_the_session_enters_its_database_never_sends_the_statement() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.registration(Registration::Signal);
+        mock.on_statement("USE `", [sleeping()]);
+        mock.on_statement("INSERT", [Response::empty()]);
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running = scope
+                .spawn(|| connection.query("INSERT INTO t VALUES (1)", &cancel, Fetch::default()));
+            until("the USE", || mock.hits("USE `") == 1);
+            let started = Instant::now();
+            assert_eq!(connection.cancel(&cancel).unwrap_err().message, UNREACHED);
+            assert_eq!(running.join().unwrap().unwrap_err().message, CANCELLED);
+            assert!(started.elapsed() < KILL_WITHIN + Duration::from_secs(1));
+        });
+        assert_eq!(mock.hits("INSERT"), 0);
+        let entering = sent(&mock, "USE `")[0].query_id().unwrap().to_string();
+        assert!(kills(&mock).len() > 2);
+        for kill in kills(&mock) {
+            assert!(kill.statement.contains(&entering), "{}", kill.statement);
+        }
+        assert!(!lock(&connection.session).opened);
     }
 
     #[test]
