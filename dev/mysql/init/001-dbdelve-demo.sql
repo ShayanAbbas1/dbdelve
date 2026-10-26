@@ -274,7 +274,7 @@ CREATE TABLE conformance (
     day DATE,
     moment DATETIME,
     bytes VARBINARY(16)
-);
+) DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO conformance (id, label, whole, fraction, ratio, flag, day, moment, bytes) VALUES
     (1, 'alpha', 9007199254740993, 12.50, 0.5, TRUE, '2024-02-29', '2024-02-29 12:34:56', 0x00FF),
