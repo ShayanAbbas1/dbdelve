@@ -398,7 +398,14 @@ fn ssl(
     let handler = configuration["handlers"].as_object().and_then(|handlers| {
         handlers
             .iter()
-            .find(|(id, handler)| id.ends_with("_ssl") && enabled(handler))
+            .find(|(id, handler)| {
+                let ssl_tab = if clickhouse {
+                    id.as_str() == "clickhouse-ssl"
+                } else {
+                    id.ends_with("_ssl")
+                };
+                ssl_tab && enabled(handler)
+            })
             .map(|(_, handler)| &handler["properties"])
     });
     let tab = |key: &str| handler.and_then(|properties| text(properties.get(key)));
@@ -442,45 +449,54 @@ fn ssl(
     let is = |value: Option<String>, expected: &str| {
         value.is_some_and(|value| value.eq_ignore_ascii_case(expected))
     };
-    // ClickHouse's JDBC driver spells `sslmode` as strict or none, which are
-    // not libpq's words, and turns TLS on with `ssl`.
-    let sslmode =
-        if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode").filter(|_| !clickhouse)) {
-            named_mode(&mode).unwrap_or_else(|| {
-                notes.push(format!(
-                    "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
-                ));
-                SslMode::VerifyFull
-            })
-        } else if is(tab("ssl.verify.server"), "true") {
-            SslMode::VerifyCa
-        } else if is(tab("ssl.require"), "true") {
-            SslMode::Require
-        } else if clickhouse {
-            // Without `ssl` the driver speaks plain HTTP; with it, `sslmode` is
-            // strict unless it says none.
-            if !is(driver("ssl"), "true") {
-                SslMode::Disable
-            } else if is(driver("sslmode"), "none") {
-                SslMode::Require
-            } else {
-                SslMode::VerifyFull
-            }
-        } else if microsoft {
-            // mssql-jdbc has encrypted and checked the certificate unless told
-            // otherwise since 10.2, so silence is verify-full, not prefer.
-            if is(driver("encrypt"), "false") || is(driver("encrypt"), "optional") {
-                SslMode::Disable
-            } else if is(driver("trustServerCertificate"), "true") {
-                SslMode::Require
-            } else {
-                SslMode::VerifyFull
-            }
-        } else if handler.is_some() {
-            SslMode::Prefer
+    let sslmode = if clickhouse {
+        // The tab's id is `clickhouse-ssl`, and enabling it sets the driver's
+        // `ssl`. Its `ssl.mode` is strict or none, which are not libpq's words;
+        // without one the tab defaults to strict.
+        if handler.is_none() && !is(driver("ssl"), "true") {
+            SslMode::Disable
         } else {
-            return None;
-        };
+            match tab("ssl.mode")
+                .or_else(|| driver("sslmode"))
+                .map(|mode| mode.to_ascii_lowercase())
+                .as_deref()
+            {
+                None | Some("strict") => SslMode::VerifyFull,
+                Some("none") => SslMode::Require,
+                Some(mode) => {
+                    notes.push(format!(
+                        "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
+                    ));
+                    SslMode::VerifyFull
+                }
+            }
+        }
+    } else if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode")) {
+        named_mode(&mode).unwrap_or_else(|| {
+            notes.push(format!(
+                "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
+            ));
+            SslMode::VerifyFull
+        })
+    } else if is(tab("ssl.verify.server"), "true") {
+        SslMode::VerifyCa
+    } else if is(tab("ssl.require"), "true") {
+        SslMode::Require
+    } else if microsoft {
+        // mssql-jdbc has encrypted and checked the certificate unless told
+        // otherwise since 10.2, so silence is verify-full, not prefer.
+        if is(driver("encrypt"), "false") || is(driver("encrypt"), "optional") {
+            SslMode::Disable
+        } else if is(driver("trustServerCertificate"), "true") {
+            SslMode::Require
+        } else {
+            SslMode::VerifyFull
+        }
+    } else if handler.is_some() {
+        SslMode::Prefer
+    } else {
+        return None;
+    };
     Some((
         sslmode,
         tab("ssl.ca.cert").or_else(|| driver("sslrootcert")),
@@ -1066,6 +1082,63 @@ mod tests {
             tls("8443", json!({ "ssl": "true", "ssl_mode": "x" })).3,
             ["driver property ssl_mode left off".to_string()]
         );
+    }
+
+    #[test]
+    fn clickhouses_ssl_tab_means_tls_and_never_less_than_it_said() {
+        let tab = |enabled: bool, properties: Value, driver: Value| {
+            let mut configuration = manual("ch.example.com", "8443", "app");
+            configuration["properties"] = driver;
+            configuration["handlers"] =
+                json!({ "clickhouse-ssl": { "enabled": enabled, "properties": properties } });
+            let imported = imported(
+                connection("clickhouse", "com_clickhouse", configuration),
+                None,
+            )
+            .unwrap();
+            (
+                server(&imported).sslmode,
+                server(&imported).root_certificate.clone(),
+                imported.notes,
+            )
+        };
+        use SslMode::*;
+
+        assert_eq!(
+            tab(
+                true,
+                json!({ "ssl.mode": "STRICT", "ssl.ca.cert": "/certs/ca.pem" }),
+                json!({})
+            ),
+            (VerifyFull, Some("/certs/ca.pem".into()), vec![])
+        );
+        assert_eq!(
+            tab(true, json!({ "ssl.mode": "NONE" }), json!({})),
+            (Require, None, vec![])
+        );
+        assert_eq!(tab(true, json!({}), json!({})), (VerifyFull, None, vec![]));
+        assert_eq!(
+            tab(
+                true,
+                json!({ "ssl.mode": "NONE" }),
+                json!({ "ssl": "false" })
+            )
+            .0,
+            Require
+        );
+        assert_eq!(
+            tab(false, json!({ "ssl.mode": "STRICT" }), json!({})),
+            (Disable, None, vec![])
+        );
+        let unknown = tab(true, json!({ "ssl.mode": "PINNED" }), json!({}));
+        assert_eq!(unknown.0, VerifyFull);
+        assert_eq!(unknown.2.len(), 1);
+        let client = tab(
+            true,
+            json!({ "ssl.client.cert": "/c.pem", "ssl.mode": "STRICT" }),
+            json!({}),
+        );
+        assert!(client.2[0].contains("client certificate"));
     }
 
     #[test]
