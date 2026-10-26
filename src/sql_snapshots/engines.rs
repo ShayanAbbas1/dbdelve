@@ -204,6 +204,8 @@ fn engine_answers_per_engine() {
             "SNOWFLAKE",
             "SNOWFLAKE_SAMPLE_DATA",
             "main",
+            "snowflake",
+            "MYSQL",
         ] {
             answer(
                 &mut out,
@@ -265,6 +267,10 @@ fn engine_answers_per_engine() {
             Some("AS ([a]+(1))"),
             Some("nextval('s'::regclass)"),
             Some("((getdate()))"),
+            Some("GENERATED ALWAYS AS IDENTITY"),
+            Some("AUTO_INCREMENTS"),
+            Some("auto_increment"),
+            Some("generated always as (a)"),
         ] {
             answer(
                 &mut out,
