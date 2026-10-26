@@ -1116,8 +1116,6 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
 /// is a conjunction of one-row terms. `None` for anything else, and for a count
 /// [`is_generated_select`] does not admit: a caller that gets no guard runs
 /// nothing.
-// Unread until `generated()` guards each write.
-#[allow(dead_code)]
 pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
     if engine.syntax() != Syntax::Sql {
         return None;

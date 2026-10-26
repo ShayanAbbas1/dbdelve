@@ -15,6 +15,7 @@ mod tsv;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -25,17 +26,19 @@ use ureq::{Agent, Body, Timeout};
 
 pub(super) use self::edit::match_value;
 use self::edit::{
-    DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Table, TableFacts,
+    DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Table,
+    TableFacts, UNCOUNTED, Write, count_refusal, halted,
 };
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
-    QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_structure, plain_error, required_cell, terminated,
+    QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, UpdateSpelling,
+    assemble_catalog, assemble_databases, assemble_structure, plain_error, required_cell,
+    terminated,
 };
-use crate::sql::{Projected, table_read};
+use crate::sql::{Projected, queued_statements, row_guard, table_read};
 use crate::tls::SslMode;
 
 /// The HTTP interface's plaintext port; its TLS one is 8443.
@@ -386,18 +389,88 @@ impl Connection {
     }
 
     /// A preview of a table also says whether its rows can be written back, or
-    /// why not; see [`Self::edit_of`].
+    /// why not; see [`Self::edit_of`]. A submission of more than one
+    /// statement, or of a write that names rows, goes out as [`Self::writes`].
     pub fn generated(
         &self,
         sql: &str,
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
+        let statements = queued_statements(Engine::ClickHouse, sql, None);
+        if statements.len() > 1 || statements.iter().any(|at| guarded(&sql[at.clone()])) {
+            return self.writes(sql, &statements, cancel);
+        }
         let mut result = self.request(sql, Kind::Generated, cancel, fetch)?;
         if let Some((schema, table)) = preview_of(sql) {
             (result.edit, result.read_only_reason) = self.edit_of(&schema, &table, &result.columns);
         }
         Ok(result)
+    }
+
+    /// Each statement in turn, one per request as the HTTP interface takes
+    /// them, stopping at the first that is refused or fails. ClickHouse has no
+    /// transaction, so the ones before it stay, and the error says so.
+    fn writes(
+        &self,
+        sql: &str,
+        statements: &[Range<usize>],
+        cancel: &CancelToken,
+    ) -> Result<QueryResult, DbError> {
+        let started = Instant::now();
+        let mut affected: Option<u64> = None;
+        for (at, range) in statements.iter().enumerate() {
+            let statement = &sql[range.clone()];
+            let ran = match guarded(statement) {
+                true => self.guarded_write(statement, cancel),
+                false => self
+                    .request(statement, Kind::Generated, cancel, Fetch::default())
+                    .map_err(Halt::Failed),
+            };
+            match ran {
+                Ok(result) => {
+                    if let Some(rows) = result.rows_affected {
+                        affected = Some(affected.unwrap_or(0) + rows);
+                    }
+                }
+                Err(halt) => {
+                    return Err(halted(at, statements.len(), halt, statement, range.start));
+                }
+            }
+        }
+        Ok(QueryResult {
+            elapsed: started.elapsed(),
+            rows_affected: affected,
+            ..QueryResult::default()
+        })
+    }
+
+    /// `statement` only once its guard, cut from the same tree the write gate
+    /// reads, counts exactly one row. Between the count and the write another
+    /// client can still add an identical row or change this one; nothing in
+    /// ClickHouse closes that window.
+    fn guarded_write(&self, statement: &str, cancel: &CancelToken) -> Result<QueryResult, Halt> {
+        let uncounted = || Halt::Refused(UNCOUNTED.into());
+        let guard = row_guard(Engine::ClickHouse, statement).ok_or_else(uncounted)?;
+        let (schema, table) = counted_table(&guard).ok_or_else(uncounted)?;
+        if let Some(described) = self.describe(&schema, &table).map_err(Halt::Failed)?
+            && let Some(reason) = described.refuses(write_of(statement))
+        {
+            return Err(Halt::Refused(reason));
+        }
+        let counted = self
+            .request(&guard, Kind::Generated, cancel, Fetch::default())
+            .map_err(Halt::Failed)?;
+        let count = counted
+            .rows
+            .first()
+            .and_then(|row| row.get(0)?.parse::<u64>().ok())
+            .ok_or_else(uncounted)?;
+        if let Some(reason) = count_refusal(count) {
+            return Err(Halt::Refused(reason));
+        }
+        self.request(statement, Kind::Generated, cancel, Fetch::default())
+            .map_err(Halt::Failed)
     }
 
     /// The edit target of a preview's result, or the reason it has none. The
@@ -466,15 +539,7 @@ impl Connection {
     /// first word alone: a statement can be megabytes of `VALUES`, and
     /// parsing it here would delay its send.
     fn forget_if_changing(&self, sql: &str) {
-        let first = sql
-            .trim_start()
-            .split(|c: char| !c.is_ascii_alphabetic())
-            .next()
-            .unwrap_or_default();
-        let reads = [
-            "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "EXISTS",
-        ];
-        if !reads.iter().any(|read| first.eq_ignore_ascii_case(read)) {
+        if !opens_with(sql, &READS) {
             lock(&self.described).clear();
         }
     }
@@ -1031,6 +1096,48 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     }
     sql.push_str(rest);
     sql
+}
+
+/// The first words of the statements that only read.
+const READS: [&str; 7] = [
+    "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "EXISTS",
+];
+
+/// Whether `sql`'s first word is one of `words`, read off that word alone.
+fn opens_with(sql: &str, words: &[&str]) -> bool {
+    let first = sql
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    words.iter().any(|word| first.eq_ignore_ascii_case(word))
+}
+
+/// Whether a generated statement runs only behind a guard: anything but a
+/// read or an `INSERT`, so one this cannot place is refused rather than sent
+/// unguarded.
+fn guarded(statement: &str) -> bool {
+    !opens_with(statement, &READS) && !opens_with(statement, &["INSERT"])
+}
+
+/// What a statement the write gate admitted, and so one of its three
+/// spellings, does.
+fn write_of(statement: &str) -> Write {
+    if opens_with(statement, &["DELETE"]) {
+        Write::Delete
+    } else if opens_with(statement, &["ALTER"]) {
+        Write::Update(UpdateSpelling::AlterUpdate)
+    } else {
+        Write::Update(UpdateSpelling::Update)
+    }
+}
+
+/// The schema and table a guard counts in, which are the write's own.
+fn counted_table(guard: &str) -> Option<(String, String)> {
+    match table_read(Engine::ClickHouse, guard)?.table.as_slice() {
+        [schema, table] => Some((schema.clone(), table.clone())),
+        _ => None,
+    }
 }
 
 /// The schema and table of a `SELECT *` from one table, written with both
@@ -1980,6 +2087,277 @@ mod tests {
         .unwrap();
         preview(&connection, PREVIEW);
         assert_eq!(mock.hits("FROM system.tables"), 2);
+    }
+
+    /// `` `d`.`t` `` described as a MergeTree that takes lightweight updates.
+    fn editable(mock: &Mock) {
+        described(
+            mock,
+            "MergeTree",
+            "MergeTree ORDER BY id SETTINGS enable_block_number_column = 1, \
+             enable_block_offset_column = 1",
+        );
+    }
+
+    fn row(id: &str) -> String {
+        format!("WHERE `id` = '{id}' AND `label` = 'a'")
+    }
+
+    fn update(id: &str) -> String {
+        format!("UPDATE `d`.`t` SET `label` = 'b' {}", row(id))
+    }
+
+    fn guard(id: &str) -> String {
+        format!("SELECT COUNT(*) FROM `d`.`t` {}", row(id))
+    }
+
+    /// The guard of the row `id` names counts `rows`.
+    fn counts(mock: &Mock, id: &str, rows: &str) {
+        mock.on_statement(
+            &guard(id),
+            [Response::rows(&[("COUNT()", "UInt64")], &[&[rows]])],
+        );
+    }
+
+    fn write(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
+        connection.generated(sql, &CancelToken::default(), Fetch::default())
+    }
+
+    #[test]
+    fn a_write_is_sent_only_after_its_guard_counts_one_row_with_its_own_predicate() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        counts(&mock, "1", "1");
+        mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+        write(&connection, &format!("{};", update("1"))).unwrap();
+
+        let sent: Vec<Request> = mock
+            .requests()
+            .into_iter()
+            .filter(|request| request.statement.contains(&row("1")))
+            .collect();
+        let statements: Vec<&str> = sent
+            .iter()
+            .map(|request| request.statement.as_str())
+            .collect();
+        assert_eq!(statements, [guard("1"), update("1")]);
+        assert!(
+            sent.iter()
+                .all(|request| request.param("session_id").is_none())
+        );
+    }
+
+    #[test]
+    fn a_guard_that_counts_no_row_or_two_refuses_the_write_unsent() {
+        for (rows, refusal) in [
+            (
+                "0",
+                "No row has these values any more; it was changed or deleted since it was read.",
+            ),
+            (
+                "2",
+                "2 rows have exactly these values, so DBDelve will not change one of them.",
+            ),
+        ] {
+            let mock = Mock::start();
+            let connection = open(&mock);
+            editable(&mock);
+            counts(&mock, "1", rows);
+            mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+            let error = write(&connection, &update("1")).unwrap_err();
+            assert_eq!(error.message, refusal);
+            assert_eq!(mock.hits(&guard("1")), 1);
+            assert_eq!(mock.hits("UPDATE `d`.`t`"), 0);
+        }
+    }
+
+    #[test]
+    fn a_batch_stops_at_its_first_refusal_and_says_which_edits_stay() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        counts(&mock, "1", "1");
+        counts(&mock, "2", "0");
+        counts(&mock, "3", "1");
+        mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+        let batch = format!("{};\n{};\n{};", update("1"), update("2"), update("3"));
+        let error = write(&connection, &batch).unwrap_err();
+        assert_eq!(
+            error.message,
+            "1 of 3 edits was applied and stays; ClickHouse has no transaction. The second was \
+             refused, and the one after it was not run: No row has these values any more; it was \
+             changed or deleted since it was read."
+        );
+        assert_eq!(mock.hits(&update("1")), 1);
+        assert_eq!(mock.hits(&update("2")), 0);
+        assert_eq!(mock.hits(&guard("3")), 0);
+        assert_eq!(mock.hits(&update("3")), 0);
+    }
+
+    #[test]
+    fn a_write_the_server_refuses_part_way_says_where_and_keeps_its_position() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        counts(&mock, "1", "1");
+        counts(&mock, "2", "1");
+        mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+        mock.on_statement(
+            &update("2"),
+            [Response::error(
+                500,
+                497,
+                "ACCESS_DENIED",
+                "Not enough privileges",
+            )],
+        );
+        let batch = format!("{};\n{};", update("1"), update("2"));
+        let error = write(&connection, &batch).unwrap_err();
+        assert_eq!(
+            error.message,
+            "1 of 2 edits was applied and stays; ClickHouse has no transaction. The second \
+             failed: Not enough privileges (ACCESS_DENIED)"
+        );
+
+        let error = write(&connection, &format!("{};", update("2"))).unwrap_err();
+        assert_eq!(error.message, "Not enough privileges (ACCESS_DENIED)");
+    }
+
+    #[test]
+    fn a_write_with_no_guard_to_count_it_runs_nothing() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        mock.on_statement("`d`.`t`", [Response::empty()]);
+        let before = mock.requests().len();
+        for statement in [
+            "UPDATE `d`.`t` SET `label` = 'b' WHERE `id` > '1'",
+            "UPDATE `d`.`t` SET `label` = 'b' WHERE `id` = '1' OR `id` = '2'",
+            "UPDATE `d`.`t` SET `label` = 'b'",
+            "DELETE FROM `d`.`t` WHERE `id` = '1' AND lower(`label`) = 'a'",
+            "OPTIMIZE TABLE `d`.`t` FINAL",
+            "ALTER TABLE `d`.`t` UPDATE `label` = 'b' WHERE `id` = '1'",
+            "ALTER TABLE `d`.`t` DELETE WHERE `id` = '1' SETTINGS mutations_sync = 2",
+            "TRUNCATE TABLE `d`.`t`",
+        ] {
+            let error = write(&connection, statement).unwrap_err();
+            assert_eq!(error.message, edit::UNCOUNTED, "{statement}");
+        }
+        assert_eq!(mock.requests().len(), before);
+    }
+
+    #[test]
+    fn a_write_the_table_does_not_take_runs_nothing() {
+        let delete = format!("DELETE FROM `d`.`t` {}", row("1"));
+        let alter = format!(
+            "ALTER TABLE `d`.`t` UPDATE `label` = 'b' {} SETTINGS mutations_sync = 2",
+            row("1")
+        );
+        let lightweight = update("1");
+        let cases = [
+            (
+                "MergeTree ORDER BY id",
+                "CREATE TABLE d.t (id UInt32, PROJECTION p (SELECT id GROUP BY id))",
+                delete.as_str(),
+                "This table has projections and its lightweight_mutation_projection_mode is \
+                 throw, so rows cannot be deleted.",
+            ),
+            (
+                "MergeTree ORDER BY id SETTINGS enable_block_number_column = 1, \
+                 enable_block_offset_column = 1",
+                "CREATE TABLE d.t (id UInt32)",
+                alter.as_str(),
+                "This table's settings changed since its rows were read, so the edit was not run.",
+            ),
+            (
+                "MergeTree ORDER BY id",
+                "CREATE TABLE d.t (id UInt32)",
+                lightweight.as_str(),
+                "This table's settings changed since its rows were read, so the edit was not run.",
+            ),
+        ];
+        for (engine_full, create, statement, refusal) in cases {
+            let mock = Mock::start();
+            let connection = open(&mock);
+            described(&mock, "MergeTree", engine_full);
+            mock.on_statement(
+                "FROM system.tables",
+                [Response::rows(
+                    &[
+                        ("engine", "String"),
+                        ("engine_full", "String"),
+                        ("create_table_query", "String"),
+                    ],
+                    &[&["MergeTree", engine_full, create]],
+                )],
+            );
+            mock.on_statement(
+                "FROM system.merge_tree_settings",
+                [Response::rows(
+                    &[("name", "String"), ("value", "String")],
+                    &[
+                        &["server.enable_lightweight_update", "1"],
+                        &["lightweight_mutation_projection_mode", "throw"],
+                    ],
+                )],
+            );
+            counts(&mock, "1", "1");
+            let error = write(&connection, statement).unwrap_err();
+            assert_eq!(error.message, refusal, "{statement}");
+            assert_eq!(mock.hits("COUNT(*)"), 0, "{statement}");
+        }
+
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "Memory", "Memory");
+        let error = write(&connection, &update("1")).unwrap_err();
+        assert_eq!(
+            error.message,
+            "ClickHouse edits rows of MergeTree tables only."
+        );
+        assert_eq!(mock.hits("COUNT(*)"), 0);
+    }
+
+    #[test]
+    fn a_mutation_and_a_delete_are_guarded_by_their_own_predicates() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        counts(&mock, "1", "1");
+        mock.on_statement("ALTER TABLE `d`.`t`", [Response::empty()]);
+        mock.on_statement("DELETE FROM `d`.`t`", [Response::empty()]);
+        let alter = format!(
+            "ALTER TABLE `d`.`t` UPDATE `label` = 'b' {} SETTINGS mutations_sync = 2",
+            row("1")
+        );
+        let delete = format!("DELETE FROM `d`.`t` {}", row("1"));
+        write(&connection, &alter).unwrap();
+        write(&connection, &delete).unwrap();
+        let statements: Vec<String> = mock
+            .requests()
+            .into_iter()
+            .map(|request| request.statement)
+            .filter(|statement| statement.contains(&row("1")))
+            .collect();
+        assert_eq!(statements, [guard("1"), alter, guard("1"), delete]);
+    }
+
+    #[test]
+    fn an_insert_and_a_read_go_out_as_one_request_unguarded() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement("INSERT INTO `d`.`t`", [Response::empty()]);
+        mock.on_statement(
+            "SELECT 1 FROM `d`.`t`",
+            [Response::rows(&[("1", "UInt8")], &[&["1"]])],
+        );
+        let insert = "INSERT INTO `d`.`t` (`id`) VALUES ('1');";
+        write(&connection, insert).unwrap();
+        write(&connection, "SELECT 1 FROM `d`.`t` WHERE `id` = '1'").unwrap();
+        assert_eq!(sent(&mock, "INSERT").len(), 1);
+        assert_eq!(sent(&mock, "INSERT")[0].statement, insert);
+        assert_eq!(mock.hits("COUNT(*)"), 0);
     }
 
     #[test]
@@ -4157,6 +4535,212 @@ mod live {
             assert_eq!(text(&found), "1", "row {at}: {predicate}");
         }
         ran(&connection, &format!("DROP TABLE {name}"));
+    }
+
+    const BLOCKS: &str = " SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1";
+
+    /// A throwaway `(id UInt32, label String)` MergeTree of its own name,
+    /// holding `rows`.
+    fn scratch(connection: &Connection, columns: &str, settings: &str, rows: &str) -> String {
+        let table = format!("edit_guard_{}", marker());
+        ran(
+            connection,
+            &format!(
+                "CREATE TABLE dbdelve_dev.{table} ({columns}) ENGINE = MergeTree ORDER BY id\
+                 {settings}"
+            ),
+        );
+        ran(
+            connection,
+            &format!("INSERT INTO dbdelve_dev.{table} VALUES {rows}"),
+        );
+        table
+    }
+
+    /// The predicate naming the row of `read` whose id is `id`, by every value
+    /// it was read with.
+    fn named(read: &QueryResult, id: &str) -> String {
+        let row = read
+            .rows
+            .iter()
+            .find(|row| row.get(0) == Some(id))
+            .unwrap_or_else(|| panic!("no row {id}"));
+        read.columns
+            .iter()
+            .enumerate()
+            .map(|(at, column)| {
+                super::edit::match_value(
+                    &column.name,
+                    row.get(at),
+                    column.data_type.as_deref().unwrap_or_default(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    }
+
+    /// The row `id` of `read` given `label`, spelled as `read`'s target says.
+    fn relabel(table: &str, read: &QueryResult, id: &str, label: &str) -> String {
+        let target = read.edit.as_ref().expect("an editable preview");
+        let predicate = named(read, id);
+        match target.update {
+            crate::db::UpdateSpelling::Update => {
+                format!("UPDATE `dbdelve_dev`.`{table}` SET `label` = '{label}' WHERE {predicate}")
+            }
+            crate::db::UpdateSpelling::AlterUpdate => format!(
+                "ALTER TABLE `dbdelve_dev`.`{table}` UPDATE `label` = '{label}' WHERE \
+                 {predicate} SETTINGS mutations_sync = 2"
+            ),
+        }
+    }
+
+    fn written(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
+        connection.generated(sql, &CancelToken::default(), Fetch::default())
+    }
+
+    fn labels(connection: &Connection, table: &str) -> String {
+        text(&ran(
+            connection,
+            &format!("SELECT label FROM dbdelve_dev.{table} ORDER BY id, label"),
+        ))
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_guarded_edit_lands_on_its_one_row_in_either_update_spelling() {
+        use crate::db::UpdateSpelling::{AlterUpdate, Update};
+        let connection = live();
+        for (settings, spelling) in [(BLOCKS, Update), ("", AlterUpdate)] {
+            let table = scratch(
+                &connection,
+                "id UInt32, label String, qty Int32",
+                settings,
+                "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)",
+            );
+            let read = previewed(&connection, &table);
+            assert_eq!(read.edit.as_ref().unwrap().update, spelling);
+            let update = relabel(&table, &read, "1", "uno");
+            assert!(crate::sql::is_generated_write_on(
+                Engine::ClickHouse,
+                &update
+            ));
+            written(&connection, &update).unwrap_or_else(|error| panic!("{update}: {error}"));
+            assert_eq!(
+                labels(&connection, &table),
+                "uno\ntwo\nthree",
+                "{spelling:?}"
+            );
+
+            let delete = format!(
+                "DELETE FROM `dbdelve_dev`.`{table}` WHERE {}",
+                named(&read, "2")
+            );
+            written(&connection, &delete).unwrap_or_else(|error| panic!("{delete}: {error}"));
+            assert_eq!(labels(&connection, &table), "uno\nthree", "{spelling:?}");
+            ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_identical_rows_and_a_row_changed_behind_the_grid_are_refused_unwritten() {
+        let connection = live();
+        let table = scratch(
+            &connection,
+            "id UInt32, label String",
+            BLOCKS,
+            "(1, 'same'), (1, 'same'), (2, 'two')",
+        );
+        let read = previewed(&connection, &table);
+        for statement in [
+            relabel(&table, &read, "1", "changed"),
+            format!(
+                "DELETE FROM `dbdelve_dev`.`{table}` WHERE {}",
+                named(&read, "1")
+            ),
+        ] {
+            let error = written(&connection, &statement).unwrap_err();
+            assert_eq!(
+                error.message,
+                "2 rows have exactly these values, so DBDelve will not change one of them."
+            );
+        }
+        assert_eq!(labels(&connection, &table), "same\nsame\ntwo");
+
+        ran(
+            &connection,
+            &format!("UPDATE dbdelve_dev.{table} SET label = 'behind' WHERE id = 2"),
+        );
+        let error = written(&connection, &relabel(&table, &read, "2", "mine")).unwrap_err();
+        assert_eq!(
+            error.message,
+            "No row has these values any more; it was changed or deleted since it was read."
+        );
+        assert_eq!(labels(&connection, &table), "same\nsame\nbehind");
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_batch_stops_at_its_first_refusal_and_what_ran_stays() {
+        let connection = live();
+        for settings in [BLOCKS, ""] {
+            let table = scratch(
+                &connection,
+                "id UInt32, label String",
+                settings,
+                "(1, 'one'), (2, 'two'), (3, 'three')",
+            );
+            let read = previewed(&connection, &table);
+            ran(
+                &connection,
+                &format!(
+                    "ALTER TABLE dbdelve_dev.{table} UPDATE label = 'behind' WHERE id = 2 \
+                     SETTINGS mutations_sync = 2"
+                ),
+            );
+            let batch = ["1", "2", "3"]
+                .map(|id| format!("{};", relabel(&table, &read, id, "edited")))
+                .join("\n");
+            let error = written(&connection, &batch).unwrap_err();
+            assert_eq!(
+                error.message,
+                "1 of 3 edits was applied and stays; ClickHouse has no transaction. The second \
+                 was refused, and the one after it was not run: No row has these values any \
+                 more; it was changed or deleted since it was read."
+            );
+            assert_eq!(labels(&connection, &table), "edited\nbehind\nthree");
+            ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_delete_a_projection_withholds_is_refused_before_its_guard() {
+        let connection = live();
+        let table = scratch(
+            &connection,
+            "id UInt32, label String, qty Int32, \
+             PROJECTION by_label (SELECT label, sum(qty) GROUP BY label)",
+            "",
+            "(1, 'one', 10), (2, 'two', 20)",
+        );
+        let read = previewed(&connection, &table);
+        let delete = format!(
+            "DELETE FROM `dbdelve_dev`.`{table}` WHERE {}",
+            named(&read, "1")
+        );
+        let error = written(&connection, &delete).unwrap_err();
+        assert_eq!(
+            error.message,
+            "This table has projections and its lightweight_mutation_projection_mode is throw, \
+             so rows cannot be deleted."
+        );
+        assert_eq!(labels(&connection, &table), "one\ntwo");
+        written(&connection, &relabel(&table, &read, "1", "uno")).unwrap();
+        assert_eq!(labels(&connection, &table), "uno\ntwo");
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
     }
 
     crate::db::conformance::suite!(

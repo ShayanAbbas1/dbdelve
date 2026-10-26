@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 
 use super::tsv::peel;
-use crate::db::{Column, EditTarget, Engine, RowMatch, UpdateSpelling};
+use crate::db::{
+    Column, DbError, EditTarget, Engine, RowMatch, UpdateSpelling, cancel_cost, is_cancel,
+    plain_error,
+};
 
 const NOT_MERGE_TREE: &str = "ClickHouse edits rows of MergeTree tables only.";
 
@@ -16,6 +19,14 @@ const NOT_MATCHABLE: &str = "Rows with an AggregateFunction, Variant, Dynamic or
 
 const PROJECTIONS: &str = "This table has projections and its lightweight_mutation_projection_mode \
                            is throw, so rows cannot be deleted.";
+
+const GONE: &str = "No row has these values any more; it was changed or deleted since it was read.";
+
+pub(super) const UNCOUNTED: &str =
+    "DBDelve could not count the rows this edit would change, so it ran nothing.";
+
+const RESPELLED: &str =
+    "This table's settings changed since its rows were read, so the edit was not run.";
 
 const BLOCK_NUMBER: &str = "enable_block_number_column";
 const BLOCK_OFFSET: &str = "enable_block_offset_column";
@@ -235,6 +246,115 @@ impl Table {
         };
         (Some(target), None)
     }
+
+    /// Why `write` may not run on this table, when it may not.
+    pub fn refuses(&self, write: Write) -> Option<String> {
+        if let Some(reason) = &self.refusal {
+            return Some(reason.clone());
+        }
+        match write {
+            Write::Delete => self.delete_refusal.map(str::to_string),
+            Write::Update(spelling) => (spelling != self.update).then(|| RESPELLED.to_string()),
+        }
+    }
+}
+
+/// What a generated write does to the rows its predicate names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Write {
+    Update(UpdateSpelling),
+    Delete,
+}
+
+/// Why a write may not change the rows its guard counted, `None` for the one
+/// row it may change.
+pub(super) fn count_refusal(count: u64) -> Option<String> {
+    match count {
+        1 => None,
+        0 => Some(GONE.into()),
+        many => Some(format!(
+            "{many} rows have exactly these values, so DBDelve will not change one of them."
+        )),
+    }
+}
+
+/// Why a write submission stopped where it did.
+#[derive(Debug)]
+pub(super) enum Halt {
+    /// Not sent: its guard or the table's describe would not have it.
+    Refused(String),
+    Failed(DbError),
+}
+
+/// The error of a submission of `total` statements that stopped at the one
+/// at index `at`, `offset` bytes into it. The ones before it ran and, with no
+/// transaction to undo them, stay; the ones after it were never sent.
+pub(super) fn halted(
+    at: usize,
+    total: usize,
+    halt: Halt,
+    statement: &str,
+    offset: usize,
+) -> DbError {
+    let (verb, reason, position) = match halt {
+        // A lone statement's refusal or failure is said as it is, and a
+        // cancel stays one.
+        Halt::Refused(reason) if total == 1 => return plain_error(reason),
+        Halt::Failed(error) if total == 1 => {
+            return DbError {
+                position: error.position.map(|position| position + offset),
+                ..error
+            };
+        }
+        Halt::Refused(reason) => ("was refused", reason, None),
+        Halt::Failed(error) => {
+            let mut reason = error.message.clone();
+            if is_cancel(Engine::ClickHouse, &error)
+                && let Some(cost) = cancel_cost(Engine::ClickHouse, &error, false, statement)
+            {
+                reason = format!("{reason} {cost}");
+            }
+            let position = error.position.map(|position| position + offset);
+            ("failed", reason, position)
+        }
+    };
+    let after = match total - at - 1 {
+        0 => String::new(),
+        1 => ", and the one after it was not run".into(),
+        rest => format!(", and the {rest} after it were not run"),
+    };
+    let which = ordinal(at + 1);
+    let message = match at {
+        0 => format!("The first of the {total} edits {verb}{after}: {reason}"),
+        1 => format!(
+            "1 of {total} edits was applied and stays; ClickHouse has no transaction. The {which} \
+             {verb}{after}: {reason}"
+        ),
+        applied => format!(
+            "{applied} of {total} edits were applied and stay; ClickHouse has no transaction. The \
+             {which} {verb}{after}: {reason}"
+        ),
+    };
+    DbError { message, position }
+}
+
+/// `first` to `tenth` in words, then `11th`, `22nd` and on.
+fn ordinal(n: usize) -> String {
+    const WORDS: [&str; 10] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth",
+    ];
+    if let Some(word) = n.checked_sub(1).and_then(|at| WORDS.get(at)) {
+        return (*word).to_string();
+    }
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// The MergeTree family a table's engine is in, without its `Replicated` or
@@ -687,6 +807,117 @@ mod tests {
             );
             facts.columns.pop();
         }
+    }
+
+    #[test]
+    fn a_table_refuses_a_delete_it_withholds_and_an_update_spelled_for_other_settings() {
+        let create = "CREATE TABLE t (`id` UInt32, PROJECTION p (SELECT id GROUP BY id))";
+        let table = Table::of(facts("MergeTree", "MergeTree ORDER BY id", create));
+        assert_eq!(table.refuses(Write::Delete), Some(PROJECTIONS.into()));
+        assert_eq!(
+            table.refuses(Write::Update(UpdateSpelling::AlterUpdate)),
+            None
+        );
+        assert_eq!(
+            table.refuses(Write::Update(UpdateSpelling::Update)),
+            Some(RESPELLED.into())
+        );
+
+        let memory = Table::of(facts("Memory", "Memory", "CREATE TABLE t (id UInt32)"));
+        for write in [Write::Delete, Write::Update(UpdateSpelling::AlterUpdate)] {
+            assert_eq!(memory.refuses(write), Some(NOT_MERGE_TREE.into()));
+        }
+    }
+
+    #[test]
+    fn a_count_other_than_one_refuses_in_its_own_words() {
+        assert_eq!(count_refusal(1), None);
+        assert_eq!(count_refusal(0).as_deref(), Some(GONE));
+        assert_eq!(
+            count_refusal(3).as_deref(),
+            Some("3 rows have exactly these values, so DBDelve will not change one of them.")
+        );
+    }
+
+    fn refused() -> Halt {
+        Halt::Refused("No.".into())
+    }
+
+    #[test]
+    fn a_halt_says_which_edits_stay_and_which_never_ran() {
+        let at = |at, total| halted(at, total, refused(), "", 0).message;
+        assert_eq!(at(0, 1), "No.");
+        assert_eq!(
+            at(0, 3),
+            "The first of the 3 edits was refused, and the 2 after it were not run: No."
+        );
+        assert_eq!(
+            at(1, 2),
+            "1 of 2 edits was applied and stays; ClickHouse has no transaction. The second was \
+             refused: No."
+        );
+        assert_eq!(
+            at(2, 3),
+            "2 of 3 edits were applied and stay; ClickHouse has no transaction. The third was \
+             refused: No."
+        );
+        assert_eq!(
+            at(11, 14),
+            "11 of 14 edits were applied and stay; ClickHouse has no transaction. The 12th was \
+             refused, and the 2 after it were not run: No."
+        );
+    }
+
+    #[test]
+    fn a_lone_failure_is_the_servers_and_a_batchs_points_into_the_submission() {
+        let failed = || {
+            Halt::Failed(DbError {
+                message: "Syntax error (SYNTAX_ERROR)".into(),
+                position: Some(4),
+            })
+        };
+        let lone = halted(0, 1, failed(), "", 10);
+        assert_eq!(lone.message, "Syntax error (SYNTAX_ERROR)");
+        assert_eq!(lone.position, Some(14));
+        let batch = halted(1, 2, failed(), "", 10);
+        assert!(
+            batch
+                .message
+                .ends_with("The second failed: Syntax error (SYNTAX_ERROR)")
+        );
+        assert_eq!(batch.position, Some(14));
+    }
+
+    #[test]
+    fn a_cancel_stays_one_alone_and_says_what_a_mutation_keeps_doing_in_a_batch() {
+        let cancel = || Halt::Failed(plain_error(super::super::CANCELLED.into()));
+        let lone = halted(0, 1, cancel(), "", 0);
+        assert!(is_cancel(Engine::ClickHouse, &lone));
+        let mutation = "ALTER TABLE `d`.`t` UPDATE `a` = 'x' WHERE `a` = 'y' \
+                        SETTINGS mutations_sync = 2";
+        let batch = halted(1, 2, cancel(), mutation, 0);
+        assert!(
+            batch.message.ends_with(
+                "The second failed: Cancelled. The mutation keeps running in the background; \
+                 KILL MUTATION stops it."
+            ),
+            "{}",
+            batch.message
+        );
+    }
+
+    #[test]
+    fn ordinals_are_words_to_ten_then_figures() {
+        let spelled: Vec<String> = [1, 2, 3, 10, 11, 12, 13, 21, 22, 23, 101, 111]
+            .map(ordinal)
+            .into();
+        assert_eq!(
+            spelled,
+            [
+                "first", "second", "third", "tenth", "11th", "12th", "13th", "21st", "22nd",
+                "23rd", "101st", "111th"
+            ]
+        );
     }
 
     #[test]
