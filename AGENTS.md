@@ -199,6 +199,7 @@ mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
 redis://dbdelve:dbdelve@127.0.0.1:56379/0
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
 ```
 
 What a change should pass locally:

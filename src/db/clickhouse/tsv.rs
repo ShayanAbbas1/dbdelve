@@ -1177,4 +1177,162 @@ mod tests {
             "The statement asked for FORMAT Parquet, which is not text."
         );
     }
+
+    /// Bodies recorded from the 26.8 dev container (`dev/clickhouse/fixtures`),
+    /// with the headers that say how to read them.
+    fn recorded(name: &str) -> (Vec<u8>, Option<String>) {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/clickhouse/fixtures");
+        let body = std::fs::read(format!("{dir}/{name}.tsv")).unwrap();
+        let headers = std::fs::read_to_string(format!("{dir}/{name}.headers")).unwrap();
+        let tag = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("X-ClickHouse-Exception-Tag: "))
+            .map(str::to_string);
+        (body, tag)
+    }
+
+    fn recorded_reader(name: &str) -> Reader<BufReader<Framed<Cursor<Vec<u8>>>>> {
+        let (body, tag) = recorded(name);
+        let framed = Framed::tagged(Cursor::new(body), &tag.unwrap(), "SELECT 1".into());
+        Reader::open(BufReader::new(framed), None).unwrap()
+    }
+
+    #[test]
+    fn the_recorded_type_gallery_reads_by_type() {
+        let mut reader = recorded_reader("type_gallery");
+        let columns: Vec<(String, String)> = reader
+            .columns()
+            .iter()
+            .map(|c| (c.name.clone(), c.data_type.clone().unwrap()))
+            .collect();
+        let got = rows(&mut reader).unwrap();
+        assert_eq!(got.len(), 2);
+        let cell = |row: usize, name: &str| -> Option<&str> {
+            let at = columns.iter().position(|(n, _)| n == name).unwrap();
+            got[row][at].as_deref()
+        };
+        let type_of = |name: &str| columns.iter().find(|(n, _)| n == name).unwrap().1.as_str();
+        assert_eq!(type_of("dec_small"), "Decimal(4, 1)");
+        assert_eq!(type_of("moment_tz"), "DateTime('Asia/Tokyo')");
+        assert_eq!(type_of("low_maybe"), "LowCardinality(Nullable(String))");
+        assert_eq!(type_of("state"), "AggregateFunction(sum, UInt64)");
+
+        for (name, first, second) in [
+            (
+                "u128",
+                Some("340282366920938463463374607431768211455"),
+                Some("0"),
+            ),
+            (
+                "i256",
+                Some(
+                    "-57896044618658097711785492504343953926634992332820282019728792003956564819968",
+                ),
+                Some(
+                    "57896044618658097711785492504343953926634992332820282019728792003956564819967",
+                ),
+            ),
+            ("f32", Some("1.5"), Some("-inf")),
+            ("f64", Some("0.1"), Some("nan")),
+            ("dec_small", Some("-123.4"), Some("99.9")),
+            (
+                "dec_wide",
+                Some("1234567890123456789012345678.123456789"),
+                Some("-0.0000000001"),
+            ),
+            ("flag", Some("true"), Some("false")),
+            ("day32", Some("1900-01-01"), Some("2299-12-31")),
+            (
+                "moment_tz",
+                Some("2024-06-15 12:34:56"),
+                Some("1970-01-01 09:00:00"),
+            ),
+            (
+                "moment64",
+                Some("2024-06-15 12:34:56.789"),
+                Some("1970-01-01 00:00:00.001"),
+            ),
+            ("ip6", Some("2001:db8::1"), Some("::")),
+            ("mood16", Some("high"), Some("low")),
+            ("text", Some("tab\there 'quote' back\\slash"), Some("")),
+            ("fixed", Some("ab\0\0"), Some("\0\0\0\0")),
+            ("raw", Some("0x00FF00"), Some("")),
+            ("maybe", None, Some("present")),
+            ("low_maybe", None, Some("in\\ner")),
+            (
+                "strings",
+                Some(r"['a\tb','it\'s','back\\slash']"),
+                Some("[]"),
+            ),
+            ("maybes", Some("['x',NULL]"), Some("[]")),
+            ("pair", Some(r"('t\tab',7)"), Some("('',0)")),
+            ("labels", Some(r"{'k\tey':'v\'al','bs':'x\\y'}"), Some("{}")),
+            ("point", Some("(1.5,-2.5)"), Some("(0,0)")),
+            ("variant", Some(r"tab\there"), Some("42")),
+            ("doc", Some(r#"{"a":[1,2,{}],"s":"t\\tab"}"#), Some("{}")),
+            ("simple", Some("7"), Some("-1")),
+            (
+                "state",
+                Some("0x0500000000000000"),
+                Some("0x0000000000000000"),
+            ),
+        ] {
+            assert_eq!(cell(0, name), first, "row 1, {name}");
+            assert_eq!(cell(1, name), second, "row 2, {name}");
+        }
+    }
+
+    #[test]
+    fn the_recorded_conformance_rows_read_as_the_suite_expects() {
+        let got = rows(&mut recorded_reader("nulls_and_text")).unwrap();
+        let cells: Vec<Vec<Option<&str>>> = got
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.as_deref()).collect())
+            .collect();
+        assert_eq!(cells[0][5], Some("true"));
+        assert_eq!(cells[0][3], Some("12.5"));
+        assert_eq!(cells[0][8], Some("0x00FF"));
+        assert_eq!(cells[1][1], Some("Zoë 李 🐉 'quoted'"));
+        assert_eq!(cells[1][8], Some("0xDEADBEEF"));
+        assert!(cells[2][2..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn the_recorded_totals_and_extremes_are_further_sections() {
+        let got = rows(&mut recorded_reader("with_totals")).unwrap();
+        let section = vec![Some("--".to_string())];
+        let marks: Vec<usize> = (0..got.len()).filter(|&at| got[at] == section).collect();
+        assert_eq!(marks, [6, 8]);
+        assert_eq!(got[0][0].as_deref(), Some("churn"));
+        assert_eq!(got[7], [text(""), text("1000000"), text("499995000")]);
+        assert_eq!(got[9][0].as_deref(), Some("churn"));
+        assert_eq!(got.len(), 11);
+    }
+
+    #[test]
+    fn the_recorded_late_exception_fails_after_its_rows() {
+        let mut reader = recorded_reader("late_exception");
+        let mut builder = RowBuilder::default();
+        let mut seen = 0;
+        let error = loop {
+            match reader.next_row(&mut builder) {
+                Ok(Next::Row) => {
+                    builder.finish().unwrap();
+                    seen += 1;
+                }
+                Ok(_) => panic!("ended without the error"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(seen, 40);
+        assert!(
+            error.message.contains("throwIf") && !error.message.starts_with("Code:"),
+            "{error}"
+        );
+        assert!(
+            error
+                .message
+                .contains("(FUNCTION_THROW_IF_VALUE_IS_NON_ZERO)")
+        );
+    }
 }

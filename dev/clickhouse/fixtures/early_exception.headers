@@ -1,0 +1,5 @@
+HTTP/1.1 500 Internal Server Error
+Content-Type: text/tab-separated-values; charset=UTF-8
+X-ClickHouse-Format: TabSeparatedWithNamesAndTypes
+X-ClickHouse-Exception-Code: 395
+X-ClickHouse-Exception-Tag: yyibfgzoyrkgyoct

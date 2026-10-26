@@ -381,8 +381,8 @@ pub fn failed(status: u16, headers: &HeaderMap) -> bool {
 pub fn exception(status: u16, headers: &HeaderMap, body: &[u8], statement: &str) -> DbError {
     let text = String::from_utf8_lossy(body);
     let text = text.trim();
-    if text.starts_with("Code:") {
-        return server_error(text, statement);
+    if let Some(error) = late_error(text) {
+        return server_error(error, statement);
     }
     let code = exception_code(headers).map(|code| format!(", exception code {code}"));
     let code = code.as_deref().unwrap_or_default();
@@ -392,6 +392,27 @@ pub fn exception(status: u16, headers: &HeaderMap, body: &[u8], statement: &str)
         true => format!("The server answered HTTP {status}{code} with no explanation."),
         false => format!("The server answered HTTP {status}{code}: {shown}"),
     })
+}
+
+/// The server's error in a failed response's body: all of it, or the last
+/// line of one that began with rows. A response the server compresses is held
+/// back until it ends, so an error after the first rows still has the 500
+/// status, and the rows go before the error in the same body.
+fn late_error(text: &str) -> Option<&str> {
+    let starts_error = |line: &str| {
+        line.strip_prefix("Code: ")
+            .and_then(|rest| rest.split_once(". DB::Exception: "))
+            .is_some_and(|(digits, _)| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    };
+    if starts_error(text) {
+        return Some(text);
+    }
+    text.match_indices("\nCode: ")
+        .map(|(at, _)| &text[at + 1..])
+        .filter(|rest| starts_error(rest))
+        .last()
 }
 
 /// A server's `Code: N. DB::Exception: <message> (NAME) (version V)` as the
@@ -742,5 +763,39 @@ EHziqoisXzppWwn2vAWvoTkc
             "SELECT 1",
         );
         assert_eq!(error.message, "Table t doesn't exist (UNKNOWN_TABLE)");
+    }
+    #[test]
+    fn a_recorded_early_exception_is_read_without_its_code_prefix_or_version() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/clickhouse/fixtures");
+        let body = std::fs::read(format!("{dir}/early_exception.tsv")).unwrap();
+        let error = exception(500, &headers("395"), &body, "SELECT throwIf(1, 'boom')");
+        assert!(
+            error
+                .message
+                .starts_with("boom: while executing 'FUNCTION throwIf")
+                && error
+                    .message
+                    .ends_with("(FUNCTION_THROW_IF_VALUE_IS_NON_ZERO)"),
+            "{}",
+            error.message
+        );
+    }
+    #[test]
+    fn a_recorded_error_after_buffered_rows_is_the_last_line() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/clickhouse/fixtures");
+        let body = std::fs::read(format!("{dir}/buffered_exception.tsv")).unwrap();
+        let error = exception(500, &headers("394"), &body, "SELECT sleepEachRow(1)");
+        assert_eq!(error.message, "Query was cancelled. (QUERY_WAS_CANCELLED)");
+    }
+
+    #[test]
+    fn a_body_with_text_that_only_looks_like_an_error_is_not_one() {
+        let body = b"a\nCode: x. DB::Exception: no\nCode: 5 DB::Exception: no";
+        let error = exception(500, &headers("5"), body, "SELECT 1");
+        assert!(
+            error.message.starts_with("The server answered HTTP 500"),
+            "{}",
+            error.message
+        );
     }
 }

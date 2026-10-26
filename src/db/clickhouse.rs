@@ -26,7 +26,7 @@ use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
 use super::{
-    CancelToken, Cancelling, Catalog, Databases, DbError, Fetch, QueryResult, RelationKind,
+    CancelToken, Cancelling, Catalog, Databases, DbError, Engine, Fetch, QueryResult, RelationKind,
     RowBuilder, ServerConfig, Stopped, Structure, plain_error, required_cell,
 };
 use crate::tls::SslMode;
@@ -485,6 +485,9 @@ impl Connection {
                     default_timeout: session.default_timeout,
                 };
             }
+            if let Some(session) = session.as_deref_mut() {
+                self.enter(session, read_only);
+            }
             let params = self.params(&query_id, session.as_deref(), read_only);
             let response = match self.post(sql, &params, bounds) {
                 Ok(response) => response,
@@ -579,6 +582,38 @@ impl Connection {
                 )),
             }),
             failed => failed,
+        }
+    }
+
+    /// Puts a new session in the profile's database. The `database` parameter
+    /// alone does not: it holds for its own request and the session stays in
+    /// `default`, so the user's second statement would not find the tables the
+    /// first did. A `USE` does, and a later `USE` of the user's is then the
+    /// session's own, which a per-request parameter would override.
+    ///
+    /// A failure is left to the statement, which still carries the parameter
+    /// until the session is open and fails in the server's words.
+    fn enter(&self, session: &mut Session, read_only: bool) {
+        let database = self.config.database.trim();
+        if session.opened || database.is_empty() {
+            return;
+        }
+        let sql = format!("USE {}", Engine::ClickHouse.quote_identifier(database));
+        while let Ok(query_id) = random_id() {
+            let params = self.params(&query_id, Some(session), read_only);
+            let Ok(response) = self.post(&sql, &params, Bounds::internal()) else {
+                return;
+            };
+            if !http::failed(response.status().as_u16(), response.headers()) {
+                session.opened = true;
+                return;
+            }
+            match http::exception_code(response.headers()) {
+                Some(INVALID_SESSION_TIMEOUT) if !session.default_timeout => {
+                    session.default_timeout = true;
+                }
+                _ => return,
+            }
         }
     }
 
@@ -955,6 +990,7 @@ mod tests {
             VALIDATION_SQL,
             [Response::rows(&[("1", "UInt8")], &[&["1"]])],
         );
+        mock.on_statement("USE `", [Response::empty()]);
         Connection::open(server)
     }
 
@@ -1030,18 +1066,18 @@ mod tests {
     }
 
     #[test]
-    fn a_users_statements_open_one_session_then_check_it_is_still_there() {
+    fn a_users_statements_open_one_session_in_the_database_then_check_it_is_still_there() {
         let mock = Mock::start();
         let connection = open(&mock);
         numbers(&mock);
         run(&connection, "SELECT n").unwrap();
         run(&connection, "SELECT n").unwrap();
-        let [first, second] = sent(&mock, "SELECT n").try_into().unwrap();
-        let session = first.param("session_id").unwrap();
+        let [enter] = sent(&mock, "USE `").try_into().unwrap();
+        assert_eq!(enter.statement, "USE `dbdelve_dev`");
+        let session = enter.param("session_id").unwrap();
         assert!(session.starts_with("dbdelve-"), "{session}");
-        assert_eq!(second.param("session_id"), Some(session));
         assert_eq!(
-            names(&first),
+            names(&enter),
             [
                 "database",
                 "default_format",
@@ -1052,11 +1088,15 @@ mod tests {
                 "session_timeout",
             ]
         );
-        assert_eq!(first.param("session_timeout"), Some(SESSION_TIMEOUT));
-        // The database opens the session only; after that the user's `USE`
-        // says.
-        assert_eq!(second.param("database"), None);
-        assert_eq!(second.param("session_check"), Some("1"));
+        assert_eq!(enter.param("session_timeout"), Some(SESSION_TIMEOUT));
+        // Only a `USE` puts a session in a database, and a per-request
+        // `database` would override the user's own.
+        let [first, second] = sent(&mock, "SELECT n").try_into().unwrap();
+        for request in [&first, &second] {
+            assert_eq!(request.param("session_id"), Some(session));
+            assert_eq!(request.param("database"), None);
+            assert_eq!(request.param("session_check"), Some("1"));
+        }
     }
 
     #[test]
@@ -1162,7 +1202,7 @@ mod tests {
             .iter()
             .map(|request| request.query_id().unwrap().to_string())
             .collect();
-        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.len(), 5);
         for id in &ids {
             let hex = id.strip_prefix("dbdelve-").unwrap();
             assert_eq!(hex.len(), 32, "{id}");
@@ -1317,27 +1357,32 @@ mod tests {
         assert_eq!(error.message, SESSION_ENDED);
         run(&connection, "SELECT n").unwrap();
         let [first, expired, fresh] = sent(&mock, "SELECT n").try_into().unwrap();
+        let [_, enter_fresh] = sent(&mock, "USE `").try_into().unwrap();
         assert_eq!(expired.param("session_id"), first.param("session_id"));
         assert_ne!(fresh.param("session_id"), first.param("session_id"));
-        assert_eq!(fresh.param("session_check"), None);
-        assert_eq!(fresh.param("database"), Some("dbdelve_dev"));
+        assert_eq!(enter_fresh.param("session_id"), fresh.param("session_id"));
+        assert_eq!(enter_fresh.param("session_check"), None);
+        assert_eq!(enter_fresh.param("database"), Some("dbdelve_dev"));
+        assert_eq!(fresh.param("session_check"), Some("1"));
     }
 
     #[test]
-    fn a_session_timeout_over_the_servers_ceiling_is_dropped_and_the_run_sent_again() {
+    fn a_session_timeout_over_the_servers_ceiling_is_dropped_and_the_open_sent_again() {
         let mock = Mock::start();
         mock.max_session_timeout(60);
         let connection = open(&mock);
         numbers(&mock);
         assert_eq!(run(&connection, "SELECT n").unwrap().rows.len(), 2);
         run(&connection, "SELECT n").unwrap();
-        let [refused, retried, later] = sent(&mock, "SELECT n").try_into().unwrap();
+        let [refused, retried] = sent(&mock, "USE `").try_into().unwrap();
         assert_eq!(refused.param("session_timeout"), Some(SESSION_TIMEOUT));
         assert_eq!(retried.param("session_timeout"), None);
-        assert_eq!(retried.query_id(), refused.query_id());
+        assert_eq!(retried.param("session_id"), refused.param("session_id"));
         assert_eq!(retried.param("session_check"), None);
-        assert_eq!(later.param("session_timeout"), None);
-        assert_eq!(later.param("session_check"), Some("1"));
+        for request in sent(&mock, "SELECT n") {
+            assert_eq!(request.param("session_timeout"), None);
+            assert_eq!(request.param("session_check"), Some("1"));
+        }
     }
 
     #[test]
@@ -1951,4 +1996,737 @@ mod tests {
         assert_eq!(error.message, "Query was cancelled. (QUERY_WAS_CANCELLED)");
         assert!(!is_cancel(Engine::ClickHouse, &error));
     }
+}
+
+/// Against the dev container (`docker compose up -d --build clickhouse`), read
+/// from `dbdelve_CLICKHOUSE_URL`.
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::db::{Column, ConnectionConfig, Engine, is_cancel};
+    use crate::sql::{Mode, Stop, classify, gate};
+
+    fn live_config() -> ServerConfig {
+        let url =
+            std::env::var("dbdelve_CLICKHOUSE_URL").expect("dbdelve_CLICKHOUSE_URL is required");
+        crate::db::server_from_url(&url, "ClickHouse").expect("dbdelve_CLICKHOUSE_URL should parse")
+    }
+
+    fn live() -> Connection {
+        Connection::open(&live_config()).expect("connection should open")
+    }
+
+    fn live_any(config: ServerConfig) -> crate::db::Connection {
+        crate::db::Connection::open(ConnectionConfig::ClickHouse(config))
+            .expect("connection should open")
+    }
+
+    fn run(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
+        connection.query(sql, &CancelToken::default(), Fetch::default())
+    }
+
+    fn ran(connection: &Connection, sql: &str) -> QueryResult {
+        run(connection, sql).unwrap_or_else(|error| panic!("{sql}: {}", error.message))
+    }
+
+    fn cells(result: &QueryResult) -> Vec<Vec<Option<String>>> {
+        result
+            .rows
+            .iter()
+            .map(|row| {
+                (0..row.len())
+                    .map(|at| row.get(at).map(str::to_string))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn text(result: &QueryResult) -> String {
+        cells(result)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// What a request with no driver in the way gets back: the status and body.
+    fn raw(sql: &str, query: &str) -> (u16, String) {
+        let config = live_config();
+        let url = format!(
+            "http://{}:{}/?{query}",
+            config.host,
+            config.port.unwrap_or(DEFAULT_PORT)
+        );
+        let mut response = ureq::post(&url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("X-ClickHouse-User", config.user.as_str())
+            .header("X-ClickHouse-Key", config.password.as_str())
+            .send(sql.as_bytes())
+            .expect("the server should answer");
+        let status = response.status().as_u16();
+        (
+            status,
+            response.body_mut().read_to_string().unwrap_or_default(),
+        )
+    }
+
+    /// A marker no other statement carries, to find one in `system.processes`.
+    fn marker() -> String {
+        random_id().unwrap().replace("dbdelve-", "marker")
+    }
+
+    fn processes_with(connection: &Connection, marker: &str) -> usize {
+        let counted = ran(
+            &connection.apart(),
+            &format!(
+                "SELECT count() FROM system.processes WHERE query LIKE '%{marker}%' \
+                 AND query_id != queryID()"
+            ),
+        );
+        text(&counted).parse().unwrap()
+    }
+
+    fn column_types(result: &QueryResult) -> Vec<Option<&str>> {
+        result
+            .columns
+            .iter()
+            .map(|c: &Column| c.data_type.as_deref())
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_connects_and_prefer_falls_back_to_plaintext() {
+        assert_eq!(text(&ran(&live(), "SELECT 1 AS one")), "1");
+        let prefer = ServerConfig {
+            sslmode: SslMode::Prefer,
+            ..live_config()
+        };
+        let connection = Connection::open(&prefer).expect("prefer should fall back");
+        assert_eq!(text(&ran(&connection, "SELECT 2")), "2");
+        let require = ServerConfig {
+            sslmode: SslMode::Require,
+            ..live_config()
+        };
+        let error = Connection::open(&require)
+            .err()
+            .expect("require should not fall back");
+        eprintln!("require against a plaintext listener: {}", error.message);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_type_gallery_reads_as_it_was_recorded() {
+        let live = ran(&live(), "SELECT * FROM type_gallery ORDER BY id");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/clickhouse/fixtures");
+        let body = std::fs::read(format!("{dir}/type_gallery.tsv")).unwrap();
+        let mut reader = Reader::open(std::io::Cursor::new(body), None).unwrap();
+        let recorded = collect(&mut reader, Fetch::default(), Instant::now()).unwrap();
+        assert_eq!(column_types(&live), column_types(&recorded));
+        assert_eq!(live.columns, recorded.columns);
+        assert_eq!(live.rows, recorded.rows);
+        assert_eq!(live.rows.len(), 2);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_trailing_semicolon_runs() {
+        let connection = live();
+        for sql in ["SELECT 1;", "SELECT 1 ;\n", "SELECT 1; -- done\n"] {
+            assert_eq!(text(&ran(&connection, sql)), "1", "{sql:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_cancel_leaves_nothing_in_system_processes() {
+        let connection = live();
+        let marker = marker();
+        let sql = format!(
+            "SELECT sleepEachRow(1) FROM numbers(60) SETTINGS max_block_size = 1 /* {marker} */"
+        );
+        let token = CancelToken::default();
+        let started = Instant::now();
+        let error = std::thread::scope(|scope| {
+            let running = scope.spawn(|| connection.query(&sql, &token, Fetch::default()));
+            while processes_with(&connection, &marker) == 0 {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "it never started"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            connection.cancel(&token).expect("the cancel should land");
+            running
+                .join()
+                .unwrap()
+                .expect_err("the run should have been cancelled")
+        });
+        assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+        assert_eq!(processes_with(&connection, &marker), 0);
+        assert_eq!(text(&ran(&connection, "SELECT 1")), "1");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_session_is_usable_at_once_after_a_cancel() {
+        let connection = live();
+        for _ in 0..8 {
+            let sql = "SELECT sleepEachRow(0.2) FROM numbers(100) SETTINGS max_block_size = 1";
+            let token = CancelToken::default();
+            let error = std::thread::scope(|scope| {
+                let running = scope.spawn(|| connection.query(sql, &token, Fetch::default()));
+                std::thread::sleep(Duration::from_millis(500));
+                connection.cancel(&token).expect("the cancel should land");
+                running.join().unwrap().expect_err("cancelled")
+            });
+            assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+            let next = run(&connection, "SELECT 1");
+            assert!(
+                next.is_ok(),
+                "SESSION_IS_LOCKED after a KILL: {:?}",
+                next.err()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_stop_at_the_limit_leaves_nothing_in_system_processes() {
+        let connection = live();
+        let marker = marker();
+        let sql = format!("SELECT number FROM system.numbers /* {marker} */");
+        let started = Instant::now();
+        let result = connection
+            .query(
+                &sql,
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.notice, None);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(processes_with(&connection, &marker), 0);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_read_that_may_not_stop_is_drained_and_counted() {
+        let result = live()
+            .query(
+                "SELECT number FROM numbers(1000)",
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(10),
+                    reads_only: false,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.rows.len(), 10);
+        assert_eq!(result.capped_from, Some(1000));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_throwif_after_the_cap_fails_the_run() {
+        let error = live()
+            .query(
+                "SELECT number, throwIf(number = 5000) FROM numbers(10000) SETTINGS max_block_size = 100",
+                &CancelToken::default(),
+                Fetch {
+                    limit: Some(10),
+                    reads_only: false,
+                    ..Fetch::default()
+                },
+            )
+            .expect_err("a late exception must not be counted as rows");
+        assert!(error.message.contains("throwIf"), "{}", error.message);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_timeout_stops_sleepeachrow_at_n() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 2,
+            ..live_config()
+        })
+        .expect("a writer may be given a timeout");
+        let started = Instant::now();
+        let error = run(
+            &connection,
+            "SELECT sleepEachRow(0.5) FROM numbers(60) SETTINGS max_block_size = 1",
+        )
+        .expect_err("the server should stop it");
+        assert!(
+            error.message.contains("TIMEOUT_EXCEEDED"),
+            "{}",
+            error.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(text(&ran(&connection, "SELECT 1")), "1");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_read_only_hold_refuses_a_write_and_any_lifting_of_itself() {
+        let connection = live();
+        connection.set_read_only(true).unwrap();
+        let refused = |sql: &str| run(&connection, sql).expect_err(sql).message;
+        assert!(refused("INSERT INTO scratch VALUES (9, 'x')").contains("readonly mode"));
+        assert!(refused("SET readonly = 0").contains("Cannot modify 'readonly' setting"));
+        assert!(
+            refused("SELECT 1 SETTINGS readonly = 0").contains("Cannot modify 'readonly' setting")
+        );
+        assert!(
+            refused("CREATE TABLE refused_by_readonly (x UInt8) ENGINE = Memory")
+                .contains("readonly mode")
+        );
+        assert_eq!(text(&ran(&connection, "SET max_threads = 2")), "");
+        assert_eq!(text(&ran(&connection, "SELECT 1")), "1");
+        connection.set_read_only(false).unwrap();
+        ran(&connection, "INSERT INTO scratch VALUES (9, 'x')");
+        assert_eq!(
+            text(&ran(&connection, "SELECT note FROM scratch WHERE id = 9")),
+            "x"
+        );
+        ran(&connection, "TRUNCATE TABLE scratch");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_backup_and_insert_into_function_file_are_refused_in_read_only_before_sending() {
+        for sql in [
+            "BACKUP TABLE conformance TO Disk('backups', 'x.zip')",
+            "INSERT INTO FUNCTION file('x.csv', 'CSV') SELECT 1",
+        ] {
+            let verdict = classify(Engine::ClickHouse, sql);
+            assert_eq!(
+                gate(&verdict, Mode::ReadOnly, &[]),
+                Some(Stop::Upgrade(Mode::Full)),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_reader_connects_and_runs_and_a_timeout_fails_its_connect() {
+        let reader = ServerConfig {
+            user: "dbdelve_reader".into(),
+            ..live_config()
+        };
+        let connection = Connection::open(&reader).expect("a readonly user connects");
+        assert_eq!(
+            text(&ran(&connection, "SELECT count() FROM conformance")),
+            "3"
+        );
+        assert!(run(&connection, "INSERT INTO scratch VALUES (9, 'x')").is_err());
+        let refused = run(&connection, "SET max_threads = 2").unwrap_err();
+        assert!(
+            refused
+                .message
+                .contains("Cannot modify 'max_threads' setting in readonly mode"),
+            "{}",
+            refused.message
+        );
+        connection.set_read_only(true).unwrap();
+        assert_eq!(
+            text(&ran(&connection, "SELECT count() FROM conformance")),
+            "3"
+        );
+
+        let error = Connection::open(&ServerConfig {
+            statement_timeout: 5,
+            ..reader
+        })
+        .err()
+        .expect("a readonly user cannot be given a timeout");
+        assert!(
+            error.message.contains("max_execution_time") && error.message.contains("readonly"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_use_carries_and_a_per_request_database_would_override_it() {
+        let connection = live();
+        for _ in 0..3 {
+            assert_eq!(
+                text(&ran(&connection, "SELECT count() FROM conformance")),
+                "3"
+            );
+        }
+        assert_eq!(
+            text(&ran(&connection, "SELECT currentDatabase()")),
+            "dbdelve_dev"
+        );
+        ran(&connection, "USE analytics");
+        assert_eq!(
+            text(&ran(&connection, "SELECT currentDatabase()")),
+            "analytics"
+        );
+        assert_eq!(
+            text(&ran(&connection, "SELECT count() FROM page_views")),
+            "100"
+        );
+        assert_eq!(
+            text(&ran(&connection.apart(), "SELECT currentDatabase()")),
+            "dbdelve_dev"
+        );
+
+        let id = lock(&connection.session).id.clone().unwrap();
+        let (status, body) = raw(
+            "SELECT currentDatabase()",
+            &format!("session_id={id}&session_check=1&database=dbdelve_dev"),
+        );
+        assert_eq!((status, body.trim()), (200, "dbdelve_dev"));
+        let (status, body) = raw(
+            "SELECT currentDatabase()",
+            &format!("session_id={id}&session_check=1"),
+        );
+        assert_eq!((status, body.trim()), (200, "analytics"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_an_expired_session_fails_one_run_and_the_next_opens_a_new_one() {
+        let connection = live();
+        ran(&connection, "SET max_threads = 3");
+        let id = format!("dbdelve-expiry-{}", marker());
+        let (status, _) = raw("SELECT 1", &format!("session_id={id}&session_timeout=1"));
+        assert_eq!(status, 200);
+        *lock(&connection.session) = Session {
+            id: Some(id),
+            opened: true,
+            default_timeout: false,
+        };
+        std::thread::sleep(Duration::from_secs(4));
+        let error = run(&connection, "SELECT 1").expect_err("the session should be gone");
+        assert_eq!(error.message, SESSION_ENDED);
+        assert_eq!(text(&ran(&connection, "SELECT 1")), "1");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_into_outfile_over_http_is_refused_by_the_server() {
+        let error = run(&live(), "SELECT 1 INTO OUTFILE 'dbdelve-x.out'").unwrap_err();
+        eprintln!("INTO OUTFILE over HTTP: {}", error.message);
+        assert!(
+            error.message.contains("INTO_OUTFILE_NOT_ALLOWED"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_user_set_null_spelling_does_not_change_null() {
+        let connection = live();
+        ran(&connection, "SET format_tsv_null_representation = 'NULL'");
+        let result = ran(
+            &connection,
+            "SELECT CAST(NULL AS Nullable(String)) AS n, 'NULL' AS s, '\\\\N' AS escaped",
+        );
+        assert_eq!(
+            cells(&result),
+            [[None, Some("NULL".into()), Some("\\N".into())]]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_statement_with_a_format_of_its_own_is_one_text_column() {
+        let result = ran(&live(), "SELECT 1 AS a, 'x' AS b FORMAT JSON");
+        assert_eq!(result.columns.len(), 1);
+        let shown = text(&result);
+        eprintln!("FORMAT JSON as shown:\n{shown}");
+        assert!(
+            shown.contains("\"a\": 1") && shown.contains("\"data\""),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_column_named_with_a_backslash_comes_back_with_one() {
+        let result = ran(&live(), "SELECT 1 AS `a\\\\b`, 2 AS `c\\td`");
+        let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a\\b", "c\td"]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_system_settings_has_the_readonly_column() {
+        let result = ran(
+            &live(),
+            "SELECT name, readonly FROM system.settings WHERE name = 'readonly'",
+        );
+        assert_eq!(
+            cells(&result),
+            [[Some("readonly".into()), Some("0".into())]]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and ClickHouse configured through dbdelve_SSH_CONFIG and dbdelve_CLICKHOUSE_URL"]
+    fn live_ssh_a_query_runs_through_the_bastion() {
+        // The compose server as the bastion sees it, by service name and the
+        // port inside the network.
+        let connection = Connection::open(&ServerConfig {
+            host: "clickhouse".into(),
+            port: Some(DEFAULT_PORT),
+            ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
+            ..live_config()
+        })
+        .expect("connection should open");
+        assert_eq!(
+            text(&ran(&connection, "SELECT count() FROM conformance")),
+            "3"
+        );
+        let token = CancelToken::default();
+        let error = std::thread::scope(|scope| {
+            let running = scope.spawn(|| {
+                connection.query(
+                    "SELECT sleepEachRow(1) FROM numbers(30) SETTINGS max_block_size = 1",
+                    &token,
+                    Fetch::default(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(1500));
+            connection
+                .cancel(&token)
+                .expect("the kill should reach the server");
+            running.join().unwrap().unwrap_err()
+        });
+        assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+    }
+
+    const FORMAT_AND_DATABASE: &str = "default_format=TSV&database=dbdelve_dev";
+
+    fn answer(sql: &str, extra: &str) -> (u16, String) {
+        let (status, body) = raw(sql, &format!("{FORMAT_AND_DATABASE}{extra}"));
+        (status, body.trim_end_matches('\n').to_string())
+    }
+
+    fn says(sql: &str) -> String {
+        match answer(sql, "") {
+            (200, body) => body,
+            (status, body) => panic!("{sql:?} answered {status}: {body}"),
+        }
+    }
+
+    fn refusal(sql: &str, extra: &str) -> String {
+        match answer(sql, extra) {
+            (200, body) => panic!("{sql:?} was not refused: {body}"),
+            (_, body) => body,
+        }
+    }
+
+    /// What `sql::misread` and the Read-only classifier take the server's
+    /// lexer to do, checked against 26.8.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_servers_lexer_is_what_the_classifier_assumes() {
+        assert_eq!(says("SELECT 1 AS `a\\`b` FORMAT TSVWithNames"), "a`b\n1");
+        assert_eq!(
+            says("SELECT 1 AS \"x\\\"y\" FORMAT TSVWithNames"),
+            "x\"y\n1"
+        );
+        assert_eq!(says("SELECT 1 # note\n+ 1"), "2");
+        assert_eq!(says("SELECT 1 #! note\n+ 1"), "2");
+        assert!(refusal("SELECT 1 #note\n+ 1", "").contains("Unrecognized token"));
+        assert!(refusal("SELECT 1 #\n+ 1", "").contains("Unrecognized token"));
+        assert_eq!(says("SELECT 1 AS a$b"), "1");
+        assert_eq!(says("SELECT 1 AS a$$ , 2 AS b$$"), "1\t2");
+        assert_eq!(says("SELECT $$a'b;c$$"), "a\\'b;c");
+        for space in [
+            '\u{85}', '\u{a0}', '\u{2003}', '\u{200b}', '\u{2060}', '\u{3000}', '\u{feff}',
+        ] {
+            assert_eq!(
+                says(&format!("SELECT{space}1")),
+                "1",
+                "U+{:04X}",
+                space as u32
+            );
+        }
+        assert!(refusal("SELECT\u{1680}1", "").contains("Unrecognized token"));
+        assert_eq!(says("SELECT \u{2018}abc\u{2019}"), "abc");
+        assert_eq!(says("SELECT 1 AS \u{201c}x\u{201d}"), "1");
+        assert_eq!(says("SELECT 1 -- note\r+ 5"), "1");
+        assert_eq!(says("SELECT 1 -- note\n+ 5"), "6");
+        assert_eq!(says("SELECT 1 /* a /* b */ + 7 */ + 2"), "3");
+        assert!(refusal("SELECT 1 /* a /* b */ + 7", "").contains("not closed"));
+    }
+
+    /// What the Read-only hold (`readonly=2`) and the floor reads of the
+    /// classifier take the server to do.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_readonly_2_is_what_the_classifier_takes_it_to_be() {
+        let held = "&readonly=2";
+        for sql in [
+            "SET readonly = 0",
+            "SET readonly = 1",
+            "SELECT 1 SETTINGS readonly = 0",
+            "INSERT INTO scratch SETTINGS readonly = 0 VALUES (9, 'x')",
+        ] {
+            assert!(
+                refusal(sql, held).contains("Cannot modify 'readonly' setting"),
+                "{sql}"
+            );
+        }
+        assert!(refusal("SET max_threads = 2 PARALLEL WITH CREATE TABLE refused_pw (x Int8) ENGINE = Memory", held)
+            .contains("readonly mode"));
+        assert_eq!(
+            says("SELECT count() FROM system.tables WHERE name = 'refused_pw'"),
+            "0"
+        );
+        // A left side with output is refused by the server whatever the hold.
+        assert!(refusal("SELECT 1 PARALLEL WITH SELECT 2", held).contains("PARALLEL WITH"));
+        assert!(
+            refusal("SET max_threads = 2 PARALLEL WITH SELECT 2", held).contains("PARALLEL WITH")
+        );
+        assert!(refusal("SELECT 1 INTO OUTFILE 'x'", held).contains("INTO_OUTFILE_NOT_ALLOWED"));
+
+        for kind in ["AST", "SYNTAX"] {
+            let sql = format!("EXPLAIN {kind} INSERT INTO scratch VALUES (7, 'x')");
+            assert_eq!(answer(&sql, held).0, 200, "{sql}");
+        }
+        // Plans the insert without running it, and a hold refuses the plan.
+        let pipeline = "EXPLAIN PIPELINE INSERT INTO scratch VALUES (7, 'x')";
+        assert!(refusal(pipeline, held).contains("readonly mode"));
+        assert_eq!(answer(pipeline, "").0, 200);
+        assert!(
+            refusal("EXPLAIN ESTIMATE INSERT INTO scratch VALUES (7, 'x')", held)
+                .contains("Only SELECT")
+        );
+        assert!(
+            refusal("EXPLAIN INSERT INTO scratch VALUES (7, 'x')", held).contains("Only SELECT")
+        );
+        assert_eq!(says("SELECT count() FROM scratch"), "0");
+
+        assert_eq!(answer("CHECK TABLE conformance", held).0, 200);
+        let watch = refusal("WATCH active_accounts", held);
+        assert!(
+            watch.contains("NOT_IMPLEMENTED"),
+            "WATCH is a read, refused for its storage: {watch}"
+        );
+
+        assert_eq!(
+            answer(
+                "ALTER TABLE edit_heavy UPDATE qty = qty WHERE id = 1 SETTINGS mutations_sync = 2",
+                ""
+            )
+            .0,
+            200
+        );
+        assert!(
+            refusal(
+                "ALTER TABLE edit_heavy UPDATE qty = qty WHERE id = 1 SETTINGS mutations_sync = 2",
+                held
+            )
+            .contains("readonly mode")
+        );
+    }
+
+    const SLOW: &str = "SELECT sleep(1), 1";
+    const RUNAWAY: &str = "SELECT sleepEachRow(1) FROM numbers(60) SETTINGS max_block_size = 1";
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        crate::db::at_once::reads_overlap(
+            &live_any(live_config()),
+            Engine::ClickHouse,
+            SLOW,
+            "INSERT INTO scratch VALUES (1, 'x')",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        crate::db::at_once::a_cancel_stops_them_all(
+            &live_any(live_config()),
+            Engine::ClickHouse,
+            RUNAWAY,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_cancel_of_one_read_run_at_once_leaves_the_other_running() {
+        crate::db::at_once::a_cancel_stops_only_its_own(
+            &live_any(live_config()),
+            Engine::ClickHouse,
+            RUNAWAY,
+            "SELECT sleepEachRow(1) FROM numbers(6) SETTINGS max_block_size = 1",
+        );
+    }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        Subject {
+            connection: live_any(live_config()),
+            engine: Engine::ClickHouse,
+            schema: "dbdelve_dev",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::ClickHouse, "dbdelve_dev"),
+            endless: "SELECT number FROM system.numbers",
+            runaway: RUNAWAY,
+            read_only_refusal: "readonly mode",
+            fixture: Some(Fixture {
+                types: &[
+                    "Int32",
+                    "String",
+                    "Nullable(Int64)",
+                    "Nullable(Decimal(10, 2))",
+                    "Nullable(Float64)",
+                    "Nullable(Bool)",
+                    "Nullable(Date)",
+                    "Nullable(DateTime('UTC'))",
+                    "Nullable(String)",
+                ],
+                renders: &[
+                    ("fraction", 0, "12.5"),
+                    ("flag", 0, "true"),
+                    ("flag", 1, "false"),
+                ],
+                find: Box::new(|key| sql_find(Engine::ClickHouse, "dbdelve_dev", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires the repository development database configured through dbdelve_CLICKHOUSE_URL",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        read_only_session_refuses_a_write,
+    );
 }
