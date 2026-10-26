@@ -7,13 +7,14 @@ Decided, and not to be re-litigated:
   MariaDB unless a bullet names it. A profile stored before it existed says
   `mysql` and stays MySQL. The `live_` tests in `mysql.rs` run once per server
   (`on_mysql::`, `on_mariadb::`).
-- **Ten functions generate the SQL DBDelve runs, and every one quotes through `Engine`:**
+- **Ten functions generate the SQL DBDelve runs, and every one quotes through the engine's
+  `EngineSpec` (`Engine::quote_*` forwards to it on SQL engines):**
   `explorer::preview_sql`, `explorer::probe_sql` (the reference arrow's
   `SELECT 1 … LIMIT 1` per referencing relation), `explorer::count_sql` (the status bar's Count, a
   `COUNT(*)` -- `COUNT_BIG(*)` on SQL Server, whose `COUNT` is an `int` --
   under the tab's filter, run only when the user asks and through
   `sql::is_generated_select`, `sql::classify` and `sql::gate`, refused rather
-  than prompted for when the gate would stop it), `sql::with_order_by`, `sql::update_row`,
+  than prompted for when the gate would stop it), `sql::with_order_by`, `sql::update_batch`,
   `sql::insert_row`, `sql::insert_rows` (Import Rows' chunks), `sql::delete_row`, `filter::sort_expression` and
   `filter::filter_predicate`. `filter::sort_expression` is the one that gets
   forgotten, and forgetting it is silent: a double-quoted name is a _string
