@@ -41,6 +41,10 @@ pub struct EngineSpec {
 impl EngineSpec {
     pub fn quote_identifier(&self, identifier: &str) -> String {
         let quote = self.sql.identifier_quote.character();
+        let identifier = match self.sql.identifier_backslash_escapes {
+            true => identifier.replace('\\', r"\\"),
+            false => identifier.to_string(),
+        };
         format!(
             "{quote}{}{quote}",
             identifier.replace(quote, &format!("{quote}{quote}"))
@@ -55,7 +59,13 @@ impl EngineSpec {
             .strip_prefix(quote)
             .and_then(|rest| rest.strip_suffix(quote))
         {
-            Some(inner) => inner.replace(&format!("{quote}{quote}"), &quote.to_string()),
+            Some(inner) => {
+                let inner = inner.replace(&format!("{quote}{quote}"), &quote.to_string());
+                match self.sql.identifier_backslash_escapes {
+                    true => inner.replace(r"\\", "\\"),
+                    false => inner,
+                }
+            }
             None => expression.to_string(),
         }
     }
@@ -155,6 +165,9 @@ pub struct SqlSpec {
     /// because `standard_conforming_strings` is on by default, and SQLite has
     /// no such notion at all.
     pub backslash_escapes: bool,
+    /// Whether a backslash inside a quoted identifier escapes the character
+    /// after it, so a literal one has to survive as two.
+    pub identifier_backslash_escapes: bool,
     /// String literals are written `N'…'`, because a bare one is converted to
     /// the database's code page first, and a character it lacks arrives as `?`.
     pub national_strings: bool,
@@ -188,6 +201,11 @@ pub struct SqlSpec {
     pub regex: RegexMatch,
     pub substring: SubstringMatch,
     pub read_only_session: ReadOnlySession,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
+    )]
+    pub unreadable_floor: UnreadableFloor,
     /// Nothing outlives one request, so no statement leaves state behind.
     pub stateless_requests: bool,
 }
@@ -196,6 +214,7 @@ impl SqlSpec {
     pub const ANSI: Self = Self {
         identifier_quote: IdentifierQuote::Double,
         backslash_escapes: false,
+        identifier_backslash_escapes: false,
         national_strings: false,
         literal_offsets: true,
         boolean_literal: BooleanLiteral::TrueFalse,
@@ -218,6 +237,7 @@ impl SqlSpec {
         regex: RegexMatch::None,
         substring: SubstringMatch::Like,
         read_only_session: ReadOnlySession::None,
+        unreadable_floor: UnreadableFloor::None,
         stateless_requests: false,
     };
 
@@ -397,6 +417,11 @@ pub enum ParserDialect {
     DuckDb,
     Snowflake,
     MsSql,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
+    )]
+    ClickHouse,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,6 +460,27 @@ pub enum ReadOnlySession {
     None,
     DefaultTransaction,
     SessionTransaction,
+    /// Sent as settings on each request rather than on a session. The user's
+    /// own statement can still try to lift it, so the server's refusal is
+    /// what stops that.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
+    )]
+    PerRequest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadableFloor {
+    /// A statement the parser cannot read is `Unreadable` and nothing more.
+    None,
+    /// A statement the parser cannot read is placed by its first keyword, and
+    /// one whose first keyword is unknown fails closed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
+    )]
+    FirstKeyword,
 }
 
 #[derive(Clone, Copy, Debug)]

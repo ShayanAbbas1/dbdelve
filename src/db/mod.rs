@@ -39,9 +39,9 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-use spec::ReadOnlySession;
+pub use spec::ReadOnlySession;
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, SqlSpec};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SqlSpec, UnreadableFloor};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
     RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
@@ -546,7 +546,7 @@ impl Engine {
     /// cannot read has nothing behind it that would stop a write, so the gate
     /// refuses it in Read-only instead of offering to run it once.
     pub fn holds_read_only(self) -> bool {
-        read_only_statement(self, true).is_some()
+        self.spec().sql.read_only_session != ReadOnlySession::None
     }
 
     /// Whether switching the schema has to wait for an open transaction to
@@ -2925,6 +2925,8 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         // MongoDB and Redis land here too: no session setting holds a client
         // to reads; the classifier is the boundary there.
         (ReadOnlySession::None, _) => None,
+        // Carried by each request's settings, not set on the session.
+        (ReadOnlySession::PerRequest, _) => None,
     }
 }
 
@@ -4253,6 +4255,25 @@ mod tests {
         assert!(Engine::MySql.holds_read_only());
         assert!(!Engine::Sqlite.holds_read_only());
         assert!(!Engine::Snowflake.holds_read_only());
+    }
+
+    #[test]
+    fn holding_read_only_is_unchanged_for_the_ten() {
+        let held = |engine: Engine| engine.holds_read_only();
+        for engine in [Engine::Postgres, Engine::MySql, Engine::MariaDb] {
+            assert!(held(engine), "{engine:?}");
+        }
+        for engine in [
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::DuckDb,
+            Engine::Snowflake,
+            Engine::SqlServer,
+            Engine::MongoDb,
+            Engine::Redis,
+        ] {
+            assert!(!held(engine), "{engine:?}");
+        }
     }
 
     #[test]

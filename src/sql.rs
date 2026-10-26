@@ -23,8 +23,8 @@ use sqlparser::ast::{
     Merge, Query, SetExpr, Statement, Update, UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
-    SQLiteDialect, SnowflakeDialect,
+    ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
+    PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
@@ -2292,6 +2292,7 @@ fn parser(dialect: ParserDialect) -> Box<dyn Dialect> {
         ParserDialect::DuckDb => Box::new(DuckDbDialect {}),
         ParserDialect::Snowflake => Box::new(SnowflakeDialect {}),
         ParserDialect::MsSql => Box::new(MsSqlDialect {}),
+        ParserDialect::ClickHouse => Box::new(ClickHouseDialect {}),
     }
 }
 

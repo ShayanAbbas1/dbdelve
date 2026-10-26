@@ -1,6 +1,7 @@
 use crate::{
     db::{
-        Abilities, Engine, EngineSpec, Fields, Hints, Hooks, Paging, RelationKind, SqlSpec, Syntax,
+        Abilities, Engine, EngineSpec, Fields, Hints, Hooks, IdentifierQuote, Paging,
+        ParserDialect, ReadOnlySession, RelationKind, SqlSpec, Syntax, UnreadableFloor,
     },
     explorer,
     filter::{self, Operator},
@@ -95,6 +96,43 @@ fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
     assert!(!WRITES.writes_back(["text", "bytea"]));
     assert!(WRITES.takes_inserts(RelationKind::Table));
     assert!(!WRITES.takes_inserts(RelationKind::View));
+}
+
+#[test]
+fn identifier_backslashes_are_doubled_only_where_the_spec_says() {
+    const BACKSLASHED: EngineSpec = EngineSpec {
+        sql: SqlSpec {
+            identifier_quote: IdentifierQuote::Backtick,
+            identifier_backslash_escapes: true,
+            ..SqlSpec::ANSI
+        },
+        ..FAKE
+    };
+    assert_eq!(BACKSLASHED.quote_identifier(r"a\b"), r"`a\\b`");
+    assert_eq!(BACKSLASHED.quote_identifier("a`b"), "`a``b`");
+    for name in [r"a\b", r"\", r"a\`b", r"`\", "plain", ""] {
+        assert_eq!(
+            BACKSLASHED.unquote_identifier(&BACKSLASHED.quote_identifier(name)),
+            name
+        );
+    }
+    assert_eq!(FAKE.quote_identifier(r"a\b"), r#""a\b""#);
+    assert_eq!(FAKE.unquote_identifier(r#""a\\b""#), r"a\\b");
+}
+
+#[test]
+fn a_per_request_hold_is_a_hold_with_no_session_statement() {
+    const PER_REQUEST: EngineSpec = EngineSpec {
+        sql: SqlSpec {
+            read_only_session: ReadOnlySession::PerRequest,
+            unreadable_floor: UnreadableFloor::FirstKeyword,
+            parser_dialect: ParserDialect::ClickHouse,
+            ..SqlSpec::ANSI
+        },
+        ..FAKE
+    };
+    assert_ne!(PER_REQUEST.sql.read_only_session, ReadOnlySession::None);
+    assert_eq!(FAKE.sql.unreadable_floor, UnreadableFloor::None);
 }
 
 #[test]
