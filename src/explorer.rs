@@ -6,8 +6,8 @@ use std::{
 use gpui_component::tree::TreeItem;
 
 use crate::db::{
-    Catalog, Engine, EngineSpec, ForeignTable, RelationKind, Routine, RoutineKind, Schema,
-    SelectTop, Syntax, Truncate,
+    Catalog, Engine, EngineSpec, ForeignTable, MaterializedViewDrop, RelationKind, Routine,
+    RoutineKind, Schema, SelectTop, Syntax, Truncate,
 };
 use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
@@ -377,10 +377,16 @@ pub fn drop_sql(
         (Syntax::Redis, _) => return None,
         (Syntax::Sql, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
         (Syntax::Sql, RelationKind::View) => "VIEW",
-        (Syntax::Sql, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
+        (Syntax::Sql, RelationKind::MaterializedView) => {
+            match engine.spec().sql.materialized_view {
+                MaterializedViewDrop::MaterializedView => "MATERIALIZED VIEW",
+                MaterializedViewDrop::View => "VIEW",
+            }
+        }
         (Syntax::Sql, RelationKind::ForeignTable) => match engine.spec().sql.foreign_table {
             ForeignTable::Foreign => "FOREIGN TABLE",
             ForeignTable::External => "EXTERNAL TABLE",
+            ForeignTable::Table => "TABLE",
         },
     };
     Some(format!(

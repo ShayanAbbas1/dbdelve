@@ -43,8 +43,9 @@ pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
 pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SqlSpec};
 pub use spec::{
-    EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
-    RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
+    EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
+    ParserDialect, RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate,
+    TypedExplain,
 };
 pub use spec::{ReadOnlySession, UnreadableFloor};
 

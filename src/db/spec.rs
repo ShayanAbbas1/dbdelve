@@ -216,6 +216,7 @@ pub struct SqlSpec {
     pub select_top: SelectTop,
     pub truncate: Truncate,
     pub foreign_table: ForeignTable,
+    pub materialized_view: MaterializedViewDrop,
     pub count_all: CountAll,
     /// The word that opens a transaction.
     pub transaction: Transaction,
@@ -258,6 +259,7 @@ impl SqlSpec {
         select_top: SelectTop::Limit,
         truncate: Truncate::Truncate,
         foreign_table: ForeignTable::Foreign,
+        materialized_view: MaterializedViewDrop::MaterializedView,
         count_all: CountAll::Count,
         transaction: Transaction::Begin,
         implicit_transaction: false,
@@ -361,6 +363,16 @@ pub enum Truncate {
 pub enum ForeignTable {
     Foreign,
     External,
+    /// ClickHouse has no foreign table, so the kind drops as a table.
+    Table,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterializedViewDrop {
+    MaterializedView,
+    /// ClickHouse's `DROP MATERIALIZED VIEW` is a syntax error; its
+    /// materialized views drop with `DROP VIEW`.
+    View,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1114,6 +1126,8 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
             DefaultMarker::Prefix("MATERIALIZED "),
             DefaultMarker::Prefix("ALIAS "),
         ],
+        foreign_table: ForeignTable::Table,
+        materialized_view: MaterializedViewDrop::View,
         parser_dialect: ParserDialect::ClickHouse,
         read_only_session: ReadOnlySession::PerRequest,
         unreadable_floor: UnreadableFloor::FirstKeyword,

@@ -2404,6 +2404,8 @@ mod tests {
 mod live {
     use super::*;
     use crate::db::{Column, ConnectionConfig, Engine, is_cancel};
+    use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
+    use crate::export::{RowsAs, render_rows_as};
     use crate::filter::{Operator, filter_predicate};
     use crate::sql::{Mode, Stop, classify, gate};
 
@@ -3518,6 +3520,93 @@ mod live {
             assert!(structure.indexes.is_empty(), "{relation}");
             assert!(structure.constraints.is_empty(), "{relation}");
         }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_copied_drop_and_truncate_run_on_throwaway_objects() {
+        let connection = live();
+        let schema = "dbdelve_dev";
+        ran(
+            &connection,
+            "CREATE OR REPLACE TABLE dbdelve_dev.copy_drop_source (n UInt64) ENGINE = MergeTree ORDER BY n",
+        );
+        ran(
+            &connection,
+            "CREATE OR REPLACE TABLE dbdelve_dev.copy_drop_table (n UInt64) ENGINE = MergeTree ORDER BY n",
+        );
+        ran(
+            &connection,
+            "CREATE OR REPLACE TABLE dbdelve_dev.copy_drop_foreign (n UInt64) ENGINE = MergeTree ORDER BY n",
+        );
+        ran(
+            &connection,
+            "CREATE OR REPLACE VIEW dbdelve_dev.copy_drop_view AS SELECT n FROM dbdelve_dev.copy_drop_source",
+        );
+        ran(
+            &connection,
+            "CREATE OR REPLACE MATERIALIZED VIEW dbdelve_dev.copy_drop_mv ENGINE = MergeTree ORDER BY n AS SELECT n FROM dbdelve_dev.copy_drop_source",
+        );
+        ran(
+            &connection,
+            "INSERT INTO dbdelve_dev.copy_drop_table VALUES (1), (2)",
+        );
+
+        ran(
+            &connection,
+            &truncate_sql(Engine::ClickHouse, schema, "copy_drop_table"),
+        );
+        let rows = cells(&ran(
+            &connection,
+            "SELECT count() FROM dbdelve_dev.copy_drop_table",
+        ));
+        assert_eq!(rows[0][0].as_deref(), Some("0"));
+
+        for (name, kind) in [
+            ("copy_drop_table", RelationKind::Table),
+            ("copy_drop_foreign", RelationKind::ForeignTable),
+            ("copy_drop_view", RelationKind::View),
+            ("copy_drop_mv", RelationKind::MaterializedView),
+        ] {
+            let statement = drop_sql(Engine::ClickHouse, schema, name, kind).unwrap();
+            ran(&connection, &statement);
+            let left = cells(&ran(
+                &connection,
+                &format!(
+                    "SELECT count() FROM system.tables WHERE database = 'dbdelve_dev' AND name = '{name}'"
+                ),
+            ));
+            assert_eq!(left[0][0].as_deref(), Some("0"), "{statement}");
+        }
+
+        let source = drop_sql(
+            Engine::ClickHouse,
+            schema,
+            "copy_drop_source",
+            RelationKind::Table,
+        )
+        .unwrap();
+        ran(&connection, &source);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_capped_preview_exports_to_csv_with_its_header() {
+        let connection = live();
+        let result = ran(
+            &connection,
+            &select_top_sql(Engine::ClickHouse, "dbdelve_dev", "conformance").unwrap(),
+        );
+        assert!(!result.rows.is_empty());
+        let csv = render_rows_as(RowsAs::CsvWithHeader, Engine::ClickHouse, None, &result);
+        let lines: Vec<&str> = csv.lines().collect();
+        let header: Vec<&str> = result
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(lines.len(), result.rows.len() + 1);
+        assert_eq!(lines[0], header.join(","));
     }
 
     #[test]
