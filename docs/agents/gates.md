@@ -50,8 +50,9 @@ where the user can read it:
 
 Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`
 into a buffer or onto the wire, whatever the user asked for. It writes
-`DELETE` only as the explicit deletion of one named row: by primary key,
-from a direct ask, with the statement shown before it runs
+`DELETE` only as the explicit deletion of one named row: by primary key (on
+an engine without unique keys, by all of the row's values as read, and only
+when exactly one row matches), from a direct ask, with the statement shown before it runs
 (`sql::delete_row`). The one exception to both is the explorer's
 right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
 `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`, Redis's Copy
@@ -81,7 +82,10 @@ passes first. It admits exactly four shapes:
   distinct, unqualified columns against single-quoted literals (or a bare
   `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
   other operator, no subquery, no function call, no CTE beside it, no
-  `RETURNING`, no `LIMIT`, and nothing else in the submission;
+  `RETURNING`, no `LIMIT`, and nothing else in the submission. ClickHouse,
+  which has no unique key, is the one exception to the terms: a row is named
+  by every value, and a term may also be `toString(col) = '…'` (the only
+  function call admitted, over a bare column) or `col IS NULL`;
 - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
   `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an
   import's transaction, which spans submissions on a connection of the
@@ -153,6 +157,15 @@ it cannot, the grid stays read-only and says why, and never guesses at a
 predicate. An `INSERT` has no existing row to name, so a table without a
 primary key can be inserted into and not edited. That asymmetry is
 deliberate and belongs in anything that documents either feature.
+
+The one exception is an engine without unique keys (ClickHouse): a row is
+named by all of its values as read, and a write runs only when exactly one row
+matches. Before each `UPDATE`, `DELETE` or `ALTER` write, an exactly-one-row
+`COUNT(*)` with the identical predicate (`sql::row_guard`) must return one. An
+update on a table lacking the block columns is spelled `ALTER TABLE <t> UPDATE
+<assignments> WHERE <predicate> SETTINGS mutations_sync = 2`, exactly, with
+the setting last. A row that cannot be matched exactly stays read-only and says
+why.
 
 ## Connection modes, per engine
 
