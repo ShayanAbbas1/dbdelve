@@ -40,7 +40,7 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 pub use spec::EngineSpec;
-use spec::{BooleanLiteral, CountAll};
+use spec::{BooleanLiteral, CountAll, ExplainPrefix, Paging, ReadOnlySession};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -322,40 +322,26 @@ impl Engine {
     /// What `mode` is spelled as here, or `None` where the engine has no such
     /// mode. Returned as a prefix because that is the whole of the difference:
     /// the statement it is put in front of is the user's, unchanged.
-    ///
-    /// SQLite has no `ExplainMode::Analyze`. Its bare `EXPLAIN` lists bytecode
-    /// rather than a plan, so the plan-only mode is `EXPLAIN QUERY PLAN`, and
-    /// there is no form that reports what a run actually cost. `None` is what
-    /// keeps the menu from offering a mode that would only produce an error.
-    ///
-    /// MySQL's `EXPLAIN ANALYZE` arrived in 8.0.18; MariaDB has none and spells
-    /// the same thing `ANALYZE` with no `EXPLAIN`. Server versions are not
-    /// detected: an older server refuses the statement and says so, which is
-    /// the error the user needs and is hard rule 6's business rather than a
-    /// version check's.
     pub fn explain_prefix(self, mode: ExplainMode) -> Option<&'static str> {
-        match (self, mode) {
-            (Self::Postgres | Self::MySql | Self::MariaDb, ExplainMode::Plan) => Some("EXPLAIN "),
-            (Self::Postgres | Self::MySql, ExplainMode::Analyze) => Some("EXPLAIN ANALYZE "),
-            (Self::MariaDb, ExplainMode::Analyze) => Some("ANALYZE "),
-            (Self::Sqlite, ExplainMode::Plan) => Some("EXPLAIN QUERY PLAN "),
-            (Self::Sqlite, ExplainMode::Analyze) => None,
-            (Self::Turso, _) => None,
-            // A plan as box-drawn text in one column, a shape `explain.rs`
-            // does not read yet.
-            (Self::DuckDb, _) => None,
-            // Its plan is a fourth shape `explain.rs` does not read yet.
-            (Self::Snowflake, _) => None,
-            // SQL Server has no prefix form. A plan comes from `SET SHOWPLAN_XML
-            // ON`, a session switch that has to be a batch of its own, so
-            // Explain would mean changing the session around the user's
-            // statement rather than putting a word on a copy of it.
-            (Self::SqlServer, _) => None,
+        match self.syntax() {
+            Syntax::Sql => {
+                let sql = &self.spec().sql;
+                let prefix = match mode {
+                    ExplainMode::Plan => sql.explain_plan,
+                    ExplainMode::Analyze => sql.explain_analyze,
+                };
+                prefix.map(|prefix| match prefix {
+                    ExplainPrefix::Explain => "EXPLAIN ",
+                    ExplainPrefix::ExplainAnalyze => "EXPLAIN ANALYZE ",
+                    ExplainPrefix::Analyze => "ANALYZE ",
+                    ExplainPrefix::ExplainQueryPlan => "EXPLAIN QUERY PLAN ",
+                })
+            }
             // A plan there is `.explain()` on the end of the statement, which
             // is `explain_suffix`; nothing goes in front.
-            (Self::MongoDb, _) => Some(""),
+            Syntax::Mongo => Some(""),
             // No command plans another.
-            (Self::Redis, _) => None,
+            Syntax::Redis => None,
         }
     }
 
@@ -381,28 +367,13 @@ impl Engine {
     /// batch, or `None` for the engine that already makes one submission
     /// atomic. `COMMIT` and `ROLLBACK` are spelled the same everywhere, so the
     /// opening word is the whole of the difference.
-    ///
-    /// MySQL's own spelling is `START TRANSACTION`, and `BEGIN` is its
-    /// documented alias outside a stored program. The alias is what dbdelve
-    /// writes because the brackets go into the statement text, where
-    /// `sql::is_generated_write` has to read them back: the tree-sitter
-    /// grammar has no `START TRANSACTION`, so the gate would refuse dbdelve's own
-    /// batch.
     pub fn transaction_start(self) -> Option<&'static str> {
-        match self {
-            // One simple-query submission is already one implicit transaction.
-            Self::Postgres => None,
-            Self::MySql | Self::MariaDb => Some("BEGIN"),
-            Self::Sqlite | Self::Turso | Self::DuckDb => Some("BEGIN"),
-            // Every statement autocommits unless the submission brackets it.
-            Self::Snowflake => Some("BEGIN"),
-            // A bare `BEGIN` opens a statement block in T-SQL, not a
-            // transaction. The gate's grammar reads this spelling too.
-            Self::SqlServer => Some("BEGIN TRANSACTION"),
+        match self.syntax() {
+            Syntax::Sql => self.spec().sql.transaction_opening(),
             // No statement opens one: a batch applies in order, and a failure
             // says which rows already did. Redis's `MULTI` queues commands
             // without rolling back the ones that fail inside it.
-            Self::MongoDb | Self::Redis => None,
+            Syntax::Mongo | Syntax::Redis => None,
         }
     }
 
@@ -552,23 +523,12 @@ impl Engine {
     /// The statement that opens a transaction spanning an import's chunks, or
     /// why there cannot be one.
     pub fn all_or_nothing(self) -> Result<&'static str, &'static str> {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb => Ok("BEGIN"),
-            Self::SqlServer => Ok("BEGIN TRANSACTION"),
-            Self::Snowflake => Err(
-                "Snowflake runs each request on its own, so no transaction can span the chunks.",
-            ),
-            Self::MongoDb => Err(
-                "MongoDB has no transaction on a standalone server, so each chunk is kept as it goes.",
-            ),
-            Self::Redis => {
-                Err("Redis has no transaction that rolls back, so each chunk is kept as it goes.")
-            }
+        let spec = self.spec();
+        match spec.abilities.chunk_refusal {
+            Some(reason) => Err(reason),
+            // Not `transaction_opening`: one submission being atomic says
+            // nothing of a transaction across several.
+            None => Ok(spec.sql.transaction.opening()),
         }
     }
 
@@ -613,23 +573,10 @@ impl Engine {
     }
 
     /// Whether a preview page is ordered by the relation's key when nothing
-    /// else sorts it. SQL Server's `OFFSET … FETCH` needs an `ORDER BY`, and
-    /// one that orders nothing lets a parallel plan repeat or skip rows from
-    /// one page to the next, so its first page waits for the structure that
-    /// names the key (`sql::paged` writes it).
+    /// else sorts it, which `OFFSET … FETCH` paging needs (`sql::paged`
+    /// writes it).
     pub fn pages_by_key(self) -> bool {
-        match self {
-            Self::SqlServer => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::MongoDb
-            | Self::Redis => false,
-        }
+        self.spec().sql.paging == Paging::OffsetFetch
     }
 
     /// Whether the row count the catalog carries for a table is exact rather
@@ -673,7 +620,7 @@ impl Engine {
     /// end, because the switch would be sent inside it and undone by the
     /// user's `ROLLBACK`.
     pub fn schema_switch_waits_for_transaction(self) -> bool {
-        matches!(self, Self::Postgres)
+        self.spec().abilities.schema_switch_waits_for_transaction
     }
 
     /// What the filter bar's raw input asks for.
@@ -3067,24 +3014,18 @@ pub(super) fn plain_error(message: String) -> DbError {
 /// reopen the file under `SQLITE_OPEN_READ_ONLY` when the mode lands on
 /// `ReadOnly`.
 fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> {
-    match (engine, read_only) {
-        (Engine::Postgres, true) => Some("SET default_transaction_read_only = on"),
-        (Engine::Postgres, false) => Some("SET default_transaction_read_only = off"),
-        (Engine::MySql | Engine::MariaDb, true) => Some("SET SESSION TRANSACTION READ ONLY"),
-        (Engine::MySql | Engine::MariaDb, false) => Some("SET SESSION TRANSACTION READ WRITE"),
-        (Engine::Sqlite, _) => None,
-        (Engine::Turso, _) => None,
-        // An open database has no session switch; read-only is a way to open
-        // the file, which a profile does not ask for yet.
-        (Engine::DuckDb, _) => None,
-        // There is no session to set anything on.
-        (Engine::Snowflake, _) => None,
-        // No session-level switch exists. `ApplicationIntent=ReadOnly` routes a
-        // login to a readable replica and is ignored by a primary.
-        (Engine::SqlServer, _) => None,
-        // No session setting holds a client to reads; the classifier is the
-        // boundary there.
-        (Engine::MongoDb | Engine::Redis, _) => None,
+    match (engine.spec().sql.read_only_session, read_only) {
+        (ReadOnlySession::DefaultTransaction, true) => {
+            Some("SET default_transaction_read_only = on")
+        }
+        (ReadOnlySession::DefaultTransaction, false) => {
+            Some("SET default_transaction_read_only = off")
+        }
+        (ReadOnlySession::SessionTransaction, true) => Some("SET SESSION TRANSACTION READ ONLY"),
+        (ReadOnlySession::SessionTransaction, false) => Some("SET SESSION TRANSACTION READ WRITE"),
+        // MongoDB and Redis land here too: no session setting holds a client
+        // to reads; the classifier is the boundary there.
+        (ReadOnlySession::None, _) => None,
     }
 }
 

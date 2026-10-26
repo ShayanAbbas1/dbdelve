@@ -35,7 +35,6 @@ pub struct EngineSpec {
     pub hints: Hints,
     /// Meaningful only where `syntax` is [`Syntax::Sql`].
     pub sql: SqlSpec,
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub abilities: Abilities,
     pub hooks: Hooks,
 }
@@ -197,13 +196,8 @@ impl SqlSpec {
 
     /// The word that opens a transaction around a generated multi-statement
     /// batch, or `None` where one submission is already atomic.
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub fn transaction_opening(&self) -> Option<&'static str> {
-        match (self.implicit_transaction, self.transaction) {
-            (true, _) => None,
-            (false, Transaction::Begin) => Some("BEGIN"),
-            (false, Transaction::BeginTransaction) => Some("BEGIN TRANSACTION"),
-        }
+        (!self.implicit_transaction).then(|| self.transaction.opening())
     }
 }
 
@@ -246,6 +240,9 @@ pub enum Params {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Paging {
     LimitOffset,
+    /// Needs an `ORDER BY`, and one that orders nothing lets a parallel plan
+    /// repeat or skip rows from one page to the next, so a preview's first
+    /// page waits for the structure that names the key.
     OffsetFetch,
 }
 
@@ -277,8 +274,23 @@ pub enum CountAll {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transaction {
+    /// MySQL's own spelling is `START TRANSACTION`, and `BEGIN` is its
+    /// documented alias outside a stored program. The alias is what dbdelve
+    /// writes because the brackets go into the statement text, where
+    /// `sql::is_generated_write` has to read them back: the tree-sitter
+    /// grammar has no `START TRANSACTION`, so the gate would refuse dbdelve's
+    /// own batch.
     Begin,
     BeginTransaction,
+}
+
+impl Transaction {
+    pub fn opening(self) -> &'static str {
+        match self {
+            Self::Begin => "BEGIN",
+            Self::BeginTransaction => "BEGIN TRANSACTION",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +440,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     },
     sql: SqlSpec {
         params: Params::Dollar,
+        // One simple-query submission is already one implicit transaction.
         implicit_transaction: true,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: false,
@@ -483,6 +496,9 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
         explain_plan: Some(ExplainPrefix::Explain),
+        // Since 8.0.18. Server versions are not detected: an older server
+        // refuses the statement and says so, which is the error the user needs
+        // and is hard rule 6's business rather than a version check's.
         explain_analyze: Some(ExplainPrefix::ExplainAnalyze),
         typed_explain: TypedExplain::MySql,
         parser_dialect: ParserDialect::MySql,
@@ -532,6 +548,8 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
         explain_plan: Some(ExplainPrefix::Explain),
+        // MariaDB has no `EXPLAIN ANALYZE` and spells the same thing `ANALYZE`
+        // with no `EXPLAIN`.
         explain_analyze: Some(ExplainPrefix::Analyze),
         parser_dialect: ParserDialect::MySql,
         regex: RegexMatch::RegexpInstr,
@@ -572,6 +590,10 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: false,
         },
+        // Its bare `EXPLAIN` lists bytecode rather than a plan, and no form
+        // reports what a run actually cost, so there is no `explain_analyze`:
+        // its absence keeps the menu from offering a mode that would only
+        // produce an error.
         explain_plan: Some(ExplainPrefix::ExplainQueryPlan),
         typed_explain: TypedExplain::Sqlite,
         parser_dialect: ParserDialect::Sqlite,
@@ -650,6 +672,10 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::DuckDb,
         regex: RegexMatch::RegexpMatches,
         substring: SubstringMatch::InstrCast,
+        // No Explain: a plan comes as box-drawn text in one column, a shape
+        // `explain.rs` does not read yet. No `read_only_session`: an open
+        // database has no session switch; read-only is a way to open the
+        // file, which a profile does not ask for yet.
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -697,6 +723,10 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         regex: RegexMatch::RegexpCount,
         substring: SubstringMatch::Contains,
         stateless_requests: true,
+        // Every statement autocommits unless the submission brackets it, so
+        // there is no `implicit_transaction`. No Explain: its plan is a fourth
+        // shape `explain.rs` does not read yet. No `read_only_session`: there
+        // is no session to set anything on.
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -742,6 +772,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         paging: Paging::OffsetFetch,
         select_top: SelectTop::Top,
         count_all: CountAll::CountBig,
+        // A bare `BEGIN` opens a statement block in T-SQL, not a transaction.
+        // The gate's grammar reads this spelling too.
         transaction: Transaction::BeginTransaction,
         generated_defaults: &[
             DefaultMarker::Prefix("IDENTITY("),
@@ -751,6 +783,13 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::MsSql,
         format_dialect: FormatDialect::SqlServer,
         substring: SubstringMatch::LikeBracketEscape,
+        // No Explain: there is no prefix form. A plan comes from `SET
+        // SHOWPLAN_XML ON`, a session switch that has to be a batch of its
+        // own, so Explain would mean changing the session around the user's
+        // statement rather than putting a word on a copy of it. No
+        // `read_only_session`: no session-level switch exists.
+        // `ApplicationIntent=ReadOnly` routes a login to a readable replica
+        // and is ignored by a primary.
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
