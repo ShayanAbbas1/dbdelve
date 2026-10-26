@@ -6,7 +6,7 @@
 //! spec only says which spelling that code picks. A new engine that fits the
 //! existing strategies is one more value here and its driver.
 
-use super::{ColumnDefinition, Fields, Syntax, mongo, mssql, mysql, postgres, redis};
+use super::{ColumnDefinition, Fields, RelationKind, Syntax, mongo, mssql, mysql, postgres, redis};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EngineSpec {
@@ -93,6 +93,21 @@ impl EngineSpec {
             || name.contains("blob")
             || name.contains("binary")
             || self.binary_types.contains(&name.as_str())
+    }
+
+    /// [`Engine::writes_back`](super::Engine::writes_back). The ability is
+    /// asked apart from the types, so a cell nobody typed is no way past it.
+    pub fn writes_back<'a>(&self, types: impl IntoIterator<Item = &'a str>) -> bool {
+        self.abilities.edits
+            && types.into_iter().all(|data_type| match self.syntax {
+                Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
+                Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
+            })
+    }
+
+    /// [`Engine::takes_inserts`](super::Engine::takes_inserts).
+    pub fn takes_inserts(&self, kind: RelationKind) -> bool {
+        self.abilities.inserts && (kind != RelationKind::View || self.abilities.inserts_into_views)
     }
 
     /// [`Engine::generates`](super::Engine::generates).

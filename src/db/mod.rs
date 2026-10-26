@@ -415,8 +415,7 @@ impl Engine {
 
     /// Whether New row may insert into a relation of `kind`.
     pub fn takes_inserts(self, kind: RelationKind) -> bool {
-        let abilities = &self.spec().abilities;
-        abilities.inserts && (kind != RelationKind::View || abilities.inserts_into_views)
+        self.spec().takes_inserts(kind)
     }
 
     /// Whether Import Rows may insert a file's rows into a relation of
@@ -683,16 +682,14 @@ impl Engine {
         self.spec().is_binary_type(data_type)
     }
 
-    /// Whether a cell of `data_type` holds what an edit of it would write
-    /// back: not bytes ([`Engine::is_binary_type`]), and on Redis only text
-    /// that is the whole of its value, never the start of a long one, a
-    /// collection's size or the spelling of bytes that are not text.
-    pub fn writes_back(self, data_type: &str) -> bool {
-        self.edits_rows()
-            && match self.syntax() {
-                Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
-                Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
-            }
+    /// Whether a cell whose type is known as each of `types` -- none, where
+    /// no driver named one -- holds what an edit of it would write back: on an
+    /// engine that edits rows at all, not bytes ([`Engine::is_binary_type`]),
+    /// and on Redis only text that is the whole of its value, never the start
+    /// of a long one, a collection's size or the spelling of bytes that are
+    /// not text.
+    pub fn writes_back<'a>(self, types: impl IntoIterator<Item = &'a str>) -> bool {
+        self.spec().writes_back(types)
     }
 
     /// Whether a grid's cells and rows may be written back at all, which an

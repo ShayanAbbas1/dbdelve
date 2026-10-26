@@ -1151,12 +1151,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // Does not route through `editable`: `row_key` answers "can this row be
-        // named" and is true regardless of mode, so the mode is asked outright.
+        // named" and is true regardless of mode or engine, so both are asked
+        // outright.
+        let engine = self.engine();
+        if !engine.edits_rows() {
+            self.note(format!("{} rows are read-only here.", engine.label()), cx);
+            return;
+        }
         if !self.require(Mode::ReadWrite, cx) {
             return;
         }
         self.clear_notice();
-        let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
         };

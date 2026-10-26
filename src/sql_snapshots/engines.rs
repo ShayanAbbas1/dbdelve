@@ -239,7 +239,7 @@ fn engine_answers_per_engine() {
                 &mut out,
                 engine,
                 &format!("writes_back {data_type}"),
-                engine.writes_back(data_type),
+                engine.writes_back([data_type]),
             );
         }
         for name in ["type", "key", "id"] {

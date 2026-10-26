@@ -543,7 +543,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
         .find(|(name, _)| name == "label")
         .map(|(_, data_type)| data_type.as_str())
         .unwrap_or_else(|| panic!("{at}: no label column"));
-    if engine.writes_back(label_type) && !structure.primary_key().is_empty() {
+    if engine.writes_back([label_type]) && !structure.primary_key().is_empty() {
         let row = PendingRow {
             schema: schema.to_string(),
             table: relation.to_string(),

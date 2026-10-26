@@ -1706,10 +1706,11 @@ impl ResultGrid {
         };
         row < self.result.rows.len()
             && (!edit.keys.contains(&col) || self.engine.edits_key_column(name))
-            && [self.column_type(col), self.cell_type(row, col)]
-                .into_iter()
-                .flatten()
-                .all(|data_type| self.engine.writes_back(data_type))
+            && self.engine.writes_back(
+                [self.column_type(col), self.cell_type(row, col)]
+                    .into_iter()
+                    .flatten(),
+            )
     }
 
     fn column_type(&self, col: usize) -> Option<&str> {
@@ -1778,8 +1779,12 @@ impl ResultGrid {
 
     /// What a new row of this grid's own is written into: where its rows are
     /// written back to, and each column that names, typed as the first row's
-    /// cell is. `None` where its rows are written back nowhere.
+    /// cell is. `None` where its rows are written back nowhere, or into a
+    /// table on an engine that takes no inserts.
     pub fn insert_target(&self) -> Option<InsertTarget> {
+        if !self.engine.takes_inserts(db::RelationKind::Table) {
+            return None;
+        }
         let edit = self.result.edit.as_ref()?;
         let columns = edit
             .columns

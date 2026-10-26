@@ -1,5 +1,7 @@
 use crate::{
-    db::{Abilities, Engine, EngineSpec, Fields, Hints, Hooks, Paging, SqlSpec, Syntax},
+    db::{
+        Abilities, Engine, EngineSpec, Fields, Hints, Hooks, Paging, RelationKind, SqlSpec, Syntax,
+    },
     explorer,
     filter::{self, Operator},
     sql,
@@ -71,6 +73,28 @@ fn a_fake_engine_spec_writes_sql_through_the_shared_strategies() {
         Engine::Postgres,
         &explorer::sql_preview(&FAKE, "s", "t", &filter, Some(100), 0)
     ));
+}
+
+#[test]
+fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
+    assert!(!FAKE.writes_back(["text"]));
+    assert!(!FAKE.writes_back([]), "a cell no driver typed");
+    for kind in [RelationKind::Table, RelationKind::View] {
+        assert!(!FAKE.takes_inserts(kind), "{kind:?}");
+    }
+
+    const WRITES: EngineSpec = EngineSpec {
+        abilities: Abilities {
+            edits: true,
+            inserts: true,
+            ..Abilities::NONE
+        },
+        ..FAKE
+    };
+    assert!(WRITES.writes_back(["text"]) && WRITES.writes_back([]));
+    assert!(!WRITES.writes_back(["text", "bytea"]));
+    assert!(WRITES.takes_inserts(RelationKind::Table));
+    assert!(!WRITES.takes_inserts(RelationKind::View));
 }
 
 #[test]

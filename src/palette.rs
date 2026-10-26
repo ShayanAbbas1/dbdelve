@@ -2712,8 +2712,8 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
 
     // A query's rows that are written back to, which take a new row on every
-    // engine, and a deleted one where the engine deletes them there as well
-    // as on a relation's.
+    // engine that takes inserts, and a deleted one where the engine deletes
+    // them there as well as on a relation's.
     if session.active_query_tab().is_some() {
         if let Some((_, table, _)) = session.query_insert_target(cx) {
             items.push(command(
