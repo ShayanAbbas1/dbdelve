@@ -2,6 +2,9 @@
 //! engine is wired through the rest of the app and every call here answers
 //! that it is not.
 
+mod http;
+mod tsv;
+
 use super::{
     CancelToken, Catalog, Databases, DbError, Fetch, QueryResult, RelationKind, ServerConfig,
     Structure, plain_error,
