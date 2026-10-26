@@ -113,7 +113,7 @@ impl Bounds {
 }
 
 /// The TLS a mode asks for. `verify-ca` is verified as `verify-full`: ureq
-/// takes no custom verifier, and stricter is allowed (hard rule 7).
+/// takes no custom verifier, and stricter is allowed (hard rule 6).
 pub fn tls_config(mode: SslMode, root_certificate: Option<&str>) -> Result<TlsConfig, DbError> {
     let builder = TlsConfig::builder();
     let config = match mode {

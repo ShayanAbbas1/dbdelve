@@ -680,7 +680,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         explain_plan: Some(ExplainPrefix::Explain),
         // Since 8.0.18. Server versions are not detected: an older server
         // refuses the statement and says so, which is the error the user needs
-        // and is hard rule 6's business rather than a version check's.
+        // and is the server's to word rather than a version check's.
         explain_analyze: Some(ExplainPrefix::ExplainAnalyze),
         typed_explain: TypedExplain::MySql,
         parser_dialect: ParserDialect::MySql,

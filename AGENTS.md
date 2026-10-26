@@ -91,11 +91,7 @@ require it, stop and raise it instead.
 5. **Blank passwords are valid.** Never warn about them. Usernames containing `@`
    must work. Both are required by cloud IAM auth and both are commonly broken.
 
-6. **Errors describe what happened, not what to do about it.** "Connection
-   refused: nothing is listening on `host:port`" and stop. No speculation about
-   the user's machine, no process-list inspection.
-
-7. **An `sslmode` is never quietly weakened.** A connection either gets what it
+6. **An `sslmode` is never quietly weakened.** A connection either gets what it
    asked for or fails saying which certificate check failed. This is a rule
    because the failure is silent by construction: the driver's default is
    `prefer`, and `prefer` with a connector that cannot do TLS hands back a

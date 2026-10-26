@@ -315,7 +315,7 @@ Decided, and not to be re-litigated:
   SQLite keeps them only in the `CREATE TABLE` text; MySQL's
   `information_schema.CHECK_CONSTRAINTS` only exists from 8.0.16.
 - **MySQL verifies certificates against `webpki-roots`**, not the platform
-  trust store the Postgres path reads. It fails loudly, which `AGENTS.md` hard rule 7 permits.
+  trust store the Postgres path reads. It fails loudly, which `AGENTS.md` hard rule 6 permits.
 - **SQL Server identifiers are double-quoted, not bracketed.** The grammar
   every gate parses with has no `[name]` and its pin does not move; the login
   tiberius sends turns `QUOTED_IDENTIFIER` on, so `"name"` is an identifier.
@@ -423,7 +423,7 @@ Decided, and not to be re-litigated:
   encrypt, and only after a failed handshake (`negotiation_failed`): a refused
   login or a connect that timed out fails the same way again, so neither
   retries. `verify-ca` checks the hostname too, since tiberius cannot switch
-  that alone off: stricter, which `AGENTS.md` hard rule 7 permits. A named root certificate must
+  that alone off: stricter, which `AGENTS.md` hard rule 6 permits. A named root certificate must
   be one certificate.
 - **An error from inside a procedure, trigger or function carries no position.**
   `token.procedure()` names it when one raised the error; the line the server

@@ -636,7 +636,7 @@ pub struct Connection {
     cancel: CancelToken,
     /// The same connector the client was built with, because cancelling opens a
     /// second socket to the same server and an `sslmode` is never quietly
-    /// weakened for it either (AGENTS.md, hard rule 7).
+    /// weakened for it either (AGENTS.md, hard rule 6).
     connector: Option<tls::MakeRustlsConnect>,
     /// The server process behind the client, for asking after the statement
     /// it is running from another connection. `None` if it would not say.
