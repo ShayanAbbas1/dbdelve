@@ -42,6 +42,10 @@ pub enum Unescape {
     /// ClickHouse literal text already: `['a\tb']` is shown as it arrived,
     /// because there is no TSV layer on top of it to undo.
     Raw { nullable: bool },
+    /// A value whose active type is not in the text: an array, map or tuple
+    /// arrives as literal text (`Raw`), anything else with its TSV escapes
+    /// (`Scalar`).
+    ByShape,
 }
 
 /// Everything a column's cells need, from its type string.
@@ -61,9 +65,11 @@ impl Decoder {
             | "MultiLineString" | "Polygon" | "MultiPolygon" | "Object" => {
                 Unescape::Raw { nullable }
             }
-            // Which variant is active is not in the text, so a String variant
-            // keeps its escapes. `\N` is NULL for all three.
-            "Variant" | "Dynamic" | "JSON" => Unescape::Raw { nullable: true },
+            // Which variant is active is not in the text, so it is told by the
+            // first byte. `\N` is NULL.
+            "Variant" | "Dynamic" => Unescape::ByShape,
+            // JSON text, escaped once by JSON and once more by TSV.
+            "JSON" => Unescape::Scalar { nullable: true },
             "Nothing" => Unescape::Scalar { nullable: true },
             _ => Unescape::Scalar { nullable },
         };
@@ -512,6 +518,8 @@ impl<R: BufRead> Reader<R> {
             let (raw, nullable) = match decoder.unescape {
                 Unescape::Scalar { nullable } => (false, nullable),
                 Unescape::Raw { nullable } => (true, nullable),
+                // A String that opens like a compound literal stays escaped.
+                Unescape::ByShape => (matches!(field.first(), Some(b'[' | b'(' | b'{')), true),
             };
             if nullable && field == b"\\N" {
                 row.push(None);
@@ -857,18 +865,26 @@ mod tests {
     }
 
     #[test]
-    fn a_variant_is_raw_and_null_is_still_null() {
+    fn a_variant_is_read_by_its_shape_and_null_is_still_null() {
         assert_eq!(
-            one("Variant(String, Array(String))", br"a\tb"),
-            text(r"a\tb")
+            one("Variant(String, Array(String))", br"a\tb\\c"),
+            text("a\tb\\c")
         );
         assert_eq!(
-            one("Variant(String, Array(String))", br"['a\tb']"),
-            text(r"['a\tb']")
+            one("Variant(String, Array(String))", br"['a\tb\\c']"),
+            text(r"['a\tb\\c']")
         );
+        assert_eq!(one("Dynamic", br"p\\q"), text(r"p\q"));
         assert_eq!(one("Variant(String, UInt8)", br"\N"), None);
         assert_eq!(one("Dynamic", br"\N"), None);
-        assert_eq!(one("JSON", br#"{"a":"b\tc"}"#), text(r#"{"a":"b\tc"}"#));
+    }
+
+    #[test]
+    fn json_text_has_its_tsv_escapes_undone_once() {
+        assert_eq!(
+            one("JSON", br#"{"a":"b\\tc","d":"e\\\\f"}"#),
+            text(r#"{"a":"b\tc","d":"e\\f"}"#)
+        );
     }
 
     #[test]
@@ -1298,8 +1314,8 @@ mod tests {
             ("pair", Some(r"('t\tab',7)"), Some("('',0)")),
             ("labels", Some(r"{'k\tey':'v\'al','bs':'x\\y'}"), Some("{}")),
             ("point", Some("(1.5,-2.5)"), Some("(0,0)")),
-            ("variant", Some(r"tab\there"), Some("42")),
-            ("doc", Some(r#"{"a":[1,2,{}],"s":"t\\tab"}"#), Some("{}")),
+            ("variant", Some("tab\there"), Some("42")),
+            ("doc", Some(r#"{"a":[1,2,{}],"s":"t\tab"}"#), Some("{}")),
             ("simple", Some("7"), Some("-1")),
             (
                 "state",

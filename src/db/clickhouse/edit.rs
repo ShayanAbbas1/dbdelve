@@ -230,6 +230,9 @@ impl Table {
                 known.in_key
                     || known.default_kind == "MATERIALIZED"
                     || peel(data_type).0.starts_with("AggregateFunction")
+                    // The server casts a string to a Map nowhere an assignment
+                    // takes one, though an INSERT parses the same text.
+                    || peel(data_type).0.starts_with("Map(")
             })
             .map(|(position, _)| position)
             .collect();
@@ -778,6 +781,27 @@ mod tests {
             RowMatch::EveryColumn { fixed: vec![0, 2] }
         );
         assert_eq!(target.update, UpdateSpelling::Update);
+    }
+
+    #[test]
+    fn a_map_column_is_fixed_because_no_assignment_casts_text_to_one() {
+        let mut facts = facts("MergeTree", "MergeTree ORDER BY id", "");
+        facts
+            .columns
+            .push(column("m", "Map(String, UInt8)", "", false));
+        facts
+            .columns
+            .push(column("a", "Array(Map(String, UInt8))", "", false));
+        let columns = result(&[
+            ("id", "UInt32"),
+            ("m", "Map(String, UInt8)"),
+            ("a", "Array(Map(String, UInt8))"),
+        ]);
+        let (target, _) = Table::of(facts).target("d", "t", &columns);
+        assert_eq!(
+            target.unwrap().row_match,
+            RowMatch::EveryColumn { fixed: vec![0, 1] }
+        );
     }
 
     #[test]

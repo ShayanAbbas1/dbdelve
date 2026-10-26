@@ -4797,13 +4797,160 @@ mod live {
             ran(&connection, &format!("TRUNCATE TABLE dbdelve_dev.{table}"));
         }
         ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
-        // A NUL the gate refuses, Nested's dotted subcolumns it cannot name, a
-        // state the server cannot parse from text, and two types whose text
-        // reads back escaped once more (backslashes inside a Variant or JSON).
-        assert_eq!(
-            refused,
-            ["fixed", "nested.k", "nested.v", "variant", "doc", "state"]
+        // A NUL the gate refuses, Nested's dotted subcolumns it cannot name,
+        // and a state the server cannot parse from text.
+        assert_eq!(refused, ["fixed", "nested.k", "nested.v", "state"]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_variant_and_json_text_with_backslashes_round_trips_through_an_insert() {
+        let connection = live();
+        let table = format!("edit_roundtrip_{}", marker());
+        let name = format!("dbdelve_dev.{table}");
+        ran(
+            &connection,
+            &format!(
+                "CREATE TABLE {name} (id UInt32, v Variant(Array(String), Int32, String), \
+                 dy Dynamic, doc JSON) ENGINE = MergeTree ORDER BY id"
+            ),
         );
+        ran(
+            &connection,
+            &format!(
+                "INSERT INTO {name} VALUES (1, 'a\\\\b\\tc\\'d', 'p\\\\q\\n', \
+                 '{{\"s\":\"x\\\\\\\\y\\\\tz\\\\\"\"}}'), \
+                 (2, ['a\\\\b', 'c\\'d'], ['e\\\\f'], '{{}}')"
+            ),
+        );
+        let types: Vec<(String, String)> = [
+            ("id", "UInt32"),
+            ("v", "Variant(Array(String), Int32, String)"),
+            ("dy", "Dynamic"),
+            ("doc", "JSON"),
+        ]
+        .map(|(column, data_type)| (column.to_string(), data_type.to_string()))
+        .to_vec();
+        let read = ran(&connection, &format!("SELECT * FROM {name} ORDER BY id"));
+        assert_eq!(read.rows[0].get(1), Some("a\\b\tc'd"));
+        assert_eq!(read.rows[0].get(3), Some(r#"{"s":"x\\y\tz\""}"#));
+        assert_eq!(read.rows[1].get(1), Some(r"['a\\b','c\'d']"));
+        for (at, row) in read.rows.iter().enumerate() {
+            let id = (at + 3).to_string();
+            let values: Vec<(&str, Option<&str>)> = std::iter::once(("id", Some(id.as_str())))
+                .chain(
+                    ["v", "dy", "doc"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, column)| (column, row.get(i + 1))),
+                )
+                .collect();
+            // A compound variant is typed back as text, so it lands as a String;
+            // only what a String variant, a Dynamic and a JSON hold must survive.
+            let values: Vec<_> = values
+                .into_iter()
+                .filter(|(column, value)| {
+                    !(*column == "v" || *column == "dy")
+                        || !value.is_some_and(|v| v.starts_with('['))
+                })
+                .collect();
+            let insert =
+                crate::sql::insert_row(Engine::ClickHouse, "dbdelve_dev", &table, &values, &types)
+                    .unwrap();
+            assert!(crate::sql::is_generated_write_on(
+                Engine::ClickHouse,
+                &insert
+            ));
+            written(&connection, &insert).unwrap_or_else(|error| panic!("{insert}: {error}"));
+        }
+        let back = ran(&connection, &format!("SELECT * FROM {name} ORDER BY id"));
+        assert_eq!(back.rows[2].get(1), read.rows[0].get(1));
+        assert_eq!(back.rows[2].get(2), read.rows[0].get(2));
+        assert_eq!(back.rows[2].get(3), read.rows[0].get(3));
+        assert_eq!(back.rows[3].get(3), read.rows[1].get(3));
+        ran(&connection, &format!("DROP TABLE {name}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_an_edited_cell_with_awkward_characters_reads_back_as_typed() {
+        use crate::result_grid::PendingRow;
+        let connection = live();
+        for settings in [BLOCKS, ""] {
+            let table = format!("edit_roundtrip_{}", marker());
+            let name = format!("dbdelve_dev.{table}");
+            ran(
+                &connection,
+                &format!(
+                    "CREATE TABLE {name} (id UInt32, s String, arr Array(String), \
+                     m Map(String, String)) ENGINE = MergeTree ORDER BY id{settings}"
+                ),
+            );
+            ran(
+                &connection,
+                &format!(
+                    "INSERT INTO {name} VALUES \
+                     (1, 'a\\\\b \\'q\\' \\t tab \\n nl \\\\n', \
+                      ['x\\\\y', 'it\\'s', 'a\\tb\\nc'], \
+                      {{'k\\\\': 'v\\'\\t\\n\\\\'}}), \
+                     (2, '', [], {{}})"
+                ),
+            );
+            let read = previewed(&connection, &table);
+            let target = read.edit.clone().expect("an editable preview");
+            let types: Vec<(String, String)> = read
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.data_type.clone().unwrap_or_default()))
+                .collect();
+            assert_eq!(
+                target.row_match,
+                crate::db::RowMatch::EveryColumn { fixed: vec![0, 3] },
+                "a Map is not assigned from text, and the key is not set"
+            );
+            for column in 1..3 {
+                let typed = read.rows[0].get(column).unwrap().to_string();
+                let current = previewed(&connection, &table);
+                let row = current
+                    .rows
+                    .iter()
+                    .find(|row| row.get(0) == Some("2"))
+                    .unwrap();
+                let name_of = types[column].0.clone();
+                let pending = PendingRow {
+                    schema: "dbdelve_dev".into(),
+                    table: table.clone(),
+                    sets: vec![(
+                        name_of.clone(),
+                        crate::result_grid::NewValue::Value(typed.clone().into()),
+                    )],
+                    keys: types
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, (n, _))| row.get(at).map(|v| (n.clone(), v.to_string())))
+                        .collect(),
+                    null_keys: Vec::new(),
+                    update: target.update,
+                    types: types.clone(),
+                    held: Vec::new(),
+                };
+                let update = crate::sql::update_batch(Engine::ClickHouse, &[pending]).unwrap();
+                written(&connection, &update).unwrap_or_else(|error| panic!("{update}: {error}"));
+                let back = previewed(&connection, &table);
+                let after = back
+                    .rows
+                    .iter()
+                    .find(|row| row.get(0) == Some("2"))
+                    .unwrap();
+                assert_eq!(
+                    after.get(column),
+                    Some(typed.as_str()),
+                    "{name_of} through {:?}",
+                    target.update
+                );
+            }
+            ran(&connection, &format!("DROP TABLE {name}"));
+        }
     }
 
     #[test]
