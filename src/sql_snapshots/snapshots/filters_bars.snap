@@ -499,11 +499,11 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] and then or · preview
-  |SELECT * FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (`Name` LIKE '%z%') LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (toString(`Name`) LIKE '%z%') LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] and then or · count
-  |SELECT COUNT(*) FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (`Name` LIKE '%z%')|
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (toString(`Name`) LIKE '%z%')|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] skipped bar · preview

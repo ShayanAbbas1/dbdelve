@@ -2404,6 +2404,7 @@ mod tests {
 mod live {
     use super::*;
     use crate::db::{Column, ConnectionConfig, Engine, is_cancel};
+    use crate::filter::{Operator, filter_predicate};
     use crate::sql::{Mode, Stop, classify, gate};
 
     fn live_config() -> ServerConfig {
@@ -2869,6 +2870,140 @@ mod live {
         let result = ran(&live(), "SELECT 1 AS `a\\\\b`, 2 AS `c\\td`");
         let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["a\\b", "c\td"]);
+    }
+
+    fn matched(
+        connection: &Connection,
+        from: &str,
+        column: &str,
+        operator: Operator,
+        value: &str,
+    ) -> String {
+        let predicate = filter_predicate(Engine::ClickHouse, column, None, operator, value)
+            .unwrap_or_else(|| panic!("{operator:?} {value:?} wrote no predicate"));
+        assert!(
+            crate::sql::is_generated_select(
+                Engine::ClickHouse,
+                &format!("SELECT * FROM {from} WHERE {predicate}")
+            ),
+            "{predicate}"
+        );
+        let result = ran(
+            connection,
+            &format!("SELECT count() FROM {from} WHERE {predicate}"),
+        );
+        text(&result)
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_every_operator_filters_each_type_the_gallery_holds() {
+        let connection = live();
+        let gallery = "dbdelve_dev.type_gallery";
+        // Row 1 is `typical`, row 2 `edges`; each case says how many of the
+        // two the operator keeps.
+        let cases: [(&str, Operator, &str, &str); 44] = [
+            ("u64", Operator::Equals, "18446744073709551615", "1"),
+            ("u64", Operator::Greater, "5", "1"),
+            ("u64", Operator::Contains, "4467", "1"),
+            ("u64", Operator::NotContains, "9", "1"),
+            ("u64", Operator::StartsWith, "1844", "1"),
+            ("u64", Operator::EndsWith, "615", "1"),
+            ("u64", Operator::Regex, "^1\\d", "1"),
+            ("maybe", Operator::Contains, "res", "1"),
+            ("maybe", Operator::NotContains, "res", "0"),
+            // A NULL stays NULL through `toString`, so no negation keeps it.
+            ("maybe", Operator::NotContains, "zzz", "1"),
+            ("maybe", Operator::StartsWith, "pre", "1"),
+            ("maybe", Operator::EndsWith, "ent", "1"),
+            ("maybe", Operator::Regex, "^pre", "1"),
+            ("maybe", Operator::IsNull, "", "1"),
+            ("maybe", Operator::IsEmpty, "", "0"),
+            ("low", Operator::Contains, "ow", "1"),
+            ("low", Operator::NotContains, "ow", "1"),
+            ("low", Operator::StartsWith, "lo", "1"),
+            ("low", Operator::EndsWith, "ow", "1"),
+            ("low", Operator::Regex, "^l", "1"),
+            ("low", Operator::IsEmpty, "", "1"),
+            ("day", Operator::Equals, "2024-06-15", "1"),
+            ("day", Operator::Less, "2000-01-01", "1"),
+            ("day", Operator::Contains, "2024-06", "1"),
+            ("day", Operator::StartsWith, "1970", "1"),
+            ("day", Operator::EndsWith, "-15", "1"),
+            ("day", Operator::Regex, "^2024-\\d\\d-15$", "1"),
+            ("moment64", Operator::Greater, "2000-01-01 00:00:00", "1"),
+            ("moment64", Operator::Contains, "12:34:56.789", "1"),
+            ("moment64", Operator::EndsWith, ".789", "1"),
+            ("moment64", Operator::Regex, "^2024.*\\.789$", "1"),
+            ("mood", Operator::Equals, "happy", "1"),
+            ("mood", Operator::Contains, "app", "1"),
+            ("mood", Operator::NotContains, "app", "1"),
+            ("mood", Operator::StartsWith, "sa", "1"),
+            ("mood", Operator::EndsWith, "py", "1"),
+            ("mood", Operator::Regex, "^h", "1"),
+            (
+                "uid",
+                Operator::Equals,
+                "00000000-0000-0000-0000-000000000000",
+                "1",
+            ),
+            ("uid", Operator::Contains, "7c2a", "1"),
+            ("uid", Operator::NotContains, "7c2a", "1"),
+            ("uid", Operator::StartsWith, "018f", "1"),
+            ("uid", Operator::EndsWith, "0001", "1"),
+            ("uid", Operator::Regex, "^0{8}-", "1"),
+            ("u64", Operator::InList, "0, 18446744073709551615", "2"),
+        ];
+        for (column, operator, value, expected) in cases {
+            assert_eq!(
+                matched(&connection, gallery, column, operator, value),
+                expected,
+                "{column} {operator:?} {value:?}"
+            );
+        }
+        assert_eq!(
+            matched(&connection, gallery, "id", Operator::Between, "1..2"),
+            "2"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_percent_underscore_and_backslash_in_a_value_match_themselves() {
+        let connection = live();
+        let from = "dbdelve_dev.dbdelve_filter_probe";
+        ran(&connection, &format!("DROP TABLE IF EXISTS {from}"));
+        ran(
+            &connection,
+            &format!("CREATE TABLE {from} (v String) ENGINE = Memory"),
+        );
+        ran(
+            &connection,
+            &format!(
+                "INSERT INTO {from} VALUES ('100%'), ('100x'), ('a_b'), ('axb'), ('50%off'), \
+                 ('p\\\\q'), ('pxq'), ('a1'), ('ab'), ('1a'), ('a9z')"
+            ),
+        );
+        let cases: [(Operator, &str, &str); 8] = [
+            (Operator::Contains, "%", "2"),
+            (Operator::StartsWith, "100%", "1"),
+            (Operator::EndsWith, "%", "1"),
+            (Operator::Contains, "_", "1"),
+            (Operator::StartsWith, "a_", "1"),
+            (Operator::NotContains, "_", "10"),
+            (Operator::Contains, "\\", "1"),
+            (Operator::EndsWith, "\\q", "1"),
+        ];
+        for (operator, value, expected) in cases {
+            assert_eq!(
+                matched(&connection, from, "v", operator, value),
+                expected,
+                "{operator:?} {value:?}"
+            );
+        }
+        let regex = matched(&connection, from, "v", Operator::Regex, "^a\\d");
+        ran(&connection, &format!("DROP TABLE {from}"));
+        assert_eq!(regex, "2");
     }
 
     #[test]

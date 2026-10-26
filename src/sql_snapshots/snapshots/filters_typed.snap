@@ -5443,203 +5443,203 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains none · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains none · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains none · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains none · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains none · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varchar(20) · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varchar(20) · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varchar(20) · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varchar(20) · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varchar(20) · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains nvarchar(20) · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains nvarchar(20) · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains nvarchar(20) · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains nvarchar(20) · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains nvarchar(20) · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains int · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains int · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains int · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains int · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains int · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bit · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bit · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bit · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bit · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bit · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains datetime · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains datetime · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains datetime · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains datetime · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains datetime · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains date · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains date · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains date · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains date · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains date · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varbinary(16) · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varbinary(16) · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varbinary(16) · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varbinary(16) · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains varbinary(16) · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains uniqueidentifier · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains uniqueidentifier · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains uniqueidentifier · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains uniqueidentifier · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains uniqueidentifier · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bytea · ok
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%ok%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bytea · 李小龍 ünï 😀
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bytea · 0xDEADbeef
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%0xDEADbeef%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bytea · 2024-01-02 03:04:05.123
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] Contains bytea · 42
-  |SELECT * FROM `public`.`accounts` WHERE `Name` LIKE '%42%' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] InList none · 1, 2

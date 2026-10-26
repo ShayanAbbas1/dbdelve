@@ -1235,8 +1235,8 @@ source: src/sql_snapshots.rs
 [clickhouse] Operator::offered NotInList => |true|
 [clickhouse] Operator::on Between => |true|
 [clickhouse] Operator::offered Between => |true|
-[clickhouse] Operator::on Regex => |false|
-[clickhouse] Operator::offered Regex => |false|
+[clickhouse] Operator::on Regex => |true|
+[clickhouse] Operator::offered Regex => |true|
 [clickhouse] filters_on key => |true|
 [clickhouse] filters_on type => |true|
 [clickhouse] filters_on Name => |true|

@@ -474,6 +474,9 @@ pub enum RegexMatch {
     RegexpInstr,
     RegexpMatches,
     RegexpCount,
+    /// ClickHouse's `match` reads text only, so the column goes through
+    /// `toString`. Unanchored, like `~`.
+    Match,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,6 +488,9 @@ pub enum SubstringMatch {
     /// or a number has no `instr`.
     InstrCast,
     Contains,
+    /// `LIKE` over `toString(column)`: ClickHouse's `LIKE` takes only a string
+    /// or a `FixedString`, and `toString` keeps `Nullable`, so a NULL stays NULL.
+    LikeToString,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1144,6 +1150,8 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
             "EmbeddedRocksDB",
             "GenerateRandom",
         ]),
+        regex: RegexMatch::Match,
+        substring: SubstringMatch::LikeToString,
         // No Explain yet, and no `skip_duplicates`: there is no clause that
         // skips a row on a key, because there is no unique key.
         ..SqlSpec::ANSI
