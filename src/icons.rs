@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 66] = [
+const ICONS: [(&str, &IconData); 67] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -85,6 +85,7 @@ const ICONS: [(&str, &IconData); 66] = [
     ("icons/link.svg", icondata_lu::LuLink),
     ("icons/import.svg", icondata_lu::LuImport),
     ("icons/ban.svg", icondata_lu::LuBan),
+    ("icons/rotate-ccw.svg", icondata_lu::LuRotateCcw),
     ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
     ("icons/engine-mysql.svg", icondata_si::SiMysql),
     ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
@@ -171,6 +172,8 @@ pub mod icon {
     pub const LINK: &str = "icons/link.svg";
     /// Connections read in from another client.
     pub const IMPORT: &str = "icons/import.svg";
+    /// Back to the default: a font's family or size.
+    pub const RESET: &str = "icons/rotate-ccw.svg";
 }
 
 pub fn icon(path: &'static str) -> Icon {

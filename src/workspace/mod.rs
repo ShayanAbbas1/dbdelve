@@ -982,15 +982,6 @@ impl Workspace {
         self.remember_profiles(cx);
         cx.refresh_windows();
     }
-
-    pub(crate) fn reset_font(&mut self, slot: FontSlot, cx: &mut Context<Self>) {
-        let family = Fonts::default().family(slot).clone();
-        if *fonts(cx).family(slot) != family {
-            self.set_font(slot, family.to_string(), cx);
-        }
-        let (_, default, _) = font_size_range(slot);
-        self.set_font_size(slot, default, cx);
-    }
 }
 
 /// What `settle_sidebar` should do with the split this frame, decided from

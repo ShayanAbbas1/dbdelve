@@ -24,7 +24,7 @@ use crate::{
     palette::Mode as PaletteMode,
     scroller::{SmoothScrollable, smooth},
     theme::{
-        Appearance, FontSlot, Fonts, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
+        Appearance, FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
         popup_theme,
     },
     ui::{
@@ -859,8 +859,8 @@ fn render_opacity(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) 
 }
 
 /// The family, picked from the palette, which lists every family the text
-/// system resolved and marks the one in use; then the size, and a reset that
-/// puts both back.
+/// system resolved, marks the one in use and leads with the default; then the
+/// size, and a reset that puts the size back.
 fn render_font(
     workspace: &Workspace,
     slot: FontSlot,
@@ -869,7 +869,6 @@ fn render_font(
 ) -> AnyElement {
     let index = slot as usize;
     let family = fonts(cx).family(slot).clone();
-    let default_family = Fonts::default().family(slot).clone();
     let size = workspace.settings.font_size(slot);
     let (min, default, max) = font_size_range(slot);
     // Disabled at the ends rather than clamped again here: `step_font_size`
@@ -916,20 +915,20 @@ fn render_font(
                 workspace.step_font_size(slot, FONT_SIZE_STEP, cx);
             })),
         );
-    let reset = button(
-        ("font-reset", index),
-        "Reset",
+    let reset = icon_button(
+        ("font-size-reset", index),
+        icon::RESET,
         Tone::Quiet,
         Control::Compact,
         t,
     )
-    .disabled(family == default_family && size == default)
-    .tooltip(format!("Reset to {default_family} {default}"))
+    .disabled(size == default)
+    .tooltip(format!("Reset to {default}"))
     .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-        workspace.reset_font(slot, cx);
+        workspace.set_font_size(slot, default, cx);
     }));
     // The picker takes what the family's name needs and the rest of the row
-    // is air, so the stepper and the reset line up down the three rows.
+    // is air, so the steppers line up down the three rows.
     div()
         .w_full()
         .min_w_0()
@@ -942,8 +941,7 @@ fn render_font(
             },
         )))
         .child(div().flex_1())
-        .child(stepper)
-        .child(reset)
+        .child(stepper.child(reset))
         .into_any_element()
 }
 

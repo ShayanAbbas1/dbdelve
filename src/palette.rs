@@ -51,8 +51,8 @@ use crate::{
     session::{CatalogState, ObjectBody, Profile, QueryState, Tab, routine_name},
     store::StoredProject,
     theme::{
-        Appearance, ConnectionColor, FontSlot, Theme, fonts, install_theme, layout, popup_theme,
-        theme, user,
+        Appearance, ConnectionColor, FontSlot, Fonts, Theme, fonts, install_theme, layout,
+        popup_theme, theme, user,
     },
     ui::{
         Control, Tone, chord_for, highlighted, icon_button, key_chip, keycap_parts, keycaps,
@@ -2432,22 +2432,33 @@ fn history_items(profile: &Profile) -> Vec<Item> {
 /// slot will take a proportional one. Render each label in its own family and
 /// filter the grid's list by advance width if picking blind starts to cost.
 fn font_items(slot: FontSlot, cx: &App) -> Vec<Item> {
-    let current = fonts(cx).family(slot).clone();
-    let mut names = cx.text_system().all_font_names();
+    font_items_from(
+        slot,
+        fonts(cx).family(slot),
+        cx.text_system().all_font_names(),
+    )
+}
+
+/// The default first, by name, so getting back to it does not mean
+/// remembering which of the hundreds of families it was.
+fn font_items_from(slot: FontSlot, current: &str, mut names: Vec<String>) -> Vec<Item> {
+    let default = Fonts::default().family(slot).to_string();
     names.sort();
     names.dedup();
-    names
+    let families = names
         .into_iter()
         .filter(|name| !name.starts_with('.'))
         .map(|name| {
-            let hint = if name.as_str() == current.as_ref() {
-                "current"
-            } else {
-                ""
-            };
+            let hint = if name == current { "current" } else { "" };
             Item::new(name.clone(), icon::FONT, Command::SetFont(slot, name)).hint(hint)
-        })
-        .collect()
+        });
+    std::iter::once(Item::new(
+        format!("Default ({default})"),
+        icon::RESET,
+        Command::SetFont(slot, default),
+    ))
+    .chain(families)
+    .collect()
 }
 
 /// The theme a theme list marks as picked, and opens on: the one on screen,
@@ -3442,6 +3453,20 @@ mod tests {
             .map(|item| item.label.as_str())
             .collect();
         assert_eq!(picked, ["GitHub Light"]);
+    }
+
+    #[test]
+    fn the_font_list_leads_with_the_default_by_name() {
+        let names = ["Menlo", ".SF NS", "Lilex", "Fira Code", "Menlo"].map(String::from);
+        let items = font_items_from(FontSlot::Editor, "Menlo", names.to_vec());
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["Default (Lilex)", "Fira Code", "Lilex", "Menlo"]);
+        assert!(matches!(
+            &items[0].command,
+            Command::SetFont(FontSlot::Editor, family) if family == "Lilex"
+        ));
+        assert_eq!(hint_of(&items, "Menlo"), "current");
+        assert_eq!(hint_of(&items, "Lilex"), "");
     }
 
     #[test]
