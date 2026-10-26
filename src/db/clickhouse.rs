@@ -4683,6 +4683,42 @@ mod live {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_two_instants_shown_as_one_wall_clock_time_are_refused_unwritten() {
+        let connection = live();
+        // 05:30 and 06:30 UTC, either side of New York's clocks going back,
+        // are both 01:30 there.
+        let table = scratch(
+            &connection,
+            "id UInt32, label String, ts DateTime('America/New_York')",
+            BLOCKS,
+            "(1, 'same', 1730611800), (1, 'same', 1730615400)",
+        );
+        let read = previewed(&connection, &table);
+        assert!(
+            read.rows
+                .iter()
+                .all(|row| row.get(2) == Some("2024-11-03 01:30:00"))
+        );
+        for statement in [
+            relabel(&table, &read, "1", "changed"),
+            format!(
+                "DELETE FROM `dbdelve_dev`.`{table}` WHERE {}",
+                named(&read, "1")
+            ),
+        ] {
+            let error = written(&connection, &statement).unwrap_err();
+            assert_eq!(
+                error.message,
+                "2 rows have exactly these values, so DBDelve will not change one of them.",
+                "{statement}"
+            );
+        }
+        assert_eq!(labels(&connection, &table), "same\nsame");
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_a_batch_stops_at_its_first_refusal_and_what_ran_stays() {
         let connection = live();
         for settings in [BLOCKS, ""] {

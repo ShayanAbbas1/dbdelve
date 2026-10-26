@@ -57,10 +57,13 @@ WHERE name = 'enable_lightweight_update'";
 
 enum Spelling {
     /// `` `c` = '<text>' ``: the server converts the literal to the column's
-    /// type exactly, and the primary key's index still applies.
+    /// type exactly, no two values of the type are shown as the same text, and
+    /// the primary key's index still applies.
     Equal,
     /// ``toString(`c`) = '<text>'``: the server's own text against the text it
-    /// sent, for a type no literal converts to exactly.
+    /// sent, for a type no literal converts to exactly or whose text can name
+    /// two values. Every row shown as this text matches, so the guard counts
+    /// them all.
     Text,
     Unmatchable,
 }
@@ -70,9 +73,12 @@ fn spelling(data_type: &str) -> Spelling {
     let (base, _) = peel(data_type);
     match base.split('(').next().unwrap_or(base) {
         "String" | "FixedString" | "Enum8" | "Enum16" | "Bool" | "UUID" | "IPv4" | "IPv6"
-        | "Date" | "Date32" | "DateTime" | "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128"
-        | "UInt256" | "Int8" | "Int16" | "Int32" | "Int64" | "Int128" | "Int256" => Spelling::Equal,
-        "Float32" | "Float64" | "BFloat16" | "Decimal" | "Decimal32" | "Decimal64"
+        | "Date" | "Date32" | "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" | "UInt256"
+        | "Int8" | "Int16" | "Int32" | "Int64" | "Int128" | "Int256" => Spelling::Equal,
+        // A `DateTime` is shown in its time zone, the server's when it names
+        // none, where the hour a clock goes back is shown twice: the literal
+        // names only one of the two instants.
+        "DateTime" | "Float32" | "Float64" | "BFloat16" | "Decimal" | "Decimal32" | "Decimal64"
         | "Decimal128" | "Decimal256" | "DateTime64" | "Time" | "Time64" | "Array" | "Tuple"
         | "Map" | "Nested" | "Point" | "Ring" | "LineString" | "MultiLineString" | "Polygon"
         | "MultiPolygon" => Spelling::Text,
@@ -523,8 +529,6 @@ mod tests {
             "IPv6",
             "Date",
             "Date32",
-            "DateTime",
-            "DateTime('UTC')",
             "UInt8",
             "UInt256",
             "Int64",
@@ -542,6 +546,12 @@ mod tests {
             "BFloat16",
             "Decimal(10, 2)",
             "Decimal64(3)",
+            "DateTime",
+            "DateTime('UTC')",
+            "DateTime('America/New_York')",
+            "Nullable(DateTime('Europe/London'))",
+            "LowCardinality(Nullable(DateTime))",
+            "SimpleAggregateFunction(max, DateTime('America/New_York'))",
             "DateTime64(6)",
             "DateTime64(3, 'UTC')",
             "Array(String)",
@@ -588,6 +598,19 @@ mod tests {
         }
         let term = match_value("a`b", Some("v"), "String").unwrap();
         assert_eq!(term, "`a``b` = 'v'");
+    }
+
+    #[test]
+    fn a_wall_clock_time_shown_twice_is_matched_as_text_so_both_rows_match() {
+        let term = match_value(
+            "ts",
+            Some("2024-11-03 01:30:00"),
+            "DateTime('America/New_York')",
+        );
+        assert_eq!(
+            term.as_deref(),
+            Some("toString(`ts`) = '2024-11-03 01:30:00'")
+        );
     }
 
     #[test]
