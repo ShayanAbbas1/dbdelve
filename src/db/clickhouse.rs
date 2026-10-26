@@ -27,7 +27,8 @@ use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Databases, DbError, Engine, Fetch, QueryResult, RelationKind,
-    RowBuilder, ServerConfig, Stopped, Structure, plain_error, required_cell,
+    RowBuilder, ServerConfig, Stopped, Structure, assemble_catalog, assemble_databases,
+    plain_error, required_cell, terminated,
 };
 use crate::tls::SslMode;
 
@@ -67,6 +68,35 @@ const UNREACHED: &str =
 const SESSION_ENDED: &str = "The server ended the session after it sat idle; USE, SET and \
                              temporary tables from earlier runs are gone. Run it again to run it \
                              in a new session.";
+
+const DATABASES_SQL: &str = "
+SELECT name, name = currentDatabase() AS is_current
+FROM system.databases
+ORDER BY name";
+
+/// `total_bytes` and `total_rows` are what the server keeps for the table, so
+/// they ride along here instead of in `sizes`. Both are NULL for a view and a
+/// dictionary, and count rows still waiting for a merge. The `.inner` tables
+/// are what a materialized view with no `TO` stores its rows in.
+const RELATIONS_SQL: &str = "
+SELECT
+    database AS schema_name,
+    name AS relation_name,
+    multiIf(
+        engine IN ('View', 'LiveView', 'WindowView'), 'view',
+        engine = 'MaterializedView', 'materialized_view',
+        engine IN ('MySQL', 'PostgreSQL', 'MongoDB', 'S3', 'S3Queue', 'URL', 'HDFS', 'Kafka',
+                   'RabbitMQ', 'NATS', 'JDBC', 'ODBC', 'Hudi', 'Redis', 'AzureBlobStorage')
+            OR startsWith(engine, 'Iceberg') OR startsWith(engine, 'DeltaLake'), 'foreign_table',
+        'table'
+    ) AS relation_kind,
+    total_bytes AS size_bytes,
+    total_rows AS row_estimate
+FROM system.tables
+WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+    AND NOT is_temporary
+    AND NOT startsWith(name, '.inner')
+ORDER BY database, name";
 
 /// The server's version, and the settings a request may carry, with whether
 /// this user may change each.
@@ -333,11 +363,11 @@ impl Connection {
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        unwired()
+        assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
     }
 
     pub fn databases(&self) -> Result<Databases, DbError> {
-        unwired()
+        assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
     pub fn structure(&self, _schema: &str, _relation: &str) -> Result<Structure, DbError> {
@@ -346,11 +376,22 @@ impl Connection {
 
     pub fn ddl(
         &self,
-        _schema: &str,
-        _relation: &str,
+        schema: &str,
+        relation: &str,
         _kind: RelationKind,
     ) -> Result<String, DbError> {
-        unwired()
+        let name = format!(
+            "{}.{}",
+            Engine::ClickHouse.quote_identifier(schema),
+            Engine::ClickHouse.quote_identifier(relation)
+        );
+        let result = self.internal_query(&format!("SHOW CREATE TABLE {name}"))?;
+        result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .map(terminated)
+            .ok_or_else(|| plain_error(format!("{name} has no definition to show.")))
     }
 
     /// Stop the statements running under `cancel`, side by side, each by
@@ -2982,6 +3023,138 @@ mod live {
         );
     }
 
+    fn kinds_of(catalog: &Catalog, schema: &str) -> Vec<(String, RelationKind)> {
+        catalog
+            .schemas
+            .iter()
+            .find(|found| found.name == schema)
+            .map(|found| {
+                found
+                    .relations
+                    .iter()
+                    .map(|relation| (relation.name.clone(), relation.kind))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_every_seeded_kind_lands_right_and_the_system_databases_stay_out() {
+        let catalog = live_any(live_config()).catalog().unwrap();
+        let seeded = kinds_of(&catalog, "dbdelve_dev");
+        let kind = |name: &str| {
+            seeded
+                .iter()
+                .find(|(found, _)| found == name)
+                .unwrap_or_else(|| panic!("{name} is not listed: {seeded:?}"))
+                .1
+        };
+        assert_eq!(kind("accounts"), RelationKind::Table);
+        assert_eq!(kind("events"), RelationKind::Table);
+        assert_eq!(kind("scratch"), RelationKind::Table);
+        assert_eq!(kind("plan_seats"), RelationKind::Table);
+        assert_eq!(kind("events_per_kind"), RelationKind::Table);
+        assert_eq!(kind("active_accounts"), RelationKind::View);
+        assert_eq!(kind("events_per_kind_mv"), RelationKind::MaterializedView);
+        assert_eq!(
+            kinds_of(&catalog, "analytics"),
+            [("page_views".to_string(), RelationKind::Table)]
+        );
+        assert!(
+            catalog
+                .schemas
+                .iter()
+                .all(|schema| !Engine::ClickHouse.is_system_database(&schema.name)),
+            "{:?}",
+            catalog.schemas.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_servers_own_row_and_byte_counts_ride_on_the_catalog() {
+        let connection = live_any(live_config());
+        let catalog = connection.catalog().unwrap();
+        let relation = |name: &str| {
+            catalog
+                .schemas
+                .iter()
+                .find(|schema| schema.name == "dbdelve_dev")
+                .and_then(|schema| schema.relations.iter().find(|r| r.name == name))
+                .unwrap()
+        };
+        assert_eq!(relation("events").rows, Some(1_000_000));
+        assert!(relation("events").size.is_some_and(|bytes| bytes > 0));
+        assert_eq!(relation("accounts").rows, Some(50));
+        assert_eq!(relation("active_accounts").rows, None);
+        assert_eq!(relation("active_accounts").size, None);
+        assert!(connection.sizes().unwrap().is_empty());
+        assert!(connection.routines().unwrap().schemas.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_materialized_view_without_a_target_hides_its_inner_table() {
+        let connection = live();
+        let view = format!("dbdelve_tmp_{}", marker());
+        ran(
+            &connection,
+            &format!(
+                "CREATE MATERIALIZED VIEW `{view}` ENGINE = MergeTree ORDER BY kind \
+                 AS SELECT kind FROM events"
+            ),
+        );
+        let inner = text(&ran(
+            &connection,
+            "SELECT count() FROM system.tables WHERE startsWith(name, '.inner')",
+        ));
+        let catalog = live_any(live_config()).catalog();
+        ran(&connection, &format!("DROP VIEW `{view}`"));
+        let listed = kinds_of(&catalog.unwrap(), "dbdelve_dev");
+        assert!(inner.parse::<u32>().unwrap() > 0, "no .inner table to hide");
+        assert!(
+            listed
+                .iter()
+                .any(|(name, kind)| *name == view && *kind == RelationKind::MaterializedView),
+            "{listed:?}"
+        );
+        assert!(
+            listed.iter().all(|(name, _)| !name.starts_with(".inner")),
+            "{listed:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_databases_list_flags_the_one_connected_to() {
+        let databases = live_any(live_config())
+            .databases(Engine::ClickHouse)
+            .unwrap();
+        assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+        assert!(databases.names.iter().any(|name| name == "analytics"));
+        assert!(databases.names.iter().any(|name| name == "dbdelve_dev"));
+        assert_eq!(databases.names.last().map(String::as_str), Some("system"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_ddl_of_a_table_and_a_view_is_the_servers_own() {
+        let connection = live_any(live_config());
+        let table = connection
+            .ddl("dbdelve_dev", "accounts", RelationKind::Table)
+            .unwrap();
+        let view = connection
+            .ddl("dbdelve_dev", "active_accounts", RelationKind::View)
+            .unwrap();
+        assert!(
+            table.starts_with("CREATE TABLE dbdelve_dev.accounts"),
+            "{table}"
+        );
+        assert!(table.contains('\n') && table.ends_with(';'), "{table}");
+        assert!(view.contains("VIEW dbdelve_dev.active_accounts"), "{view}");
+    }
+
     fn conformance_subject() -> crate::db::conformance::Subject {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
@@ -3024,6 +3197,7 @@ mod live {
         conformance_subject:
         connects,
         query_round_trip,
+        catalog_round_trip,
         types_render_as_expected,
         cancel_stops_a_long_query,
         row_limit_stops_an_eligible_read,
