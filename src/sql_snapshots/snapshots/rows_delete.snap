@@ -415,6 +415,65 @@ source: src/sql_snapshots.rs
   |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
+[clickhouse] id
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] composite
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7' AND `Region` = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] awkward column
+  |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[clickhouse] empty keys
+  (none)
+
+[clickhouse] value single quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] value backslash before quote
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '\\\\'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] value unicode
+  |DELETE FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] binary
+  |DELETE FROM `public`.`accounts` WHERE `payload` = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] relation plain
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] relation quotes
+  |DELETE FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[clickhouse] relation unicode
+  |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[clickhouse] relation reserved
+  |DELETE FROM `select`.`order` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] relation mixed case
+  |DELETE FROM `Sales`.`OrderLines` WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[clickhouse] relation brackets and dots
+  |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[clickhouse] relation backslash
+  |DELETE FROM `back\\\\slash`.`trail\\\\` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
 [mssql] id
   |DELETE FROM "public"."accounts" WHERE "id" = '7'|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false

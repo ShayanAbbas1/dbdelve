@@ -395,6 +395,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::DuckDb
             | Engine::SqlServer
             | Engine::Snowflake
+            | Engine::ClickHouse
             | Engine::MongoDb
             | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
         }
@@ -410,6 +411,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::DuckDb
             | Engine::SqlServer
             | Engine::Snowflake
+            | Engine::ClickHouse
             | Engine::MongoDb
             | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
         }

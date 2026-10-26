@@ -6,7 +6,10 @@
 //! spec only says which spelling that code picks. A new engine that fits the
 //! existing strategies is one more value here and its driver.
 
-use super::{ColumnDefinition, Fields, RelationKind, Syntax, mongo, mssql, mysql, postgres, redis};
+use super::{
+    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, mongo, mssql, mysql, postgres,
+    redis,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EngineSpec {
@@ -201,10 +204,8 @@ pub struct SqlSpec {
     pub regex: RegexMatch,
     pub substring: SubstringMatch,
     pub read_only_session: ReadOnlySession,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
-    )]
+    /// Nothing reads it until the classifier learns the floor.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub unreadable_floor: UnreadableFloor,
     /// Nothing outlives one request, so no statement leaves state behind.
     pub stateless_requests: bool,
@@ -417,10 +418,6 @@ pub enum ParserDialect {
     DuckDb,
     Snowflake,
     MsSql,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
-    )]
     ClickHouse,
 }
 
@@ -463,10 +460,6 @@ pub enum ReadOnlySession {
     /// Sent as settings on each request rather than on a session. The user's
     /// own statement can still try to lift it, so the server's refusal is
     /// what stops that.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
-    )]
     PerRequest,
 }
 
@@ -476,10 +469,6 @@ pub enum UnreadableFloor {
     None,
     /// A statement the parser cannot read is placed by its first keyword, and
     /// one whose first keyword is unknown fails closed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ClickHouse spec arrives with the engine")
-    )]
     FirstKeyword,
 }
 
@@ -1003,6 +992,51 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
         // No `imports`: its new rows are keys that each name their own value,
         // not rows under a file's columns. No `copies_ddl`: a keyspace is
         // declared nowhere.
+        ..Abilities::NONE
+    },
+    hooks: Hooks::NONE,
+};
+
+pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
+    id: "clickhouse",
+    label: "ClickHouse",
+    schemes: &["clickhouse"],
+    file_extensions: &[],
+    logo: "icons/engine-clickhouse.svg",
+    brand: 0xFFCC01,
+    syntax: Syntax::Sql,
+    layout: Fields::Server,
+    default_port: Some(clickhouse::DEFAULT_PORT),
+    takes_options: false,
+    resolves_srv: false,
+    system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
+    binary_types: &[],
+    hints: Hints {
+        database: "default",
+        user: "default",
+        ..Hints::DEFAULT
+    },
+    sql: SqlSpec {
+        identifier_quote: IdentifierQuote::Backtick,
+        backslash_escapes: true,
+        // Quoted identifiers read backslash escapes as strings do.
+        identifier_backslash_escapes: true,
+        literal_offsets: false,
+        generated_defaults: &[
+            DefaultMarker::Prefix("MATERIALIZED "),
+            DefaultMarker::Prefix("ALIAS "),
+        ],
+        parser_dialect: ParserDialect::ClickHouse,
+        read_only_session: ReadOnlySession::PerRequest,
+        unreadable_floor: UnreadableFloor::FirstKeyword,
+        // No Explain yet, and no `skip_duplicates`: there is no clause that
+        // skips a row on a key, because there is no unique key.
+        ..SqlSpec::ANSI
+    },
+    // Edits arrive with the write gate that can name a row.
+    abilities: Abilities {
+        copies_ddl: true,
+        switches_database: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,

@@ -3550,7 +3550,7 @@ mod tests {
         rows.push(Listed {
             unavailable: Some((0, "Needs the odbc plugin".into())),
             logo: icon::DATABASE,
-            ..listed("ch", "ClickHouse", "")
+            ..listed("ch", "Oracle", "")
         });
         projects[0].connections.push("ch".into());
         (rows, projects)
@@ -3560,10 +3560,7 @@ mod tests {
     fn an_unavailable_connection_is_listed_greyed_in_its_project() {
         let (rows, projects) = with_unavailable();
         let items = listed_connections(&rows, &projects, 0);
-        let row = items
-            .iter()
-            .find(|item| item.label == "ClickHouse")
-            .unwrap();
+        let row = items.iter().find(|item| item.label == "Oracle").unwrap();
         assert!(matches!(
             row.command,
             Command::Confirm(Target::Unavailable(0))
@@ -3590,7 +3587,7 @@ mod tests {
                 &HashSet::new(),
             )
         };
-        assert_eq!(verb("ClickHouse"), "Remove");
+        assert_eq!(verb("Oracle"), "Remove");
         assert_eq!(verb("Orders"), "Switch");
     }
 

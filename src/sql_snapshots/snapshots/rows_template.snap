@@ -78,6 +78,17 @@ source: src/sql_snapshots.rs
 [snowflake] only a sql server computed column => |INSERT INTO "public"."accounts" ("total") VALUES (?);|
 [snowflake] empty => (none)
 [snowflake] awkward names => |INSERT INTO "public"."accounts" ("we""ird", "back`tick", "with space", "ümlaut", "[x]", "") VALUES (?, ?, ?, ?, ?, ?);|
+[clickhouse] ordinary => |INSERT INTO `public`.`accounts` (`id`, `Name`, `total`, `seq`, `rid`, `it's`) VALUES (?, ?, ?, ?, ?, ?);|
+[clickhouse] postgres generated => |INSERT INTO `public`.`accounts` (`a`, `b`, `c`) VALUES (?, ?, ?);|
+[clickhouse] mysql generated => |INSERT INTO `public`.`accounts` (`a`, `b`, `c`, `d`) VALUES (?, ?, ?, ?);|
+[clickhouse] sql server computed => |INSERT INTO `public`.`accounts` (`a`, `total`, `flat`, `ident`, `dflt`) VALUES (?, ?, ?, ?, ?);|
+[clickhouse] look-alikes => |INSERT INTO `public`.`accounts` (`a`, `b`, `c`, `d`) VALUES (?, ?, ?, ?);|
+[clickhouse] all generated, sql server => |INSERT INTO `public`.`accounts` (`total`, `ident`, `g`, `s`) VALUES (?, ?, ?, ?);|
+[clickhouse] all dropped, postgres => |INSERT INTO `public`.`accounts` (`b`, `c`) VALUES (?, ?);|
+[clickhouse] all dropped, mysql => |INSERT INTO `public`.`accounts` (`b`, `c`) VALUES (?, ?);|
+[clickhouse] only a sql server computed column => |INSERT INTO `public`.`accounts` (`total`) VALUES (?);|
+[clickhouse] empty => (none)
+[clickhouse] awkward names => |INSERT INTO `public`.`accounts` (`we"ird`, `back``tick`, `with space`, `ümlaut`, `[x]`, ``) VALUES (?, ?, ?, ?, ?, ?);|
 [mssql] ordinary => |INSERT INTO "public"."accounts" ("id", "Name", "total", "seq", "it's") VALUES (@p1, @p2, @p3, @p4, @p5);|
 [mssql] postgres generated => |INSERT INTO "public"."accounts" ("a", "b", "c") VALUES (@p1, @p2, @p3);|
 [mssql] mysql generated => |INSERT INTO "public"."accounts" ("a", "b", "c", "d") VALUES (@p1, @p2, @p3, @p4);|

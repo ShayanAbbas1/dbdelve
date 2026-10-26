@@ -36,6 +36,11 @@ source: src/sql_snapshots.rs
 [snowflake] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
 [snowflake] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
 [snowflake] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
+[clickhouse] buffer "" => |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[clickhouse] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[clickhouse] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[clickhouse] buffer "SELECT 1 -- note" => |SELECT 1; -- note\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+[clickhouse] buffer "SELECT 1\n/* c */\n" => |SELECT 1;\u{a}/* c */\u{a}\u{a}DELETE FROM `public`.`accounts` WHERE `id` = '7'|
 [mssql] buffer "" => |DELETE FROM "public"."accounts" WHERE "id" = '7'|
 [mssql] buffer "SELECT 1" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|
 [mssql] buffer "SELECT 1;" => |SELECT 1;\u{a}\u{a}DELETE FROM "public"."accounts" WHERE "id" = '7'|

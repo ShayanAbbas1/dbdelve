@@ -194,6 +194,34 @@ source: src/sql_snapshots.rs
 [snowflake] keyless
   error: |dbdelve cannot name an edited row by its primary key.|
 
+[clickhouse] one row
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] two rows
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] composite keys
+  |BEGIN;|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '8' AND `Region` = 'us';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] default
+  |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] empty
+  error: |There are no edits to apply.|
+
+[clickhouse] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
 [mssql] one row
   |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '7';|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None

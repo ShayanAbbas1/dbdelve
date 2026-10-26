@@ -190,6 +190,30 @@ source: src/sql_snapshots.rs
 
 [snowflake] delete · Analyze
   (none)
+[clickhouse] plain · Plan · explainable => |ok|
+
+[clickhouse] plain · Plan
+  (none)
+[clickhouse] filtered · Plan · explainable => |ok|
+
+[clickhouse] filtered · Plan
+  (none)
+[clickhouse] delete · Plan · explainable => |ok|
+
+[clickhouse] delete · Plan
+  (none)
+[clickhouse] plain · Analyze · explainable => |ok|
+
+[clickhouse] plain · Analyze
+  (none)
+[clickhouse] filtered · Analyze · explainable => |ok|
+
+[clickhouse] filtered · Analyze
+  (none)
+[clickhouse] delete · Analyze · explainable => |ok|
+
+[clickhouse] delete · Analyze
+  (none)
 [mssql] plain · Plan · explainable => |ok|
 
 [mssql] plain · Plan

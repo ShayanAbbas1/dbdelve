@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+mod clickhouse;
 #[cfg(test)]
 mod conformance;
 mod duckdb;
@@ -117,6 +118,7 @@ pub enum Engine {
     Turso,
     DuckDb,
     Snowflake,
+    ClickHouse,
     SqlServer,
     MongoDb,
     Redis,
@@ -224,6 +226,7 @@ impl Engine {
             Self::Turso => &spec::TURSO,
             Self::DuckDb => &spec::DUCKDB,
             Self::Snowflake => &spec::SNOWFLAKE,
+            Self::ClickHouse => &spec::CLICKHOUSE,
             Self::SqlServer => &spec::SQL_SERVER,
             Self::MongoDb => &spec::MONGODB,
             Self::Redis => &spec::REDIS,
@@ -241,7 +244,7 @@ impl Engine {
     }
 
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
@@ -249,6 +252,7 @@ impl Engine {
         Self::Turso,
         Self::DuckDb,
         Self::Snowflake,
+        Self::ClickHouse,
         Self::SqlServer,
         Self::MongoDb,
         Self::Redis,
@@ -948,6 +952,7 @@ pub enum ConnectionConfig {
         schema: Option<String>,
     },
     Snowflake(SnowflakeConfig),
+    ClickHouse(ServerConfig),
     MongoDb(MongoConfig),
     /// `database` is the database's number, blank for 0.
     Redis(ServerConfig),
@@ -974,6 +979,7 @@ impl ConnectionConfig {
             Self::Turso { .. } => Engine::Turso,
             Self::DuckDb { .. } => Engine::DuckDb,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
         }
@@ -987,6 +993,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
             Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
@@ -1003,6 +1010,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
             Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
@@ -1019,9 +1027,10 @@ impl ConnectionConfig {
                 server.database = name;
                 server.schema = None;
             }
-            Self::MySql(server) | Self::MariaDb(server) | Self::SqlServer(server) => {
-                server.database = name
-            }
+            Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server)
+            | Self::ClickHouse(server) => server.database = name,
             Self::MongoDb(mongo) => mongo.set_database(name),
             Self::Snowflake(account) => account.set_database(name),
             // Listed as `db3`, stored as the number a URL's path holds.
@@ -1105,6 +1114,7 @@ impl ConnectionConfig {
             Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
             Engine::MongoDb => mongo::config_from_url(url).map(Self::MongoDb),
             Engine::Redis => redis::config_from_url(url).map(Self::Redis),
+            Engine::ClickHouse => server_from_url(url, "ClickHouse").map(Self::ClickHouse),
             Engine::Sqlite => sqlite::path_from_url(url).map(|path| Self::Sqlite {
                 path,
                 // A URL has nowhere to say it; the form is where it is set.
@@ -1131,6 +1141,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => server.statement_timeout,
             Self::MongoDb(mongo) => mongo.server.statement_timeout,
             Self::Sqlite {
@@ -1172,6 +1183,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => server.endpoint(),
             Self::MongoDb(mongo) => mongo.endpoint(),
             Self::Sqlite { path, .. } | Self::Turso { path, .. } => path.clone(),
@@ -1194,6 +1206,7 @@ pub enum Connection {
     Turso(turso::Connection),
     DuckDb(duckdb::Connection),
     Snowflake(snowflake::Connection),
+    ClickHouse(clickhouse::Connection),
     MongoDb(mongo::Connection),
     Redis(redis::Connection),
 }
@@ -1234,6 +1247,9 @@ impl Connection {
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
+            ConnectionConfig::ClickHouse(server) => {
+                clickhouse::Connection::open(&server).map(Self::ClickHouse)
+            }
             ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
             ConnectionConfig::Redis(server) => redis::Connection::open(&server).map(Self::Redis),
         }
@@ -1267,6 +1283,7 @@ impl Connection {
             Self::Turso(connection) => connection.query(sql, fetch),
             Self::DuckDb(connection) => connection.query(sql, fetch),
             Self::Snowflake(connection) => connection.query_with(sql, cancel, fetch),
+            Self::ClickHouse(connection) => connection.query(sql, cancel, fetch),
             Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
             Self::Redis(connection) => connection.query(sql, fetch),
         }
@@ -1289,6 +1306,11 @@ impl Connection {
     ) -> Result<QueryResult, DbError> {
         let opened = match self {
             Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            // Never joined to the arm above: that would put every statement
+            // of a queue run at once on the session's mutex, one after another.
+            Self::ClickHouse(connection) => {
+                return connection.query_alongside(sql, cancel, fetch, read_only);
+            }
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
@@ -1358,6 +1380,7 @@ impl Connection {
     pub fn apart(&self) -> Result<Self, DbError> {
         match self {
             Self::Snowflake(_) | Self::MongoDb(_) => Ok(self.clone()),
+            Self::ClickHouse(connection) => Ok(Self::ClickHouse(connection.apart())),
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
@@ -1421,6 +1444,15 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
+            Self::ClickHouse(connection) => connection.generated(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
@@ -1455,6 +1487,7 @@ impl Connection {
             Self::Turso(connection) => connection.catalog(),
             Self::DuckDb(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
+            Self::ClickHouse(connection) => connection.catalog(),
             Self::MongoDb(connection) => connection.catalog(),
             Self::Redis(connection) => connection.catalog(),
         }
@@ -1471,6 +1504,7 @@ impl Connection {
             Self::Turso(connection) => connection.routines(),
             Self::DuckDb(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
+            Self::ClickHouse(_) => Ok(Catalog::default()),
             Self::MongoDb(connection) => connection.routines(),
             Self::Redis(_) => Ok(Catalog::default()),
         }
@@ -1495,6 +1529,7 @@ impl Connection {
             | Self::Turso(_)
             | Self::DuckDb(_)
             | Self::Snowflake(_)
+            | Self::ClickHouse(_)
             | Self::Redis(_) => Ok(Sizes::new()),
         }
     }
@@ -1512,7 +1547,9 @@ impl Connection {
             Self::Turso(connection) => connection.references(schema, relation),
             Self::DuckDb(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
-            Self::Snowflake(_) | Self::MongoDb(_) | Self::Redis(_) => Ok(Vec::new()),
+            Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => {
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -1526,6 +1563,7 @@ impl Connection {
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
             Self::Snowflake(connection) => connection.databases(),
+            Self::ClickHouse(connection) => connection.databases(),
             Self::DuckDb(connection) => connection.databases(),
             Self::Sqlite(_) | Self::Turso(_) => Ok(Databases::default()),
         }?;
@@ -1607,6 +1645,7 @@ impl Connection {
             Self::Turso(connection) => connection.structure(schema, relation),
             Self::DuckDb(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
+            Self::ClickHouse(connection) => connection.structure(schema, relation),
             Self::MongoDb(connection) => connection.structure(schema, relation),
             Self::Redis(connection) => connection.structure(schema, relation),
         }
@@ -1625,6 +1664,7 @@ impl Connection {
             Self::Turso(connection) => connection.ddl(schema, relation),
             Self::DuckDb(connection) => connection.ddl(schema, relation),
             Self::Snowflake(connection) => connection.ddl(schema, relation, kind),
+            Self::ClickHouse(connection) => connection.ddl(schema, relation, kind),
             Self::MongoDb(connection) => connection.ddl(schema, relation),
             Self::Redis(connection) => connection.ddl(schema, relation),
         }
@@ -1652,7 +1692,10 @@ impl Connection {
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
         if let Some(alongside) = cancel.stop_alongside()
-            && !matches!(self, Self::Snowflake(_) | Self::MongoDb(_))
+            && !matches!(
+                self,
+                Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_)
+            )
         {
             return alongside
                 .iter()
@@ -1667,6 +1710,7 @@ impl Connection {
             Self::Turso(connection) => connection.cancel(),
             Self::DuckDb(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
+            Self::ClickHouse(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
             Self::Redis(connection) => connection.cancel(),
         }
@@ -1687,6 +1731,7 @@ impl Connection {
             | Self::Turso(_)
             | Self::DuckDb(_)
             | Self::Snowflake(_)
+            | Self::ClickHouse(_)
             | Self::MongoDb(_)
             | Self::Redis(_) => false,
         }
@@ -1701,6 +1746,9 @@ impl Connection {
     /// `sql::gate` (src/sql.rs:1268), the real boundary, is not the only thing
     /// standing between Read-only and a write reaching the server.
     pub fn set_read_only(&self, read_only: bool) -> Result<(), DbError> {
+        if let Self::ClickHouse(connection) = self {
+            return connection.set_read_only(read_only);
+        }
         let engine = match self {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(connection) => connection.engine(),
@@ -1709,6 +1757,7 @@ impl Connection {
             Self::Turso(_) => Engine::Turso,
             Self::DuckDb(_) => Engine::DuckDb,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
         };
@@ -2288,6 +2337,7 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
         Engine::MongoDb => message == "Cancelled.",
         Engine::Redis => message == redis::CANCELLED,
+        Engine::ClickHouse => message == clickhouse::CANCELLED,
     }
 }
 
@@ -2341,7 +2391,13 @@ pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<Strin
              next command opens a new one."
                 .into(),
         ),
-        Engine::Sqlite
+        Engine::ClickHouse if !reads => Some(
+            "ClickHouse has no transaction to roll back: what the statement had already written \
+             stays."
+                .into(),
+        ),
+        Engine::ClickHouse
+        | Engine::Sqlite
         | Engine::Turso
         | Engine::MySql
         | Engine::MariaDb
@@ -3031,6 +3087,7 @@ pub(super) mod at_once {
                     .alongside
                     .as_ref()
                     .map_or(0, |alongside| alongside.iter().flatten().count())
+                    + running.handles.len()
             }) < count
         {
             std::thread::sleep(Duration::from_millis(50));
@@ -3262,16 +3319,22 @@ mod tests {
 
     #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
+        // ClickHouse takes no insert until its write gate exists; Task 3.5
+        // lifts the exception.
         for engine in Engine::ALL {
-            assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
+            assert_eq!(
+                engine.takes_inserts(RelationKind::Table),
+                engine != Engine::ClickHouse,
+                "{engine:?}"
+            );
             assert_eq!(
                 engine.takes_inserts(RelationKind::View),
-                engine != Engine::MongoDb,
+                !matches!(engine, Engine::MongoDb | Engine::ClickHouse),
                 "{engine:?}"
             );
             assert_eq!(
                 engine.takes_imports(RelationKind::Table),
-                engine != Engine::Redis,
+                !matches!(engine, Engine::Redis | Engine::ClickHouse),
                 "{engine:?}"
             );
         }
@@ -3655,6 +3718,56 @@ mod tests {
                 assert!(engine.is_binary_type(data_type), "{engine:?} {data_type}");
             }
         }
+    }
+
+    #[test]
+    fn clickhouse_is_a_server_engine_with_a_url_that_takes_only_the_tls_keys() {
+        let config = ConnectionConfig::from_url(
+            "clickhouse://someone%40example.com:pw@ch.example.test:8443/logs?sslmode=verify-full&sslrootcert=/certs/ca.pem",
+        )
+        .unwrap();
+        assert_eq!(config.engine(), Engine::ClickHouse);
+        let server = config.server().expect("a server half, for the Keychain");
+        assert_eq!(
+            (
+                server.user.as_str(),
+                server.password.as_str(),
+                server.host.as_str(),
+                server.port,
+                server.database.as_str(),
+            ),
+            (
+                "someone@example.com",
+                "pw",
+                "ch.example.test",
+                Some(8443),
+                "logs"
+            )
+        );
+        assert_eq!(server.sslmode, SslMode::VerifyFull);
+        assert_eq!(server.root_certificate.as_deref(), Some("/certs/ca.pem"));
+        assert_eq!(config.endpoint(), server.endpoint());
+
+        let error = ConnectionConfig::from_url("clickhouse://u@h/db?compress=1").unwrap_err();
+        assert_eq!(
+            error,
+            "Connection URL parameter compress is not one dbdelve can pass to ClickHouse."
+        );
+
+        assert_eq!(Engine::parse("clickhouse"), Ok(Engine::ClickHouse));
+        assert_eq!(Engine::ClickHouse.as_str(), "clickhouse");
+        assert_eq!(Engine::ClickHouse.fields(), Fields::Server);
+        assert_eq!(Engine::ClickHouse.default_port(), Some(8123));
+        assert_eq!(
+            crate::connection_form::placeholders(Engine::ClickHouse).port,
+            "8123"
+        );
+        assert!(Engine::ClickHouse.holds_read_only());
+        assert_eq!(
+            read_only_statement(Engine::ClickHouse, true),
+            None,
+            "the hold rides on each request"
+        );
     }
 
     #[test]

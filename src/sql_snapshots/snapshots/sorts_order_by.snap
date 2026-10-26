@@ -926,6 +926,138 @@ source: src/sql_snapshots.rs
 [snowflake] update · [id asc, Name desc]
   (none)
 
+[clickhouse] preview · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] preview page 3 · []
+  |SELECT * FROM `public`.`accounts` LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] filtered · []
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] existing order · []
+  |SELECT * FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] trailing comment · []
+  |SELECT * FROM `public`.`accounts` -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] union · []
+  (none)
+
+[clickhouse] unparseable · []
+  (none)
+
+[clickhouse] update · []
+  (none)
+
+[clickhouse] preview · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] preview page 3 · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] filtered · [id asc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] existing order · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] trailing comment · [id asc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] union · [id asc]
+  (none)
+
+[clickhouse] unparseable · [id asc]
+  (none)
+
+[clickhouse] update · [id asc]
+  (none)
+
+[clickhouse] preview · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] preview page 3 · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] filtered · [Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] existing order · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] trailing comment · [Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] union · [Name desc]
+  (none)
+
+[clickhouse] unparseable · [Name desc]
+  (none)
+
+[clickhouse] update · [Name desc]
+  (none)
+
+[clickhouse] preview · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] filtered · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` ASC, `Name` DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] existing order · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY `id` ASC, `Name` DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] trailing comment · [id asc, Name desc]
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` ASC, `Name` DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] union · [id asc, Name desc]
+  (none)
+
+[clickhouse] unparseable · [id asc, Name desc]
+  (none)
+
+[clickhouse] update · [id asc, Name desc]
+  (none)
+
 [mssql] preview · []
   |SELECT * FROM "public"."accounts" LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

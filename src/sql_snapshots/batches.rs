@@ -297,7 +297,7 @@ fn update_batches_per_engine() {
 
 fn expect_by_engine(engine: Engine, skip: bool) -> bool {
     match engine {
-        Engine::Snowflake | Engine::SqlServer => !skip,
+        Engine::Snowflake | Engine::SqlServer | Engine::ClickHouse => !skip,
         Engine::Redis => false,
         _ => true,
     }

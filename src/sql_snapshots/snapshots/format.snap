@@ -113,6 +113,22 @@ source: src/sql_snapshots.rs
 [snowflake] unended comment => error: |Not formatting: a string, quoted name or comment does not end.|
 [snowflake] unended identifier => error: |Not formatting: a string, quoted name or comment does not end.|
 [snowflake] very long line => |select\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  b\u{a}from\u{a}  t|
+[clickhouse] plain => |select\u{a}  a,\u{a}  b\u{a}from\u{a}  t\u{a}where\u{a}  x = 1 -- keep\u{a}order by\u{a}  a|
+[clickhouse] two statements => |select\u{a}  1;\u{a}select\u{a}  2;|
+[clickhouse] two statements spaced => |select\u{a}  1;\u{a}\u{a}select\u{a}  2|
+[clickhouse] comment only => |-- only a comment|
+[clickhouse] empty => ||
+[clickhouse] block comment => |select\u{a}  /* a ; b */\u{a}  1|
+[clickhouse] backslash literal => |select\u{a}  'a\\b',\u{a}  'it\\'s'\u{a}from\u{a}  t|
+[clickhouse] backslash newline => |select\u{a}  'a\\nb'|
+[clickhouse] backslash newline escape string => |select\u{a}  E'a\\nb'|
+[clickhouse] quoted names => |select\u{a}  `a`,\u{a}  "b",\u{a}  [ c ]\u{a}from\u{a}  t|
+[clickhouse] placeholders => |select\u{a}  *\u{a}from\u{a}  t\u{a}where\u{a}  a = $1\u{a}  and b = ?\u{a}  and c = :name\u{a}  and d = @p1\u{a}  and e = % s|
+[clickhouse] dollar quote => error: |Not formatting: a dollar-quoted body would be rewritten.|
+[clickhouse] unended string => error: |Not formatting: a string, quoted name or comment does not end.|
+[clickhouse] unended comment => error: |Not formatting: a string, quoted name or comment does not end.|
+[clickhouse] unended identifier => error: |Not formatting: a string, quoted name or comment does not end.|
+[clickhouse] very long line => |select\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  b\u{a}from\u{a}  t|
 [mssql] plain => |select\u{a}  a,\u{a}  b\u{a}from\u{a}  t\u{a}where\u{a}  x = 1 -- keep\u{a}order by\u{a}  a|
 [mssql] two statements => |select\u{a}  1;\u{a}select\u{a}  2;|
 [mssql] two statements spaced => |select\u{a}  1;\u{a}\u{a}select\u{a}  2|

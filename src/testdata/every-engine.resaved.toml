@@ -329,3 +329,22 @@ color = "red"
 confirmed = []
 open_queries = []
 open_objects = []
+
+[[profiles]]
+id = "clk"
+name = "ClickHouse events"
+host = "ch.internal"
+port = 8443
+database = "analytics"
+user = "ada"
+sslmode = "verify-full"
+root_certificate = "/certs/ch.pem"
+engine = "clickhouse"
+statement_timeout = 45
+confirmed = []
+open_queries = []
+open_objects = []
+
+[profiles.ssh]
+host = "bastion.internal"
+user = "jump"

@@ -878,6 +878,10 @@ mod tests {
             ("mongodb+srv://cluster0.example.net/app", Engine::MongoDb),
             ("rediss://cache:6380", Engine::Redis),
             ("snowflake://account", Engine::Snowflake),
+            (
+                "clickhouse://default@ch.internal:8123/logs",
+                Engine::ClickHouse,
+            ),
         ];
         for (text, engine) in cases {
             assert_eq!(recognise(text), Recognised::Url(engine), "{text}");

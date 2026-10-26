@@ -758,6 +758,114 @@ source: src/sql_snapshots.rs
 [snowflake] rows=0 key=a key "q" type=unknown
   (none)
 
+[clickhouse] rows=100 key=k type=string
+  (none)
+
+[clickhouse] rows=100 key=k type=hash
+  (none)
+
+[clickhouse] rows=100 key=k type=list
+  (none)
+
+[clickhouse] rows=100 key=k type=set
+  (none)
+
+[clickhouse] rows=100 key=k type=zset
+  (none)
+
+[clickhouse] rows=100 key=k type=stream
+  (none)
+
+[clickhouse] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[clickhouse] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[clickhouse] rows=100 key=k type=unknown
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=string
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=hash
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=list
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=set
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=zset
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=stream
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[clickhouse] rows=100 key=a key "q" type=unknown
+  (none)
+
+[clickhouse] rows=0 key=k type=string
+  (none)
+
+[clickhouse] rows=0 key=k type=hash
+  (none)
+
+[clickhouse] rows=0 key=k type=list
+  (none)
+
+[clickhouse] rows=0 key=k type=set
+  (none)
+
+[clickhouse] rows=0 key=k type=zset
+  (none)
+
+[clickhouse] rows=0 key=k type=stream
+  (none)
+
+[clickhouse] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[clickhouse] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[clickhouse] rows=0 key=k type=unknown
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=string
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=hash
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=list
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=set
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=zset
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=stream
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[clickhouse] rows=0 key=a key "q" type=unknown
+  (none)
+
 [mssql] rows=100 key=k type=string
   (none)
 
