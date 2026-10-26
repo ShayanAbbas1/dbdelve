@@ -1195,17 +1195,21 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
+        let unnameable = grid.delegate().read_only_reason().map_or_else(
+            || {
+                "dbdelve cannot name this row by its primary key, so it will not delete it."
+                    .to_string()
+            },
+            str::to_string,
+        );
         let key = grid.delegate().active().and_then(|(row, _)| {
             Some((
                 grid.delegate().row_key(row)?,
                 grid.delegate().row_types(row),
             ))
         });
-        let Some(((schema, table, keys), types)) = key else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let Some(((schema, table, keys, null_keys), types)) = key else {
+            self.note(unnameable, cx);
             return;
         };
         if !self.confirm_stale(StaleResume::Delete, cx) {
@@ -1216,11 +1220,11 @@ impl Workspace {
             .iter()
             .map(|(column, value)| (column.as_str(), value.as_str()))
             .collect();
-        let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed, &types) else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let nulls: Vec<&str> = null_keys.iter().map(String::as_str).collect();
+        let Some(statement) =
+            sql::delete_row_matching(engine, &schema, &table, &borrowed, &nulls, &types)
+        else {
+            self.note(unnameable, cx);
             return;
         };
         // Both halves of the admission, before anything is shown: the gate every
@@ -1228,7 +1232,11 @@ impl Workspace {
         // cannot give alone — that the predicate is this row's key and not some
         // other set of columns. Failing either is dbdelve disagreeing with itself,
         // a bug in dbdelve rather than a user error, so it is said and not run.
-        let columns: Vec<&str> = borrowed.iter().map(|&(column, _)| column).collect();
+        let columns: Vec<&str> = borrowed
+            .iter()
+            .map(|&(column, _)| column)
+            .chain(nulls.iter().copied())
+            .collect();
         if !sql::is_generated_write_on(engine, &statement)
             || !sql::delete_matches_key_on(engine, &statement, &columns)
         {

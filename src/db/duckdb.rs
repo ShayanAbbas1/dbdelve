@@ -696,6 +696,7 @@ fn edit_target(
         table,
         columns: origins,
         keys,
+        ..Default::default()
     })
 }
 
@@ -2051,6 +2052,7 @@ mod tests {
                     keys: vec![first.clone()],
                     types: types.clone(),
                     held: Vec::new(),
+                    ..Default::default()
                 },
                 PendingRow {
                     schema: edit.schema.clone(),
@@ -2059,6 +2061,7 @@ mod tests {
                     keys: vec![second.clone()],
                     types: types.clone(),
                     held: Vec::new(),
+                    ..Default::default()
                 },
             ],
         )

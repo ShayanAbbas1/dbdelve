@@ -89,9 +89,14 @@ fn gutter_cell() -> Div {
 /// `referenced_by` and the label to show for it.
 type ReferenceMenu = Rc<Vec<(usize, SharedString)>>;
 
-/// A row's schema and table, and its primary key as column/value pairs — what a
-/// one-row `DELETE` needs and nothing else.
-pub type RowKey = (String, String, Vec<(String, String)>);
+/// A row's schema and table, its primary key as column/value pairs, and the
+/// columns of a row named by every value that were NULL — what a one-row
+/// `DELETE` needs and nothing else.
+pub type RowKey = (String, String, Vec<(String, String)>, Vec<String>);
+
+/// A row's key columns against the values the server sent, and the columns of a
+/// row named by every value that were NULL.
+type KeyValues = (Vec<(String, String)>, Vec<String>);
 
 /// A grid's schema and table, and the columns a new row of it fills as
 /// column/type pairs — what the New row form is built from.
@@ -398,6 +403,7 @@ struct Editing {
 
 /// One row's worth of pending edits, resolved to real column names and ready
 /// for `sql::update_row`. Alias resolution happens here so the caller does none.
+#[derive(Default)]
 pub struct PendingRow {
     pub schema: String,
     pub table: String,
@@ -406,6 +412,11 @@ pub struct PendingRow {
     /// The key columns' real names against their **as-fetched** values: the row
     /// is identified by what the server holds, not by what the user has typed.
     pub keys: Vec<(String, String)>,
+    /// The columns of a row named by every value that read NULL, which `keys`
+    /// leaves out; always empty for a row named by a unique key.
+    pub null_keys: Vec<String>,
+    /// How the row's update is written.
+    pub update: db::UpdateSpelling,
     /// Real column name against its type, where the result says it.
     pub types: Vec<(String, String)>,
     /// Each changed column's as-fetched value, where it has one: what an edit
@@ -1714,8 +1725,12 @@ impl ResultGrid {
         let Some(Some(name)) = edit.columns.get(col) else {
             return false;
         };
+        let settable = match &edit.row_match {
+            db::RowMatch::Key => !edit.keys.contains(&col) || self.engine.edits_key_column(name),
+            db::RowMatch::EveryColumn { fixed } => !fixed.contains(&col),
+        };
         row < self.result.rows.len()
-            && (!edit.keys.contains(&col) || self.engine.edits_key_column(name))
+            && settable
             && self.engine.writes_back(
                 [self.column_type(col), self.cell_type(row, col)]
                     .into_iter()
@@ -1780,11 +1795,13 @@ impl ResultGrid {
         if row >= self.result.rows.len() {
             return None;
         }
-        Some((
-            edit.schema.clone(),
-            edit.table.clone(),
-            self.key_values(edit, row)?,
-        ))
+        let (keys, null_keys) = self.key_values(edit, row)?;
+        Some((edit.schema.clone(), edit.table.clone(), keys, null_keys))
+    }
+
+    /// Why the result's rows cannot be written back, when the engine said.
+    pub fn read_only_reason(&self) -> Option<&str> {
+        self.result.read_only_reason.as_deref()
     }
 
     /// What a new row of this grid's own is written into: where its rows are
@@ -1999,11 +2016,14 @@ impl ResultGrid {
                 if sets.is_empty() {
                     return None;
                 }
+                let (keys, null_keys) = self.key_values(edit, row)?;
                 Some(PendingRow {
                     schema: edit.schema.clone(),
                     table: edit.table.clone(),
                     sets,
-                    keys: self.key_values(edit, row)?,
+                    keys,
+                    null_keys,
+                    update: edit.update,
                     types: self.row_types(row),
                     held: self
                         .pending
@@ -2032,16 +2052,24 @@ impl ResultGrid {
             .collect()
     }
 
-    /// The row's key columns, named and carrying the value the server sent.
-    /// `None` if any of them is missing, which is what refuses the whole row.
-    fn key_values(&self, edit: &EditTarget, row: usize) -> Option<Vec<(String, String)>> {
-        edit.keys
-            .iter()
-            .map(|&col| {
-                let name = edit.columns.get(col)?.clone()?;
-                Some((name, self.cell(row, col)?.to_string()))
-            })
-            .collect()
+    /// The row's key columns, named and carrying the value the server sent,
+    /// and apart from them the columns that were NULL. `None` if any key is
+    /// missing, which is what refuses the whole row: a NULL is missing from a
+    /// unique key, where `=` would not find it, and is a value to match in a
+    /// row named by every column.
+    fn key_values(&self, edit: &EditTarget, row: usize) -> Option<KeyValues> {
+        let every_column = matches!(edit.row_match, db::RowMatch::EveryColumn { .. });
+        let mut keys = Vec::new();
+        let mut null_keys = Vec::new();
+        for &col in &edit.keys {
+            let name = edit.columns.get(col)?.clone()?;
+            match self.cell(row, col) {
+                Some(value) => keys.push((name, value.to_string())),
+                None if every_column && row < self.result.rows.len() => null_keys.push(name),
+                None => return None,
+            }
+        }
+        Some((keys, null_keys))
     }
 
     fn pending_at(&self, row: usize, col: usize) -> Option<&PendingEdit> {
@@ -3624,6 +3652,7 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into()), None],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -3647,6 +3676,7 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("note".into()), Some("depth".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -3668,6 +3698,7 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -3687,11 +3718,93 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
         )
+    }
+
+    /// `a` is fixed, and `b` reads NULL in the second row; the target names a
+    /// row by all three columns.
+    fn every_column_grid(row_match: db::RowMatch) -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: vec![column("a"), column("b"), column("c")],
+                rows: rows(vec![
+                    vec![Some("1".into()), Some("p".into()), Some("x".into())],
+                    vec![Some("2".into()), None, Some("y".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "db".into(),
+                    table: "t".into(),
+                    columns: vec![Some("a".into()), Some("b".into()), Some("c".into())],
+                    keys: vec![0, 1, 2],
+                    row_match,
+                    update: db::UpdateSpelling::AlterUpdate,
+                }),
+                read_only_reason: Some("Rows cannot be matched by value.".into()),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+    }
+
+    #[test]
+    fn a_row_named_by_every_column_carries_its_nulls_apart() {
+        let grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        assert_eq!(
+            grid.row_key(1),
+            Some((
+                "db".to_string(),
+                "t".to_string(),
+                vec![
+                    ("a".to_string(), "2".to_string()),
+                    ("c".to_string(), "y".to_string())
+                ],
+                vec!["b".to_string()]
+            ))
+        );
+        assert_eq!(grid.row_key(9), None);
+    }
+
+    #[test]
+    fn a_key_target_still_refuses_a_row_with_a_null_key() {
+        let grid = every_column_grid(db::RowMatch::Key);
+        assert_eq!(grid.row_key(0).map(|key| key.3), Some(Vec::new()));
+        assert_eq!(grid.row_key(1), None);
+    }
+
+    #[test]
+    fn under_every_column_the_fixed_columns_are_not_editable_and_the_rest_are() {
+        let grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        assert!(!grid.editable(0, 0));
+        assert!(grid.editable(0, 1));
+        assert!(grid.editable(0, 2));
+        let keyed = every_column_grid(db::RowMatch::Key);
+        assert!(!keyed.editable(0, 0));
+        assert!(!keyed.editable(0, 2));
+    }
+
+    #[test]
+    fn a_pending_row_carries_the_nulls_and_the_update_spelling() {
+        let mut grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        grid.pending.push(PendingEdit {
+            row: 1,
+            col: 2,
+            value: NewValue::Value("z".into()),
+            shown: None,
+        });
+        let [row] = &grid.pending_updates()[..] else {
+            panic!("one pending row");
+        };
+        assert_eq!(row.null_keys, ["b"]);
+        assert_eq!(row.update, db::UpdateSpelling::AlterUpdate);
+        assert_eq!(
+            grid.read_only_reason(),
+            Some("Rows cannot be matched by value.")
+        );
     }
 
     #[test]
@@ -3704,7 +3817,8 @@ mod tests {
             Some((
                 "public".to_string(),
                 "measurements".to_string(),
-                vec![("id".to_string(), "8".to_string())]
+                vec![("id".to_string(), "8".to_string())],
+                Vec::new()
             ))
         );
         // A row index can outlive the rows it was taken from.
@@ -4023,6 +4137,7 @@ mod tests {
                     table: "mixed_shapes".into(),
                     columns: vec![Some("_id".into()), Some("value".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -4171,6 +4286,7 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("payload".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -4226,6 +4342,7 @@ mod tests {
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -4313,6 +4430,7 @@ mod tests {
                         table: "measurements".into(),
                         columns: vec![Some("id".into()), Some("payload".into())],
                         keys: vec![0],
+                        ..Default::default()
                     }),
                     ..QueryResult::default()
                 },
@@ -4350,6 +4468,7 @@ mod tests {
                             Some("value".into()),
                         ],
                         keys: vec![0],
+                        ..Default::default()
                     }),
                     ..QueryResult::default()
                 },
@@ -4414,6 +4533,7 @@ mod tests {
                         table: "pets".into(),
                         columns: vec![Some("id".into()), Some("picture".into())],
                         keys: vec![0],
+                        ..Default::default()
                     }),
                     ..QueryResult::default()
                 },

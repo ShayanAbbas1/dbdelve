@@ -1,10 +1,12 @@
 use crate::{
     db::{
-        Abilities, Engine, EngineSpec, Fields, Hints, Hooks, IdentifierQuote, Paging,
-        ParserDialect, ReadOnlySession, RelationKind, SqlSpec, Syntax, UnreadableFloor,
+        Abilities, EditTarget, Engine, EngineSpec, Fields, Hints, Hooks, IdentifierQuote, Paging,
+        ParserDialect, ReadOnlySession, RelationKind, RowMatch, SqlSpec, Syntax, UnreadableFloor,
+        UpdateSpelling,
     },
     explorer,
     filter::{self, Operator},
+    result_grid::{NewValue, PendingRow},
     sql,
 };
 
@@ -143,4 +145,158 @@ fn engine_spec_is_static_data() {
         let first: &'static EngineSpec = engine.spec();
         assert!(std::ptr::eq(first, engine.spec()));
     }
+}
+
+fn matched(column: &str, value: Option<&str>, data_type: &str) -> Option<String> {
+    let column = FAKE.quote_identifier(column);
+    match (value, data_type) {
+        (_, "opaque") => None,
+        (None, _) => Some(format!("{column} IS NULL")),
+        (Some(value), "float") => Some(format!("toString({column}) = '{value}'")),
+        (Some(value), _) => Some(format!("{column} = '{value}'")),
+    }
+}
+
+const EVERY_VALUE: EngineSpec = EngineSpec {
+    hooks: Hooks {
+        match_value: Some(matched),
+        ..Hooks::NONE
+    },
+    sql: SqlSpec {
+        transactions: false,
+        row_terms: true,
+        ..SqlSpec::ANSI
+    },
+    ..FAKE
+};
+
+fn pending_row(update: UpdateSpelling) -> PendingRow {
+    PendingRow {
+        schema: "s".into(),
+        table: "t".into(),
+        sets: vec![("a".into(), NewValue::Value("new".into()))],
+        keys: vec![("k".into(), "1".into()), ("f".into(), "1.5".into())],
+        null_keys: vec!["n".into()],
+        update,
+        types: vec![("f".into(), "float".into())],
+        held: Vec::new(),
+    }
+}
+
+#[test]
+fn a_row_named_by_every_value_is_matched_through_the_hook_and_is_null() {
+    let row = pending_row(UpdateSpelling::Update);
+    assert_eq!(
+        sql::sql_update_batch(&EVERY_VALUE, &[row]).unwrap(),
+        r#"UPDATE "s"."t" SET "a" = 'new' WHERE "k" = '1' AND toString("f") = '1.5' AND "n" IS NULL;"#
+    );
+    let keys = [("k", "1")];
+    assert_eq!(
+        sql::sql_delete_row(
+            &EVERY_VALUE,
+            "s",
+            "t",
+            sql::Match {
+                keys: &keys,
+                nulls: &["n"]
+            },
+            &[]
+        )
+        .as_deref(),
+        Some(r#"DELETE FROM "s"."t" WHERE "k" = '1' AND "n" IS NULL"#)
+    );
+}
+
+#[test]
+fn a_value_the_hook_cannot_spell_leaves_the_row_unwritten() {
+    let types = [("k".to_string(), "opaque".to_string())];
+    let keys = [("k", "1")];
+    assert_eq!(
+        sql::sql_delete_row(
+            &EVERY_VALUE,
+            "s",
+            "t",
+            sql::Match {
+                keys: &keys,
+                nulls: &[]
+            },
+            &types
+        ),
+        None
+    );
+    assert_eq!(
+        sql::sql_delete_row(
+            &EVERY_VALUE,
+            "s",
+            "t",
+            sql::Match {
+                keys: &[],
+                nulls: &[]
+            },
+            &[]
+        ),
+        None
+    );
+}
+
+#[test]
+fn without_the_hook_a_null_key_is_still_matched_with_is_null() {
+    let keys = [("k", "1")];
+    assert_eq!(
+        sql::sql_delete_row(
+            &FAKE,
+            "s",
+            "t",
+            sql::Match {
+                keys: &keys,
+                nulls: &["n"]
+            },
+            &[]
+        )
+        .as_deref(),
+        Some(r#"DELETE FROM "s"."t" WHERE "k" = '1' AND "n" IS NULL"#)
+    );
+}
+
+#[test]
+fn an_alter_update_batch_waits_for_every_replica() {
+    let row = pending_row(UpdateSpelling::AlterUpdate);
+    assert_eq!(
+        sql::sql_update_batch(&EVERY_VALUE, &[row]).unwrap(),
+        r#"ALTER TABLE "s"."t" UPDATE "a" = 'new' WHERE "k" = '1' AND toString("f") = '1.5' AND "n" IS NULL SETTINGS mutations_sync = 2;"#
+    );
+}
+
+#[test]
+fn a_spec_without_transactions_brackets_no_batch() {
+    let rows = [
+        pending_row(UpdateSpelling::Update),
+        pending_row(UpdateSpelling::Update),
+    ];
+    assert_eq!(EVERY_VALUE.sql.transaction_opening(), None);
+    assert!(
+        !sql::sql_update_batch(&EVERY_VALUE, &rows)
+            .unwrap()
+            .contains("BEGIN")
+    );
+    assert!(
+        sql::sql_update_batch(&FAKE, &rows)
+            .unwrap()
+            .starts_with("BEGIN;")
+    );
+}
+
+#[test]
+fn an_edit_target_stored_before_row_match_reads_as_a_key() {
+    let old = r#"{"schema":"s","table":"t","columns":["id",null],"keys":[0]}"#;
+    let target: EditTarget = serde_json::from_str(old).unwrap();
+    assert_eq!(target.row_match, RowMatch::Key);
+    assert_eq!(target.update, UpdateSpelling::Update);
+    let every = EditTarget {
+        row_match: RowMatch::EveryColumn { fixed: vec![1] },
+        update: UpdateSpelling::AlterUpdate,
+        ..target
+    };
+    let back: EditTarget = serde_json::from_str(&serde_json::to_string(&every).unwrap()).unwrap();
+    assert_eq!(back, every);
 }

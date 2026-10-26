@@ -2319,6 +2319,9 @@ pub struct QueryResult {
     /// `None` is the answer for every result set dbdelve cannot address a single
     /// row of, and it is not an error — see [`Connection::edit_target`].
     pub edit: Option<EditTarget>,
+    /// Why these rows cannot be written back, where the engine knows and the
+    /// user would otherwise be told only that the row has no primary key.
+    pub read_only_reason: Option<String>,
     /// The submission's result sets after this one, in order.
     ///
     /// One level deep and never a tree: a nested `rest` is always empty,
@@ -2650,7 +2653,7 @@ impl QueryResult {
 /// The identity work — which oid, which attribute number — happens inside this
 /// module and stops here (hard rule 4). A caller gets an answer it can build
 /// SQL from, not a puzzle it has to ask the catalog about.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditTarget {
     pub schema: String,
     pub table: String,
@@ -2660,6 +2663,34 @@ pub struct EditTarget {
     pub columns: Vec<Option<String>>,
     /// Result-column indices that together identify one row. Never empty.
     pub keys: Vec<usize>,
+    /// What `keys` is: a unique key, or every value the row was read with.
+    #[serde(default)]
+    pub row_match: RowMatch,
+    /// How an update of a row is written.
+    #[serde(default)]
+    pub update: UpdateSpelling,
+}
+
+/// How a row is named when it is written back.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowMatch {
+    /// By a unique key, whose values are never NULL.
+    #[default]
+    Key,
+    /// By every value the row was read with, for an engine with no unique key;
+    /// `keys` lists them all, and a NULL is matched as `IS NULL`. `fixed` are
+    /// the result columns that cannot be set.
+    EveryColumn { fixed: Vec<usize> },
+}
+
+/// The statement an edited row is written with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateSpelling {
+    /// `UPDATE t SET … WHERE …`.
+    #[default]
+    Update,
+    /// `ALTER TABLE t UPDATE … WHERE … SETTINGS mutations_sync = 2`.
+    AlterUpdate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -30,6 +30,7 @@ fn pending(
             .collect(),
         types: types.to_vec(),
         held: Vec::new(),
+        ..Default::default()
     }
 }
 

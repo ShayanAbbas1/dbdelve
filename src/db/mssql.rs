@@ -1817,6 +1817,7 @@ fn resolve_edit_target(
             })
             .collect(),
         keys,
+        ..Default::default()
     })
 }
 
@@ -3540,6 +3541,7 @@ mod tests {
             keys: vec![("id".into(), id.into())],
             types: Vec::new(),
             held: Vec::new(),
+            ..Default::default()
         };
         for id in ["901", "902"] {
             let _ = connection.query(
@@ -3674,7 +3676,7 @@ mod tests {
                 run(&batch);
                 assert_eq!(name().as_deref(), Some("after"), "{batch}");
 
-                let (schema, relation, keys) = grid.row_key(0).expect("a key names the row");
+                let (schema, relation, keys, _) = grid.row_key(0).expect("a key names the row");
                 let keys: Vec<(&str, &str)> = keys
                     .iter()
                     .map(|(column, value)| (column.as_str(), value.as_str()))

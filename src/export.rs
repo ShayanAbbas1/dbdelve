@@ -338,6 +338,7 @@ mod tests {
             table: "notes".into(),
             columns: columns.iter().map(|name| Some(name.to_string())).collect(),
             keys: vec![0],
+            ..Default::default()
         }
     }
 
@@ -399,6 +400,7 @@ mod tests {
             table: "accounts".into(),
             columns: vec![Some("id".into()), None],
             keys: vec![0],
+            ..Default::default()
         };
 
         assert_eq!(

@@ -1332,6 +1332,7 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
             })
             .collect(),
         keys,
+        ..Default::default()
     })
 }
 

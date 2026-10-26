@@ -925,6 +925,7 @@ fn resolve_edit_target(
         table: table.to_string(),
         columns: probed.iter().map(column_of).collect(),
         keys,
+        ..Default::default()
     })
 }
 

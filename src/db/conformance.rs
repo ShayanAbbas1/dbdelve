@@ -551,6 +551,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             keys: vec![(key.to_string(), "901".to_string())],
             types: types.clone(),
             held: vec![("label".into(), "inserted".into())],
+            ..Default::default()
         };
         let update = sql::update_batch(engine, &[row])
             .unwrap_or_else(|error| panic!("{at}: update_batch: {error}"));

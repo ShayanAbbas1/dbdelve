@@ -4289,6 +4289,7 @@ mod tests {
                 .map(|(field, alias)| (field.to_string(), alias.to_string()))
                 .collect(),
             held: Vec::new(),
+            ..Default::default()
         }
     }
 

@@ -244,6 +244,14 @@ pub struct SqlSpec {
     pub local_table_engines: Option<&'static [&'static str]>,
     /// Nothing outlives one request, so no statement leaves state behind.
     pub stateless_requests: bool,
+    /// Whether a transaction can be opened at all. Without one a generated
+    /// multi-row batch is not bracketed, whatever `transaction` says.
+    pub transactions: bool,
+    /// Whether the write gate reads the terms a row named by every value
+    /// carries: `toString(c) = '…'` and `c IS NULL`.
+    // Unread until the write gate reads it.
+    #[allow(dead_code)]
+    pub row_terms: bool,
 }
 
 impl SqlSpec {
@@ -277,12 +285,14 @@ impl SqlSpec {
         unreadable_floor: UnreadableFloor::None,
         local_table_engines: None,
         stateless_requests: false,
+        transactions: true,
+        row_terms: false,
     };
 
     /// The word that opens a transaction around a generated multi-statement
     /// batch, or `None` where one submission is already atomic.
     pub fn transaction_opening(&self) -> Option<&'static str> {
-        (!self.implicit_transaction).then(|| self.transaction.opening())
+        (self.transactions && !self.implicit_transaction).then(|| self.transaction.opening())
     }
 }
 
@@ -572,10 +582,21 @@ pub struct Hooks {
     /// A literal for a value bound for a column of `data_type`, or `None` to
     /// fall back to the plain literal.
     pub quote_value: Option<fn(value: &str, data_type: &str) -> Option<String>>,
+    /// The whole predicate term naming a row's value in `column` (`None` for a
+    /// NULL), for an engine whose rows are named by every value. `None` from the
+    /// hook means the value cannot be matched, so the row is not written.
+    pub match_value: Option<MatchValue>,
 }
 
+/// A hook spelling one column's term in a row's predicate: the column, its value
+/// (`None` for NULL) and its type.
+pub type MatchValue = fn(column: &str, value: Option<&str>, data_type: &str) -> Option<String>;
+
 impl Hooks {
-    pub const NONE: Self = Self { quote_value: None };
+    pub const NONE: Self = Self {
+        quote_value: None,
+        match_value: None,
+    };
 }
 
 pub(crate) const POSTGRES: EngineSpec = EngineSpec {
@@ -995,6 +1016,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     },
     hooks: Hooks {
         quote_value: Some(mssql::typed_literal),
+        match_value: None,
     },
 };
 

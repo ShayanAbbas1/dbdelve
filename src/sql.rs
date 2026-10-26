@@ -35,6 +35,7 @@ use tree_sitter::{Node, Parser, Tree};
 use crate::db::{
     ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
     Params, ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain, UnreadableFloor,
+    UpdateSpelling,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -455,7 +456,15 @@ pub fn update_row(
     types: &[(String, String)],
 ) -> Option<String> {
     if engine.syntax() == Syntax::Sql {
-        return sql_update_statement(engine.spec(), schema, table, sets, keys, types);
+        return sql_update_statement(
+            engine.spec(),
+            schema,
+            table,
+            sets,
+            Match { keys, nulls: &[] },
+            UpdateSpelling::Update,
+            types,
+        );
     }
     if sets.is_empty() || keys.is_empty() {
         return None;
@@ -661,6 +670,17 @@ pub(crate) fn sql_insert_template(
     ))
 }
 
+#[cfg(test)]
+pub fn delete_row(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    keys: &[(&str, &str)],
+    types: &[(String, String)],
+) -> Option<String> {
+    delete_row_matching(engine, schema, table, keys, &[], types)
+}
+
 /// One row's `DELETE`: every column in `keys` matched, and nothing else.
 ///
 /// One row per statement. Multi-row deletion is cut, and the upgrade path when
@@ -671,15 +691,28 @@ pub(crate) fn sql_insert_template(
 /// `None` on an empty key list. A `DELETE` with no `WHERE` empties the table, so
 /// it must not be possible to produce one: a caller that has lost the row's key
 /// gets nothing to run rather than something that runs.
-pub fn delete_row(
+///
+/// `null_keys` are the columns of a row named by every value that read NULL,
+/// matched with `IS NULL`.
+pub fn delete_row_matching(
     engine: Engine,
     schema: &str,
     table: &str,
     keys: &[(&str, &str)],
+    null_keys: &[&str],
     types: &[(String, String)],
 ) -> Option<String> {
     match engine.syntax() {
-        Syntax::Sql => sql_delete_row(engine.spec(), schema, table, keys, types),
+        Syntax::Sql => sql_delete_row(
+            engine.spec(),
+            schema,
+            table,
+            Match {
+                keys,
+                nulls: null_keys,
+            },
+            types,
+        ),
         Syntax::Mongo => crate::mql::delete_row(table, keys, types).ok(),
         Syntax::Redis => crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok(),
     }
@@ -689,22 +722,59 @@ pub(crate) fn sql_delete_row(
     spec: &EngineSpec,
     schema: &str,
     table: &str,
-    keys: &[(&str, &str)],
+    row: Match,
     types: &[(String, String)],
 ) -> Option<String> {
-    if keys.is_empty() {
-        return None;
-    }
-
-    let keys: Vec<(&str, NewValue)> = keys
-        .iter()
-        .map(|&(column, value)| (column, NewValue::Value(value.into())))
-        .collect();
     Some(format!(
         "DELETE FROM {} WHERE {}",
         spec.qualified(schema, table),
-        sql_assignments(spec, &keys, types, " AND ")
+        sql_match(spec, row, types)?
     ))
+}
+
+/// The columns a statement names a row by: the values the server sent, and the
+/// columns that were NULL, which `=` does not find and so are matched with
+/// `IS NULL`. `nulls` is only ever filled for an engine that names a row by
+/// every value.
+#[derive(Clone, Copy)]
+pub(crate) struct Match<'a> {
+    pub keys: &'a [(&'a str, &'a str)],
+    pub nulls: &'a [&'a str],
+}
+
+/// The `WHERE` of a one-row statement, or `None` when it would name no row, or
+/// when the engine's `match_value` cannot spell one of the values.
+fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Option<String> {
+    if row.keys.is_empty() && row.nulls.is_empty() {
+        return None;
+    }
+    let Some(term) = spec.hooks.match_value else {
+        let keys: Vec<(&str, NewValue)> = row
+            .keys
+            .iter()
+            .map(|&(column, value)| (column, NewValue::Value(value.into())))
+            .collect();
+        let mut terms = Vec::new();
+        if !keys.is_empty() {
+            terms.push(sql_assignments(spec, &keys, types, " AND "));
+        }
+        terms.extend(
+            row.nulls
+                .iter()
+                .map(|column| format!("{} IS NULL", spec.quote_identifier(column))),
+        );
+        return Some(terms.join(" AND "));
+    };
+    let valued = row
+        .keys
+        .iter()
+        .map(|&(column, value)| (column, Some(value)));
+    let nulls = row.nulls.iter().map(|&column| (column, None));
+    valued
+        .chain(nulls)
+        .map(|(column, value)| term(column, value, type_of(types, column).unwrap_or_default()))
+        .collect::<Option<Vec<_>>>()
+        .map(|terms| terms.join(" AND "))
 }
 
 /// Whether `sql` is a statement dbdelve could have written: one or more `UPDATE`s,
@@ -1885,7 +1955,11 @@ pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result
                 &row.schema,
                 &row.table,
                 &borrowed_sets(&row.sets),
-                &borrowed(&row.keys),
+                Match {
+                    keys: &borrowed(&row.keys),
+                    nulls: &row.null_keys.iter().map(String::as_str).collect::<Vec<_>>(),
+                },
+                row.update,
                 &row.types,
             )
             // Terminated, not separated: the last statement carries its
@@ -1932,23 +2006,23 @@ fn sql_update_statement(
     schema: &str,
     table: &str,
     sets: &[(&str, NewValue)],
-    keys: &[(&str, &str)],
+    row: Match,
+    update: UpdateSpelling,
     types: &[(String, String)],
 ) -> Option<String> {
-    if sets.is_empty() || keys.is_empty() {
+    if sets.is_empty() {
         return None;
     }
 
-    let keys: Vec<(&str, NewValue)> = keys
-        .iter()
-        .map(|&(column, value)| (column, NewValue::Value(value.into())))
-        .collect();
-    Some(format!(
-        "UPDATE {} SET {} WHERE {}",
-        spec.qualified(schema, table),
-        sql_assignments(spec, sets, types, ", "),
-        sql_assignments(spec, &keys, types, " AND ")
-    ))
+    let table = spec.qualified(schema, table);
+    let assignments = sql_assignments(spec, sets, types, ", ");
+    let predicate = sql_match(spec, row, types)?;
+    Some(match update {
+        UpdateSpelling::Update => format!("UPDATE {table} SET {assignments} WHERE {predicate}"),
+        UpdateSpelling::AlterUpdate => format!(
+            "ALTER TABLE {table} UPDATE {assignments} WHERE {predicate} SETTINGS mutations_sync = 2"
+        ),
+    })
 }
 
 /// A statement at the front of the history, and there only once however many
@@ -5661,6 +5735,7 @@ mod tests {
             keys: owned(keys),
             types: Vec::new(),
             held: Vec::new(),
+            ..Default::default()
         }
     }
 
