@@ -311,11 +311,18 @@ pub(super) const LIGHTWEIGHT_UPDATE_HINT: &str = "ALTER TABLE ... UPDATE ... WHE
 /// The server's refusal of a typed lightweight `UPDATE` on a table that lacks
 /// the block columns, with its words kept and one line added. The error's code
 /// (48) is gone from the message by now, so it is read by its name beside the
-/// wording that says which refusal it is. The statement is never rewritten.
+/// wording that says which refusal it is: the same prefix also opens the
+/// refusals for a unique key and for the Summing, Aggregating and Graphite
+/// engines, which block columns would not mend. The statement is never
+/// rewritten.
 pub(super) fn hinted(error: DbError) -> DbError {
     let message = &error.message;
+    let for_want_of_block_columns = ["_block_number", "_block_offset"]
+        .iter()
+        .any(|column| message.contains(&format!("materialized {column} column")));
     if !message.contains("(NOT_IMPLEMENTED)")
         || !message.contains("Lightweight updates are not supported")
+        || !for_want_of_block_columns
     {
         return error;
     }
@@ -1213,10 +1220,29 @@ mod tests {
         );
         assert!(hinted.message.starts_with(&refused.message));
 
+        let offset = plain_error(
+            "Lightweight updates are not supported. Lightweight updates are supported only for \
+             tables with materialized _block_offset column. Run 'MODIFY SETTING \
+             enable_block_offset_column = 1' command to enable it. (NOT_IMPLEMENTED)"
+                .into(),
+        );
+        assert!(
+            super::hinted(offset)
+                .message
+                .ends_with(LIGHTWEIGHT_UPDATE_HINT)
+        );
+
         for other in [
             "Cannot modify 'mutations_sync' setting in readonly mode. (READONLY)",
             "Method read is not supported by storage Memory. (NOT_IMPLEMENTED)",
             "Lightweight updates are not supported. (BAD_ARGUMENTS)",
+            "Lightweight updates are not supported. (NOT_IMPLEMENTED)",
+            "Lightweight updates are not supported. Lightweight updates are not supported on \
+             tables with UNIQUE KEY. (NOT_IMPLEMENTED)",
+            "Lightweight updates are not supported. Lightweight updates are not supported for \
+             tables with SummingMergeTree engine. (NOT_IMPLEMENTED)",
+            "Lightweight updates are not supported. Lightweight updates are supported only for \
+             tables with custom partitioning. (NOT_IMPLEMENTED)",
         ] {
             let error = plain_error(other.into());
             assert_eq!(super::hinted(error.clone()), error, "{other}");

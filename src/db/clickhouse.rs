@@ -591,7 +591,7 @@ impl Connection {
         self.forget_if_changing(sql);
         let result = self.request(sql, Kind::Alongside { read_only }, cancel, fetch);
         self.forget_if_changing(sql);
-        result
+        result.map_err(hinted)
     }
 
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
@@ -3262,6 +3262,38 @@ mod tests {
     }
 
     #[test]
+    fn both_user_paths_hint_a_refused_typed_update_and_generated_ones_do_not() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        let refusal = "Lightweight updates are not supported. Lightweight updates are supported \
+                       only for tables with materialized _block_number column. Run 'MODIFY \
+                       SETTING enable_block_number_column = 1' command to enable it.";
+        mock.on_statement(
+            "UPDATE t",
+            [
+                Response::error(500, 48, "NOT_IMPLEMENTED", refusal),
+                Response::error(500, 48, "NOT_IMPLEMENTED", refusal),
+                Response::error(500, 48, "NOT_IMPLEMENTED", refusal),
+            ],
+        );
+        let sql = "UPDATE t SET v = 1 WHERE id = 1";
+        let cancel = CancelToken::default();
+        let alongside = connection
+            .query_alongside(sql, &CancelToken::alongside(), Fetch::default(), false)
+            .unwrap_err();
+        let query = connection
+            .query(sql, &cancel, Fetch::default())
+            .unwrap_err();
+        let generated = connection
+            .generated(sql, &cancel, Fetch::default())
+            .unwrap_err();
+        for hinted in [alongside, query] {
+            assert!(hinted.message.ends_with(edit::LIGHTWEIGHT_UPDATE_HINT));
+        }
+        assert!(!generated.message.contains(edit::LIGHTWEIGHT_UPDATE_HINT));
+    }
+
+    #[test]
     fn a_cancel_nobody_here_asked_for_keeps_the_servers_words() {
         let mock = Mock::start();
         let connection = open(&mock);
@@ -4703,6 +4735,32 @@ mod live {
         assert_eq!(
             text(&ran(&connection, &format!("SELECT v FROM {name}"))),
             "a"
+        );
+        ran(&connection, &format!("DROP TABLE {name}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_typed_update_refused_for_the_engine_gains_no_alter_hint() {
+        let connection = live();
+        let name = format!("dbdelve_dev.summing_{}", marker());
+        ran(
+            &connection,
+            &format!(
+                "CREATE TABLE {name} (id UInt32, v UInt32) ENGINE = SummingMergeTree ORDER BY id \
+                 SETTINGS enable_block_number_column = 1, enable_block_offset_column = 1"
+            ),
+        );
+        ran(&connection, &format!("INSERT INTO {name} VALUES (1, 1)"));
+        let error = run(
+            &connection,
+            &format!("UPDATE {name} SET v = 2 WHERE id = 1"),
+        )
+        .unwrap_err();
+        assert!(
+            !error.message.contains(edit::LIGHTWEIGHT_UPDATE_HINT),
+            "{}",
+            error.message
         );
         ran(&connection, &format!("DROP TABLE {name}"));
     }
