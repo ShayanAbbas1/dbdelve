@@ -13,6 +13,7 @@
 //! grammar puts the node boundary, and it is what we want, since Postgres does
 //! not need a trailing semicolon on a statement sent over the wire.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use serde::Deserialize;
@@ -34,8 +35,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
     ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
-    Params, ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain, UnreadableFloor,
-    UpdateSpelling,
+    Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit, Syntax, TypedExplain,
+    UnreadableFloor, UpdateSpelling,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -804,17 +805,28 @@ fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Optio
 /// through [`is_generated_write_on`], which reads it as that engine does.
 #[cfg(test)]
 pub fn is_generated_write(sql: &str) -> bool {
-    generated_write(sql, true)
+    generated_write(&STRICTEST, sql)
 }
 
-/// `backslash_escapes` is [`Engine::backslash_escapes`] for the engine the
-/// statement is bound for.
-pub(crate) fn generated_write(sql: &str, backslash_escapes: bool) -> bool {
+/// The SQL every test-only gate entry reads with: literals as a
+/// backslash-escaping engine reads them, and nothing an engine's spec adds.
+#[cfg(test)]
+const STRICTEST: SqlSpec = SqlSpec {
+    backslash_escapes: true,
+    ..SqlSpec::ANSI
+};
+
+/// `spec` is the [`SqlSpec`] of the engine the statement is bound for.
+pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
     // An exact-text whitelist rather than a parse, so nothing can ride along.
     if is_transaction_bracket(sql) {
         return true;
     }
-    let Some(tree) = parse_write(sql, backslash_escapes) else {
+    let Some(sql) = as_written(spec, sql) else {
+        return false;
+    };
+    let sql = sql.as_ref();
+    let Some(tree) = parse_write(sql, spec.backslash_escapes) else {
         return false;
     };
     let root = tree.root_node();
@@ -839,17 +851,95 @@ pub(crate) fn generated_write(sql: &str, backslash_escapes: bool) -> bool {
     // The one place a `delete` node is tolerated, and only for the shape read
     // back out of the tree rather than trusted because dbdelve wrote it.
     if kinds == ["delete"] {
-        return delete_key_columns(sql, backslash_escapes).is_some();
+        return delete_key_columns(spec, sql).is_some();
     }
+
+    // A row named by every value is written only through a predicate the
+    // exactly-one guard can count, so each update must be that shape too.
+    let updates = !kinds.is_empty()
+        && kinds.iter().all(|kind| *kind == "update")
+        && (!spec.row_terms
+            || statements
+                .iter()
+                .all(|statement| one_row_update(spec, *statement, sql).is_some()));
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
     // A comment anywhere in an insert refuses it: MySQL runs `/*! … */` as
     // SQL, and the grammar hides one inside a name or between tokens the shape
     // checks below read only by kind.
-    ((kinds == ["insert"] && literal_insert(statements[0], sql) && !commented(root))
-        || (!kinds.is_empty() && kinds.iter().all(|kind| *kind == "update")))
+    ((kinds == ["insert"] && literal_insert(statements[0], sql) && !commented(root)) || updates)
         && !deletes_anything(root)
+}
+
+/// `sql` as the write gate reads it: unchanged, except on ClickHouse, where
+/// each mutation spelled exactly as `sql_update_statement` writes it,
+/// `ALTER TABLE <t> UPDATE <a> WHERE <p> SETTINGS mutations_sync = 2`, reads as
+/// the `UPDATE <t> SET <a> WHERE <p>` it amounts to ([`mutation_as_dml`]),
+/// which keeps every byte of `<t>`, `<a>` and `<p>`.
+///
+/// `None`, refusing the submission, for any other statement opening with
+/// `ALTER`, and on ClickHouse for any comment, a quoted name holding an
+/// escaped quote, or anything else the server's lexer may read otherwise than
+/// sqlparser's tokenizer ([`misread`]). The tree-sitter grammar the gate reads
+/// knows neither nested comments nor backslash escapes in names, which the
+/// server has, and DBDelve writes no comment and no escaped quote in a name.
+fn as_written<'sql>(spec: &SqlSpec, sql: &'sql str) -> Option<Cow<'sql, str>> {
+    if spec.parser_dialect != ParserDialect::ClickHouse {
+        return Some(Cow::Borrowed(sql));
+    }
+    let dialect = parser(spec.parser_dialect);
+    let tokens = located_tokens(dialect.as_ref(), sql)?;
+    let hidden = tokens.iter().any(|(token, range)| match token {
+        Token::Whitespace(
+            Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_),
+        ) => true,
+        Token::Word(word) => {
+            word.quote_style.is_some() && escaped_quote(&sql[range.clone()], b"'\"`")
+        }
+        _ => false,
+    });
+    if hidden || misread(sql, &tokens) {
+        return None;
+    }
+    let pieces = between_semicolons(&tokens);
+    let altered = |piece: &Range<usize>| {
+        let first = tokens
+            .iter()
+            .find(|(token, range)| {
+                range.start >= piece.start && !matches!(token, Token::Whitespace(_))
+            })
+            .map(|(token, _)| token);
+        is_keyword(first.as_ref(), "ALTER")
+    };
+    if !pieces.iter().any(altered) {
+        return Some(Cow::Borrowed(sql));
+    }
+    pieces
+        .iter()
+        .map(|piece| {
+            let text = &sql[piece.clone()];
+            match altered(piece) {
+                true => alter_update_as_update(spec, text).map(|dml| format!("{dml};")),
+                false => Some(format!("{text};")),
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|statements| Cow::Owned(statements.join("\n")))
+}
+
+/// The `UPDATE` an `ALTER TABLE … UPDATE` amounts to, only when `statement` is
+/// exactly the spelling `sql_update_statement` writes for
+/// [`UpdateSpelling::AlterUpdate`]: one space between words, upper case, and
+/// `SETTINGS mutations_sync = 2` last, so the statement returns once every
+/// replica has the change rather than while it is still pending.
+fn alter_update_as_update(spec: &SqlSpec, statement: &str) -> Option<String> {
+    let mutation = read_mutation(spec, statement)?;
+    let exact = format!(
+        "ALTER TABLE {} UPDATE {} SETTINGS mutations_sync = 2",
+        &statement[mutation.table], &statement[mutation.body]
+    );
+    (mutation.updates && statement == exact).then_some(mutation.dml)
 }
 
 /// Whether `sql` is one lone `BEGIN`, `BEGIN TRANSACTION`, `COMMIT` or
@@ -899,19 +989,13 @@ fn literal_insert(statement: Node, sql: &str) -> bool {
 
     let rows = rest.iter().take_while(|node| node.kind() == "list").count();
     let (rows, tail) = rest.split_at(rows);
-    let null = |node: &Node| {
-        node.kind() == "literal"
-            && sql
-                .get(node.byte_range())
-                .is_some_and(|text| text.eq_ignore_ascii_case("NULL"))
-    };
     let literal_rows = rows.iter().all(|row| {
         let mut cursor = row.walk();
         let values: Vec<_> = row.named_children(&mut cursor).collect();
         !values.is_empty()
             && values
                 .iter()
-                .all(|value| literal_value(*value, sql) || null(value))
+                .all(|value| literal_value(*value, sql) || null_literal(*value, sql))
     });
     let Some(last) = rows.last() else {
         return false;
@@ -991,11 +1075,11 @@ fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> 
 /// the tests go through [`delete_matches_key_on`].
 #[cfg(test)]
 pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
-    delete_key_matches(sql, keys, true)
+    delete_key_matches(&STRICTEST, sql, keys)
 }
 
-fn delete_key_matches(sql: &str, keys: &[&str], backslash_escapes: bool) -> bool {
-    let Some(columns) = delete_key_columns(sql, backslash_escapes) else {
+fn delete_key_matches(spec: &SqlSpec, sql: &str, keys: &[&str]) -> bool {
+    let Some(columns) = as_written(spec, sql).and_then(|sql| delete_key_columns(spec, &sql)) else {
         return false;
     };
     columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
@@ -1009,7 +1093,7 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     match engine.syntax() {
         Syntax::Mongo => crate::mql::is_generated_write(statement),
         Syntax::Redis => crate::redis_cmd::edit::is_generated_write(statement),
-        Syntax::Sql => generated_write(statement, engine.backslash_escapes()),
+        Syntax::Sql => generated_write(&engine.spec().sql, statement),
     }
 }
 
@@ -1018,8 +1102,43 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
     match engine.syntax() {
         Syntax::Mongo => crate::mql::delete_matches_key(statement, keys),
         Syntax::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
-        Syntax::Sql => delete_key_matches(statement, keys, engine.backslash_escapes()),
+        Syntax::Sql => delete_key_matches(&engine.spec().sql, statement, keys),
     }
+}
+
+/// `SELECT COUNT(*) FROM <t> WHERE <p>` for one generated `UPDATE`, `DELETE`
+/// or ClickHouse `ALTER TABLE … UPDATE`: how many rows `statement` would
+/// write, counted with its own table and predicate, so a row named by every
+/// value is written only when exactly one row has those values.
+///
+/// `<t>` and `<p>` are cut from the tree the write gate reads, never from the
+/// generator's word, and only from a statement the gate admits whose predicate
+/// is a conjunction of one-row terms. `None` for anything else, and for a count
+/// [`is_generated_select`] does not admit: a caller that gets no guard runs
+/// nothing.
+// Unread until `generated()` guards each write.
+#[allow(dead_code)]
+pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
+    if engine.syntax() != Syntax::Sql {
+        return None;
+    }
+    let spec = &engine.spec().sql;
+    if is_transaction_bracket(statement) || !generated_write(spec, statement) {
+        return None;
+    }
+    let text = as_written(spec, statement)?;
+    let tree = parse_write(&text, spec.backslash_escapes)?;
+    let [one] = only_statement(&tree.root_node())?;
+    let (table, predicate) = one_row_delete(one)
+        .filter(|(_, predicate)| row_columns(spec, *predicate, &text).is_some())
+        .or_else(|| one_row_update(spec, one, &text))?;
+    let guard = format!(
+        "SELECT {} FROM {} WHERE {}",
+        spec.count_all.aggregate(),
+        text.get(table.byte_range())?,
+        text.get(predicate.byte_range())?
+    );
+    is_generated_select(engine, &guard).then_some(guard)
 }
 
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
@@ -1206,22 +1325,35 @@ fn deletes_anything(node: tree_sitter::Node) -> bool {
 /// a `RETURNING`, a `LIMIT`, an `OR`, a subquery, a function call, a qualified
 /// column or a second statement all change that child list or that expression
 /// tree, and so all arrive here as `None`.
-fn delete_key_columns(sql: &str, backslash_escapes: bool) -> Option<Vec<String>> {
-    let tree = parse_write(sql, backslash_escapes)?;
+///
+/// On an engine that names a row by every value (`row_terms`), a term may also
+/// be `toString(<column>) = '…'` or `<column> IS NULL` ([`equality_columns`]).
+///
+/// `sql` is as [`as_written`] gives it.
+fn delete_key_columns(spec: &SqlSpec, sql: &str) -> Option<Vec<String>> {
+    let tree = parse_write(sql, spec.backslash_escapes)?;
     let root = tree.root_node();
     if forbidden(root) {
         return None;
     }
+    let [statement] = only_statement(&root)?;
+    let (_, predicate) = one_row_delete(statement)?;
+    row_columns(spec, predicate, sql)
+}
 
+/// The root's one child, when it is a statement.
+fn only_statement<'tree>(root: &Node<'tree>) -> Option<[Node<'tree>; 1]> {
     let mut cursor = root.walk();
     let children: Vec<_> = root.named_children(&mut cursor).collect();
-    let [statement] = children.as_slice() else {
-        return None;
-    };
-    if statement.kind() != "statement" {
-        return None;
+    match children.as_slice() {
+        [statement] if statement.kind() == "statement" => Some([*statement]),
+        _ => None,
     }
+}
 
+/// The table and the predicate of `DELETE FROM <t> WHERE <p>`, and nothing
+/// else in `statement`.
+fn one_row_delete(statement: Node) -> Option<(Node, Node)> {
     let mut cursor = statement.walk();
     let parts: Vec<_> = statement.named_children(&mut cursor).collect();
     let [delete, from] = parts.as_slice() else {
@@ -1236,37 +1368,114 @@ fn delete_key_columns(sql: &str, backslash_escapes: bool) -> Option<Vec<String>>
     let [keyword, relation, filter] = inside.as_slice() else {
         return None;
     };
-    if keyword.kind() != "keyword_from"
-        || relation.kind() != "object_reference"
-        || filter.kind() != "where"
+    if keyword.kind() != "keyword_from" || relation.kind() != "object_reference" {
+        return None;
+    }
+    Some((*relation, predicate_of(*filter)?))
+}
+
+/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
+/// where each `<v>` is a literal or `NULL` and no column is set twice, and
+/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
+fn one_row_update<'tree>(
+    spec: &SqlSpec,
+    statement: Node<'tree>,
+    sql: &str,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let mut cursor = statement.walk();
+    let parts: Vec<_> = statement.named_children(&mut cursor).collect();
+    let [update] = parts.as_slice() else {
+        return None;
+    };
+    if update.kind() != "update" {
+        return None;
+    }
+
+    let mut cursor = update.walk();
+    let inside: Vec<_> = update.named_children(&mut cursor).collect();
+    let [keyword, relation, set, assignments @ .., filter] = inside.as_slice() else {
+        return None;
+    };
+    let mut cursor = relation.walk();
+    let table: Vec<_> = relation.named_children(&mut cursor).collect();
+    let [table] = table.as_slice() else {
+        return None;
+    };
+    if keyword.kind() != "keyword_update"
+        || relation.kind() != "relation"
+        || table.kind() != "object_reference"
+        || set.kind() != "keyword_set"
+        || assignments.is_empty()
     {
         return None;
     }
 
+    let mut columns = Vec::new();
+    for assignment in assignments {
+        let mut cursor = assignment.walk();
+        let sides: Vec<_> = assignment.children(&mut cursor).collect();
+        let [left, equals, right] = sides.as_slice() else {
+            return None;
+        };
+        if assignment.kind() != "assignment"
+            || equals.kind() != "="
+            || !(literal_value(*right, sql) || null_literal(*right, sql))
+        {
+            return None;
+        }
+        columns.push(column_name(*left, sql)?);
+    }
+    distinct(&columns)?;
+    let predicate = predicate_of(*filter)?;
+    row_columns(spec, predicate, sql)?;
+    Some((*table, predicate))
+}
+
+/// The predicate of a `where` node holding nothing but `WHERE <p>`.
+fn predicate_of(filter: Node) -> Option<Node> {
     let mut cursor = filter.walk();
     let clause: Vec<_> = filter.named_children(&mut cursor).collect();
-    let [keyword_where, predicate] = clause.as_slice() else {
-        return None;
-    };
-    if keyword_where.kind() != "keyword_where" {
-        return None;
+    match clause.as_slice() {
+        [keyword, predicate] if filter.kind() == "where" && keyword.kind() == "keyword_where" => {
+            Some(*predicate)
+        }
+        _ => None,
     }
+}
 
+/// The columns `predicate` names, when it is a conjunction of one-row terms
+/// over distinct columns.
+fn row_columns(spec: &SqlSpec, predicate: Node, sql: &str) -> Option<Vec<String>> {
     let mut columns = Vec::new();
-    if !equality_columns(*predicate, sql, &mut columns) {
+    if !equality_columns(spec, predicate, sql, &mut columns) {
         return None;
     }
+    distinct(&columns)?;
+    Some(columns)
+}
 
-    // A column named twice is a predicate dbdelve never writes, and reading it as
-    // a one-column key would call a half-matched composite key a whole one.
-    let distinct = columns.iter().collect::<std::collections::HashSet<_>>();
-    (distinct.len() == columns.len()).then_some(columns)
+/// A column named twice is a predicate dbdelve never writes, and reading it as
+/// a one-column key would call a half-matched composite key a whole one.
+fn distinct(columns: &[String]) -> Option<()> {
+    let unique = columns.iter().collect::<std::collections::HashSet<_>>();
+    (unique.len() == columns.len()).then_some(())
 }
 
 /// Walks a conjunction, pushing the column each `=` predicate names. False the
 /// moment anything else appears — an `OR`, another operator, a parenthesized
 /// group, a subquery, a function call.
-fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String>) -> bool {
+///
+/// Under `row_terms`, two more terms name a column: `toString(<column>) = '…'`
+/// (the server's own text of a value no literal matches exactly, a float or a
+/// `DateTime64`) and `<column> IS NULL`. Nothing else: not `IS NOT NULL`, not a
+/// second argument to `toString` (a time zone changes its text), not any
+/// other function.
+fn equality_columns(
+    spec: &SqlSpec,
+    node: tree_sitter::Node,
+    sql: &str,
+    columns: &mut Vec<String>,
+) -> bool {
     if node.kind() != "binary_expression" {
         return false;
     }
@@ -1276,24 +1485,60 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
         return false;
     };
 
-    match operator.kind() {
+    let column = match operator.kind() {
         "keyword_and" => {
-            equality_columns(*left, sql, columns) && equality_columns(*right, sql, columns)
+            return equality_columns(spec, *left, sql, columns)
+                && equality_columns(spec, *right, sql, columns);
         }
-        "=" => {
-            if !literal_value(*right, sql) {
-                return false;
-            }
-            match column_name(*left, sql) {
-                Some(column) => {
-                    columns.push(column);
-                    true
-                }
-                None => false,
-            }
+        "=" if literal_value(*right, sql) => match left.kind() {
+            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(*left, sql),
+            _ => column_name(*left, sql),
+        },
+        "keyword_is" if spec.row_terms && null_literal(*right, sql) => column_name(*left, sql),
+        _ => None,
+    };
+    match column {
+        Some(column) => {
+            columns.push(column);
+            true
         }
-        _ => false,
+        None => false,
     }
+}
+
+/// The column of `toString(<column>)`, spelled exactly so: one argument, a
+/// bare or quoted unqualified column, the function's own name unquoted and
+/// unqualified.
+fn stringified(invocation: Node, sql: &str) -> Option<String> {
+    let mut cursor = invocation.walk();
+    let parts: Vec<_> = invocation.children(&mut cursor).collect();
+    let [function, open, argument, close] = parts.as_slice() else {
+        return None;
+    };
+    let mut cursor = argument.walk();
+    let value: Vec<_> = argument.children(&mut cursor).collect();
+    let [value] = value.as_slice() else {
+        return None;
+    };
+    let kinds = (function.kind(), open.kind(), argument.kind(), close.kind());
+    if kinds != ("object_reference", "(", "term", ")")
+        || sql.get(function.byte_range()) != Some("toString")
+    {
+        return None;
+    }
+    column_name(*value, sql)
+}
+
+fn null_literal(node: Node, sql: &str) -> bool {
+    node.kind() == "literal"
+        && sql
+            .get(node.byte_range())
+            .is_some_and(|text| text.eq_ignore_ascii_case("NULL"))
+}
+
+fn quoted(node: Node, sql: &str) -> bool {
+    sql.get(node.byte_range())
+        .is_some_and(|text| text.starts_with('\''))
 }
 
 /// A single-quoted literal and nothing else. `"other"` is a `literal` to this
@@ -1343,24 +1588,29 @@ fn parse_write(sql: &str, backslash_escapes: bool) -> Option<Tree> {
 }
 
 fn misread_literal(node: Node, sql: &str) -> bool {
-    let escaped_quote = |text: &str| {
-        let bytes = text.as_bytes();
-        bytes.iter().enumerate().any(|(at, byte)| {
-            matches!(byte, b'\'' | b'"')
-                && bytes[..at]
-                    .iter()
-                    .rev()
-                    .take_while(|&&b| b == b'\\')
-                    .count()
-                    % 2
-                    == 1
-        })
-    };
     let mut cursor = node.walk();
-    (node.kind() == "literal" && sql.get(node.byte_range()).is_some_and(escaped_quote))
+    (node.kind() == "literal"
+        && sql
+            .get(node.byte_range())
+            .is_some_and(|text| escaped_quote(text, b"'\"")))
         || node
             .children(&mut cursor)
             .any(|child| misread_literal(child, sql))
+}
+
+/// Whether `text` holds one of `quotes` after an odd run of backslashes.
+fn escaped_quote(text: &str, quotes: &[u8]) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(at, byte)| {
+        quotes.contains(byte)
+            && bytes[..at]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'\\')
+                .count()
+                % 2
+                == 1
+    })
 }
 
 /// The unqualified column a predicate's left side names, unquoted.
@@ -2615,10 +2865,24 @@ fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
 /// or `DELETE` with a `WHERE`. And on every dialect but ClickHouse's, which has
 /// no mutations.
 pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
-    if spec.sql.parser_dialect != ParserDialect::ClickHouse {
+    read_mutation(&spec.sql, sql).map(|mutation| mutation.dml)
+}
+
+/// [`mutation_as_dml`]'s reading of a mutation, with where its parts lie in
+/// the text it was read from.
+struct Mutation {
+    dml: String,
+    updates: bool,
+    table: Range<usize>,
+    /// From the word after `UPDATE` or `DELETE` to the end of the `WHERE`.
+    body: Range<usize>,
+}
+
+fn read_mutation(spec: &SqlSpec, sql: &str) -> Option<Mutation> {
+    if spec.parser_dialect != ParserDialect::ClickHouse {
         return None;
     }
-    let dialect = parser(spec.sql.parser_dialect);
+    let dialect = parser(spec.parser_dialect);
     let tokens = located_tokens(dialect.as_ref(), sql)?;
     if misread(sql, &tokens) {
         return None;
@@ -2647,7 +2911,8 @@ pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
             _ => break,
         }
     }
-    let table = &sql[words[2].1.start..words[at - 1].1.end];
+    let table_range = words[2].1.start..words[at - 1].1.end;
+    let table = &sql[table_range.clone()];
 
     let mut end = words.len();
     if end >= at + 4
@@ -2683,10 +2948,11 @@ pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
         }
     }
     let filter = filter?;
-    let last = body.last()?.1.end;
+    let body_range = body.get(1)?.1.start..body.last()?.1.end;
+    let rest = &sql[body_range.clone()];
     let dml = match updates {
-        true if filter > 1 => format!("UPDATE {table} SET {}", &sql[body[1].1.start..last]),
-        false if filter == 1 => format!("DELETE FROM {table} {}", &sql[body[1].1.start..last]),
+        true if filter > 1 => format!("UPDATE {table} SET {rest}"),
+        false if filter == 1 => format!("DELETE FROM {table} {rest}"),
         _ => return None,
     };
     let statements = SqlParser::parse_sql(dialect.as_ref(), &dml).ok()?;
@@ -2714,7 +2980,12 @@ pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
         }
         _ => false,
     };
-    plain.then_some(dml)
+    plain.then_some(Mutation {
+        dml,
+        updates,
+        table: table_range,
+        body: body_range,
+    })
 }
 
 /// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB
@@ -5712,6 +5983,64 @@ mod tests {
             &["id"]
         ));
         assert!(!delete_matches_key("DROP TABLE t", &["id"]));
+    }
+
+    #[test]
+    fn only_an_engine_naming_rows_by_every_value_reads_the_row_terms() {
+        let terms = [
+            "DELETE FROM t WHERE toString(c) = '1.5'",
+            "DELETE FROM t WHERE c IS NULL",
+            "ALTER TABLE t UPDATE a = '1' WHERE b = '2' SETTINGS mutations_sync = 2",
+        ];
+        for engine in Engine::ALL {
+            for sql in terms {
+                assert_eq!(
+                    is_generated_write_on(engine, sql),
+                    engine == Engine::ClickHouse,
+                    "{engine:?} {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_clickhouse_name_holding_a_backslash_names_no_row() {
+        // The gate's grammar does not read a backslash inside backticks, so
+        // such a row is refused rather than matched on a misread name.
+        let delete = format!(
+            "DELETE FROM t WHERE {} = '1' AND `n` IS NULL",
+            Engine::ClickHouse.spec().quote_identifier(r"a\b")
+        );
+        assert!(!is_generated_write_on(Engine::ClickHouse, &delete));
+        assert!(!delete_matches_key_on(
+            Engine::ClickHouse,
+            &delete,
+            &[r"a\b", "n"]
+        ));
+        assert_eq!(row_guard(Engine::ClickHouse, &delete), None);
+    }
+
+    #[test]
+    fn a_row_guard_counts_with_the_writes_own_table_and_predicate() {
+        assert_eq!(
+            row_guard(
+                Engine::Postgres,
+                r#"UPDATE "s"."t" SET "a" = 'x' WHERE "id" = '7';"#
+            )
+            .as_deref(),
+            Some(r#"SELECT COUNT(*) FROM "s"."t" WHERE "id" = '7'"#)
+        );
+        for refused in [
+            "SELECT 1",
+            "BEGIN",
+            "INSERT INTO t (a) VALUES ('1')",
+            "UPDATE t SET a = '1' WHERE id > '7'",
+            "UPDATE t SET a = '1' WHERE id = '7'; UPDATE t SET a = '2' WHERE id = '8'",
+            "DELETE FROM t WHERE id = '7' OR 1 = 1",
+        ] {
+            assert_eq!(row_guard(Engine::Postgres, refused), None, "{refused}");
+        }
+        assert_eq!(row_guard(Engine::MongoDb, "db.t.deleteOne({_id: 1})"), None);
     }
 
     fn set(value: &str) -> NewValue {

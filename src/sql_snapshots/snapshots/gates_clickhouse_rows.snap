@@ -1,0 +1,287 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[clickhouse] update, every term
+  |UPDATE `db`.`t` SET `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] alter update, every term
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] delete, every term
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=true matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] update, terminated
+  |UPDATE `db`.`t` SET `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] alter update, terminated
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] update to null
+  |UPDATE `db`.`t` SET `a` = NULL WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] alter update, two sets
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new', `b` = NULL WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+
+[clickhouse] delete, a subset
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=true row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5'|
+
+[clickhouse] delete, null terms only
+  |DELETE FROM `db`.`t` WHERE `k` IS NULL AND `f` IS NULL AND `n` IS NULL|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=true matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `k` IS NULL AND `f` IS NULL AND `n` IS NULL|
+
+[clickhouse] delete, null terms first
+  |DELETE FROM `db`.`t` WHERE `n` IS NULL AND `k` = '1' AND toString(`f`) = '1.5'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=true matches_key[k+f]=false row_guard=|SELECT COUNT(*) FROM `db`.`t` WHERE `n` IS NULL AND `k` = '1' AND toString(`f`) = '1.5'|
+
+[clickhouse] two alter updates
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2;|
+  |ALTER TABLE `db`.`t` UPDATE `b` = 'x' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update and update
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2;|
+  |UPDATE `db`.`t` SET `b` = 'x' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, qualified column in toString
+  |DELETE FROM `db`.`t` WHERE toString(`t`.`f`) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, toString with a time zone
+  |DELETE FROM `db`.`t` WHERE toString(`f`, 'UTC') = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, another function
+  |DELETE FROM `db`.`t` WHERE lower(`k`) = 'x'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, is not null
+  |DELETE FROM `db`.`t` WHERE `n` IS NOT NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, or
+  |DELETE FROM `db`.`t` WHERE `k` = '1' OR `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, or
+  |UPDATE `db`.`t` SET `a` = 'new' WHERE `k` = '1' OR `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, or
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' OR `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, toString of a hex literal
+  |DELETE FROM `db`.`t` WHERE toString(`f`) = 0x41|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, quoted toString
+  |DELETE FROM `db`.`t` WHERE `toString`(`f`) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, lower-case tostring
+  |DELETE FROM `db`.`t` WHERE tostring(`f`) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, qualified toString
+  |DELETE FROM `db`.`t` WHERE db.toString(`f`) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, toString distinct
+  |DELETE FROM `db`.`t` WHERE toString(DISTINCT `f`) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, toString of a group
+  |DELETE FROM `db`.`t` WHERE toString((`f`)) = '1.5'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, grouped is null
+  |DELETE FROM `db`.`t` WHERE (`n`) IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, isNull
+  |DELETE FROM `db`.`t` WHERE isNull(`n`) = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, equals null
+  |DELETE FROM `db`.`t` WHERE `n` = NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, is null compared
+  |DELETE FROM `db`.`t` WHERE `n` IS NULL = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, a column twice
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND `k` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, subquery
+  |DELETE FROM `db`.`t` WHERE `k` = (SELECT max(`k`) FROM `db`.`t`)|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, in subquery
+  |DELETE FROM `db`.`t` WHERE `k` IN (SELECT `k` FROM `db`.`t`)|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, no where
+  |DELETE FROM `db`.`t`|
+  = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, settings
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, on cluster
+  |DELETE FROM `db`.`t` ON CLUSTER c WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, in partition
+  |DELETE FROM `db`.`t` IN PARTITION 'p' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, settings
+  |UPDATE `db`.`t` SET `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, no where
+  |UPDATE `db`.`t` SET `a` = 'new'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, function
+  |UPDATE `db`.`t` SET `a` = now() WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, subquery
+  |UPDATE `db`.`t` SET `a` = (SELECT 1) WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, a column set twice
+  |UPDATE `db`.`t` SET `a` = '1', `a` = '2' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, default
+  |UPDATE `db`.`t` SET `a` = DEFAULT WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] update, aliased
+  |UPDATE `db`.`t` AS x SET `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, second command
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL, UPDATE `b` = 'x' WHERE 1 SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, then delete command
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL, DELETE WHERE 1 SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, on cluster
+  |ALTER TABLE `db`.`t` ON CLUSTER c UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, in partition
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' IN PARTITION 'p' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, no settings
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, asynchronous
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 0|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, this replica only
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 1|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, quoted setting
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = '2'|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, another setting
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2, max_threads = 1|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, settings twice
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2 SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, lower case
+  |alter table `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, two spaces
+  |ALTER  TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, comment between words
+  |ALTER /* c */ TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, comment in the predicate
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL /* c */ SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, nested comment
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' /* /* */ AND `n` IS NULL */ SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, hash comment
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' # c|
+  | AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, no where
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, subquery
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` IN (SELECT `k` FROM `db`.`t`) SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, function
+  |ALTER TABLE `db`.`t` UPDATE `a` = now() WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, heredoc
+  |ALTER TABLE `db`.`t` UPDATE `a` = $$x$$ WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter delete
+  |ALTER TABLE `db`.`t` DELETE WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update, then drop
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2; DROP TABLE `db`.`t`|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter update and delete
+  |ALTER TABLE `db`.`t` UPDATE `a` = 'new' WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL SETTINGS mutations_sync = 2;|
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] alter modify
+  |ALTER TABLE `db`.`t` MODIFY COLUMN `a` String|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] backslash before a quote in a name
+  |DELETE FROM `db`.`t` WHERE `k\\` = '1' AND `n` IS NULL -- `|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, line comment
+  |DELETE FROM `db`.`t` WHERE `k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL -- c|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)
+
+[clickhouse] delete, nested comment
+  |DELETE FROM `db`.`t` WHERE `k` = '1' /* /* */ AND `n` IS NULL */|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key[k+f+n]=false matches_key[k+f]=false row_guard=(none)

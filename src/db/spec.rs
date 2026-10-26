@@ -249,8 +249,6 @@ pub struct SqlSpec {
     pub transactions: bool,
     /// Whether the write gate reads the terms a row named by every value
     /// carries: `toString(c) = '…'` and `c IS NULL`.
-    // Unread until the write gate reads it.
-    #[allow(dead_code)]
     pub row_terms: bool,
 }
 
@@ -1193,6 +1191,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         ]),
         regex: RegexMatch::Match,
         substring: SubstringMatch::LikeToString,
+        row_terms: true,
         // No Explain yet, and no `skip_duplicates`: there is no clause that
         // skips a row on a key, because there is no unique key.
         ..SqlSpec::ANSI

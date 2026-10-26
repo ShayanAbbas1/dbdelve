@@ -970,7 +970,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] default
   |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] every name
   |UPDATE `public`.`accounts` SET `id` = 'v', `Name` = 'v', `select` = 'v', `we"ird` = 'v', `back``tick` = 'v', `with space` = 'v', `ümlaut` = 'v', `it's` = 'v', `[x]` = 'v', `a.b` = 'v', `` = 'v', `_id` = 'v' WHERE `id` = '7'|

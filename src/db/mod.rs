@@ -41,11 +41,11 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SqlSpec};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
-    ParserDialect, RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate,
-    TypedExplain,
+    ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
+    Truncate, TypedExplain,
 };
 pub use spec::{ReadOnlySession, UnreadableFloor};
 
@@ -667,6 +667,7 @@ impl Engine {
 
     /// Whether a backslash in a single-quoted literal escapes the character
     /// after it.
+    #[cfg(test)]
     pub fn backslash_escapes(self) -> bool {
         self.spec().sql.backslash_escapes
     }

@@ -72,7 +72,7 @@ fn a_fake_engine_spec_writes_sql_through_the_shared_strategies() {
         insert,
         r#"INSERT INTO "s"."t" ("a", "b") VALUES ('it''s', NULL)"#
     );
-    assert!(sql::generated_write(&insert, FAKE.sql.backslash_escapes));
+    assert!(sql::generated_write(&FAKE.sql, &insert));
     // Only the gate's tree-sitter arm runs for a SQL engine, and it reads no spec field.
     assert!(sql::is_generated_select(
         Engine::Postgres,

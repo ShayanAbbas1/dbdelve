@@ -3,7 +3,7 @@ use super::{
     statement_with,
 };
 use crate::{
-    db::Engine,
+    db::{Engine, UpdateSpelling},
     import_rows::{Json, Value},
     redis_cmd::edit::{INTEGER, STRING},
     result_grid::{NewValue, PendingRow},
@@ -290,6 +290,78 @@ fn update_batches_per_engine() {
                 );
                 record(&mut out, engine, "empty", &[], false);
                 record(&mut out, engine, "keyless", &one(&name, &[]), false);
+                if engine == Engine::ClickHouse {
+                    let every = |keys: &[(&str, &str)], nulls: &[&str], update| PendingRow {
+                        null_keys: nulls.iter().map(|column| (*column).to_owned()).collect(),
+                        update,
+                        ..pending(schema, table, &name, keys, &types)
+                    };
+                    let (lightweight, alter) =
+                        (UpdateSpelling::Update, UpdateSpelling::AlterUpdate);
+                    record(
+                        &mut out,
+                        engine,
+                        "null terms",
+                        &[every(&[("id", "7")], &["Region", "flag"], lightweight)],
+                        true,
+                    );
+                    record(
+                        &mut out,
+                        engine,
+                        "only null terms",
+                        &[every(&[], &["id", "Region"], lightweight)],
+                        true,
+                    );
+                    record(
+                        &mut out,
+                        engine,
+                        "alter update",
+                        &[every(&KEY, &[], alter)],
+                        true,
+                    );
+                    record(
+                        &mut out,
+                        engine,
+                        "alter update, null terms",
+                        &[every(&[("id", "7")], &["Region"], alter)],
+                        true,
+                    );
+                    record(
+                        &mut out,
+                        engine,
+                        "alter update, two rows",
+                        &[
+                            every(&[("id", "7")], &["Region"], alter),
+                            every(&[("id", "8")], &[], alter),
+                        ],
+                        true,
+                    );
+                    record(
+                        &mut out,
+                        engine,
+                        "both spellings",
+                        &[
+                            every(&[("id", "7")], &[], lightweight),
+                            every(&[("id", "8")], &["Region"], alter),
+                        ],
+                        true,
+                    );
+                    let deleted = sql::delete_row_matching(
+                        engine,
+                        schema,
+                        table,
+                        &[("id", "7")],
+                        &["Region", "flag"],
+                        &types,
+                    );
+                    statement_with(
+                        &mut out,
+                        engine,
+                        "delete, null terms",
+                        deleted.as_deref(),
+                        "",
+                    );
+                }
             }
         }
     }

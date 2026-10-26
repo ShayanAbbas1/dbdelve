@@ -448,6 +448,251 @@ fn clickhouse_gate_corpus() {
     check("gates_clickhouse", &out);
 }
 
+/// ClickHouse's rows named by every value: the write gate, the delete readout
+/// against every column and against some, and the exactly-one guard, each read
+/// from the text exactly as written.
+#[test]
+fn clickhouse_row_terms_corpus() {
+    let engine = Engine::ClickHouse;
+    let t = "`db`.`t`";
+    let terms = "`k` = '1' AND toString(`f`) = '1.5' AND `n` IS NULL";
+    let set = "`a` = 'new'";
+    let sync = "SETTINGS mutations_sync = 2";
+    let alter =
+        |set: &str, filter: &str| format!("ALTER TABLE {t} UPDATE {set} WHERE {filter} {sync}");
+    let update = |set: &str, filter: &str| format!("UPDATE {t} SET {set} WHERE {filter}");
+    let delete = |filter: &str| format!("DELETE FROM {t} WHERE {filter}");
+    let cases: Vec<(&str, String)> = vec![
+        ("update, every term", update(set, terms)),
+        ("alter update, every term", alter(set, terms)),
+        ("delete, every term", delete(terms)),
+        ("update, terminated", format!("{};", update(set, terms))),
+        (
+            "alter update, terminated",
+            format!("{};", alter(set, terms)),
+        ),
+        ("update to null", update("`a` = NULL", terms)),
+        (
+            "alter update, two sets",
+            alter("`a` = 'new', `b` = NULL", terms),
+        ),
+        (
+            "delete, a subset",
+            delete("`k` = '1' AND toString(`f`) = '1.5'"),
+        ),
+        (
+            "delete, null terms only",
+            delete("`k` IS NULL AND `f` IS NULL AND `n` IS NULL"),
+        ),
+        (
+            "delete, null terms first",
+            delete("`n` IS NULL AND `k` = '1' AND toString(`f`) = '1.5'"),
+        ),
+        (
+            "two alter updates",
+            format!("{};\n{};", alter(set, terms), alter("`b` = 'x'", terms)),
+        ),
+        (
+            "alter update and update",
+            format!("{};\n{};", alter(set, terms), update("`b` = 'x'", terms)),
+        ),
+        // Refused: terms the guard could not count as one row.
+        (
+            "delete, qualified column in toString",
+            delete("toString(`t`.`f`) = '1.5'"),
+        ),
+        (
+            "delete, toString with a time zone",
+            delete("toString(`f`, 'UTC') = '1.5'"),
+        ),
+        ("delete, another function", delete("lower(`k`) = 'x'")),
+        ("delete, is not null", delete("`n` IS NOT NULL")),
+        ("delete, or", delete("`k` = '1' OR `n` IS NULL")),
+        ("update, or", update(set, "`k` = '1' OR `n` IS NULL")),
+        ("alter update, or", alter(set, "`k` = '1' OR `n` IS NULL")),
+        (
+            "delete, toString of a hex literal",
+            delete("toString(`f`) = 0x41"),
+        ),
+        ("delete, quoted toString", delete("`toString`(`f`) = '1.5'")),
+        (
+            "delete, lower-case tostring",
+            delete("tostring(`f`) = '1.5'"),
+        ),
+        (
+            "delete, qualified toString",
+            delete("db.toString(`f`) = '1.5'"),
+        ),
+        (
+            "delete, toString distinct",
+            delete("toString(DISTINCT `f`) = '1.5'"),
+        ),
+        (
+            "delete, toString of a group",
+            delete("toString((`f`)) = '1.5'"),
+        ),
+        ("delete, grouped is null", delete("(`n`) IS NULL")),
+        ("delete, isNull", delete("isNull(`n`) = '1'")),
+        ("delete, equals null", delete("`n` = NULL")),
+        ("delete, is null compared", delete("`n` IS NULL = '1'")),
+        (
+            "delete, a column twice",
+            delete("`k` = '1' AND `k` IS NULL"),
+        ),
+        (
+            "delete, subquery",
+            delete("`k` = (SELECT max(`k`) FROM `db`.`t`)"),
+        ),
+        (
+            "delete, in subquery",
+            delete("`k` IN (SELECT `k` FROM `db`.`t`)"),
+        ),
+        ("delete, no where", format!("DELETE FROM {t}")),
+        (
+            "delete, settings",
+            format!("{} SETTINGS mutations_sync = 2", delete(terms)),
+        ),
+        (
+            "delete, on cluster",
+            format!("DELETE FROM {t} ON CLUSTER c WHERE {terms}"),
+        ),
+        (
+            "delete, in partition",
+            format!("DELETE FROM {t} IN PARTITION 'p' WHERE {terms}"),
+        ),
+        (
+            "update, settings",
+            format!("{} SETTINGS mutations_sync = 2", update(set, terms)),
+        ),
+        ("update, no where", format!("UPDATE {t} SET {set}")),
+        ("update, function", update("`a` = now()", terms)),
+        ("update, subquery", update("`a` = (SELECT 1)", terms)),
+        (
+            "update, a column set twice",
+            update("`a` = '1', `a` = '2'", terms),
+        ),
+        ("update, default", update("`a` = DEFAULT", terms)),
+        (
+            "update, aliased",
+            format!("UPDATE {t} AS x SET {set} WHERE {terms}"),
+        ),
+        // Refused: anything after `ALTER` but the one spelling.
+        (
+            "alter update, second command",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms}, UPDATE `b` = 'x' WHERE 1 {sync}"),
+        ),
+        (
+            "alter update, then delete command",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms}, DELETE WHERE 1 {sync}"),
+        ),
+        (
+            "alter update, on cluster",
+            format!("ALTER TABLE {t} ON CLUSTER c UPDATE {set} WHERE {terms} {sync}"),
+        ),
+        (
+            "alter update, in partition",
+            format!("ALTER TABLE {t} UPDATE {set} IN PARTITION 'p' WHERE {terms} {sync}"),
+        ),
+        (
+            "alter update, no settings",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms}"),
+        ),
+        (
+            "alter update, asynchronous",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms} SETTINGS mutations_sync = 0"),
+        ),
+        (
+            "alter update, this replica only",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms} SETTINGS mutations_sync = 1"),
+        ),
+        (
+            "alter update, quoted setting",
+            format!("ALTER TABLE {t} UPDATE {set} WHERE {terms} SETTINGS mutations_sync = '2'"),
+        ),
+        (
+            "alter update, another setting",
+            format!("{}, max_threads = 1", alter(set, terms)),
+        ),
+        (
+            "alter update, settings twice",
+            format!("{} {sync}", alter(set, terms)),
+        ),
+        (
+            "alter update, lower case",
+            alter(set, terms).replacen("ALTER TABLE", "alter table", 1),
+        ),
+        (
+            "alter update, two spaces",
+            alter(set, terms).replacen("ALTER TABLE", "ALTER  TABLE", 1),
+        ),
+        (
+            "alter update, comment between words",
+            alter(set, terms).replacen("ALTER TABLE", "ALTER /* c */ TABLE", 1),
+        ),
+        (
+            "alter update, comment in the predicate",
+            alter(set, &format!("{terms} /* c */")),
+        ),
+        (
+            "alter update, nested comment",
+            alter(set, "`k` = '1' /* /* */ AND `n` IS NULL */"),
+        ),
+        (
+            "alter update, hash comment",
+            alter(set, "`k` = '1' # c\n AND `n` IS NULL"),
+        ),
+        (
+            "alter update, no where",
+            format!("ALTER TABLE {t} UPDATE {set} {sync}"),
+        ),
+        (
+            "alter update, subquery",
+            alter(set, "`k` IN (SELECT `k` FROM `db`.`t`)"),
+        ),
+        ("alter update, function", alter("`a` = now()", terms)),
+        ("alter update, heredoc", alter("`a` = $$x$$", terms)),
+        (
+            "alter delete",
+            format!("ALTER TABLE {t} DELETE WHERE {terms} {sync}"),
+        ),
+        (
+            "alter update, then drop",
+            format!("{}; DROP TABLE {t}", alter(set, terms)),
+        ),
+        (
+            "alter update and delete",
+            format!("{};\n{};", alter(set, terms), delete(terms)),
+        ),
+        (
+            "alter modify",
+            format!("ALTER TABLE {t} MODIFY COLUMN `a` String"),
+        ),
+        (
+            "backslash before a quote in a name",
+            delete("`k\\` = '1' AND `n` IS NULL -- `"),
+        ),
+        ("delete, line comment", format!("{} -- c", delete(terms))),
+        (
+            "delete, nested comment",
+            delete("`k` = '1' /* /* */ AND `n` IS NULL */"),
+        ),
+    ];
+    let mut out = String::new();
+    for (case, text) in &cases {
+        let extra = format!(
+            " matches_key[k+f+n]={} matches_key[k+f]={} row_guard={}",
+            sql::delete_matches_key_on(engine, text, &["k", "f", "n"]),
+            sql::delete_matches_key_on(engine, text, &["k", "f"]),
+            match sql::row_guard(engine, text) {
+                Some(guard) => format!("|{guard}|"),
+                None => "(none)".into(),
+            },
+        );
+        statement_with(&mut out, engine, case, Some(text), &extra);
+    }
+    check("gates_clickhouse_rows", &out);
+}
+
 #[test]
 fn mongo_and_redis_gate_corpus() {
     let c = r#"db.getCollection("accounts")"#;
