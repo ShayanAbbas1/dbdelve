@@ -6,7 +6,7 @@ use crate::{
     sql::{self, Buffer},
 };
 
-const BUFFERS: [(&str, &str); 10] = [
+const BUFFERS: [(&str, &str); 12] = [
     ("two statements", "SELECT 1; SELECT 2"),
     ("go and a counted go", "SELECT 1;\nGO\nSELECT 2\nGO 2\n"),
     (
@@ -23,6 +23,11 @@ const BUFFERS: [(&str, &str); 10] = [
         "DECLARE @x int = 1;\nSELECT @x\nGO\nSELECT * FROM #tmp",
     ),
     ("only a comment", "/* only a comment */"),
+    ("go inside a string", "SELECT 'a\nGO\nb'\nGO\nSELECT 2"),
+    (
+        "go inside a block comment",
+        "/*\nGO\n*/\nSELECT 1\nGO\nSELECT 2",
+    ),
     (
         "trailing comment and quoted semicolon",
         "SELECT 1 -- trailing\n;\n\nSELECT 'a;b'",
@@ -110,7 +115,7 @@ fn statement_units_per_engine() {
     check("sessions_units", &out);
 }
 
-const STATEMENTS: [&str; 23] = [
+const STATEMENTS: [&str; 27] = [
     "SELECT * FROM t",
     "SELECT a, b FROM s.t",
     "SELECT nextval('s')",
@@ -134,6 +139,10 @@ const STATEMENTS: [&str; 23] = [
     "ANALYZE TABLE t",
     "db.a.find({})",
     "GET k",
+    "MULTI",
+    "EXEC",
+    "DISCARD",
+    "CLIENT SETNAME me",
 ];
 
 #[test]
