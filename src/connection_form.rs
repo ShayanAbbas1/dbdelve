@@ -652,37 +652,20 @@ pub(crate) struct Placeholders {
 /// Read against `ConnectionConfig::server`, `account` and
 /// `default_profile_name`, which decide what blank actually does.
 pub(crate) fn placeholders(engine: Engine) -> Placeholders {
-    let name = match engine {
-        _ if engine.fields() == Fields::File => "Named after the file",
-        Engine::Redis => "Named after the host",
-        _ => "Named after the database",
-    };
-    let (host, database) = match engine {
-        Engine::Snowflake => ("Implied by the account", "Required"),
-        // What a blank database connects to (`ConnectionConfig::database_name`);
-        // elsewhere it leaves the server to pick.
-        Engine::Postgres => ("localhost", "postgres"),
-        Engine::Redis => ("localhost", "0"),
-        _ => ("localhost", "Optional"),
-    };
-    let user = match engine {
-        Engine::MongoDb | Engine::Redis => "Optional",
-        _ => "Required",
-    };
-    let path = match engine {
-        Engine::DuckDb => "Blank for a database in memory",
-        _ => "/path/to/app.sqlite",
-    };
+    let hints = engine.spec().hints;
     Placeholders {
-        name,
-        host,
+        name: match engine.fields() {
+            Fields::File => "Named after the file",
+            Fields::Server | Fields::Account => hints.name,
+        },
+        host: hints.host,
         port: engine
             .default_port()
             .map(|port| port.to_string())
             .unwrap_or_default(),
-        database,
-        user,
-        path,
+        database: hints.database,
+        user: hints.user,
+        path: hints.path,
     }
 }
 

@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn every_engine_spelling_decodes_as_it_does_today() {
         let mut engines = vec![None];
-        for (spelling, _) in Engine::SCHEMES {
+        for (spelling, _) in Engine::schemes() {
             engines.extend([
                 Some(spelling.to_string()),
                 Some(spelling.to_uppercase()),

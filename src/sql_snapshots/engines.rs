@@ -320,7 +320,7 @@ fn engine_answers_per_engine() {
             Some(filter::value_placeholder(engine, true, Operator::Equals)),
         );
     }
-    let spellings = Engine::SCHEMES.iter().flat_map(|(spelling, _)| {
+    let spellings = Engine::schemes().flat_map(|(spelling, _)| {
         [
             spelling.to_string(),
             spelling.to_ascii_uppercase(),

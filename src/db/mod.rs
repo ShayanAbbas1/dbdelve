@@ -29,6 +29,7 @@ mod mysql;
 mod postgres;
 mod redis;
 mod snowflake;
+mod spec;
 mod sqlite;
 mod ssh;
 mod turso;
@@ -38,6 +39,7 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
+pub use spec::EngineSpec;
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -206,38 +208,30 @@ impl ExplainMode {
 }
 
 impl Engine {
-    /// The engine's brand logo. SQL Server's is a generic server glyph, because
-    /// Simple Icons carries no Microsoft logos.
-    pub fn logo(self) -> &'static str {
+    /// Everything that sets this engine apart, as data.
+    pub fn spec(self) -> &'static EngineSpec {
         match self {
-            Self::Postgres => "icons/engine-postgres.svg",
-            Self::MySql => "icons/engine-mysql.svg",
-            Self::MariaDb => "icons/engine-mariadb.svg",
-            Self::Sqlite => "icons/engine-sqlite.svg",
-            Self::Turso => "icons/engine-turso.svg",
-            Self::DuckDb => "icons/engine-duckdb.svg",
-            Self::Snowflake => "icons/engine-snowflake.svg",
-            Self::SqlServer => "icons/engine-sqlserver.svg",
-            Self::MongoDb => "icons/engine-mongodb.svg",
-            Self::Redis => "icons/engine-redis.svg",
+            Self::Postgres => &spec::POSTGRES,
+            Self::MySql => &spec::MYSQL,
+            Self::MariaDb => &spec::MARIADB,
+            Self::Sqlite => &spec::SQLITE,
+            Self::Turso => &spec::TURSO,
+            Self::DuckDb => &spec::DUCKDB,
+            Self::Snowflake => &spec::SNOWFLAKE,
+            Self::SqlServer => &spec::SQL_SERVER,
+            Self::MongoDb => &spec::MONGODB,
+            Self::Redis => &spec::REDIS,
         }
+    }
+
+    /// The engine's brand logo.
+    pub fn logo(self) -> &'static str {
+        self.spec().logo
     }
 
     /// The engine's brand colour as 0xRRGGBB. The theme reads only its hue.
     pub fn brand(self) -> u32 {
-        match self {
-            Self::Postgres => 0x4169E1,
-            Self::MySql => 0x4479A1,
-            // The sea lion's colour rather than the wordmark's near-black teal.
-            Self::MariaDb => 0xC0765A,
-            Self::Sqlite => 0x003B57,
-            Self::Turso => 0x4FF8D2,
-            Self::DuckDb => 0xFFF000,
-            Self::Snowflake => 0x29B5E8,
-            Self::SqlServer => 0xCC2927,
-            Self::MongoDb => 0x47A248,
-            Self::Redis => 0xFF4438,
-        }
+        self.spec().brand
     }
 
     /// Presentation order, which is the order the form's chips appear in.
@@ -255,80 +249,52 @@ impl Engine {
     ];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Postgres => "Postgres",
-            Self::MySql => "MySQL",
-            Self::MariaDb => "MariaDB",
-            Self::Sqlite => "SQLite",
-            Self::Turso => "Turso",
-            Self::DuckDb => "DuckDB",
-            Self::Snowflake => "Snowflake",
-            Self::SqlServer => "SQL Server",
-            Self::MongoDb => "MongoDB",
-            Self::Redis => "Redis",
-        }
+        self.spec().label
     }
 
     /// The spelling stored in `profiles.toml`. Changing one of these strings
     /// orphans every profile already written with it.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::MySql => "mysql",
-            Self::MariaDb => "mariadb",
-            Self::Sqlite => "sqlite",
-            Self::Turso => "turso",
-            Self::DuckDb => "duckdb",
-            Self::Snowflake => "snowflake",
-            Self::SqlServer => "mssql",
-            Self::MongoDb => "mongodb",
-            Self::Redis => "redis",
-        }
+        self.spec().id
     }
 
     /// Every spelling [`Engine::parse`] reads: the URL schemes as well as the
-    /// stored spellings. A table so the welcome surface can tell a scheme still
+    /// stored spellings. Listed so the welcome surface can tell a scheme still
     /// being typed from one that is no scheme at all.
-    pub const SCHEMES: [(&'static str, Self); 16] = [
-        ("postgres", Self::Postgres),
-        ("postgresql", Self::Postgres),
-        ("mysql", Self::MySql),
-        ("mariadb", Self::MariaDb),
-        ("sqlite", Self::Sqlite),
-        ("sqlite3", Self::Sqlite),
-        ("file", Self::Sqlite),
-        ("turso", Self::Turso),
-        ("duckdb", Self::DuckDb),
-        ("snowflake", Self::Snowflake),
-        ("mssql", Self::SqlServer),
-        ("sqlserver", Self::SqlServer),
-        ("mongodb", Self::MongoDb),
-        ("mongodb+srv", Self::MongoDb),
-        ("redis", Self::Redis),
-        ("rediss", Self::Redis),
-    ];
+    pub fn schemes() -> impl Iterator<Item = (&'static str, Self)> {
+        Self::ALL.into_iter().flat_map(|engine| {
+            engine
+                .spec()
+                .schemes
+                .iter()
+                .map(move |scheme| (*scheme, engine))
+        })
+    }
 
     /// Accepts the URL schemes as well as the stored spellings, so one function
     /// serves both the profile reader and the URL box.
     pub fn parse(value: &str) -> Result<Self, String> {
         let value = value.trim().to_ascii_lowercase();
-        Self::SCHEMES
-            .iter()
+        Self::schemes()
             .find(|(spelling, _)| *spelling == value)
-            .map(|(_, engine)| *engine)
+            .map(|(_, engine)| engine)
             .ok_or_else(|| format!("{value} is not a database engine dbdelve speaks."))
+    }
+
+    /// The engine whose files end in `extension`, whatever its case.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|engine| {
+            engine
+                .spec()
+                .file_extensions
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
     }
 
     /// The port a blank one means, where the engine has one.
     pub fn default_port(self) -> Option<u16> {
-        match self {
-            Self::Postgres => Some(postgres::DEFAULT_PORT),
-            Self::MySql | Self::MariaDb => Some(mysql::DEFAULT_PORT),
-            Self::SqlServer => Some(mssql::DEFAULT_PORT),
-            Self::MongoDb => Some(mongo::DEFAULT_PORT),
-            Self::Redis => Some(redis::DEFAULT_PORT),
-            Self::Sqlite | Self::Turso | Self::DuckDb | Self::Snowflake => None,
-        }
+        self.spec().default_port
     }
 
     /// Which set of fields makes a connection to this engine, which is what
@@ -336,51 +302,20 @@ impl Engine {
     /// are absent for a file, and an account has a key where a server has a
     /// password and no transport to choose.
     pub fn fields(self) -> Fields {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::SqlServer
-            | Self::MongoDb
-            | Self::Redis => Fields::Server,
-            Self::Sqlite | Self::Turso | Self::DuckDb => Fields::File,
-            Self::Snowflake => Fields::Account,
-        }
+        self.spec().layout
     }
 
     /// Whether the form offers a field of driver options passed through as
     /// typed: MongoDB's connection-string options (`authSource`, `replicaSet`,
     /// `readPreference`, …), which outnumber any set of fields worth drawing.
     pub fn takes_options(self) -> bool {
-        match self {
-            Self::MongoDb => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::Redis => false,
-        }
+        self.spec().takes_options
     }
 
     /// Whether the host may instead be a DNS name whose SRV records list the
     /// servers (`mongodb+srv`), which the form offers as a toggle.
     pub fn resolves_srv(self) -> bool {
-        match self {
-            Self::MongoDb => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::Redis => false,
-        }
+        self.spec().resolves_srv
     }
 
     /// What `mode` is spelled as here, or `None` where the engine has no such
@@ -784,18 +719,7 @@ impl Engine {
     }
 
     pub fn syntax(self) -> Syntax {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer => Syntax::Sql,
-            Self::MongoDb => Syntax::Mongo,
-            Self::Redis => Syntax::Redis,
-        }
+        self.spec().syntax
     }
 
     /// Whether a relation has a definition [`Connection::ddl`] can write out.
