@@ -527,17 +527,17 @@ impl<R: BufRead> Reader<R> {
         Ok(Next::Row)
     }
 
-    /// Reads the rest of the body and counts its rows. It goes through the
-    /// same exception checks as `next_row`, so an error after the row limit
-    /// fails the statement as one before it does. Only the first section's
-    /// rows count.
-    pub fn drain(&mut self) -> Result<usize, DbError> {
+    /// Reads the rest of the set and counts its rows, stopping after the empty
+    /// line that begins a further one ([`Next::Section`]) or at the end of the
+    /// body ([`Next::End`]); `next_row` reads on from there. It goes through
+    /// the same exception checks as `next_row`, so an error after the row
+    /// limit fails the statement as one before it does.
+    pub fn drain(&mut self) -> Result<(usize, Next), DbError> {
         let width = self.columns.len();
         if self.untagged.is_some() || !matches!(self.mode, Mode::Tsv) {
             return self.drain_lines();
         }
         let mut count = 0;
-        let mut counting = true;
         let mut length = 0usize;
         let mut only_return = false;
         loop {
@@ -546,6 +546,7 @@ impl<R: BufRead> Reader<R> {
                 break;
             }
             let mut start = 0;
+            let mut section = None;
             for end in memchr_iter(b'\n', buf) {
                 let total = length + (end - start);
                 let carried = length > 0;
@@ -557,12 +558,16 @@ impl<R: BufRead> Reader<R> {
                             false => buf[start] == b'\r',
                         });
                 if empty && width > 1 {
-                    counting = false;
-                } else if counting {
-                    count += 1;
+                    section = Some(end + 1);
+                    break;
                 }
+                count += 1;
                 start = end + 1;
                 length = 0;
+            }
+            if let Some(through) = section {
+                self.source.consume(through);
+                return Ok((count, Next::Section));
             }
             if start < buf.len() {
                 if length == 0 {
@@ -576,21 +581,19 @@ impl<R: BufRead> Reader<R> {
         if length > 0 {
             return Err(cut("a row"));
         }
-        Ok(count)
+        Ok((count, Next::End))
     }
 
-    fn drain_lines(&mut self) -> Result<usize, DbError> {
+    fn drain_lines(&mut self) -> Result<(usize, Next), DbError> {
         let width = self.columns.len();
         let mut count = 0;
-        let mut counting = true;
         while self.pull()? {
             if matches!(self.mode, Mode::Tsv) && width > 1 && self.line.is_empty() {
-                counting = false;
-            } else if counting {
-                count += 1;
+                return Ok((count, Next::Section));
             }
+            count += 1;
         }
-        Ok(count)
+        Ok((count, Next::End))
     }
 
     /// The next logical line into `self.line`, false at the end of the body.
@@ -906,7 +909,7 @@ mod tests {
             vec![vec![text("x"), text("1")], vec![text("y"), text("2")]]
         );
         let mut reader = Reader::open(Cursor::new(crlf.to_vec()), None).unwrap();
-        assert_eq!(reader.drain().unwrap(), 2);
+        assert_eq!(reader.drain().unwrap(), (2, Next::End));
     }
 
     #[test]
@@ -916,12 +919,39 @@ mod tests {
         assert_eq!(got.len(), 2 + 1 + 1 + 1 + 2);
         assert_eq!(got[2], vec![text("--")]);
         assert_eq!(got[4], vec![text("--")]);
+    }
+
+    /// The drain of a capped first set ends where the totals begin, so they
+    /// and the extremes are still read as sets of their own.
+    #[test]
+    fn a_drain_stops_at_the_first_section_at_every_split_and_in_crlf() {
+        let lf =
+            b"a\tb\tc\nString\tUInt8\tUInt8\na\t1\t2\nb\t3\t4\n\nx\t9\t9\n\nm\t0\t0\n".to_vec();
+        let crlf = String::from_utf8(lf.clone()).unwrap().replace('\n', "\r\n");
+        for whole in [lf, crlf.into_bytes()] {
+            for at in 1..whole.len() {
+                let mut reader = tagged_reader(split_at(&whole, at));
+                assert_eq!(reader.drain().unwrap(), (2, Next::Section), "split at {at}");
+                let rest = rows(&mut reader).unwrap();
+                assert_eq!(
+                    rest,
+                    [
+                        vec![text("x"), text("9"), text("9")],
+                        vec![text("--")],
+                        vec![text("m"), text("0"), text("0")],
+                    ],
+                    "split at {at}"
+                );
+            }
+        }
+        let data = b"a\t1\nb\t2\n\nx\t9\n";
         let mut reader = Reader::open(
-            Cursor::new(body("a\tb\tc", "String\tUInt8\tUInt8", data)),
-            None,
+            Cursor::new(body("k\tn", "String\tUInt8", data)),
+            untagged("26.8.1.1"),
         )
         .unwrap();
-        assert_eq!(reader.drain().unwrap(), 2);
+        assert_eq!(reader.drain().unwrap(), (2, Next::Section));
+        assert_eq!(rows(&mut reader).unwrap(), [vec![text("x"), text("9")]]);
     }
 
     #[test]
@@ -929,7 +959,7 @@ mod tests {
         let got = read("s", "String", b"a\n\nb\n");
         assert_eq!(got, vec![vec![text("a")], vec![text("")], vec![text("b")]]);
         let mut reader = Reader::open(Cursor::new(body("s", "String", b"a\n\nb\n")), None).unwrap();
-        assert_eq!(reader.drain().unwrap(), 3);
+        assert_eq!(reader.drain().unwrap(), (3, Next::End));
     }
 
     #[test]
@@ -1055,7 +1085,7 @@ mod tests {
         let mut builder = RowBuilder::default();
         reader.next_row(&mut builder).unwrap();
         builder.finish().unwrap();
-        assert_eq!(reader.drain().unwrap(), 3);
+        assert_eq!(reader.drain().unwrap(), (3, Next::End));
     }
 
     #[test]
@@ -1156,7 +1186,7 @@ mod tests {
             vec![vec![text(r#"{"a":1}"#)], vec![text(r#"{"a":2}"#)]]
         );
         let mut reader = Reader::foreign(Cursor::new(body.to_vec()), "JSONEachRow");
-        assert_eq!(reader.drain().unwrap(), 2);
+        assert_eq!(reader.drain().unwrap(), (2, Next::End));
     }
 
     #[test]

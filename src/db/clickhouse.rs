@@ -753,8 +753,8 @@ impl Connection {
 
 /// The rows of a body, the first set into `fetch`'s feed, and the sets after
 /// an empty line (`WITH TOTALS`, `extremes`) as further results. Past the
-/// limit the first set is drained and counted, never kept, or for a read that
-/// may stop there, left unread for the caller to `KILL`.
+/// limit the first set is drained to its end and counted, never kept, or for
+/// a read that may stop there, left unread for the caller to `KILL`.
 fn collect<R: BufRead>(
     reader: &mut Reader<R>,
     fetch: Fetch,
@@ -773,8 +773,13 @@ fn collect<R: BufRead>(
     let mut filled = None;
     let mut at_limit = false;
     let mut builder = RowBuilder::default();
+    let mut drained = None;
     loop {
-        match reader.next_row(&mut builder)? {
+        let next = match drained.take() {
+            Some(next) => next,
+            None => reader.next_row(&mut builder)?,
+        };
+        match next {
             Next::End => break,
             Next::Section => {
                 cap(&mut sets, returned, kept);
@@ -791,8 +796,9 @@ fn collect<R: BufRead>(
                         break;
                     }
                     if first {
-                        returned += reader.drain()?;
-                        break;
+                        let (rows, next) = reader.drain()?;
+                        returned += rows;
+                        drained = Some(next);
                     }
                     continue;
                 }
@@ -1567,6 +1573,50 @@ mod tests {
         let fed = feed.take();
         assert_eq!(fed.rows.len(), 2);
         assert!(fed.filled.is_some());
+    }
+
+    #[test]
+    fn a_capped_first_set_keeps_its_totals_and_extremes() {
+        for tagged in [true, false] {
+            let mock = Mock::start();
+            mock.tagged(tagged);
+            let connection = open(&mock);
+            mock.on_statement(
+                "WITH TOTALS",
+                [Response::rows(
+                    &[("k", "String"), ("n", "UInt64"), ("m", "UInt64")],
+                    &[
+                        &["a", "1", "5"],
+                        &["b", "2", "6"],
+                        &["c", "3", "7"],
+                        &["d", "4", "8"],
+                        &[""],
+                        &["", "10", "26"],
+                        &[""],
+                        &["", "1", "5"],
+                        &["", "4", "8"],
+                    ],
+                )],
+            );
+            let result = connection
+                .query(
+                    "SELECT k, n, m WITH TOTALS",
+                    &CancelToken::default(),
+                    Fetch {
+                        limit: Some(2),
+                        ..Fetch::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(result.rows.len(), 2, "tagged: {tagged}");
+            assert_eq!(result.capped_from, Some(4), "tagged: {tagged}");
+            let [totals, extremes] = result.rest.try_into().unwrap();
+            assert_eq!(totals.rows.len(), 1, "tagged: {tagged}");
+            assert_eq!(totals.rows[0].get(1), Some("10"));
+            assert_eq!(extremes.rows.len(), 2, "tagged: {tagged}");
+            assert_eq!(extremes.capped_from, None);
+            assert_eq!(extremes.rows[1].get(2), Some("8"));
+        }
     }
 
     #[test]
