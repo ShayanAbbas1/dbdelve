@@ -414,33 +414,9 @@ pub fn unpaged(statement: &str) -> String {
     unpage().unwrap_or_else(|| statement.to_string())
 }
 
-/// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
-/// matched.
-///
-/// Values go in as literals and are never cast. Postgres applies the target
-/// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
-/// would, and SQLite applies the column's type affinity to the same effect. A
-/// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
-/// is therefore the empty string, and [`NewValue`]'s other two arms are the
-/// keywords: three different writes, which is the whole point of spelling two
-/// of them as something other than a value.
-///
-/// `keys` carries plain values, because a row identified by a `NULL` is a row
-/// `=` does not find; the caller drops such a row before it gets here.
-///
-/// `types` names each column's type where it is known, for the engine whose
-/// literal depends on it (`Engine::quote_value`). A column missing from it is
-/// quoted the way any value is.
-///
-/// `None` when either list is empty. A statement with no `WHERE` rewrites every
-/// row in the table and one with no `SET` is not a statement at all, so a caller
-/// that has lost the row's key gets nothing to run rather than something that
-/// runs.
-///
-/// The grid's edits reach the server through [`update_batch`], whose SQL arm
-/// writes this same statement from the spec (`sql_update_statement`). This
-/// `Engine`-typed spelling, MongoDB's and Redis's SQL-shaped text included, is
-/// what the tests pin.
+/// [`sql_update_statement`] for `engine`. MongoDB's and Redis's edits are
+/// written by their own modules, and only the tests read the SQL-shaped text
+/// spelled with their quoting here.
 #[cfg(test)]
 pub fn update_row(
     engine: Engine,
@@ -450,6 +426,9 @@ pub fn update_row(
     keys: &[(&str, &str)],
     types: &[(String, String)],
 ) -> Option<String> {
+    if engine.syntax() == Syntax::Sql {
+        return sql_update_statement(engine.spec(), schema, table, sets, keys, types);
+    }
     if sets.is_empty() || keys.is_empty() {
         return None;
     }
@@ -1898,7 +1877,28 @@ pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result
     })
 }
 
-/// `update_row`'s statement for the `sql_` writers.
+/// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
+/// matched.
+///
+/// Values go in as literals and are never cast. Postgres applies the target
+/// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
+/// would, and SQLite applies the column's type affinity to the same effect. A
+/// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
+/// is therefore the empty string, and [`NewValue`]'s other two arms are the
+/// keywords: three different writes, which is the whole point of spelling two
+/// of them as something other than a value.
+///
+/// `keys` carries plain values, because a row identified by a `NULL` is a row
+/// `=` does not find; the caller drops such a row before it gets here.
+///
+/// `types` names each column's type where it is known, for the engine whose
+/// literal depends on it (`EngineSpec::quote_value`). A column missing from it is
+/// quoted the way any value is.
+///
+/// `None` when either list is empty. A statement with no `WHERE` rewrites every
+/// row in the table and one with no `SET` is not a statement at all, so a caller
+/// that has lost the row's key gets nothing to run rather than something that
+/// runs.
 fn sql_update_statement(
     spec: &EngineSpec,
     schema: &str,
