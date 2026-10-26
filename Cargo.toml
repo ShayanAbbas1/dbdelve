@@ -147,10 +147,12 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
     "ring",
 ] }
 
-# Snowflake. It publishes no Rust driver, and the community ones are tokio plus
-# reqwest, so this speaks its documented SQL REST API over a blocking client --
-# the same "blocking, owns no runtime GPUI has to host" rule as the three
-# drivers above.
+# Snowflake and ClickHouse. Snowflake publishes no Rust driver, and the
+# community ones are tokio plus reqwest, so this speaks its documented SQL REST
+# API over a blocking client -- the same "blocking, owns no runtime GPUI has to
+# host" rule as the three drivers above. ClickHouse is raw HTTP on the same
+# client, with `ureq::unversioned` for the tunnel resolver and the watched
+# transport; that module is not semver-covered, which the exact pin makes safe.
 #
 # Default features off for the usual reason, though here they happen to be the
 # right ones: `rustls` is ureq's spelling of rustls *on ring* with webpki-roots,
