@@ -24,12 +24,12 @@ use crate::{
     palette::Mode as PaletteMode,
     scroller::{SmoothScrollable, smooth},
     theme::{
-        Appearance, FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
+        Appearance, FontSlot, Fonts, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
         popup_theme,
     },
     ui::{
-        Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
-        option_row, picker, raised_card, segment, stacked_option_row, switch, well,
+        Control, Tone, button, button_label, chord_hint, highlighted, icon_button, keycap_text,
+        keycaps, option_row, picker, raised_card, segment, stacked_option_row, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -859,7 +859,8 @@ fn render_opacity(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) 
 }
 
 /// The family, picked from the palette, which lists every family the text
-/// system resolved and marks the one in use; then the size.
+/// system resolved and marks the one in use; then the size, and a reset that
+/// puts both back.
 fn render_font(
     workspace: &Workspace,
     slot: FontSlot,
@@ -868,6 +869,7 @@ fn render_font(
 ) -> AnyElement {
     let index = slot as usize;
     let family = fonts(cx).family(slot).clone();
+    let default_family = Fonts::default().family(slot).clone();
     let size = workspace.settings.font_size(slot);
     let (min, default, max) = font_size_range(slot);
     // Disabled at the ends rather than clamped again here: `step_font_size`
@@ -889,22 +891,17 @@ fn render_font(
                 workspace.step_font_size(slot, -FONT_SIZE_STEP, cx);
             })),
         )
-        // The readout is the reset: clicking a size that is not the default
-        // puts it back.
         .child(
-            button(
-                ("font-size", index),
-                format!("{size}"),
-                Tone::Quiet,
-                Control::Compact,
-                t,
-            )
-            .min_w(px(layout::chrome(layout::CONTROL_HEIGHT)))
-            .disabled(size == default)
-            .tooltip(format!("Reset to {default}"))
-            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                workspace.set_font_size(slot, default, cx);
-            })),
+            div()
+                .min_w(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                .flex()
+                .justify_center()
+                .child(button_label(
+                    format!("{size}"),
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )),
         )
         .child(
             button(
@@ -919,7 +916,22 @@ fn render_font(
                 workspace.step_font_size(slot, FONT_SIZE_STEP, cx);
             })),
         );
+    let reset = button(
+        ("font-reset", index),
+        "Reset",
+        Tone::Quiet,
+        Control::Compact,
+        t,
+    )
+    .disabled(family == default_family && size == default)
+    .tooltip(format!("Reset to {default_family} {default}"))
+    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+        workspace.reset_font(slot, cx);
+    }));
+    // The picker takes what the family's name needs and the rest of the row
+    // is air, so the stepper and the reset line up down the three rows.
     div()
+        .w_full()
         .min_w_0()
         .flex()
         .items_center()
@@ -929,7 +941,9 @@ fn render_font(
                 workspace.open_palette(PaletteMode::Font(slot), window, cx);
             },
         )))
+        .child(div().flex_1())
         .child(stepper)
+        .child(reset)
         .into_any_element()
 }
 
