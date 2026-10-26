@@ -40,13 +40,13 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-pub use spec::ReadOnlySession;
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SqlSpec, UnreadableFloor};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SqlSpec};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
     RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
 };
+pub use spec::{ReadOnlySession, UnreadableFloor};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -551,6 +551,19 @@ impl Engine {
     /// refuses it in Read-only instead of offering to run it once.
     pub fn holds_read_only(self) -> bool {
         self.spec().sql.read_only_session != ReadOnlySession::None
+    }
+
+    /// Why a statement `sql::classify` cannot read is refused in Read-only,
+    /// finishing "dbdelve can't parse this, and …".
+    pub fn unreadable_reason(self) -> &'static str {
+        match self.spec().sql.unreadable_floor {
+            UnreadableFloor::None => {
+                "this database has no server-side read-only setting to stop it if it writes"
+            }
+            UnreadableFloor::FirstKeyword => {
+                "the server's read-only setting does not stop every statement of this kind"
+            }
+        }
     }
 
     /// Whether switching the schema has to wait for an open transaction to
@@ -2361,9 +2374,18 @@ pub fn applied(engine: Engine, error: &DbError) -> u64 {
 /// whether a transaction was open, and a cancel aborts the one it lands in,
 /// even a read's; SQLite rolls back the transaction an interrupted write was
 /// in. MySQL's `KILL QUERY` and SQLite's interrupt of a read undo only the
-/// statement, and Snowflake has no session to lose.
-pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<String> {
+/// statement, and Snowflake has no session to lose. A ClickHouse `KILL QUERY`
+/// ends only the wait on a mutation `statement` started, not the mutation.
+pub fn cancel_cost(
+    engine: Engine,
+    error: &DbError,
+    reads: bool,
+    statement: &str,
+) -> Option<String> {
     match engine {
+        Engine::ClickHouse if crate::sql::mutation_as_dml(engine.spec(), statement).is_some() => {
+            Some("The mutation keeps running in the background; KILL MUTATION stops it.".into())
+        }
         Engine::SqlServer => Some(error.message.clone()),
         Engine::Postgres => Some(
             "A cancel aborts the transaction it lands in: if one was open, it refuses every \
@@ -4386,6 +4408,47 @@ mod tests {
             Engine::Redis,
         ] {
             assert!(!held(engine), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn only_clickhouse_gives_another_reason_for_refusing_the_unreadable() {
+        for engine in Engine::ALL {
+            let expected = match engine {
+                Engine::ClickHouse => {
+                    "the server's read-only setting does not stop every statement of this kind"
+                }
+                _ => "this database has no server-side read-only setting to stop it if it writes",
+            };
+            assert_eq!(engine.unreadable_reason(), expected, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_clickhouse_mutation_is_said_to_keep_running() {
+        let error = plain_error(clickhouse::CANCELLED.into());
+        let mutation = "ALTER TABLE t DELETE WHERE a = 1 SETTINGS mutations_sync = 2;";
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, false, mutation).as_deref(),
+            Some("The mutation keeps running in the background; KILL MUTATION stops it.")
+        );
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, false, "INSERT INTO t SELECT 1").as_deref(),
+            Some(
+                "ClickHouse has no transaction to roll back: what the statement had already \
+                 written stays."
+            )
+        );
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, true, "SELECT 1"),
+            None
+        );
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
+            assert_eq!(
+                cancel_cost(engine, &error, false, mutation),
+                None,
+                "{engine:?}"
+            );
         }
     }
 

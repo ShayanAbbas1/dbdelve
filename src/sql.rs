@@ -19,8 +19,9 @@ use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Delete, Expr, Insert,
-    Merge, Query, SetExpr, Statement, Update, UtilityOption,
+    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
+    Delete, Expr, Insert, Merge, Query, SetExpr, SqlOption, Statement, TableObject, Update,
+    UtilityOption,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
@@ -33,7 +34,7 @@ use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
     ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
-    Params, ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain,
+    Params, ParserDialect, SkipDuplicates, StatementSplit, Syntax, TypedExplain, UnreadableFloor,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -2253,6 +2254,11 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return classify(engine, &explain);
     }
 
+    let spec = engine.spec();
+    if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
+        return by_statement(spec, dialect.as_ref(), sql);
+    }
+
     // All or nothing: one statement it cannot read makes the whole submission
     // one it cannot vouch for.
     // An unreadable verdict's mode is the lowest one it may be run once in.
@@ -2273,8 +2279,338 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     // nothing there to be dangerous, and a dialog over nothing is noise.
     statements
         .iter()
-        .map(statement_verdict)
+        .map(|statement| spec_verdict(spec, statement))
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// [`classify`] where the floor under an unreadable statement is its first
+/// keyword. Each statement between the tokenizer's `;`s is read on its own: by
+/// its tree where sqlparser reads it, as the `UPDATE` or `DELETE` a mutation
+/// amounts to ([`mutation_as_dml`]), and by [`first_keyword_verdict`]
+/// otherwise. One that cannot be read leaves the whole submission
+/// `Unreadable`, at the highest mode any statement in it needs.
+///
+/// The server's lexer and sqlparser's tokenizer agree on what is a comment
+/// (`--` to a newline, `/* */` nested) and where a literal ends, so the first
+/// word read here is the one the server runs. A tokenizer error, or a token
+/// the two may read apart ([`misread`]), fails closed: Read-write at least,
+/// so Read-only refuses it.
+fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict {
+    let Some(tokens) = located_tokens(dialect, sql) else {
+        return Verdict {
+            mode: Mode::ReadWrite,
+            destructive: vec![Destructive::Unreadable],
+        };
+    };
+    let misread = tokens
+        .iter()
+        .any(|(token, range)| misread(token, &sql[range.clone()]));
+
+    let mut unreadable = misread;
+    let verdict = between_semicolons(&tokens)
+        .into_iter()
+        .map(|range| {
+            // A character the tokenizer does not know may be a space to the
+            // server, so the words either side of it count as neighbours.
+            let words: Vec<&Token> = tokens
+                .iter()
+                .filter(|(token, at)| {
+                    range.contains(&at.start)
+                        && !matches!(token, Token::Whitespace(_) | Token::Char(_))
+                })
+                .map(|(token, _)| token)
+                .collect();
+            let text = &sql[range];
+            let parsed = match misread {
+                true => None,
+                false => match mutation_as_dml(spec, text) {
+                    Some(dml) => SqlParser::parse_sql(dialect, &dml).ok(),
+                    None => SqlParser::parse_sql(dialect, text).ok(),
+                },
+            };
+            let verdict = match parsed {
+                Some(statements) => statements
+                    .iter()
+                    .map(|statement| spec_verdict(spec, statement))
+                    .fold(Verdict::READ, Verdict::max),
+                None => {
+                    unreadable = true;
+                    first_keyword_verdict(&words)
+                }
+            };
+            verdict.max(anywhere_verdict(&words))
+        })
+        .fold(Verdict::READ, Verdict::max);
+
+    match (misread, unreadable) {
+        (true, _) => Verdict {
+            mode: verdict.mode.max(Mode::ReadWrite),
+            destructive: vec![Destructive::Unreadable],
+        },
+        (false, true) => Verdict {
+            mode: verdict.mode,
+            destructive: vec![Destructive::Unreadable],
+        },
+        (false, false) => verdict,
+    }
+}
+
+/// Whether the server's lexer may read `token` (`text` in the source)
+/// otherwise than sqlparser's tokenizer did, so that a word one of them sees
+/// is hidden from the other:
+///
+/// - a character the tokenizer does not know: the server skips Unicode spaces
+///   it does not (a zero-width space), and reads curly quotes as quotes;
+/// - a `#` or `$` outside a literal: the server starts a comment at `# ` and
+///   `#!`, and keeps a `$` inside a bare word, so `a$$` is one word to it and
+///   a word and the start of a dollar-quoted string to the tokenizer;
+/// - a quoted identifier the server ends elsewhere: it escapes a quote with a
+///   backslash and the tokenizer does not, so ``` `a\`` ``` ends there for
+///   the server and runs on for the tokenizer;
+/// - a `--` comment a carriage return runs through, in case the server ends
+///   it there.
+fn misread(token: &Token, text: &str) -> bool {
+    match token {
+        Token::Char(_) => true,
+        Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
+            comment.trim_end_matches('\r').contains('\r')
+        }
+        Token::Whitespace(_)
+        | Token::SingleQuotedString(_)
+        | Token::NationalStringLiteral(_)
+        | Token::HexStringLiteral(_) => false,
+        Token::Word(word) if word.quote_style.is_some() => !quoted_whole(text),
+        _ => text.contains(['#', '$']),
+    }
+}
+
+/// Whether the server reads `text`, a quoted name as the tokenizer cut it, as
+/// one quoted name ending where the tokenizer's does: a backslash escapes the
+/// byte after it, and a doubled quote is a quote.
+fn quoted_whole(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let Some(&quote) = bytes.first() else {
+        return false;
+    };
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            byte if byte == quote && bytes.get(at + 1) == Some(&quote) => at += 2,
+            byte if byte == quote => return at + 1 == bytes.len(),
+            _ => at += 1,
+        }
+    }
+    false
+}
+
+/// Whether `token` is the unquoted keyword `keyword`.
+fn is_keyword(token: Option<&&Token>, keyword: &str) -> bool {
+    matches!(token, Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(keyword))
+}
+
+/// The first words of the statements that only read or change the session.
+/// The server's `readonly=2` refuses any write and any change to `readonly`
+/// itself, so one of these runs once on confirmation even in Read-only.
+const FLOOR_READS: &[&str] = &[
+    "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXISTS", "EXPLAIN", "CHECK", "WATCH", "USE",
+    "SET",
+];
+
+/// The first words of DDL, access control and server control, `BACKUP` and
+/// `RESTORE` among them: `readonly=2` stops neither.
+const FLOOR_FULL: &[&str] = &[
+    "ALTER", "CREATE", "REPLACE", "DROP", "TRUNCATE", "RENAME", "EXCHANGE", "ATTACH", "DETACH",
+    "UNDROP", "MOVE", "OPTIMIZE", "SYSTEM", "KILL", "GRANT", "REVOKE", "BACKUP", "RESTORE",
+];
+
+/// The mode a statement sqlparser cannot read needs, by its first word
+/// (`words` holds no whitespace or comment). A first word in neither list, or
+/// a first token that is no word at all, fails closed: Read-write, so
+/// Read-only refuses it. An `INSERT INTO FUNCTION` is [`anywhere_verdict`]'s.
+fn first_keyword_verdict(words: &[&Token]) -> Verdict {
+    let first = |list: &[&str]| list.iter().any(|word| is_keyword(words.first(), word));
+    if first(FLOOR_READS) {
+        Verdict::READ
+    } else if first(FLOOR_FULL) {
+        Verdict::FULL
+    } else {
+        Verdict::WRITE
+    }
+}
+
+/// What a statement's words say wherever they stand, read or not: an `INTO
+/// OUTFILE` writes a file, an `INTO [TABLE] FUNCTION` writes through a table
+/// function to a URL, a file or another server, and `PARALLEL WITH` runs a
+/// second statement beside the first, which the first word does not describe.
+fn anywhere_verdict(words: &[&Token]) -> Verdict {
+    let at = |index: usize, keyword: &str| is_keyword(words.get(index), keyword);
+    let full = (0..words.len()).any(|index| {
+        at(index, "OUTFILE")
+            || at(index, "PARALLEL") && at(index + 1, "WITH")
+            || at(index, "INTO")
+                && (at(index + 1, "FUNCTION")
+                    || at(index + 1, "TABLE") && at(index + 2, "FUNCTION"))
+    });
+    match full {
+        true => Verdict::FULL,
+        false => Verdict::READ,
+    }
+}
+
+/// [`statement_verdict`], raised by what the engine's spec says of it: a
+/// `CREATE TABLE` on a table engine outside the spec's `local_table_engines`
+/// keeps its rows somewhere else, a URL, a file or another server, so it needs
+/// Full.
+fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
+    let verdict = statement_verdict(statement);
+    let (Some(local), Statement::CreateTable(create)) = (spec.sql.local_table_engines, statement)
+    else {
+        return verdict;
+    };
+    let options = match &create.table_options {
+        CreateTableOptions::None => &[][..],
+        CreateTableOptions::With(options)
+        | CreateTableOptions::Options(options)
+        | CreateTableOptions::Plain(options)
+        | CreateTableOptions::TableProperties(options) => options,
+    };
+    let listed = |name: &str| {
+        local.iter().any(|engine| match engine.strip_prefix('*') {
+            Some(suffix) => name.ends_with(suffix),
+            None => name == *engine,
+        })
+    };
+    let elsewhere = options.iter().any(|option| match option {
+        SqlOption::NamedParenthesizedList(list)
+            if list.key.value.eq_ignore_ascii_case("ENGINE") =>
+        {
+            !list.name.as_ref().is_some_and(|name| listed(&name.value))
+        }
+        SqlOption::KeyValue { key, .. } => key.value.eq_ignore_ascii_case("ENGINE"),
+        _ => false,
+    });
+    match elsewhere {
+        true => verdict.max(Verdict::FULL),
+        false => verdict,
+    }
+}
+
+/// A ClickHouse mutation spelled as the statement it amounts to:
+/// `ALTER TABLE t UPDATE … WHERE …` as `UPDATE t SET … WHERE …`, and
+/// `ALTER TABLE t DELETE WHERE …` as `DELETE FROM t WHERE …`, each with at most
+/// a trailing `SETTINGS mutations_sync = n`, which is dropped. The text between
+/// is kept exactly as written.
+///
+/// `None` for anything else after `ALTER`: a second command, `ON CLUSTER`,
+/// `IN PARTITION`, any other setting, a token the server may read otherwise
+/// ([`misread`]), or a spelling that does not then read as exactly one `UPDATE`
+/// or `DELETE` with a `WHERE`. And on every dialect but ClickHouse's, which has
+/// no mutations.
+pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
+    if spec.sql.parser_dialect != ParserDialect::ClickHouse {
+        return None;
+    }
+    let dialect = parser(spec.sql.parser_dialect);
+    let tokens = located_tokens(dialect.as_ref(), sql)?;
+    if tokens
+        .iter()
+        .any(|(token, range)| misread(token, &sql[range.clone()]))
+    {
+        return None;
+    }
+    let mut words: Vec<(&Token, Range<usize>)> = tokens
+        .iter()
+        .filter(|(token, _)| !matches!(token, Token::Whitespace(_)))
+        .map(|(token, range)| (token, range.clone()))
+        .collect();
+    if matches!(words.last(), Some((Token::SemiColon, _))) {
+        words.pop();
+    }
+    let keyword =
+        |at: usize, keyword: &str| is_keyword(words.get(at).map(|(token, _)| token), keyword);
+    if !keyword(0, "ALTER") || !keyword(1, "TABLE") {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        if !matches!(words.get(at), Some((Token::Word(_), _))) {
+            return None;
+        }
+        at += 1;
+        match words.get(at) {
+            Some((Token::Period, _)) => at += 1,
+            _ => break,
+        }
+    }
+    let table = &sql[words[2].1.start..words[at - 1].1.end];
+
+    let mut end = words.len();
+    if end >= at + 4
+        && keyword(end - 4, "SETTINGS")
+        && keyword(end - 3, "mutations_sync")
+        && matches!(words[end - 2].0, Token::Eq)
+        && matches!(words[end - 1].0, Token::Number(..))
+    {
+        end -= 4;
+    }
+    let body = &words[at..end];
+    let updates = keyword(at, "UPDATE");
+    if !updates && !keyword(at, "DELETE") {
+        return None;
+    }
+
+    // A comma outside brackets after the `WHERE` starts a second command.
+    let mut depth = 0i32;
+    let mut filter = None;
+    for (index, (token, _)) in body.iter().enumerate() {
+        match token {
+            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+            Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+            Token::Comma if depth == 0 && filter.is_some() => return None,
+            Token::SemiColon => return None,
+            _ if is_keyword(Some(token), "PARTITION") || is_keyword(Some(token), "SETTINGS") => {
+                return None;
+            }
+            _ if depth == 0 && filter.is_none() && is_keyword(Some(token), "WHERE") => {
+                filter = Some(index);
+            }
+            _ => {}
+        }
+    }
+    let filter = filter?;
+    let last = body.last()?.1.end;
+    let dml = match updates {
+        true if filter > 1 => format!("UPDATE {table} SET {}", &sql[body[1].1.start..last]),
+        false if filter == 1 => format!("DELETE FROM {table} {}", &sql[body[1].1.start..last]),
+        _ => return None,
+    };
+    let statements = SqlParser::parse_sql(dialect.as_ref(), &dml).ok()?;
+    let plain = match statements.as_slice() {
+        [Statement::Update(update)] => {
+            updates
+                && update.table.joins.is_empty()
+                && update.from.is_none()
+                && update.selection.is_some()
+                && update.returning.is_none()
+                && update.output.is_none()
+                && update.or.is_none()
+                && update.order_by.is_empty()
+                && update.limit.is_none()
+        }
+        [Statement::Delete(delete)] => {
+            !updates
+                && delete.tables.is_empty()
+                && delete.using.is_none()
+                && delete.selection.is_some()
+                && delete.returning.is_none()
+                && delete.output.is_none()
+                && delete.order_by.is_empty()
+                && delete.limit.is_none()
+        }
+        _ => false,
+    };
+    plain.then_some(dml)
 }
 
 /// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB
@@ -2955,6 +3291,12 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         | Statement::CreateStage {
             or_replace: true, ..
         } => Verdict::destroys(Destructive::Drop),
+        // `INSERT INTO FUNCTION url(…)`, `s3(…)`, `file(…)`, `remote(…)` and
+        // the rest write outside the database, as a `COPY … TO` file does.
+        // Only ClickHouse's dialect parses one.
+        Statement::Insert(insert) if matches!(insert.table, TableObject::TableFunction(_)) => {
+            Verdict::FULL
+        }
         Statement::Insert(insert) if insert.overwrite => {
             Verdict::destroys(Destructive::Truncate)
         }
@@ -6301,6 +6643,501 @@ mod tests {
                 "{engine:?}"
             );
         }
+    }
+
+    fn unreadable_at(mode: Mode) -> Verdict {
+        Verdict {
+            mode,
+            destructive: vec![Destructive::Unreadable],
+        }
+    }
+
+    #[test]
+    fn clickhouse_reads_its_own_dialect() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "SELECT * FROM t FINAL",
+            "SELECT * FROM t PREWHERE a = 1",
+            "SELECT a FROM t ARRAY JOIN arr AS a",
+            "SELECT * FROM t LIMIT 1 BY a",
+            "SELECT arrayMap(x -> x + 1, [1, 2])",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SHOW TABLES",
+            "DESCRIBE TABLE t",
+            "DESC t",
+            "USE analytics",
+            "SET max_threads = 1",
+            "SET readonly = 0",
+            "SELECT number FROM system.numbers",
+            "SELECT * FROM url('http://example.test/x.csv', CSV)",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::READ, "{sql}");
+        }
+        for sql in [
+            "SELECT 1 SETTINGS readonly = 0",
+            "SELECT 1 FORMAT JSON",
+            "WITH 1 AS x SELECT x",
+            "EXISTS t",
+            "EXISTS TABLE t",
+            "EXPLAIN PIPELINE SELECT 1",
+            "EXPLAIN AST ALTER TABLE t DELETE WHERE 1",
+            "CHECK TABLE t",
+            "WATCH lv",
+        ] {
+            let verdict = classify(ch, sql);
+            assert_eq!(verdict, unreadable_at(Mode::ReadOnly), "{sql}");
+            assert_eq!(gate(&verdict, Mode::ReadOnly, &[]), Some(Stop::RunOnce));
+        }
+        assert_eq!(
+            classify(ch, "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory"),
+            Verdict::WRITE
+        );
+    }
+
+    #[test]
+    fn clickhouse_floors_what_it_cannot_parse_by_its_first_keyword() {
+        let ch = Engine::ClickHouse;
+        let words = FLOOR_READS
+            .iter()
+            .map(|word| (*word, Mode::ReadOnly))
+            .chain(FLOOR_FULL.iter().map(|word| (*word, Mode::Full)))
+            .chain([
+                ("INSERT", Mode::ReadWrite),
+                ("INSERT INTO FUNCTION", Mode::Full),
+                ("INSERT INTO TABLE FUNCTION", Mode::Full),
+                ("insert into /* c */ function", Mode::Full),
+                ("DELETE", Mode::ReadWrite),
+                ("UPDATE", Mode::ReadWrite),
+                ("FROBNICATE", Mode::ReadWrite),
+                ("`SELECT`", Mode::ReadWrite),
+                ("(", Mode::ReadWrite),
+            ]);
+        for (word, mode) in words {
+            for word in [word.to_owned(), word.to_lowercase()] {
+                for lead in [
+                    "",
+                    "-- c\n",
+                    "--c\r\n",
+                    "/* c */",
+                    "/* a /* b */ c */\n",
+                    " \t\n",
+                ] {
+                    let sql = format!("{lead}{word} ) (");
+                    let verdict = classify(ch, &sql);
+                    // sqlparser reads any `SHOW …` as a variable to show.
+                    let expected = match word.eq_ignore_ascii_case("SHOW") {
+                        true => Verdict::READ,
+                        false => unreadable_at(mode),
+                    };
+                    assert_eq!(verdict, expected, "{sql:?}");
+                    let stop = match mode {
+                        Mode::ReadOnly => verdict.destructive.first().map(|_| Stop::RunOnce),
+                        mode => Some(Stop::Upgrade(mode)),
+                    };
+                    assert_eq!(gate(&verdict, Mode::ReadOnly, &[]), stop, "{sql:?}");
+                }
+            }
+        }
+
+        // What might be read as a comment by one side and not the other fails
+        // closed rather than trusting the word after it.
+        for sql in [
+            "# c\nSELECT 1",
+            "#!c\nSELECT 1",
+            "\u{feff}SELECT 1",
+            "\u{200b}SELECT 1",
+            "-- c\rBACKUP TABLE t TO Disk('b', 'x')",
+            "/* unended BACKUP TABLE t TO Disk('b', 'x')",
+            "SELECT 'unended",
+            "SELECT `unended",
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(Mode::ReadWrite), "{sql:?}");
+        }
+
+        // The server's lexer and sqlparser's tokenizer part ways on these, so
+        // a word the server runs may be one the tokenizer never sees: each
+        // fails closed, and still needs Full where the words it does see say so.
+        let backup = "BACKUP TABLE t TO Disk('b', 'x')";
+        for (sql, mode) in [
+            // A backslash escapes the backtick for the server alone, which
+            // then reads the doubled one as the end of the name.
+            (
+                format!("SELECT `a\\`` PARALLEL WITH {backup} -- `"),
+                Mode::ReadWrite,
+            ),
+            (
+                format!("SELECT \"a\\\"\" PARALLEL WITH {backup} -- \""),
+                Mode::ReadWrite,
+            ),
+            // `# ` comments to the server, and hides the quote that opens a
+            // string to the tokenizer.
+            (
+                format!("SELECT 1 #'\nPARALLEL WITH {backup} -- '"),
+                Mode::ReadWrite,
+            ),
+            // `a$$` is one bare word to the server.
+            (
+                format!("SELECT a$$ PARALLEL WITH {backup} --$$"),
+                Mode::ReadWrite,
+            ),
+            (format!("SELECT $$x$$ PARALLEL WITH {backup}"), Mode::Full),
+            ("SELECT $1".to_owned(), Mode::ReadWrite),
+            // A zero-width space is a space to the server.
+            (
+                format!("SELECT 1 PARALLEL\u{200b}WITH {backup}"),
+                Mode::Full,
+            ),
+            (format!("\u{200b}{backup}"), Mode::Full),
+            (
+                "INSERT INTO\u{200b}FUNCTION file('x') VALUES (1)".to_owned(),
+                Mode::Full,
+            ),
+            // Curly quotes are quotes to the server.
+            (
+                format!("SELECT \u{2018}'\u{2019} PARALLEL WITH {backup} --'"),
+                Mode::ReadWrite,
+            ),
+            ("SELECT caf\u{e9}".to_owned(), Mode::ReadWrite),
+        ] {
+            assert_eq!(classify(ch, &sql), unreadable_at(mode), "{sql:?}");
+        }
+        // Inside a literal or a comment, none of them matters.
+        for sql in [
+            "SELECT 'a#b$c\u{200b}\u{2018}\\'' AS x",
+            "SELECT `a#b$c\u{200b}` FROM t",
+            "SELECT 1 /* # $ \u{200b} ` \\ */",
+            "-- # $ \u{200b}\nSELECT 1",
+            "SELECT 1\u{a0}FROM t",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::READ, "{sql:?}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO\u{a0}FUNCTION file('x') VALUES (1)"),
+            Verdict::FULL
+        );
+        assert_eq!(classify(ch, "-- c\r\nSELECT 1"), Verdict::READ);
+        assert_eq!(
+            classify(ch, "/* /* */ */ BACKUP TABLE t TO Disk('b', 'x')"),
+            unreadable_at(Mode::Full)
+        );
+    }
+
+    #[test]
+    fn clickhouse_needs_full_for_what_writes_outside_the_database() {
+        let ch = Engine::ClickHouse;
+        for target in [
+            "url('http://example.test/x', CSV, 'a Int32')",
+            "s3('http://example.test/b/x.csv')",
+            "s3Cluster('c', 'http://example.test/b/x.csv')",
+            "file('x.csv', 'CSV', 'a Int32')",
+            "hdfs('hdfs://example.test/x', 'CSV', 'a Int32')",
+            "remote('h', db.t)",
+            "remoteSecure('h', db.t)",
+            "mysql('h:3306', 'db', 't', 'u', 'p')",
+            "postgresql('h:5432', 'db', 't', 'u', 'p')",
+            "azureBlobStorage('c', 'x')",
+            "gcs('http://example.test/x')",
+            "mongodb('h', 'db', 'c', 'u', 'p', 'a Int32')",
+            "odbc('dsn', 't')",
+            "jdbc('dsn', 't')",
+            "db.f('x')",
+        ] {
+            for into in ["INTO FUNCTION", "INTO TABLE FUNCTION", "into function"] {
+                let sql = format!("INSERT {into} {target} VALUES (1)");
+                assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+                let sql = format!("INSERT {into} {target} SELECT * FROM t");
+                assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+            }
+            // Unparseable, so the floor reads the same words.
+            let sql = format!("INSERT INTO FUNCTION {target} SETTINGS a = 1 VALUES (1)");
+            assert_eq!(classify(ch, &sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO `function` VALUES (1)"),
+            Verdict::WRITE
+        );
+
+        // No other dialect reads a table function as an insert's target:
+        // Postgres's reads a table named `FUNCTION` aliased `url`, the rest
+        // nothing at all, and the verdict each gave before stands.
+        let insert = "INSERT INTO FUNCTION url('http://example.test/x') VALUES (1)";
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql && *engine != ch)
+        {
+            let dialect = dialect(engine).unwrap();
+            let expected = match SqlParser::parse_sql(dialect.as_ref(), insert) {
+                Ok(statements) => {
+                    assert!(
+                        matches!(
+                            statements.as_slice(),
+                            [Statement::Insert(Insert {
+                                table: TableObject::TableName(_),
+                                ..
+                            })]
+                        ),
+                        "{engine:?}"
+                    );
+                    Verdict::WRITE
+                }
+                Err(_) => Verdict {
+                    mode: match engine.holds_read_only() {
+                        true => Mode::ReadOnly,
+                        false => Mode::ReadWrite,
+                    },
+                    destructive: vec![Destructive::Unreadable],
+                },
+            };
+            assert_eq!(classify(engine, insert), expected, "{engine:?}");
+        }
+
+        for sql in [
+            "SELECT 1 INTO OUTFILE 'x'",
+            "select 1 into outfile 'x' format CSV",
+            "WITH x AS (SELECT 1) SELECT * FROM x INTO OUTFILE 'y'",
+            "INSERT INTO t SELECT 1 INTO OUTFILE 'x'",
+            "SELECT 1 PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(classify(ch, "SELECT outfile FROM t"), Verdict::FULL);
+
+        for engine in [
+            "URL('http://example.test/x', CSV)",
+            "File(CSV)",
+            "S3('http://example.test/b/x.csv')",
+            "SQLite('x.db', 't')",
+            "Kafka",
+            "mergetree",
+        ] {
+            let sql = format!("CREATE TABLE t2 (a Int32) ENGINE = {engine}");
+            assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1"),
+            Verdict::FULL
+        );
+        for sql in [
+            "CREATE TABLE t2 (a Int32) ENGINE = MergeTree ORDER BY a",
+            "CREATE TABLE t2 (a Int32) ENGINE = ReplicatedReplacingMergeTree('/x', '{r}') ORDER BY a",
+            "CREATE TABLE t2 (a Int32) ENGINE = Memory",
+            "CREATE TABLE t2 (a Int32)",
+            "CREATE TABLE t2 AS SELECT 1",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::WRITE, "{sql}");
+        }
+        // The engine list is ClickHouse's alone: MySQL's `ENGINE =` is read as
+        // it always was.
+        assert_eq!(
+            classify(Engine::MySql, "CREATE TABLE t2 (a int) ENGINE = CSV"),
+            Verdict::WRITE
+        );
+    }
+
+    #[test]
+    fn a_clickhouse_mutation_is_classified_as_the_statement_it_amounts_to() {
+        let spec = Engine::ClickHouse.spec();
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "ALTER TABLE t UPDATE a = 1 WHERE b = 2",
+                Some("UPDATE t SET a = 1 WHERE b = 2"),
+            ),
+            (
+                "ALTER TABLE t UPDATE a = 1, b = 'x' WHERE c = 3 SETTINGS mutations_sync = 2",
+                Some("UPDATE t SET a = 1, b = 'x' WHERE c = 3"),
+            ),
+            (
+                "ALTER TABLE `db`.`t` DELETE WHERE a IN (1, 2) SETTINGS mutations_sync = 2;",
+                Some("DELETE FROM `db`.`t` WHERE a IN (1, 2)"),
+            ),
+            (
+                "alter table t delete /* c */ where a = 1",
+                Some("DELETE FROM t where a = 1"),
+            ),
+            (
+                "ALTER TABLE t UPDATE a = 1 WHERE b = 2, DROP COLUMN c",
+                None,
+            ),
+            ("ALTER TABLE t DELETE WHERE 1, UPDATE a = 1 WHERE 1", None),
+            ("ALTER TABLE t ON CLUSTER c DELETE WHERE a = 1", None),
+            ("ALTER TABLE t UPDATE a = 1 IN PARTITION p WHERE 1", None),
+            ("ALTER TABLE t DELETE IN PARTITION p WHERE 1", None),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS mutations_sync = '2'",
+                None,
+            ),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS max_threads = 1",
+                None,
+            ),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS mutations_sync = 2, max_threads = 1",
+                None,
+            ),
+            ("ALTER TABLE t UPDATE a = 1", None),
+            ("ALTER TABLE t DELETE WHERE 1 RETURNING *", None),
+            ("ALTER TABLE t MODIFY COLUMN a String", None),
+            ("ALTER TABLE t DELETE WHERE 1; DROP TABLE t", None),
+            (
+                "ALTER TABLE t DELETE WHERE a = '#$\\''",
+                Some("DELETE FROM t WHERE a = '#$\\''"),
+            ),
+            ("ALTER TABLE `t\\`` DELETE WHERE 1 -- `", None),
+            ("ALTER TABLE t DELETE WHERE a = 1 # c", None),
+            ("ALTER TABLE t DELETE WHERE a = $$x$$", None),
+            (
+                "ALTER TABLE t DELETE WHERE 1 PARALLEL\u{200b}WITH DROP TABLE t",
+                None,
+            ),
+            ("DELETE FROM t WHERE a = 1", None),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(mutation_as_dml(spec, sql).as_deref(), *expected, "{sql}");
+            let verdict = classify(Engine::ClickHouse, sql);
+            match expected {
+                Some(_) => assert_eq!(verdict, Verdict::WRITE, "{sql}"),
+                // Whatever does not re-spell takes `ALTER`'s floor.
+                None if sql.starts_with("ALTER") => assert_eq!(verdict.mode, Mode::Full, "{sql}"),
+                None => {}
+            }
+        }
+        assert_eq!(
+            classify(
+                Engine::ClickHouse,
+                "ALTER TABLE t ON CLUSTER c DELETE WHERE a = 1"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(
+                Engine::ClickHouse,
+                "ALTER TABLE t UPDATE a = 1 WHERE 1, DROP COLUMN c"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(Engine::ClickHouse, "SELECT 1; ALTER TABLE t DELETE WHERE 1"),
+            Verdict::WRITE
+        );
+        for engine in [Engine::MySql, Engine::Postgres, Engine::DuckDb] {
+            assert_eq!(
+                mutation_as_dml(engine.spec(), "ALTER TABLE t DELETE WHERE a = 1"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_writes_and_several_statements_need_what_their_worst_needs() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "INSERT INTO t SELECT * FROM s",
+            "INSERT INTO t WITH x AS (SELECT 1) SELECT * FROM x",
+            "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+            "CREATE TABLE t2 AS SELECT * FROM t",
+            "DELETE FROM t WHERE a = 1",
+            "UPDATE t SET a = 1 WHERE b = 2",
+            "ALTER TABLE t DELETE WHERE a = 1",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::WRITE, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO t SETTINGS async_insert = 1 VALUES (1)"),
+            unreadable_at(Mode::ReadWrite)
+        );
+        assert_eq!(
+            classify(ch, "DELETE FROM t ON CLUSTER c WHERE a = 1"),
+            unreadable_at(Mode::ReadWrite)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1; DROP TABLE t"),
+            Verdict::destroys(Destructive::Drop)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1; SELECT 1 FORMAT JSON"),
+            unreadable_at(Mode::ReadOnly)
+        );
+        assert_eq!(
+            classify(
+                ch,
+                "SELECT 1 SETTINGS readonly = 0; BACKUP TABLE t TO Disk('b', 'x')"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1 FROM t; DROP TABLE t SYNC"),
+            unreadable_at(Mode::Full)
+        );
+        // `EXPLAIN` never runs its statement on ClickHouse.
+        assert_eq!(
+            classify(ch, "EXPLAIN INSERT INTO t SELECT 1"),
+            Verdict::READ
+        );
+        assert_eq!(
+            classify(ch, "EXPLAIN DELETE FROM t WHERE a = 1"),
+            Verdict::READ
+        );
+        for sql in [
+            "SYSTEM SHUTDOWN",
+            "KILL QUERY WHERE 1",
+            "BACKUP TABLE t TO Disk('b', 'x')",
+            "RESTORE TABLE t FROM Disk('b', 'x')",
+            "REPLACE TABLE t AS SELECT 1",
+            "ATTACH TABLE t",
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(classify(ch, "OPTIMIZE TABLE t FINAL"), Verdict::FULL);
+    }
+
+    #[test]
+    fn a_clickhouse_statement_is_rerun_stopped_and_kept_by_what_it_is() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "SELECT number FROM system.numbers",
+            "SELECT number FROM system.numbers FORMAT JSON",
+            "SELECT number FROM system.numbers SETTINGS max_threads = 1",
+            "SELECT * FROM t FINAL PREWHERE a = 1",
+        ] {
+            assert!(stoppable(ch, sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1 FORMAT JSON",
+            "SELECT 1 SETTINGS readonly = 0",
+            "SELECT 1; SELECT 2",
+            "ALTER TABLE t DELETE WHERE 1",
+            "SELECT number FROM system.numbers INTO OUTFILE 'x'",
+        ] {
+            assert!(!stoppable(ch, sql), "{sql}");
+        }
+
+        assert!(rerunnable(ch, "SELECT * FROM t LIMIT 1 BY a"));
+        assert!(!rerunnable(ch, "SELECT 1 FORMAT JSON"));
+        assert!(!rerunnable(ch, "ALTER TABLE t UPDATE a = 1 WHERE 1"));
+        assert!(!rerunnable(ch, "INSERT INTO FUNCTION file('x') VALUES (1)"));
+
+        assert!(plain_read(ch, "SELECT arrayMap(x -> x + 1, [1, 2])"));
+        for sql in ["SHOW TABLES", "SET max_threads = 1", "SELECT 1 FORMAT JSON"] {
+            assert!(!plain_read(ch, sql), "{sql}");
+        }
+
+        let settings = |sql: &str| leaves(ch, sql).settings;
+        for sql in [
+            "SET max_threads = 1",
+            "USE analytics",
+            "SET max_threads = 1 SETTINGS x",
+            "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory",
+        ] {
+            assert!(settings(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "SELECT 1 SETTINGS max_threads = 1",
+            "ALTER TABLE t DELETE WHERE 1",
+        ] {
+            assert!(!settings(sql), "{sql}");
+        }
+        assert_eq!(leaves(ch, "BEGIN").transaction, Some(true));
     }
 
     /// One AST, three dialects. Two statements genuinely differ and are asserted as

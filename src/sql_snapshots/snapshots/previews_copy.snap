@@ -1396,7 +1396,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] plain · drop ForeignTable
   |DROP FOREIGN TABLE `public`.`accounts`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] plain · truncate
   |TRUNCATE TABLE `public`.`accounts`;|
@@ -1424,7 +1424,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] quotes · drop ForeignTable
   |DROP FOREIGN TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] quotes · truncate
   |TRUNCATE TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
@@ -1452,7 +1452,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] unicode · drop ForeignTable
   |DROP FOREIGN TABLE `données`.`Ünïcødé 表`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] unicode · truncate
   |TRUNCATE TABLE `données`.`Ünïcødé 表`;|
@@ -1480,7 +1480,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] reserved · drop ForeignTable
   |DROP FOREIGN TABLE `select`.`order`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] reserved · truncate
   |TRUNCATE TABLE `select`.`order`;|
@@ -1508,7 +1508,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] mixed case · drop ForeignTable
   |DROP FOREIGN TABLE `Sales`.`OrderLines`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] mixed case · truncate
   |TRUNCATE TABLE `Sales`.`OrderLines`;|
@@ -1536,7 +1536,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] brackets and dots · drop ForeignTable
   |DROP FOREIGN TABLE `[dbo]`.`a.b`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] brackets and dots · truncate
   |TRUNCATE TABLE `[dbo]`.`a.b`;|
@@ -1564,7 +1564,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] backslash · drop ForeignTable
   |DROP FOREIGN TABLE `back\\\\slash`.`trail\\\\`;|
-  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce)
 
 [clickhouse] backslash · truncate
   |TRUNCATE TABLE `back\\\\slash`.`trail\\\\`;|

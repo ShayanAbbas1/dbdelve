@@ -2069,6 +2069,7 @@ impl Workspace {
                         // Not a write's, which the cancel undid, and not when
                         // something other than the cancel ended it. Whatever
                         // the cancel cost besides is said either way.
+                        let ran = statement.as_deref().unwrap_or_default();
                         let result = match result {
                             Err(error)
                                 if cancelled
@@ -2080,12 +2081,12 @@ impl Workspace {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
-                                    notice: db::cancel_cost(engine, &error, true),
+                                    notice: db::cancel_cost(engine, &error, true, ran),
                                     ..QueryResult::default()
                                 })
                             }
                             Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
-                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only)
+                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only, ran)
                                     && cost != error.message
                                 {
                                     error.message = format!("{}\n\n{cost}", error.message);

@@ -204,9 +204,13 @@ pub struct SqlSpec {
     pub regex: RegexMatch,
     pub substring: SubstringMatch,
     pub read_only_session: ReadOnlySession,
-    /// Nothing reads it until the classifier learns the floor.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub unreadable_floor: UnreadableFloor,
+    /// The table engines a `CREATE TABLE … ENGINE =` may name and stay a
+    /// write: those that keep their rows in the database. Any other engine
+    /// reads or writes somewhere else (a URL, a file, another server), so it
+    /// needs Full. `None` where the `ENGINE` option is not read at all. A
+    /// leading `*` matches a suffix.
+    pub local_table_engines: Option<&'static [&'static str]>,
     /// Nothing outlives one request, so no statement leaves state behind.
     pub stateless_requests: bool,
 }
@@ -239,6 +243,7 @@ impl SqlSpec {
         substring: SubstringMatch::Like,
         read_only_session: ReadOnlySession::None,
         unreadable_floor: UnreadableFloor::None,
+        local_table_engines: None,
         stateless_requests: false,
     };
 
@@ -1029,6 +1034,23 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::ClickHouse,
         read_only_session: ReadOnlySession::PerRequest,
         unreadable_floor: UnreadableFloor::FirstKeyword,
+        local_table_engines: Some(&[
+            "*MergeTree",
+            "Log",
+            "TinyLog",
+            "StripeLog",
+            "Memory",
+            "Null",
+            "Set",
+            "Join",
+            "Buffer",
+            "Merge",
+            "Distributed",
+            "Dictionary",
+            "EmbeddedRocksDB",
+            "KeeperMap",
+            "GenerateRandom",
+        ]),
         // No Explain yet, and no `skip_duplicates`: there is no clause that
         // skips a row on a key, because there is no unique key.
         ..SqlSpec::ANSI
