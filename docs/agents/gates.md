@@ -19,7 +19,8 @@ aborts it, and only if `pg_stat_activity` shows the session's process running
 this statement's exact text, never waiting on the side session to find
 out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
 rolled back alone; SQLite interrupts it; DuckDB fetches no further; MongoDB
-drops the cursor; SQL Server
+drops the cursor; ClickHouse closes the
+response and `KILL QUERY`s it by its `query_id`; SQL Server
 sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
 `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
 `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
@@ -161,7 +162,12 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   `Engine::holds_read_only` is false on SQLite, DuckDB, Snowflake and SQL
   Server, so a statement `sqlparser` cannot parse carries Read-write there, not
   Read-only, and the gate asks for that. A statement it parses keeps its own
-  verdict.
+  verdict. ClickHouse holds Read-only (`readonly=2`) but not for every
+  statement, so what it cannot parse is read by its first keyword
+  (`UnreadableFloor::FirstKeyword`): reads stay Read-only and run once on
+  confirmation, writes need Read-write, DDL, server control and `BACKUP` and
+  `RESTORE` need Full, and anything it does not know fails closed to
+  Read-write.
 - **`IF` conditions.** T-SQL's `IF … ELSE` and the `IF … END IF` Postgres, MySQL
   and Snowflake parse to the same variant. `condition_verdict` reads a plain
   name, value, comparison or `IS …` test as a read, and a subquery (`EXISTS`,
@@ -171,5 +177,5 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   Read-write, Full and back through `choose_mode`, so it takes the titlebar
   menu's path and nothing else.
 - **`Connection::set_read_only`** holds a Read-only session to reads on Postgres
-  and MySQL; SQLite has no such setting, Snowflake no session to hold it in,
+  and MySQL, and on ClickHouse flags every request to carry `readonly=2`; SQLite has no such setting, Snowflake no session to hold it in,
   and SQL Server no session-level switch.

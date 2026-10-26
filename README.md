@@ -48,8 +48,8 @@ data lives are all in [docs/install.md](docs/install.md).
 
 ## Supported databases
 
-Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, MongoDB
-and Redis (and Valkey, KeyDB, Dragonfly).
+Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, MongoDB,
+Redis (and Valkey, KeyDB, Dragonfly) and ClickHouse.
 
 More engines are planned.
 

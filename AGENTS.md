@@ -1,8 +1,8 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB and
-Redis.
+speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB,
+Redis and ClickHouse.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -38,9 +38,10 @@ require it, stop and raise it instead.
 
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary
-   key, shown before it runs (`sql::delete_row`). The explorer's Copy DROP and
-   Copy TRUNCATE put text on the clipboard and nothing else. It never writes
-   into a statement it cannot parse whole: `sql::with_order_by` refuses rather
+   key (on an engine without unique keys, by all of the row's values as read, and
+   only when exactly one row matches), shown before it runs (`sql::delete_row`).
+   The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
+   nothing else. It never writes into a statement it cannot parse whole: `sql::with_order_by` refuses rather
    than guessing at a clause boundary, because a corrupted statement is worse
    than an unsorted grid.
 
@@ -58,7 +59,10 @@ require it, stop and raise it instead.
    A cell is editable only when DBDelve can name its row by primary key; when
    it cannot, the grid stays read-only and says why, and never guesses at a
    predicate. A table without a primary key can be inserted into and not
-   edited, deliberately. **Multi-row deletion is not admitted.** When it is
+   edited, deliberately. An engine without unique keys is the one exception: a
+   row is named by all of its values as read, and a write runs only when exactly
+   one row matches, checked by an exactly-one-row `COUNT(*)` with the identical
+   predicate before each write. **Multi-row deletion is not admitted.** When it is
    wanted, the path is one `DELETE` per row, each naming its own key, inside
    the `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering
    several.

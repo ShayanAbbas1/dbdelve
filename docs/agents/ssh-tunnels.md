@@ -29,6 +29,10 @@ already set up on the machine.
   reconnect to *that* path on this machine, past the tunnel entirely. Nowhere
   does `server.host` get rewritten to `127.0.0.1` to make a driver happy; the
   places above are the only ones a tunnel's address reaches.
+  ClickHouse's `ureq` agent takes a resolver (`TunnelResolver`) that dials the
+  tunnel for every socket it opens and returns the loopback address, while the
+  URI keeps the real host, so SNI and the hostname check use the real name and
+  `verify-full` works through a tunnel.
 - **Readiness is read off `ssh -v`'s own lines, not a TCP probe.** `-v`'s
   `debug1: Local forwarding listening on 127.0.0.1 port <port>.` fires once
   the listener is bound, but ssh prints it before the session behind it is
