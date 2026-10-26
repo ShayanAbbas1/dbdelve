@@ -12,6 +12,7 @@ mod gates;
 mod previews;
 mod redis_writes;
 mod rows;
+mod sessions;
 mod sorts;
 mod spellings;
 
