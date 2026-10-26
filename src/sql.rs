@@ -31,7 +31,7 @@ use sqlparser::parser::Parser as SqlParser;
 use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::db::{ColumnDefinition, Engine, ExplainMode};
+use crate::db::{ColumnDefinition, Engine, ExplainMode, Syntax};
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
 
@@ -329,17 +329,10 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
 /// guessed at, because the alternative is handing the server a statement the
 /// user did not write and cannot read.
 pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Option<String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::with_order_by(statement, keys),
-        Engine::Redis => return None,
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::with_order_by(statement, keys),
+        Syntax::Redis => return None,
+        Syntax::Sql => {}
     }
     let sql = statement;
     let tree = parse(sql)?;
@@ -516,17 +509,10 @@ pub fn insert_row(
     columns: &[(&str, Option<&str>)],
     types: &[(String, String)],
 ) -> Result<String, String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::insert_row(table, columns, types),
-        Engine::Redis => return crate::redis_cmd::edit::insert_row(schema, table, columns),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::insert_row(table, columns, types),
+        Syntax::Redis => return crate::redis_cmd::edit::insert_row(schema, table, columns),
+        Syntax::Sql => {}
     }
     if columns.is_empty() {
         return Err("There is nothing in this row to insert.".into());
@@ -568,11 +554,11 @@ pub(crate) fn insert_rows(
     rows: &[Vec<Option<&Value>>],
     skip: bool,
 ) -> Result<String, String> {
-    if engine == Engine::MongoDb {
+    if engine.syntax() == Syntax::Mongo {
         let names: Vec<&str> = columns.iter().map(|&(name, _)| name).collect();
         return crate::mql::insert_many(table, &names, rows);
     }
-    if engine == Engine::Redis {
+    if engine.syntax() == Syntax::Redis {
         return Err("Redis takes no imported rows.".into());
     }
     let Some(&(first, _)) = columns.first() else {
@@ -679,19 +665,12 @@ pub fn delete_row(
     keys: &[(&str, &str)],
     types: &[(String, String)],
 ) -> Option<String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::delete_row(table, keys, types).ok(),
-        Engine::Redis => {
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::delete_row(table, keys, types).ok(),
+        Syntax::Redis => {
             return crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok();
         }
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Sql => {}
     }
     if keys.is_empty() {
         return None;
@@ -937,33 +916,19 @@ fn delete_key_matches(sql: &str, keys: &[&str], backslash_escapes: bool) -> bool
 /// admits the same shapes read out of its own parse, less the transaction
 /// bracket and with `insertMany` for the multi-row insert.
 pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
-    match engine {
-        Engine::MongoDb => crate::mql::is_generated_write(statement),
-        Engine::Redis => crate::redis_cmd::edit::is_generated_write(statement),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => generated_write(statement, engine.backslash_escapes()),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::is_generated_write(statement),
+        Syntax::Redis => crate::redis_cmd::edit::is_generated_write(statement),
+        Syntax::Sql => generated_write(statement, engine.backslash_escapes()),
     }
 }
 
 /// [`delete_matches_key`] for the engine the statement is bound for.
 pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
-    match engine {
-        Engine::MongoDb => crate::mql::delete_matches_key(statement, keys),
-        Engine::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => delete_key_matches(statement, keys, engine.backslash_escapes()),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::delete_matches_key(statement, keys),
+        Syntax::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
+        Syntax::Sql => delete_key_matches(statement, keys, engine.backslash_escapes()),
     }
 }
 
@@ -986,17 +951,10 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
 /// a transaction: a preview never brackets anything, so seeing through
 /// brackets here would only widen what is accepted.
 pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::is_generated_read(sql),
-        Engine::Redis => return crate::redis_cmd::browse::is_generated_read(sql),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::is_generated_read(sql),
+        Syntax::Redis => return crate::redis_cmd::browse::is_generated_read(sql),
+        Syntax::Sql => {}
     }
     let Some(tree) = parse(sql) else {
         return false;
@@ -1841,17 +1799,10 @@ fn repeats(count: u64) -> Result<(), String> {
 /// the change the user made, and dbdelve would have no way to say which part of
 /// it ran.
 pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::update_batch(rows),
-        Engine::Redis => return crate::redis_cmd::edit::update_batch(rows),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::update_batch(rows),
+        Syntax::Redis => return crate::redis_cmd::edit::update_batch(rows),
+        Syntax::Sql => {}
     }
     if rows.is_empty() {
         return Err("There are no edits to apply.".into());
@@ -1918,7 +1869,7 @@ pub(crate) fn appended_statement(engine: Engine, buffer: &str, statement: &str) 
         return statement.to_string();
     }
     // A Redis command ends with its line, and a `;` would join its last word.
-    if engine == Engine::Redis {
+    if engine.syntax() == Syntax::Redis {
         return format!("{text}\n\n{statement}");
     }
 
@@ -2111,18 +2062,10 @@ impl Verdict {
 
 /// Whether `sql` can be put in an Explain mode, and why not when it cannot.
 pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
-    match engine {
-        Engine::MongoDb => crate::mql::explainable(sql),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::explainable(sql),
         // The server refuses what it cannot explain, and says so.
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer
-        | Engine::Redis => Ok(()),
+        Syntax::Sql | Syntax::Redis => Ok(()),
     }
 }
 
@@ -2135,7 +2078,7 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
 /// bare `EXPLAIN` is bytecode, and a `FORMAT` other than text or tree is JSON,
 /// XML or YAML. Those stay in the grid, where they are at least legible.
 pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
-    if engine == Engine::Redis {
+    if engine.syntax() == Syntax::Redis {
         return None;
     }
     let Some(dialect) = dialect(engine) else {
@@ -2221,7 +2164,7 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
 /// finds statement boundaries in a buffer someone is still typing into;
 /// this needs a typed statement, and would rather refuse than guess.
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
-    if engine == Engine::Redis {
+    if engine.syntax() == Syntax::Redis {
         return crate::redis_cmd::classify(sql);
     }
     let Some(dialect) = dialect(engine) else {
@@ -2705,7 +2648,7 @@ pub(crate) struct Leaves {
 /// grammar does not know, which still changed the session if it ran.
 /// Snowflake and MongoDB keep nothing from one run to the next.
 pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
-    if engine == Engine::Redis {
+    if engine.syntax() == Syntax::Redis {
         return crate::redis_cmd::leaves(sql);
     }
     let mut leaves = Leaves::default();
@@ -3179,8 +3122,8 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // value.
 pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
     let (Some(reader), Some(layout)) = (dialect(engine), sqlformat_dialect(engine)) else {
-        return match engine {
-            Engine::Redis => Err("Not formatting: a Redis command is one line, as typed."),
+        return match engine.syntax() {
+            Syntax::Redis => Err("Not formatting: a Redis command is one line, as typed."),
             _ => crate::mql::format(sql),
         };
     };

@@ -5,7 +5,7 @@ use std::{
 
 use gpui_component::tree::TreeItem;
 
-use crate::db::{Catalog, Engine, RelationKind, Routine, RoutineKind, Schema};
+use crate::db::{Catalog, Engine, RelationKind, Routine, RoutineKind, Schema, Syntax};
 use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
 
@@ -309,18 +309,11 @@ pub fn preview_sql(
     limit: Option<usize>,
     offset: usize,
 ) -> String {
-    match engine {
-        Engine::MongoDb => return mql::browse::find_preview(relation, filter, limit, offset),
+    match engine.syntax() {
+        Syntax::Mongo => return mql::browse::find_preview(relation, filter, limit, offset),
         // No limit or offset to write: see `Engine::pages`.
-        Engine::Redis => return redis_cmd::browse::preview(filter),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Redis => return redis_cmd::browse::preview(filter),
+        Syntax::Sql => {}
     }
     let mut sql = format!("SELECT *{}", from_where(engine, schema, relation, filter));
     let Some(limit) = limit else {
@@ -405,17 +398,9 @@ pub fn open_row_sql<'a>(
     rows: usize,
     cell: impl Fn(&str) -> Option<&'a str>,
 ) -> Option<String> {
-    match engine {
-        Engine::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?, rows),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer
-        | Engine::MongoDb => None,
+    match engine.syntax() {
+        Syntax::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?, rows),
+        Syntax::Sql | Syntax::Mongo => None,
     }
 }
 
@@ -431,17 +416,10 @@ pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 /// The size of what `preview_sql` would page through, for the status bar's
 /// Count. Never run unasked: on a large table it is a full scan.
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
-    match engine {
-        Engine::MongoDb => return mql::browse::count_documents(relation, filter),
-        Engine::Redis => return redis_cmd::browse::count(filter),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return mql::browse::count_documents(relation, filter),
+        Syntax::Redis => return redis_cmd::browse::count(filter),
+        Syntax::Sql => {}
     }
     format!(
         "SELECT {}{}",

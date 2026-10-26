@@ -434,21 +434,10 @@ impl Engine {
     /// engines, whose whole difference is the prefix, and the cursor's own
     /// `.explain(verbosity)` on MongoDB.
     pub fn explain_suffix(self, mode: ExplainMode) -> &'static str {
-        match (self, mode) {
-            (Self::MongoDb, ExplainMode::Plan) => r#".explain("queryPlanner")"#,
-            (Self::MongoDb, ExplainMode::Analyze) => r#".explain("executionStats")"#,
-            (
-                Self::Postgres
-                | Self::MySql
-                | Self::MariaDb
-                | Self::Sqlite
-                | Self::Turso
-                | Self::DuckDb
-                | Self::Snowflake
-                | Self::SqlServer
-                | Self::Redis,
-                ExplainMode::Plan | ExplainMode::Analyze,
-            ) => "",
+        match (self.syntax(), mode) {
+            (Syntax::Mongo, ExplainMode::Plan) => r#".explain("queryPlanner")"#,
+            (Syntax::Mongo, ExplainMode::Analyze) => r#".explain("executionStats")"#,
+            (Syntax::Sql | Syntax::Redis, ExplainMode::Plan | ExplainMode::Analyze) => "",
         }
     }
 
@@ -533,17 +522,9 @@ impl Engine {
     /// one a new row can take: a Redis key's type, which is whatever command
     /// made the key, and a new key is a `SET`.
     pub fn new_row_omits(self, column: &str) -> bool {
-        match self {
-            Self::Redis => column == "type",
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => false,
+        match self.syntax() {
+            Syntax::Redis => column == "type",
+            Syntax::Sql | Syntax::Mongo => false,
         }
     }
 
@@ -672,17 +653,9 @@ impl Engine {
     /// A collection has no fixed columns, and an unmapped field is left out
     /// rather than written as null.
     pub fn takes_new_fields(self) -> bool {
-        match self {
-            Self::MongoDb => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::Redis => false,
+        match self.syntax() {
+            Syntax::Mongo => true,
+            Syntax::Sql | Syntax::Redis => false,
         }
     }
 
@@ -691,34 +664,18 @@ impl Engine {
     /// whose contents are a read of their own. `None` where a row is all there
     /// is.
     pub fn opened_column(self) -> Option<&'static str> {
-        match self {
-            Self::Redis => Some("key"),
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => None,
+        match self.syntax() {
+            Syntax::Redis => Some("key"),
+            Syntax::Sql | Syntax::Mongo => None,
         }
     }
 
     /// Whether a header click can ask the server for an order. A Redis reply's
     /// order is the command's own, so a view of one sorts the rows it holds.
     pub fn sorts_on_server(self) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => true,
-            Self::Redis => false,
+        match self.syntax() {
+            Syntax::Sql | Syntax::Mongo => true,
+            Syntax::Redis => false,
         }
     }
 
@@ -726,17 +683,9 @@ impl Engine {
     /// offset. A Redis `SCAN` has neither: the fetch keeps the limit, and a
     /// cursor walk has no page after the first that it can be asked for.
     pub fn pages(self) -> bool {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => true,
-            Self::Redis => false,
+        match self.syntax() {
+            Syntax::Sql | Syntax::Mongo => true,
+            Syntax::Redis => false,
         }
     }
 
@@ -1131,17 +1080,9 @@ impl Engine {
     /// that is the whole of its value, never the start of a long one, a
     /// collection's size or the spelling of bytes that are not text.
     pub fn writes_back(self, data_type: &str) -> bool {
-        match self {
-            Self::Redis => crate::redis_cmd::edit::writes_back(data_type),
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => !self.is_binary_type(data_type),
+        match self.syntax() {
+            Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
+            Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
         }
     }
 
@@ -1152,17 +1093,9 @@ impl Engine {
     /// are taken out. A new row needs no such gate: any grid written back to
     /// one table takes one.
     pub fn edits_query_rows(self) -> bool {
-        match self {
-            Self::Redis => true,
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => false,
+        match self.syntax() {
+            Syntax::Redis => true,
+            Syntax::Sql | Syntax::Mongo => false,
         }
     }
 
@@ -1172,32 +1105,17 @@ impl Engine {
     /// set's member and score and a string's value are the row, and an edit
     /// of one is written as a `RENAMENX`, or as a removal and an addition.
     pub fn edits_key_column(self, column: &str) -> bool {
-        match self {
-            Self::Redis => crate::redis_cmd::edit::edits_key_column(column),
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer
-            | Self::MongoDb => false,
+        match self.syntax() {
+            Syntax::Redis => crate::redis_cmd::edit::edits_key_column(column),
+            Syntax::Sql | Syntax::Mongo => false,
         }
     }
 
     /// What a header click adds to a statement, as a notice names it.
     pub fn sort_clause(self) -> &'static str {
-        match self {
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::SqlServer => "an ORDER BY",
-            Self::MongoDb | Self::Redis => "a sort",
+        match self.syntax() {
+            Syntax::Sql => "an ORDER BY",
+            Syntax::Mongo | Syntax::Redis => "a sort",
         }
     }
 

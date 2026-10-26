@@ -191,17 +191,9 @@ impl Operator {
     /// column picked yet. Everywhere but Redis that is [`Operator::on`]: a
     /// `SCAN` narrows a key's name by glob and its type only exactly.
     pub(crate) fn offered(self, engine: Engine, column: Option<&str>) -> bool {
-        match engine {
-            Engine::Redis => crate::redis_cmd::browse::offers(column, self),
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::Sqlite
-            | Engine::Turso
-            | Engine::DuckDb
-            | Engine::Snowflake
-            | Engine::SqlServer
-            | Engine::MongoDb => self.on(engine),
+        match engine.syntax() {
+            Syntax::Redis => crate::redis_cmd::browse::offers(column, self),
+            Syntax::Sql | Syntax::Mongo => self.on(engine),
         }
     }
 
@@ -358,17 +350,9 @@ pub(crate) fn filter_bars(filters: &[FilterRow]) -> Vec<FilterBar> {
 /// Whether a bar may compare `column` at all. A Redis key's name and type are
 /// what `SCAN` can narrow by; every column of the others is.
 pub(crate) fn filters_on(engine: Engine, column: &str) -> bool {
-    match engine {
-        Engine::Redis => crate::redis_cmd::browse::filters_on(column),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer
-        | Engine::MongoDb => true,
+    match engine.syntax() {
+        Syntax::Redis => crate::redis_cmd::browse::filters_on(column),
+        Syntax::Sql | Syntax::Mongo => true,
     }
 }
 
@@ -405,21 +389,12 @@ pub(crate) fn derived_filter(
         };
         folded = Some(match folded {
             None => predicate,
-            Some(left) => match engine {
-                Engine::MongoDb => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
-                Engine::Redis => {
+            Some(left) => match engine.syntax() {
+                Syntax::Mongo => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
+                Syntax::Redis => {
                     crate::redis_cmd::browse::joined(bar.conjunction, &left, &predicate)
                 }
-                Engine::Postgres
-                | Engine::MySql
-                | Engine::MariaDb
-                | Engine::Sqlite
-                | Engine::Turso
-                | Engine::DuckDb
-                | Engine::Snowflake
-                | Engine::SqlServer => {
-                    format!("({left}) {} ({predicate})", bar.conjunction.as_str())
-                }
+                Syntax::Sql => format!("({left}) {} ({predicate})", bar.conjunction.as_str()),
             },
         });
     }
@@ -439,17 +414,10 @@ pub(crate) fn bar_predicate(
         // Verbatim, and checked as a whole statement by `is_generated_select`
         // rather than inspected here: a filter dbdelve does not understand is
         // exactly what the gate is for (spec §2.3).
-        return (!value.is_empty()).then(|| match engine {
-            Engine::MongoDb => crate::mql::browse::raw_filter(value),
-            Engine::Redis => crate::redis_cmd::browse::raw_filter(value),
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::Sqlite
-            | Engine::Turso
-            | Engine::DuckDb
-            | Engine::Snowflake
-            | Engine::SqlServer => value.to_string(),
+        return (!value.is_empty()).then(|| match engine.syntax() {
+            Syntax::Mongo => crate::mql::browse::raw_filter(value),
+            Syntax::Redis => crate::redis_cmd::browse::raw_filter(value),
+            Syntax::Sql => value.to_string(),
         });
     }
     let column = bar.column.as_deref()?;
@@ -495,21 +463,14 @@ pub(crate) fn filter_predicate(
     operator: Operator,
     value: &str,
 ) -> Option<String> {
-    match engine {
-        Engine::MongoDb => {
+    match engine.syntax() {
+        Syntax::Mongo => {
             return crate::mql::browse::filter_predicate(column, data_type, operator, value);
         }
-        Engine::Redis => {
+        Syntax::Redis => {
             return crate::redis_cmd::browse::filter_predicate(column, operator, value);
         }
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Sql => {}
     }
     let name = engine.quote_identifier(column);
     let literal = |value: &str| engine.quote_value(value, data_type);
@@ -815,20 +776,12 @@ pub(crate) fn sort_expression(
     column: usize,
 ) -> Option<String> {
     let name = &columns.get(column)?.name;
-    match engine {
+    match engine.syntax() {
         // A document's fields are unique, and a position names nothing there.
-        Engine::MongoDb => return crate::mql::browse::sort_field(name),
+        Syntax::Mongo => return crate::mql::browse::sort_field(name),
         // Never written into a command: a key of the sort in memory, which is
         // the only one Redis has (`Engine::sorts_on_server`).
-        Engine::Redis
-        | Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Redis | Syntax::Sql => {}
     }
     let unique = columns.iter().filter(|other| &other.name == name).count() == 1;
 
