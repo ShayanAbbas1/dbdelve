@@ -40,9 +40,9 @@ The editor takes redis-cli commands, one per line, split into words by
 redis-cli's own rules, so a line pasted from redis-cli means here what it meant
 there. A line starting with `#` is a comment. Run All sends the commands in
 order on the one connection, so `MULTI` ... `EXEC` works, and shows the last
-result. Command names complete as you type, tagged read, write or destructive,
-except a name whose subcommand decides that (`CONFIG`, `CLIENT`), which has no
-tag.
+result. Command names complete as you type, tagged read, write, script or
+destructive, except a name whose subcommand decides that (`CONFIG`, `CLIENT`),
+which has no tag.
 
 Some commands are refused before anything is sent, because they take the
 session DBDelve owns out from under it:
