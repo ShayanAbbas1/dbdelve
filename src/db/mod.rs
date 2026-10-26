@@ -40,6 +40,7 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 pub use spec::EngineSpec;
+use spec::{BooleanLiteral, CountAll};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -499,31 +500,18 @@ impl Engine {
         }
     }
 
-    /// How a boolean is spelled as an Import Rows value. MySQL reads `'true'`
-    /// into a `tinyint` as an error in strict mode, and SQL Server's `bit` and
-    /// SQLite's integers take `1` and `0` only.
+    /// How a boolean is spelled as an Import Rows value.
     pub fn boolean_literal(self, value: bool) -> &'static str {
-        match (self, value) {
-            (Self::Postgres | Self::DuckDb | Self::Snowflake | Self::MongoDb, true) => "true",
-            (Self::Postgres | Self::DuckDb | Self::Snowflake | Self::MongoDb, false) => "false",
-            (
-                Self::MySql
-                | Self::MariaDb
-                | Self::Sqlite
-                | Self::Turso
-                | Self::SqlServer
-                | Self::Redis,
-                true,
-            ) => "1",
-            (
-                Self::MySql
-                | Self::MariaDb
-                | Self::Sqlite
-                | Self::Turso
-                | Self::SqlServer
-                | Self::Redis,
-                false,
-            ) => "0",
+        let literal = match self.syntax() {
+            Syntax::Sql => self.spec().sql.boolean_literal,
+            Syntax::Mongo => BooleanLiteral::TrueFalse,
+            Syntax::Redis => BooleanLiteral::OneZero,
+        };
+        match (literal, value) {
+            (BooleanLiteral::TrueFalse, true) => "true",
+            (BooleanLiteral::TrueFalse, false) => "false",
+            (BooleanLiteral::OneZero, true) => "1",
+            (BooleanLiteral::OneZero, false) => "0",
         }
     }
 
@@ -663,23 +651,13 @@ impl Engine {
         }
     }
 
-    /// The aggregate a relation's row count is written with. T-SQL's `COUNT`
-    /// is an `int` and fails past 2,147,483,647 rows, so SQL Server's is
-    /// `COUNT_BIG`; every other engine's `COUNT` is already 64-bit.
+    /// The aggregate a relation's row count is written with.
     pub fn count_all(self) -> &'static str {
-        match self {
-            Self::SqlServer => "COUNT_BIG(*)",
-            // MongoDB and Redis write no SQL, so this is never what their
-            // count runs.
-            Self::Postgres
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake
-            | Self::MongoDb
-            | Self::Redis => "COUNT(*)",
+        // MongoDB and Redis write no SQL, so their spec's answer is never
+        // what their count runs.
+        match self.spec().sql.count_all {
+            CountAll::Count => "COUNT(*)",
+            CountAll::CountBig => "COUNT_BIG(*)",
         }
     }
 
@@ -788,40 +766,13 @@ impl Engine {
         system.contains(&name)
     }
 
-    /// Postgres and SQLite take the standard's double quote. MySQL takes a
-    /// backtick, which it accepts whether or not `ANSI_QUOTES` is set — a double
-    /// quote there is a *string literal*, so quoting a MySQL identifier the
-    /// standard way produces a statement that runs and means something else.
-    ///
-    /// `None` for MongoDB, whose field names are JavaScript strings, escaped
-    /// with a backslash rather than doubled, and for Redis, whose names are
-    /// redis-cli words.
-    fn identifier_quote(self) -> Option<char> {
-        match self {
-            // Snowflake folds an unquoted name to upper case and reads a quoted
-            // one exactly, and the catalog reports names as stored -- so quoting
-            // what the catalog said is always the name it meant.
-            Self::Postgres | Self::Sqlite | Self::Turso | Self::DuckDb | Self::Snowflake => {
-                Some('"')
-            }
-            // Not T-SQL's own `[name]`: the grammar every gate in `sql.rs`
-            // parses with has no brackets, and the pin does not move. The
-            // standard quote names an identifier under `QUOTED_IDENTIFIER`,
-            // which the driver's login turns on.
-            Self::SqlServer => Some('"'),
-            Self::MySql | Self::MariaDb => Some('`'),
-            Self::MongoDb | Self::Redis => None,
-        }
-    }
-
     pub fn quote_identifier(self, identifier: &str) -> String {
-        match (self, self.identifier_quote()) {
-            (Self::Redis, _) => crate::redis_cmd::quoted(identifier),
-            (_, Some(quote)) => format!(
-                "{quote}{}{quote}",
-                identifier.replace(quote, &format!("{quote}{quote}"))
-            ),
-            (_, None) => json_string(identifier),
+        match self.syntax() {
+            Syntax::Sql => self.spec().quote_identifier(identifier),
+            // A field name is a JavaScript string, escaped with a backslash
+            // rather than doubled.
+            Syntax::Mongo => json_string(identifier),
+            Syntax::Redis => crate::redis_cmd::quoted(identifier),
         }
     }
 
@@ -832,156 +783,46 @@ impl Engine {
     /// position or a function call names no column, and pretending otherwise
     /// would light up the wrong header.
     pub fn unquote_identifier(self, expression: &str) -> String {
-        if self == Self::Redis {
-            return match crate::redis_cmd::split(expression).as_deref() {
+        match self.syntax() {
+            Syntax::Sql => self.spec().unquote_identifier(expression),
+            Syntax::Mongo => serde_json::from_str::<String>(expression)
+                .unwrap_or_else(|_| expression.to_string()),
+            Syntax::Redis => match crate::redis_cmd::split(expression).as_deref() {
                 Ok([word]) => String::from_utf8_lossy(word).into_owned(),
                 _ => expression.to_string(),
-            };
-        }
-        let Some(quote) = self.identifier_quote() else {
-            return serde_json::from_str::<String>(expression)
-                .unwrap_or_else(|_| expression.to_string());
-        };
-        match expression
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
-            Some(inner) => inner.replace(&format!("{quote}{quote}"), &quote.to_string()),
-            None => expression.to_string(),
+            },
         }
     }
 
-    /// Whether a date literal may carry a UTC offset. MariaDB refuses one even
-    /// into a `timestamp`, which it reads in the session's zone.
+    /// Whether a date literal may carry a UTC offset.
     pub fn reads_literal_offsets(self) -> bool {
-        match self {
-            Self::MariaDb => false,
-            Self::Postgres
-            | Self::MySql
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::SqlServer
-            | Self::Snowflake
-            | Self::MongoDb
-            | Self::Redis => true,
-        }
+        self.spec().sql.literal_offsets
     }
 
     /// Whether a backslash in a single-quoted literal escapes the character
-    /// after it. Snowflake reads it so unconditionally; MySQL and MariaDB unless
-    /// `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know, so they
-    /// are taken to.
+    /// after it.
     pub fn backslash_escapes(self) -> bool {
-        match self {
-            Self::MySql | Self::MariaDb | Self::Snowflake => true,
-            Self::Postgres
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::SqlServer
-            | Self::MongoDb
-            | Self::Redis => false,
-        }
+        self.spec().sql.backslash_escapes
     }
 
-    /// Doubling the quote is enough for two of them: neither Postgres nor
-    /// SQLite reads a backslash as an escape, the first because
-    /// `standard_conforming_strings` is on by default and the second because it
-    /// has no such notion at all. MySQL does, unless `NO_BACKSLASH_ESCAPES` is
-    /// set — which is again not dbdelve's to set — so a literal backslash has to
-    /// survive as two.
     pub fn quote_literal(self, value: &str) -> String {
-        match self {
-            Self::Postgres
-            | Self::Sqlite
-            | Self::Turso
-            | Self::DuckDb
-            | Self::MySql
-            | Self::MariaDb
-            | Self::Snowflake => {
-                let value = match self.backslash_escapes() {
-                    true => value.replace('\\', r"\\"),
-                    false => value.to_string(),
-                };
-                format!("'{}'", value.replace('\'', "''"))
-            }
-            // `N` because a bare literal is converted to the database's code
-            // page first, and a character it lacks arrives as `?`. No
-            // backslash escape in T-SQL.
-            Self::SqlServer => format!("N'{}'", value.replace('\'', "''")),
-            Self::MongoDb => json_string(value),
-            Self::Redis => crate::redis_cmd::quoted(value),
+        match self.syntax() {
+            Syntax::Sql => self.spec().quote_literal(value),
+            Syntax::Mongo => json_string(value),
+            Syntax::Redis => crate::redis_cmd::quoted(value),
         }
     }
 
     /// [`Self::quote_literal`] for a value bound for a column of `data_type`,
-    /// on the one engine where the type changes how its literal is spelled.
-    ///
-    /// SQL Server's binary value is its hex literal, bare: quoted, it is a
-    /// string, compared by its UTF-16 bytes, and matches no row. Bare only when
-    /// it is exactly such a literal, because this is the one way a value enters
-    /// a statement unquoted. And `N` only where a column needs it: an
-    /// `nvarchar` literal against a `varchar` key converts the column rather
-    /// than itself, so the edit scans the index. An ASCII value reads the same
-    /// in every code page, which is what makes dropping the `N` safe.
+    /// on an engine where the type changes how its literal is spelled.
     pub fn quote_value(self, value: &str, data_type: Option<&str>) -> String {
-        let (Self::SqlServer, Some(data_type)) = (self, data_type) else {
-            return self.quote_literal(value);
-        };
-        let lowered = data_type.to_ascii_lowercase();
-        let name = lowered.split('(').next().unwrap_or_default().trim();
-        let hex = value
-            .get(..2)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("0x"))
-            .and_then(|_| value.get(2..))
-            .filter(|digits| {
-                digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-            });
-        let narrow = matches!(
-            name,
-            "char"
-                | "varchar"
-                | "text"
-                | "bit"
-                | "tinyint"
-                | "smallint"
-                | "int"
-                | "bigint"
-                | "decimal"
-                | "numeric"
-                | "real"
-                | "float"
-                | "money"
-                | "smallmoney"
-                | "date"
-                | "time"
-                | "datetime"
-                | "datetime2"
-                | "smalldatetime"
-                | "datetimeoffset"
-                | "uniqueidentifier"
-        );
-        if let Some(digits) = hex.filter(|_| self.is_binary_type(name)) {
-            format!("0x{digits}")
-        } else if matches!(name, "datetime" | "smalldatetime")
-            && let Some(iso) = iso_datetime(value)
-        {
-            iso
-        } else if narrow && value.is_ascii() {
-            format!("'{}'", value.replace('\'', "''"))
-        } else {
-            self.quote_literal(value)
+        match self.syntax() {
+            Syntax::Sql => self.spec().quote_value(value, data_type),
+            Syntax::Mongo | Syntax::Redis => self.quote_literal(value),
         }
     }
 
     /// Whether a [`Column::data_type`] names a type whose values are bytes.
-    ///
-    /// Substrings because the families are open-ended in two directions: MySQL
-    /// prefixes its blobs and binaries, and SQLite gives BLOB affinity to any
-    /// declared type merely *containing* `blob`. `image` only on SQL Server,
-    /// where it is the legacy binary type; elsewhere it is a name anyone may
-    /// give a column or a domain, and a SQLite `image` column holds text.
     ///
     /// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
     /// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
@@ -990,13 +831,7 @@ impl Engine {
     /// that could not name the type says nothing, and treating silence as binary
     /// would make ordinary columns read-only.
     pub fn is_binary_type(self, data_type: &str) -> bool {
-        let name = data_type.to_ascii_lowercase();
-        name == "bytea"
-            || name.contains("blob")
-            || name.contains("binary")
-            || (self == Self::SqlServer
-                && matches!(name.as_str(), "image" | "rowversion" | "timestamp"))
-            || (self == Self::MongoDb && name == "bindata")
+        self.spec().is_binary_type(data_type)
     }
 
     /// Whether a cell of `data_type` holds what an edit of it would write
@@ -1044,53 +879,20 @@ impl Engine {
     }
 
     pub fn qualified(self, schema: &str, name: &str) -> String {
-        format!(
-            "{}.{}",
-            self.quote_identifier(schema),
-            self.quote_identifier(name)
-        )
+        match self.syntax() {
+            Syntax::Sql => self.spec().qualified(schema, name),
+            Syntax::Mongo | Syntax::Redis => format!(
+                "{}.{}",
+                self.quote_identifier(schema),
+                self.quote_identifier(name)
+            ),
+        }
     }
 }
 
 /// A JavaScript string literal, which a JSON string always is.
 fn json_string(value: &str) -> String {
     serde_json::Value::from(value).to_string()
-}
-
-/// A `datetime` value as `'YYYY-MM-DDThh:mm:ss…'`, the one spelling of it
-/// `DATEFORMAT` and `SET LANGUAGE` never reorder: with a space instead of the
-/// `T`, or as a bare date, `british` reads `2024-01-02` as the first of
-/// February. `None` for anything not shaped like the grid's own rendering.
-fn iso_datetime(value: &str) -> Option<String> {
-    // Every byte of the shape is ASCII, so matching bytes also keeps the
-    // slices below on character boundaries.
-    let shaped = |text: &[u8], shape: &[u8]| {
-        text.len() == shape.len()
-            && text.iter().zip(shape).all(|(byte, want)| match want {
-                b'9' => byte.is_ascii_digit(),
-                _ => byte == want,
-            })
-    };
-    let bytes = value.as_bytes();
-    if bytes.len() < 10 || !shaped(&bytes[..10], b"9999-99-99") {
-        return None;
-    }
-    let time = match &bytes[10..] {
-        [] => b" 00:00:00".as_slice(),
-        rest => rest,
-    };
-    let clock = time.len() >= 9 && shaped(&time[..9], b" 99:99:99");
-    let fraction = &time[time.len().min(9)..];
-    let fraction_ok = match fraction {
-        [] => true,
-        [b'.', digits @ ..] => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
-        _ => false,
-    };
-    let time = value
-        .get(11..)
-        .filter(|time| !time.is_empty())
-        .unwrap_or("00:00:00");
-    (clock && fraction_ok).then(|| format!("'{}T{time}'", &value[..10]))
 }
 
 /// A URL is percent-encoded by definition, and a path with a space in it is

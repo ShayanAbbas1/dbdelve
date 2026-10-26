@@ -1831,6 +1831,99 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     template.replace("{object}", &object)
 }
 
+/// A literal for a value bound for a column of `data_type`, where the type
+/// changes how it is spelled, or `None` for the plain literal.
+///
+/// A binary value is its hex literal, bare: quoted, it is a string, compared
+/// by its UTF-16 bytes, and matches no row. Bare only when it is exactly such
+/// a literal, because this is the one way a value enters a statement
+/// unquoted. And `N` only where a column needs it: an `nvarchar` literal
+/// against a `varchar` key converts the column rather than itself, so the edit
+/// scans the index. An ASCII value reads the same in every code page, which is
+/// what makes dropping the `N` safe.
+pub(super) fn typed_literal(value: &str, data_type: &str) -> Option<String> {
+    let lowered = data_type.to_ascii_lowercase();
+    let name = lowered.split('(').next().unwrap_or_default().trim();
+    let hex = value
+        .get(..2)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("0x"))
+        .and_then(|_| value.get(2..))
+        .filter(|digits| {
+            digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+    let narrow = matches!(
+        name,
+        "char"
+            | "varchar"
+            | "text"
+            | "bit"
+            | "tinyint"
+            | "smallint"
+            | "int"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "real"
+            | "float"
+            | "money"
+            | "smallmoney"
+            | "date"
+            | "time"
+            | "datetime"
+            | "datetime2"
+            | "smalldatetime"
+            | "datetimeoffset"
+            | "uniqueidentifier"
+    );
+    if let Some(digits) = hex.filter(|_| Engine::SqlServer.is_binary_type(name)) {
+        Some(format!("0x{digits}"))
+    } else if matches!(name, "datetime" | "smalldatetime")
+        && let Some(iso) = iso_datetime(value)
+    {
+        Some(iso)
+    } else if narrow && value.is_ascii() {
+        Some(format!("'{}'", value.replace('\'', "''")))
+    } else {
+        None
+    }
+}
+
+/// A `datetime` value as `'YYYY-MM-DDThh:mm:ss…'`, the one spelling of it
+/// `DATEFORMAT` and `SET LANGUAGE` never reorder: with a space instead of the
+/// `T`, or as a bare date, `british` reads `2024-01-02` as the first of
+/// February. `None` for anything not shaped like the grid's own rendering.
+fn iso_datetime(value: &str) -> Option<String> {
+    // Every byte of the shape is ASCII, so matching bytes also keeps the
+    // slices below on character boundaries.
+    let shaped = |text: &[u8], shape: &[u8]| {
+        text.len() == shape.len()
+            && text.iter().zip(shape).all(|(byte, want)| match want {
+                b'9' => byte.is_ascii_digit(),
+                _ => byte == want,
+            })
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() < 10 || !shaped(&bytes[..10], b"9999-99-99") {
+        return None;
+    }
+    let time = match &bytes[10..] {
+        [] => b" 00:00:00".as_slice(),
+        rest => rest,
+    };
+    let clock = time.len() >= 9 && shaped(&time[..9], b" 99:99:99");
+    let fraction = &time[time.len().min(9)..];
+    let fraction_ok = match fraction {
+        [] => true,
+        [b'.', digits @ ..] => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    let time = value
+        .get(11..)
+        .filter(|time| !time.is_empty())
+        .unwrap_or("00:00:00");
+    (clock && fraction_ok).then(|| format!("'{}T{time}'", &value[..10]))
+}
+
 fn connect_error(error: &tiberius::error::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing

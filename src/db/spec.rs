@@ -31,16 +31,71 @@ pub struct EngineSpec {
     #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub binary_types: &'static [&'static str],
     pub hints: Hints,
     /// Meaningful only where `syntax` is [`Syntax::Sql`].
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub sql: SqlSpec,
     #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub abilities: Abilities,
-    #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
     pub hooks: Hooks,
+}
+
+impl EngineSpec {
+    pub fn quote_identifier(&self, identifier: &str) -> String {
+        let quote = self.sql.identifier_quote.character();
+        format!(
+            "{quote}{}{quote}",
+            identifier.replace(quote, &format!("{quote}{quote}"))
+        )
+    }
+
+    /// The inverse of [`Self::quote_identifier`]; anything that is not a
+    /// quoted identifier comes back unchanged.
+    pub fn unquote_identifier(&self, expression: &str) -> String {
+        let quote = self.sql.identifier_quote.character();
+        match expression
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            Some(inner) => inner.replace(&format!("{quote}{quote}"), &quote.to_string()),
+            None => expression.to_string(),
+        }
+    }
+
+    pub fn qualified(&self, schema: &str, name: &str) -> String {
+        format!(
+            "{}.{}",
+            self.quote_identifier(schema),
+            self.quote_identifier(name)
+        )
+    }
+
+    pub fn quote_literal(&self, value: &str) -> String {
+        let value = match self.sql.backslash_escapes {
+            true => value.replace('\\', r"\\"),
+            false => value.to_string(),
+        };
+        let national = if self.sql.national_strings { "N" } else { "" };
+        format!("{national}'{}'", value.replace('\'', "''"))
+    }
+
+    pub fn quote_value(&self, value: &str, data_type: Option<&str>) -> String {
+        data_type
+            .zip(self.hooks.quote_value)
+            .and_then(|(data_type, typed)| typed(value, data_type))
+            .unwrap_or_else(|| self.quote_literal(value))
+    }
+
+    /// Substrings because the families are open-ended in two directions:
+    /// MySQL prefixes its blobs and binaries, and SQLite gives BLOB affinity to
+    /// any declared type merely *containing* `blob`.
+    pub fn is_binary_type(&self, data_type: &str) -> bool {
+        let name = data_type.to_ascii_lowercase();
+        name == "bytea"
+            || name.contains("blob")
+            || name.contains("binary")
+            || self.binary_types.contains(&name.as_str())
+    }
 }
 
 /// What the connection form says a blank field means.
@@ -69,11 +124,19 @@ impl Hints {
 #[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
 pub struct SqlSpec {
     pub identifier_quote: IdentifierQuote,
+    /// Whether a backslash in a single-quoted literal escapes the character
+    /// after it, so a literal one has to survive as two. Postgres reads none
+    /// because `standard_conforming_strings` is on by default, and SQLite has
+    /// no such notion at all.
     pub backslash_escapes: bool,
-    /// String literals are written `N'…'`.
+    /// String literals are written `N'…'`, because a bare one is converted to
+    /// the database's code page first, and a character it lacks arrives as `?`.
     pub national_strings: bool,
     /// Whether a date literal may carry a UTC offset.
     pub literal_offsets: bool,
+    /// How a boolean is spelled as an Import Rows value. MySQL reads `'true'`
+    /// into a `tinyint` as an error in strict mode, and SQL Server's `bit` and
+    /// SQLite's integers take `1` and `0` only.
     pub boolean_literal: BooleanLiteral,
     pub params: Params,
     pub paging: Paging,
@@ -144,10 +207,27 @@ impl SqlSpec {
     }
 }
 
+/// No brackets, not even for SQL Server: the grammar every gate in `sql.rs`
+/// parses with has none, and the pin does not move. The standard quote names
+/// an identifier there under `QUOTED_IDENTIFIER`, which the driver's login
+/// turns on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentifierQuote {
     Double,
+    /// MySQL's, which it accepts whether or not `ANSI_QUOTES` is set — a
+    /// double quote there is a *string literal*, so quoting a MySQL identifier
+    /// the standard way produces a statement that runs and means something
+    /// else.
     Backtick,
+}
+
+impl IdentifierQuote {
+    fn character(self) -> char {
+        match self {
+            Self::Double => '"',
+            Self::Backtick => '`',
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +270,8 @@ pub enum ForeignTable {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CountAll {
     Count,
+    /// T-SQL's `COUNT` is an `int` and fails past 2,147,483,647 rows; every
+    /// other engine's is already 64-bit.
     CountBig,
 }
 
@@ -316,7 +398,6 @@ impl Abilities {
 
 /// The answers no strategy expresses, as code.
 #[derive(Clone, Copy, Debug)]
-#[expect(dead_code, reason = "phase 3: read as each area moves onto the spec")]
 pub struct Hooks {
     /// A literal for a value bound for a column of `data_type`, or `None` to
     /// fall back to the plain literal.
@@ -392,6 +473,8 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     hints: Hints::DEFAULT,
     sql: SqlSpec {
         identifier_quote: IdentifierQuote::Backtick,
+        // Unless `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know
+        // or to set.
         backslash_escapes: true,
         boolean_literal: BooleanLiteral::OneZero,
         skip_duplicates: SkipDuplicates::OnDuplicateKey,
@@ -439,6 +522,8 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     sql: SqlSpec {
         identifier_quote: IdentifierQuote::Backtick,
         backslash_escapes: true,
+        // Refused even into a `timestamp`, which MariaDB reads in the
+        // session's zone.
         literal_offsets: false,
         boolean_literal: BooleanLiteral::OneZero,
         skip_duplicates: SkipDuplicates::OnDuplicateKey,
@@ -601,7 +686,11 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         database: "Required",
         ..Hints::DEFAULT
     },
+    // The standard quote: Snowflake folds an unquoted name to upper case and
+    // reads a quoted one exactly, and the catalog reports names as stored --
+    // so quoting what the catalog said is always the name it meant.
     sql: SqlSpec {
+        // Unconditionally.
         backslash_escapes: true,
         foreign_table: ForeignTable::External,
         parser_dialect: ParserDialect::Snowflake,
@@ -642,6 +731,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     takes_options: false,
     resolves_srv: false,
     system_databases: &["master", "tempdb", "model", "msdb"],
+    // `image` is the legacy binary type here; elsewhere it is a name anyone
+    // may give a column or a domain, and a SQLite `image` column holds text.
     binary_types: &["image", "rowversion", "timestamp"],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
@@ -672,7 +763,9 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         switches_database: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        quote_value: Some(mssql::typed_literal),
+    },
 };
 
 pub(crate) const MONGODB: EngineSpec = EngineSpec {
