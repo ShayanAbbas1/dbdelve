@@ -29,7 +29,7 @@ use crate::{
     },
     ui::{
         Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
-        option_row, picker, raised_card, segment, switch, well,
+        option_row, picker, raised_card, segment, stacked_option_row, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -706,13 +706,13 @@ fn render_row(
             SharedString::from(description)
         }
     });
-    option_row(
-        highlighted(row.title, matched, t),
-        description,
-        render_control(workspace, row.id, t, cx),
-        t,
-    )
-    .into_any_element()
+    let title = highlighted(row.title, matched, t);
+    let control = render_control(workspace, row.id, t, cx);
+    if matches!(row.id, SettingId::Font(_)) {
+        stacked_option_row(title, description, control, t).into_any_element()
+    } else {
+        option_row(title, description, control, t).into_any_element()
+    }
 }
 
 fn render_control(

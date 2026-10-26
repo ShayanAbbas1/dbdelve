@@ -617,21 +617,45 @@ pub(crate) fn option_row(
         .px(px(layout::SPACE_LG))
         .py(px(layout::SPACE_MD))
         .child(
-            div()
+            option_text(title, description, t)
                 .flex_1()
-                .min_w(px(layout::SETTINGS_TEXT_MIN_WIDTH))
-                .flex()
-                .flex_col()
-                .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                .children(description.map(|description| {
-                    div()
-                        .mt(px(layout::SETTINGS_DESCRIPTION_GAP))
-                        .text_size(px(layout::chrome(layout::TEXT_SM)))
-                        .text_color(t.text_muted)
-                        .child(description)
-                })),
+                .min_w(px(layout::SETTINGS_TEXT_MIN_WIDTH)),
         )
         .child(div().min_w_0().flex().items_center().child(control))
+}
+
+/// An [`option_row`] whose control always sits under its title and
+/// description. For a control whose width follows what it shows -- a font
+/// row's picker carries the family's name -- so that sibling rows do not
+/// each decide differently whether it fits beside them.
+pub(crate) fn stacked_option_row(
+    title: impl IntoElement,
+    description: Option<SharedString>,
+    control: impl IntoElement,
+    t: Theme,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(layout::SPACE_SM))
+        .px(px(layout::SPACE_LG))
+        .py(px(layout::SPACE_MD))
+        .child(option_text(title, description, t))
+        .child(div().min_w_0().flex().items_center().child(control))
+}
+
+fn option_text(title: impl IntoElement, description: Option<SharedString>, t: Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(div().font_weight(FontWeight::MEDIUM).child(title))
+        .children(description.map(|description| {
+            div()
+                .mt(px(layout::SETTINGS_DESCRIPTION_GAP))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_muted)
+                .child(description)
+        }))
 }
 
 /// An on/off choice. Drawn here rather than taken from gpui-component, whose
