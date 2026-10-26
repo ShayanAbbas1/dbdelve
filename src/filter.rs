@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::{
     Workspace, db,
-    db::{Engine, Syntax},
+    db::{Engine, EngineSpec, RegexMatch, SubstringMatch, Syntax},
     explorer::preview_sql,
     sql,
     sql::SortKey,
@@ -180,11 +180,12 @@ impl Operator {
     }
 
     /// Whether this engine can express the operator at all. Only the regex
-    /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
-    /// a syntax error until an application registers the function (spec §7).
-    /// SQL Server has none before 2025. MongoDB has `$regex`.
+    /// match cannot, on a SQL engine with no spelling for it
+    /// ([`RegexMatch::None`]). MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::Turso | Engine::SqlServer)
+        self != Self::Regex
+            || engine.syntax() != Syntax::Sql
+            || engine.spec().sql.regex != RegexMatch::None
     }
 
     /// Whether the bar offers the operator on `column`, or on a bar with no
@@ -464,16 +465,22 @@ pub(crate) fn filter_predicate(
     value: &str,
 ) -> Option<String> {
     match engine.syntax() {
-        Syntax::Mongo => {
-            return crate::mql::browse::filter_predicate(column, data_type, operator, value);
-        }
-        Syntax::Redis => {
-            return crate::redis_cmd::browse::filter_predicate(column, operator, value);
-        }
-        Syntax::Sql => {}
+        Syntax::Mongo => crate::mql::browse::filter_predicate(column, data_type, operator, value),
+        Syntax::Redis => crate::redis_cmd::browse::filter_predicate(column, operator, value),
+        Syntax::Sql => sql_predicate(engine.spec(), column, data_type, operator, value),
     }
-    let name = engine.quote_identifier(column);
-    let literal = |value: &str| engine.quote_value(value, data_type);
+}
+
+/// [`filter_predicate`] for a SQL engine, written from its spec alone.
+pub(crate) fn sql_predicate(
+    spec: &EngineSpec,
+    column: &str,
+    data_type: Option<&str>,
+    operator: Operator,
+    value: &str,
+) -> Option<String> {
+    let name = spec.quote_identifier(column);
+    let literal = |value: &str| spec.quote_value(value, data_type);
     let comparison = |symbol: &str| Some(format!("{name} {symbol} {}", literal(value)));
     // `<>` rather than `!=` on both of the negations, because it is the
     // spelling all three engines agree on; the dropdown says `!=` because that
@@ -490,7 +497,7 @@ pub(crate) fn filter_predicate(
         Operator::IsEmpty => Some(format!("{name} = {}", literal(""))),
         Operator::IsNotEmpty => Some(format!("{name} <> {}", literal(""))),
         Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith => {
-            Some(substring(engine, &name, data_type, operator, value))
+            Some(substring(spec, &name, data_type, operator, value))
         }
         Operator::InList | Operator::NotInList => {
             let items: Vec<_> = value
@@ -527,27 +534,28 @@ pub(crate) fn filter_predicate(
         // in the grammar the gate parses with, so the function form it has had
         // since 8.0.4 goes out instead. SQLite has no regex at all, which
         // `Operator::on` is what refuses (spec §7).
-        Operator::Regex => match engine {
-            Engine::Postgres => comparison("~"),
-            Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
+        Operator::Regex => match spec.sql.regex {
+            RegexMatch::Tilde => comparison("~"),
+            RegexMatch::RegexpLike => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
             // MariaDB has no `REGEXP_LIKE`, and its infix `REGEXP` is not in
             // the grammar; `REGEXP_INSTR` is a plain function that matches
             // anywhere in the value.
-            Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
+            RegexMatch::RegexpInstr => {
+                Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value)))
+            }
             // Matches anywhere in the value, as `~` does; `regexp_full_match`
             // would anchor it to the whole of it.
-            Engine::DuckDb => Some(format!(
+            RegexMatch::RegexpMatches => Some(format!(
                 "regexp_matches(CAST({name} AS VARCHAR), {})",
                 literal(value)
             )),
-            // SQL Server has no regex before 2025's `REGEXP_LIKE`.
-            Engine::Sqlite | Engine::Turso | Engine::SqlServer => None,
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
-            Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
-            // Written by `mql::browse::filter_predicate`, above, or not at all.
-            Engine::MongoDb | Engine::Redis => None,
+            RegexMatch::RegexpCount => {
+                Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value)))
+            }
+            RegexMatch::None => None,
         },
     }
 }
@@ -570,18 +578,19 @@ pub(crate) fn filter_predicate(
 /// are case-sensitive where SQLite's `LIKE` is not, which is the cost of the
 /// trade and is smaller than answering a question nobody asked.
 pub(crate) fn substring(
-    engine: Engine,
+    spec: &EngineSpec,
     name: &str,
     data_type: Option<&str>,
     operator: Operator,
     value: &str,
 ) -> String {
-    let literal = engine.quote_literal(value);
-    if matches!(engine, Engine::Sqlite | Engine::Turso | Engine::DuckDb) {
-        // DuckDB, unlike SQLite, reads no other type as text on its own: a
-        // date or a number has no `instr`.
-        let name = match engine {
-            Engine::DuckDb => format!("CAST({name} AS VARCHAR)"),
+    let literal = spec.quote_literal(value);
+    if matches!(
+        spec.sql.substring,
+        SubstringMatch::Instr | SubstringMatch::InstrCast
+    ) {
+        let name = match spec.sql.substring {
+            SubstringMatch::InstrCast => format!("CAST({name} AS VARCHAR)"),
             _ => name.to_string(),
         };
         return match operator {
@@ -598,7 +607,7 @@ pub(crate) fn substring(
     }
     // No default escape here either, but there are exact functions for the
     // job, so there is no arithmetic to do. Case-sensitive, like SQLite's arm.
-    if engine == Engine::Snowflake {
+    if spec.sql.substring == SubstringMatch::Contains {
         let function = match operator {
             Operator::StartsWith => "STARTSWITH",
             Operator::EndsWith => "ENDSWITH",
@@ -613,8 +622,8 @@ pub(crate) fn substring(
     // T-SQL's `LIKE` has no default escape either, but a bracket makes any
     // character literal, so `[%]` is a percent sign -- and `[` itself has to be
     // bracketed, since it opens a character class there.
-    let escaped = match engine {
-        Engine::SqlServer => value
+    let escaped = match spec.sql.substring {
+        SubstringMatch::LikeBracketEscape => value
             .chars()
             .map(|character| match character {
                 '%' | '_' | '[' => format!("[{character}]"),
@@ -634,7 +643,7 @@ pub(crate) fn substring(
             Operator::NotContains => "NOT ",
             _ => "",
         },
-        engine.quote_value(&pattern, data_type)
+        spec.quote_value(&pattern, data_type)
     )
 }
 

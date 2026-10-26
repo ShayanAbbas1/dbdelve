@@ -383,6 +383,10 @@ pub enum FormatDialect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegexMatch {
+    /// The filter bar does not offer the operator. SQLite ships no `REGEXP`
+    /// implementation, so the operator is a syntax error until an application
+    /// registers the function (spec §7); SQL Server has none before 2025's
+    /// `REGEXP_LIKE`.
     None,
     Tilde,
     RegexpLike,
@@ -396,6 +400,8 @@ pub enum SubstringMatch {
     Like,
     LikeBracketEscape,
     Instr,
+    /// DuckDB, unlike SQLite, reads no other type as text on its own: a date
+    /// or a number has no `instr`.
     InstrCast,
     Contains,
 }

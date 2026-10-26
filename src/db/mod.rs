@@ -41,8 +41,8 @@ pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 use spec::{CountAll, Paging, ReadOnlySession};
 pub use spec::{
-    EngineSpec, ExplainPrefix, FormatDialect, Params, ParserDialect, SkipDuplicates,
-    StatementSplit, TypedExplain,
+    EngineSpec, ExplainPrefix, FormatDialect, Params, ParserDialect, RegexMatch, SkipDuplicates,
+    StatementSplit, SubstringMatch, TypedExplain,
 };
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
