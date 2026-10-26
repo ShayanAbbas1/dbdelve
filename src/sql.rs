@@ -31,7 +31,7 @@ use sqlparser::parser::Parser as SqlParser;
 use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::db::{ColumnDefinition, Engine, ExplainMode, Syntax};
+use crate::db::{ColumnDefinition, Engine, ExplainMode, StatementSplit, Syntax};
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
 
@@ -59,20 +59,14 @@ impl Buffer {
     /// A MongoDB buffer is mongosh statements, not SQL, and `mql` reads its
     /// boundaries: a newline ends a statement there unless a `.` continues it.
     pub fn for_engine(engine: Engine, sql: &str) -> Self {
-        let statements = match engine {
-            Engine::SqlServer => batches(sql)
+        let statements = match engine.syntax() {
+            Syntax::Sql if batches_on(engine) => batches(sql)
                 .into_iter()
                 .flat_map(|batch| tsql_statements(sql, batch))
                 .collect(),
-            Engine::MongoDb => crate::mql::statements(sql),
-            Engine::Redis => crate::redis_cmd::statements(sql),
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::Sqlite
-            | Engine::Turso
-            | Engine::DuckDb
-            | Engine::Snowflake => statements_in(sql),
+            Syntax::Sql => statements_in(sql),
+            Syntax::Mongo => crate::mql::statements(sql),
+            Syntax::Redis => crate::redis_cmd::statements(sql),
         };
 
         Self { statements }
@@ -155,17 +149,9 @@ pub(crate) fn queued_statements(
     sql: &str,
     selection: Option<Range<usize>>,
 ) -> Vec<Range<usize>> {
-    let units = match engine {
-        Engine::SqlServer => queued_batches(sql),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::MongoDb
-        | Engine::Redis => Buffer::for_engine(engine, sql).statements().to_vec(),
+    let units = match batches_on(engine) {
+        true => queued_batches(sql),
+        false => Buffer::for_engine(engine, sql).statements().to_vec(),
     };
     let Some(selection) = selection.filter(|sel| !sel.is_empty()) else {
         return units;
@@ -185,17 +171,9 @@ pub(crate) fn queued_statements(
 /// procedure call, a loop or a trigger can return more sets than the batch has
 /// statements, and there is no reading that off the text.
 pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
-    match engine {
-        Engine::SqlServer => tsql_statements(sql, 0..sql.len()).len().max(1),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::DuckDb
-        | Engine::Snowflake
-        | Engine::MongoDb
-        | Engine::Redis => 1,
+    match batches_on(engine) {
+        true => tsql_statements(sql, 0..sql.len()).len().max(1),
+        false => 1,
     }
 }
 
@@ -230,8 +208,7 @@ pub(crate) fn split_reads(
                 word.starts_with('#') || word.starts_with('@') && !word.starts_with("@@")
             })
     };
-    if engine != Engine::SqlServer || !batches.iter().all(|batch| reads_alone(&sql[batch.clone()]))
-    {
+    if !batches_on(engine) || !batches.iter().all(|batch| reads_alone(&sql[batch.clone()])) {
         return Vec::new();
     }
     batches
@@ -1635,6 +1612,11 @@ fn go_lines(sql: &str) -> Vec<(Range<usize>, Option<u64>)> {
         .collect()
 }
 
+/// Whether `engine` reads a buffer as `GO`-separated batches.
+fn batches_on(engine: Engine) -> bool {
+    engine.syntax() == Syntax::Sql && engine.spec().sql.statement_split == StatementSplit::Batches
+}
+
 /// The text between `GO` lines.
 fn batches(sql: &str) -> Vec<Range<usize>> {
     let mut batches = Vec::new();
@@ -1723,7 +1705,7 @@ fn tsql_statements(sql: &str, batch: Range<usize>) -> Vec<Range<usize>> {
 /// `GO` lines around it. More than one batch, or a batch asked to run more than
 /// once, is refused rather than sent as text the server cannot read.
 pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(sql);
     }
     batch_counts(engine, sql)?;
@@ -1744,7 +1726,7 @@ pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
 /// batch, and running it once is not what the buffer says; a selection run a
 /// batch at a time has to refuse it for the reason a single one does.
 pub(crate) fn batch_counts(engine: Engine, sql: &str) -> Result<(), String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(());
     }
     for (_, count) in go_lines(sql) {
@@ -1756,7 +1738,7 @@ pub(crate) fn batch_counts(engine: Engine, sql: &str) -> Result<(), String> {
 /// Refused when the `GO` that ends the batch holding `offset` carries a count:
 /// running the statement under the cursor once would quietly drop it.
 pub(crate) fn batch_repeats(engine: Engine, sql: &str, offset: usize) -> Result<(), String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(());
     }
     match go_lines(sql)
@@ -3126,9 +3108,9 @@ pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> 
     let Some(tokens) = located_tokens(reader.as_ref(), sql) else {
         return Err(UNENDED);
     };
-    let statements = match engine {
-        Engine::SqlServer => Buffer::for_engine(engine, sql).statements().to_vec(),
-        _ => between_semicolons(&tokens),
+    let statements = match batches_on(engine) {
+        true => Buffer::for_engine(engine, sql).statements().to_vec(),
+        false => between_semicolons(&tokens),
     };
     let options = sqlformat::FormatOptions {
         dialect: layout,
