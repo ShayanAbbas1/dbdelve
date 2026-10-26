@@ -1,0 +1,322 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] no order by => |[] (0 keys)|
+[postgres] simple => |[a asc=true] (1 keys)|
+[postgres] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[postgres] lower-case desc => |[a asc=false] (1 keys)|
+[postgres] asc spelled out => |[a asc=true] (1 keys)|
+[postgres] ordinal => |[1 asc=true] (1 keys)|
+[postgres] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[postgres] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[postgres] double-quoted, escaped quote => (none)
+[postgres] backticked, escaped tick => (none)
+[postgres] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[postgres] bracketed => (none)
+[postgres] subquery only => |[] (0 keys)|
+[postgres] subquery and outer => |[b asc=false] (1 keys)|
+[postgres] then limit => |[a asc=false] (1 keys)|
+[postgres] then limit offset => |[a asc=true] (1 keys)|
+[postgres] then offset fetch => (none)
+[postgres] where, group by, order by => |[a asc=false] (1 keys)|
+[postgres] union ordered => |[a asc=false] (1 keys)|
+[postgres] cte => |[a asc=true] (1 keys)|
+[postgres] trailing comment => |[a asc=true] (1 keys)|
+[postgres] semicolon => |[a asc=true] (1 keys)|
+[postgres] two statements => (none)
+[postgres] nulls first => (none)
+[postgres] explain => (none)
+[postgres] no from => (none)
+[postgres] unparseable => (none)
+[postgres] update => (none)
+[postgres] unpaged preview => |[] (0 keys)|
+[postgres] paged preview => |[] (0 keys)|
+[mysql] no order by => |[] (0 keys)|
+[mysql] simple => |[a asc=true] (1 keys)|
+[mysql] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[mysql] lower-case desc => |[a asc=false] (1 keys)|
+[mysql] asc spelled out => |[a asc=true] (1 keys)|
+[mysql] ordinal => |[1 asc=true] (1 keys)|
+[mysql] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[mysql] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[mysql] double-quoted, escaped quote => (none)
+[mysql] backticked, escaped tick => (none)
+[mysql] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[mysql] bracketed => (none)
+[mysql] subquery only => |[] (0 keys)|
+[mysql] subquery and outer => |[b asc=false] (1 keys)|
+[mysql] then limit => |[a asc=false] (1 keys)|
+[mysql] then limit offset => |[a asc=true] (1 keys)|
+[mysql] then offset fetch => (none)
+[mysql] where, group by, order by => |[a asc=false] (1 keys)|
+[mysql] union ordered => |[a asc=false] (1 keys)|
+[mysql] cte => |[a asc=true] (1 keys)|
+[mysql] trailing comment => |[a asc=true] (1 keys)|
+[mysql] semicolon => |[a asc=true] (1 keys)|
+[mysql] two statements => (none)
+[mysql] nulls first => (none)
+[mysql] explain => (none)
+[mysql] no from => (none)
+[mysql] unparseable => (none)
+[mysql] update => (none)
+[mysql] unpaged preview => |[] (0 keys)|
+[mysql] paged preview => |[] (0 keys)|
+[mariadb] no order by => |[] (0 keys)|
+[mariadb] simple => |[a asc=true] (1 keys)|
+[mariadb] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[mariadb] lower-case desc => |[a asc=false] (1 keys)|
+[mariadb] asc spelled out => |[a asc=true] (1 keys)|
+[mariadb] ordinal => |[1 asc=true] (1 keys)|
+[mariadb] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[mariadb] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[mariadb] double-quoted, escaped quote => (none)
+[mariadb] backticked, escaped tick => (none)
+[mariadb] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[mariadb] bracketed => (none)
+[mariadb] subquery only => |[] (0 keys)|
+[mariadb] subquery and outer => |[b asc=false] (1 keys)|
+[mariadb] then limit => |[a asc=false] (1 keys)|
+[mariadb] then limit offset => |[a asc=true] (1 keys)|
+[mariadb] then offset fetch => (none)
+[mariadb] where, group by, order by => |[a asc=false] (1 keys)|
+[mariadb] union ordered => |[a asc=false] (1 keys)|
+[mariadb] cte => |[a asc=true] (1 keys)|
+[mariadb] trailing comment => |[a asc=true] (1 keys)|
+[mariadb] semicolon => |[a asc=true] (1 keys)|
+[mariadb] two statements => (none)
+[mariadb] nulls first => (none)
+[mariadb] explain => (none)
+[mariadb] no from => (none)
+[mariadb] unparseable => (none)
+[mariadb] update => (none)
+[mariadb] unpaged preview => |[] (0 keys)|
+[mariadb] paged preview => |[] (0 keys)|
+[sqlite] no order by => |[] (0 keys)|
+[sqlite] simple => |[a asc=true] (1 keys)|
+[sqlite] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[sqlite] lower-case desc => |[a asc=false] (1 keys)|
+[sqlite] asc spelled out => |[a asc=true] (1 keys)|
+[sqlite] ordinal => |[1 asc=true] (1 keys)|
+[sqlite] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[sqlite] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[sqlite] double-quoted, escaped quote => (none)
+[sqlite] backticked, escaped tick => (none)
+[sqlite] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[sqlite] bracketed => (none)
+[sqlite] subquery only => |[] (0 keys)|
+[sqlite] subquery and outer => |[b asc=false] (1 keys)|
+[sqlite] then limit => |[a asc=false] (1 keys)|
+[sqlite] then limit offset => |[a asc=true] (1 keys)|
+[sqlite] then offset fetch => (none)
+[sqlite] where, group by, order by => |[a asc=false] (1 keys)|
+[sqlite] union ordered => |[a asc=false] (1 keys)|
+[sqlite] cte => |[a asc=true] (1 keys)|
+[sqlite] trailing comment => |[a asc=true] (1 keys)|
+[sqlite] semicolon => |[a asc=true] (1 keys)|
+[sqlite] two statements => (none)
+[sqlite] nulls first => (none)
+[sqlite] explain => (none)
+[sqlite] no from => (none)
+[sqlite] unparseable => (none)
+[sqlite] update => (none)
+[sqlite] unpaged preview => |[] (0 keys)|
+[sqlite] paged preview => |[] (0 keys)|
+[turso] no order by => |[] (0 keys)|
+[turso] simple => |[a asc=true] (1 keys)|
+[turso] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[turso] lower-case desc => |[a asc=false] (1 keys)|
+[turso] asc spelled out => |[a asc=true] (1 keys)|
+[turso] ordinal => |[1 asc=true] (1 keys)|
+[turso] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[turso] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[turso] double-quoted, escaped quote => (none)
+[turso] backticked, escaped tick => (none)
+[turso] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[turso] bracketed => (none)
+[turso] subquery only => |[] (0 keys)|
+[turso] subquery and outer => |[b asc=false] (1 keys)|
+[turso] then limit => |[a asc=false] (1 keys)|
+[turso] then limit offset => |[a asc=true] (1 keys)|
+[turso] then offset fetch => (none)
+[turso] where, group by, order by => |[a asc=false] (1 keys)|
+[turso] union ordered => |[a asc=false] (1 keys)|
+[turso] cte => |[a asc=true] (1 keys)|
+[turso] trailing comment => |[a asc=true] (1 keys)|
+[turso] semicolon => |[a asc=true] (1 keys)|
+[turso] two statements => (none)
+[turso] nulls first => (none)
+[turso] explain => (none)
+[turso] no from => (none)
+[turso] unparseable => (none)
+[turso] update => (none)
+[turso] unpaged preview => |[] (0 keys)|
+[turso] paged preview => |[] (0 keys)|
+[duckdb] no order by => |[] (0 keys)|
+[duckdb] simple => |[a asc=true] (1 keys)|
+[duckdb] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[duckdb] lower-case desc => |[a asc=false] (1 keys)|
+[duckdb] asc spelled out => |[a asc=true] (1 keys)|
+[duckdb] ordinal => |[1 asc=true] (1 keys)|
+[duckdb] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[duckdb] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[duckdb] double-quoted, escaped quote => (none)
+[duckdb] backticked, escaped tick => (none)
+[duckdb] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[duckdb] bracketed => (none)
+[duckdb] subquery only => |[] (0 keys)|
+[duckdb] subquery and outer => |[b asc=false] (1 keys)|
+[duckdb] then limit => |[a asc=false] (1 keys)|
+[duckdb] then limit offset => |[a asc=true] (1 keys)|
+[duckdb] then offset fetch => (none)
+[duckdb] where, group by, order by => |[a asc=false] (1 keys)|
+[duckdb] union ordered => |[a asc=false] (1 keys)|
+[duckdb] cte => |[a asc=true] (1 keys)|
+[duckdb] trailing comment => |[a asc=true] (1 keys)|
+[duckdb] semicolon => |[a asc=true] (1 keys)|
+[duckdb] two statements => (none)
+[duckdb] nulls first => (none)
+[duckdb] explain => (none)
+[duckdb] no from => (none)
+[duckdb] unparseable => (none)
+[duckdb] update => (none)
+[duckdb] unpaged preview => |[] (0 keys)|
+[duckdb] paged preview => |[] (0 keys)|
+[snowflake] no order by => |[] (0 keys)|
+[snowflake] simple => |[a asc=true] (1 keys)|
+[snowflake] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[snowflake] lower-case desc => |[a asc=false] (1 keys)|
+[snowflake] asc spelled out => |[a asc=true] (1 keys)|
+[snowflake] ordinal => |[1 asc=true] (1 keys)|
+[snowflake] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[snowflake] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[snowflake] double-quoted, escaped quote => (none)
+[snowflake] backticked, escaped tick => (none)
+[snowflake] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[snowflake] bracketed => (none)
+[snowflake] subquery only => |[] (0 keys)|
+[snowflake] subquery and outer => |[b asc=false] (1 keys)|
+[snowflake] then limit => |[a asc=false] (1 keys)|
+[snowflake] then limit offset => |[a asc=true] (1 keys)|
+[snowflake] then offset fetch => (none)
+[snowflake] where, group by, order by => |[a asc=false] (1 keys)|
+[snowflake] union ordered => |[a asc=false] (1 keys)|
+[snowflake] cte => |[a asc=true] (1 keys)|
+[snowflake] trailing comment => |[a asc=true] (1 keys)|
+[snowflake] semicolon => |[a asc=true] (1 keys)|
+[snowflake] two statements => (none)
+[snowflake] nulls first => (none)
+[snowflake] explain => (none)
+[snowflake] no from => (none)
+[snowflake] unparseable => (none)
+[snowflake] update => (none)
+[snowflake] unpaged preview => |[] (0 keys)|
+[snowflake] paged preview => |[] (0 keys)|
+[mssql] no order by => |[] (0 keys)|
+[mssql] simple => |[a asc=true] (1 keys)|
+[mssql] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[mssql] lower-case desc => |[a asc=false] (1 keys)|
+[mssql] asc spelled out => |[a asc=true] (1 keys)|
+[mssql] ordinal => |[1 asc=true] (1 keys)|
+[mssql] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[mssql] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[mssql] double-quoted, escaped quote => (none)
+[mssql] backticked, escaped tick => (none)
+[mssql] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[mssql] bracketed => (none)
+[mssql] subquery only => |[] (0 keys)|
+[mssql] subquery and outer => |[b asc=false] (1 keys)|
+[mssql] then limit => |[a asc=false] (1 keys)|
+[mssql] then limit offset => |[a asc=true] (1 keys)|
+[mssql] then offset fetch => (none)
+[mssql] where, group by, order by => |[a asc=false] (1 keys)|
+[mssql] union ordered => |[a asc=false] (1 keys)|
+[mssql] cte => |[a asc=true] (1 keys)|
+[mssql] trailing comment => |[a asc=true] (1 keys)|
+[mssql] semicolon => |[a asc=true] (1 keys)|
+[mssql] two statements => (none)
+[mssql] nulls first => (none)
+[mssql] explain => (none)
+[mssql] no from => (none)
+[mssql] unparseable => (none)
+[mssql] update => (none)
+[mssql] unpaged preview => |[] (0 keys)|
+[mssql] paged preview => |[] (0 keys)|
+[mongodb] no order by => (none)
+[mongodb] simple => (none)
+[mongodb] desc then bare => (none)
+[mongodb] lower-case desc => (none)
+[mongodb] asc spelled out => (none)
+[mongodb] ordinal => (none)
+[mongodb] expression => (none)
+[mongodb] double-quoted => (none)
+[mongodb] double-quoted, escaped quote => (none)
+[mongodb] backticked, escaped tick => (none)
+[mongodb] backticked => (none)
+[mongodb] bracketed => (none)
+[mongodb] subquery only => (none)
+[mongodb] subquery and outer => (none)
+[mongodb] then limit => (none)
+[mongodb] then limit offset => (none)
+[mongodb] then offset fetch => (none)
+[mongodb] where, group by, order by => (none)
+[mongodb] union ordered => (none)
+[mongodb] cte => (none)
+[mongodb] trailing comment => (none)
+[mongodb] semicolon => (none)
+[mongodb] two statements => (none)
+[mongodb] nulls first => (none)
+[mongodb] explain => (none)
+[mongodb] no from => (none)
+[mongodb] unparseable => (none)
+[mongodb] update => (none)
+[mongodb] unpaged preview => |[] (0 keys)|
+[mongodb] paged preview => |[] (0 keys)|
+[mongodb] find => |[] (0 keys)|
+[mongodb] find skip => |[] (0 keys)|
+[mongodb] find filtered => |[] (0 keys)|
+[mongodb] find sorted => |["id" asc=false] (1 keys)|
+[mongodb] find sorted, paged => |["id" asc=true] (1 keys)|
+[mongodb] find sorted on own line => |["id" asc=false] (1 keys)|
+[mongodb] find sorted, two keys => |["id" asc=true ; "Name" asc=false] (2 keys)|
+[mongodb] aggregate empty => |[] (0 keys)|
+[mongodb] aggregate no sort => |[] (0 keys)|
+[mongodb] aggregate paging only => |[] (0 keys)|
+[mongodb] aggregate sort only => |["id" asc=true] (1 keys)|
+[mongodb] aggregate sort last => |["id" asc=true] (1 keys)|
+[mongodb] aggregate sort then paging => |["id" asc=true] (1 keys)|
+[mongodb] aggregate sort mid-pipeline => |[] (0 keys)|
+[mongodb] aggregate other stages => |[] (0 keys)|
+[mongodb] not a query => (none)
+[mongodb] find sorted, two keys reversed => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[redis] no order by => (none)
+[redis] simple => (none)
+[redis] desc then bare => (none)
+[redis] lower-case desc => (none)
+[redis] asc spelled out => (none)
+[redis] ordinal => (none)
+[redis] expression => (none)
+[redis] double-quoted => (none)
+[redis] double-quoted, escaped quote => (none)
+[redis] backticked, escaped tick => (none)
+[redis] backticked => (none)
+[redis] bracketed => (none)
+[redis] subquery only => (none)
+[redis] subquery and outer => (none)
+[redis] then limit => (none)
+[redis] then limit offset => (none)
+[redis] then offset fetch => (none)
+[redis] where, group by, order by => (none)
+[redis] union ordered => (none)
+[redis] cte => (none)
+[redis] trailing comment => (none)
+[redis] semicolon => (none)
+[redis] two statements => (none)
+[redis] nulls first => (none)
+[redis] explain => (none)
+[redis] no from => (none)
+[redis] unparseable => (none)
+[redis] update => (none)
+[redis] unpaged preview => (none)
+[redis] paged preview => (none)
+[redis] redis scan => (none)
+[redis] redis sort => (none)
