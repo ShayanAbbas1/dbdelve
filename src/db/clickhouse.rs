@@ -3,6 +3,8 @@
 //! that it is not.
 
 mod http;
+#[cfg(test)]
+mod mock;
 mod tsv;
 
 use super::{
