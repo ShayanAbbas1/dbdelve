@@ -69,7 +69,7 @@ source: src/sql_snapshots.rs
 [clickhouse] count_all => |COUNT(*)|
 [clickhouse] transaction_start => (none)
 [clickhouse] all_or_nothing => error: |ClickHouse has no transaction, so each chunk is kept as it lands.|
-[clickhouse] explain_prefix Plan => (none)
+[clickhouse] explain_prefix Plan => |EXPLAIN |
 [clickhouse] explain_suffix Plan => ||
 [clickhouse] explain_prefix Analyze => (none)
 [clickhouse] explain_suffix Analyze => ||

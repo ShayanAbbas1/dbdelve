@@ -1193,8 +1193,10 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         substring: SubstringMatch::LikeToString,
         row_terms: true,
         transactions: false,
-        // No Explain yet, and no `skip_duplicates`: there is no clause that
-        // skips a row on a key, because there is no unique key.
+        // `EXPLAIN` alone is `EXPLAIN PLAN`, which never executes its statement;
+        // there is no analyzing form, and no `skip_duplicates`: there is no
+        // clause that skips a row on a key, because there is no unique key.
+        explain_plan: Some(ExplainPrefix::Explain),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {

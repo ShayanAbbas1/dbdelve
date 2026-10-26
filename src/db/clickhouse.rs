@@ -3285,7 +3285,7 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
-    use crate::db::{Column, ConnectionConfig, Engine, is_cancel};
+    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, is_cancel};
     use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
     use crate::export::{RowsAs, render_rows_as};
     use crate::filter::{Operator, filter_predicate};
@@ -3444,6 +3444,23 @@ mod live {
             }
         }
         assert_eq!(seen.len(), 5000);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_explain_plans_a_copy_without_running_it() {
+        let connection = live();
+        let statement = "SELECT * FROM system.numbers LIMIT 3";
+        let explained = Engine::ClickHouse
+            .explain(ExplainMode::Plan, statement)
+            .unwrap();
+        assert_eq!(explained, format!("EXPLAIN {statement}"));
+        assert_eq!(
+            classify(Engine::ClickHouse, &explained).mode,
+            Mode::ReadOnly
+        );
+        let plan = text(&ran(&connection, &explained));
+        assert!(plan.contains("ReadFromSystemNumbers"), "{plan}");
     }
 
     #[test]

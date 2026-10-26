@@ -3909,6 +3909,22 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_plans_a_copy_and_has_nothing_to_analyze() {
+        assert_eq!(
+            Engine::ClickHouse.explain(ExplainMode::Plan, "SELECT 1"),
+            Some("EXPLAIN SELECT 1".to_string())
+        );
+        assert_eq!(
+            Engine::ClickHouse.explain_prefix(ExplainMode::Analyze),
+            None
+        );
+        assert_eq!(
+            Engine::ClickHouse.explain(ExplainMode::Analyze, "SELECT 1"),
+            None
+        );
+    }
+
+    #[test]
     fn mongodb_explains_by_suffix_and_the_sql_engines_by_prefix() {
         for mode in ExplainMode::ALL {
             assert_eq!(Engine::MongoDb.explain_prefix(mode), Some(""));
