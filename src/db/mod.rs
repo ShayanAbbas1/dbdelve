@@ -525,10 +525,10 @@ impl Engine {
     }
 
     /// Whether a preview page is ordered by the relation's key when nothing
-    /// else sorts it, which `OFFSET … FETCH` paging needs (`sql::paged`
-    /// writes it).
+    /// else sorts it, which `OFFSET … FETCH` paging needs and an unsorted
+    /// ClickHouse page needs to be stable (`sql::paged` writes it).
     pub fn pages_by_key(self) -> bool {
-        self.spec().sql.paging == Paging::OffsetFetch
+        self.spec().sql.paging != Paging::LimitOffset
     }
 
     /// Whether the row count the catalog carries for a table is exact rather

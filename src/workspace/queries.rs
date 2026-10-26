@@ -1856,7 +1856,13 @@ impl Workspace {
         // grammar cannot read; its sort is read from the spelling it was
         // generated in. A buffer's statement is read as typed.
         let keys = match tab {
-            Tab::Object(_) => sql::order_by(engine, &sql::unpaged(&sql)),
+            Tab::Object(object) => {
+                let before_paging = (engine.spec().sql.paging
+                    == crate::db::Paging::LimitOffsetByKey)
+                    .then(|| self.statement_before_paging(object, &sql))
+                    .flatten();
+                sql::order_by(engine, &before_paging.unwrap_or_else(|| sql::unpaged(&sql)))
+            }
             Tab::Query(_) => sql::order_by(engine, &sql),
         };
         let sortable = keys.is_some();

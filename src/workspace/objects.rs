@@ -149,6 +149,7 @@ impl Workspace {
                     row_panel_filter: Default::default(),
                     row_panel_split: cx.new(|_| ResizableState::default()),
                     count: RowCount::Unasked,
+                    sent_from: None,
                 }
             }
         };
@@ -247,6 +248,7 @@ impl Workspace {
             stale,
             structure,
             count,
+            sent_from,
             ..
         } = &mut tab.body
         else {
@@ -281,6 +283,7 @@ impl Workspace {
         let paged = sql::is_generated_select(engine, &sql)
             .then(|| sql::paged(engine, &sql, &key))
             .flatten();
+        *sent_from = paged.clone().map(|paged| (paged, sql.clone()));
         let Some(sql) = paged else {
             // Spent all the same. Left standing, it would have `load_relation`
             // load the structure and try again on every visit to the tab, for
@@ -306,6 +309,24 @@ impl Workspace {
             *query = QueryState::Idle;
         }
         self.execute_and_then(sql, Tab::Object(id), None, keep_rows, None, cx);
+    }
+
+    /// The statement a preview was paged from, when `sent` is the one it last
+    /// sent: anything else, such as the edit a refresh runs, was not paged.
+    pub(crate) fn statement_before_paging(&self, object: u64, sent: &str) -> Option<String> {
+        let tab = self
+            .profile()?
+            .session
+            .objects
+            .iter()
+            .find(|tab| tab.id == object)?;
+        match &tab.body {
+            ObjectBody::Relation {
+                sent_from: Some((paged, before)),
+                ..
+            } if paged == sent => Some(before.clone()),
+            _ => None,
+        }
     }
 
     /// Count the rows under a relation tab's filter, because the user asked.

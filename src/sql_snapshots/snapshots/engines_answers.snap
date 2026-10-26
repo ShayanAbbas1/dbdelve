@@ -1103,7 +1103,7 @@ source: src/sql_snapshots.rs
 [clickhouse] opened_column => |None|
 [clickhouse] sorts_on_server => |true|
 [clickhouse] pages => |true|
-[clickhouse] pages_by_key => |false|
+[clickhouse] pages_by_key => |true|
 [clickhouse] exact_row_estimates => |false|
 [clickhouse] copies_ddl => |true|
 [clickhouse] switches_database => |true|

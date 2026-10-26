@@ -373,6 +373,24 @@ pub(crate) fn sql_paged(spec: &EngineSpec, statement: &str, key: &[String]) -> O
     let Some(limit) = child_of_kind(&anchor, "limit") else {
         return Some(statement.to_string());
     };
+    if spec.sql.paging == Paging::LimitOffsetByKey {
+        // Without a key (none declared, or an expression such as `toDate(ts)`)
+        // the page stays unordered: there is nothing honest to order it by.
+        if child_of_kind(&anchor, "order_by").is_some() || key.is_empty() {
+            return Some(statement.to_string());
+        }
+        let order = key
+            .iter()
+            .map(|column| spec.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(splice(
+            statement,
+            &tree,
+            limit.byte_range(),
+            &format!("ORDER BY {order} {}", &statement[limit.byte_range()]),
+        ));
+    }
     let number = |node: tree_sitter::Node| -> Option<usize> {
         statement
             .get(child_of_kind(&node, "literal")?.byte_range())?
@@ -5821,6 +5839,56 @@ mod tests {
         // Not `paged`'s shape: left alone.
         let typed = "SELECT * FROM t ORDER BY id OFFSET 5 ROWS";
         assert_eq!(unpaged(typed), typed);
+    }
+
+    #[test]
+    fn an_unsorted_clickhouse_page_is_ordered_by_the_key() {
+        let unsorted = "SELECT * FROM `db`.`events` WHERE `a` = 1 LIMIT 100 OFFSET 200";
+        let key = ["user_id".to_string(), "ts".to_string()];
+        let page = paged(Engine::ClickHouse, unsorted, &key).unwrap();
+        assert_eq!(
+            page,
+            "SELECT * FROM `db`.`events` WHERE `a` = 1 ORDER BY `user_id`, `ts` LIMIT 100 OFFSET 200"
+        );
+        assert!(is_generated_select(Engine::ClickHouse, &page), "{page}");
+
+        // The key's order is not a sort the user chose: read from the
+        // statement before paging, an unsorted preview has no sort keys.
+        assert_eq!(order_by(Engine::ClickHouse, unsorted), Some(Vec::new()));
+        assert_eq!(
+            order_by(Engine::ClickHouse, &page).map(|k| k.len()),
+            Some(2)
+        );
+
+        // A sort the user asked for is the order, key or no key, and is what
+        // the statement before paging reads back.
+        let sorted =
+            with_order_by(Engine::ClickHouse, unsorted, &[SortKey::new("`id`", true)]).unwrap();
+        assert_eq!(
+            paged(Engine::ClickHouse, &sorted, &key).as_deref(),
+            Some(sorted.as_str())
+        );
+        assert_eq!(
+            order_by(Engine::ClickHouse, &sorted),
+            Some(vec![SortKey::new("`id`", true)])
+        );
+
+        // No key, or a key made of an expression such as `toDate(ts)`, which
+        // gives none: the page stays as generated.
+        assert_eq!(
+            paged(Engine::ClickHouse, unsorted, &[]).as_deref(),
+            Some(unsorted)
+        );
+        // No limit is one page.
+        let whole = "SELECT * FROM `db`.`events`";
+        assert_eq!(
+            paged(Engine::ClickHouse, whole, &key).as_deref(),
+            Some(whole)
+        );
+        assert_eq!(
+            paged(Engine::ClickHouse, "DELETE FROM t LIMIT 1", &key),
+            None
+        );
     }
 
     #[test]

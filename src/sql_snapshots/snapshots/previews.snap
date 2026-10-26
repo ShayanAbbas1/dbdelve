@@ -8907,36 +8907,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · one key · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · one key · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · composite key · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · composite key · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · awkward keys · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · awkward keys · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · empty name · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · empty name · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3
   |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
@@ -8951,36 +8951,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · one key · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · one key · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · composite key · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · composite key · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `public`.`accounts` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · awkward keys · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · awkward keys · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · empty name · paged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · empty name · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered
   |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -8995,388 +8995,308 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · one key · paged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · one key · unpaged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · composite key · paged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · composite key · unpaged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · awkward keys · paged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · awkward keys · unpaged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · empty name · paged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · empty name · unpaged
-  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · all
   |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · all · no key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · no key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · one key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · one key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · composite key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · composite key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · awkward keys · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · awkward keys · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · empty name · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · all · empty name · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page
   |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · page · no key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · no key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · one key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · one key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · composite key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · composite key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · awkward keys · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · awkward keys · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · empty name · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page · empty name · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3
   |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · page 3 · no key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · no key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · one key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · one key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · composite key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · composite key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · awkward keys · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · awkward keys · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · empty name · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · page 3 · empty name · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered
   |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · filtered · no key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · no key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · one key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · one key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · composite key · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · composite key · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · awkward keys · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · awkward keys · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · empty name · paged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] quotes · filtered · empty name · unpaged
-  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all
   |SELECT * FROM `données`.`Ünïcødé 表`|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · no key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · no key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · one key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · one key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · composite key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · composite key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · awkward keys · paged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · awkward keys · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · empty name · paged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · all · empty name · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · no key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · no key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · one key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · one key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · composite key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · composite key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · awkward keys · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · awkward keys · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · empty name · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page · empty name · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · no key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · no key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · one key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · one key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · composite key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · composite key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · awkward keys · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · awkward keys · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · empty name · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · page 3 · empty name · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · no key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · no key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · one key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · one key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · composite key · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · composite key · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · awkward keys · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · awkward keys · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · empty name · paged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] unicode · filtered · empty name · unpaged
-  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] reserved · all
   |SELECT * FROM `select`.`order`|
@@ -9435,36 +9355,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · one key · paged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
+  |SELECT * FROM `select`.`order` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · one key · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
+  |SELECT * FROM `select`.`order` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · composite key · paged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
+  |SELECT * FROM `select`.`order` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · composite key · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
+  |SELECT * FROM `select`.`order` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · awkward keys · paged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · awkward keys · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · empty name · paged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · empty name · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3
   |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
@@ -9479,36 +9399,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · one key · paged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `select`.`order` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · one key · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `select`.`order` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · composite key · paged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `select`.`order` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · composite key · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `select`.`order` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · awkward keys · paged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · awkward keys · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · empty name · paged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · empty name · unpaged
-  |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered
   |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -9523,36 +9443,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · one key · paged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · one key · unpaged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · composite key · paged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · composite key · unpaged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · awkward keys · paged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · awkward keys · unpaged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · empty name · paged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · empty name · unpaged
-  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · all
   |SELECT * FROM `Sales`.`OrderLines`|
@@ -9611,36 +9531,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · one key · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · one key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · composite key · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · composite key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · awkward keys · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · awkward keys · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · empty name · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · empty name · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3
   |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
@@ -9655,36 +9575,36 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · one key · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · one key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · composite key · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · composite key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · awkward keys · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · awkward keys · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · empty name · paged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · empty name · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered
   |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -9699,388 +9619,308 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · one key · paged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · one key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · composite key · paged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · composite key · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · awkward keys · paged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · awkward keys · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · empty name · paged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · empty name · unpaged
-  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all
   |SELECT * FROM `[dbo]`.`a.b`|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · no key · paged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · no key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · one key · paged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · one key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · composite key · paged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · composite key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · awkward keys · paged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · awkward keys · unpaged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · empty name · paged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · all · empty name · unpaged
-  |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · no key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · no key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · one key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · one key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · composite key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · composite key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · awkward keys · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · awkward keys · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · empty name · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page · empty name · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · no key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · no key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · one key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · one key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · composite key · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · composite key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · awkward keys · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · awkward keys · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · empty name · paged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · page 3 · empty name · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · no key · paged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · no key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · one key · paged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · one key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · composite key · paged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · composite key · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · awkward keys · paged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · awkward keys · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · empty name · paged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] brackets and dots · filtered · empty name · unpaged
-  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all
   |SELECT * FROM `back\\\\slash`.`trail\\\\`|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · no key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · no key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · one key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · one key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · composite key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · composite key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · awkward keys · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · awkward keys · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · empty name · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · all · empty name · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page
   |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · no key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · no key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · one key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · one key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · composite key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · composite key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · awkward keys · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · awkward keys · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · empty name · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page · empty name · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3
   |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · no key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · no key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · one key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · one key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · composite key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · composite key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · awkward keys · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · awkward keys · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · empty name · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · page 3 · empty name · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered
   |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · no key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · no key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · one key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · one key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · composite key · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · composite key · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · awkward keys · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · awkward keys · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · empty name · paged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] backslash · filtered · empty name · unpaged
-  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] no limit · paged
   |SELECT * FROM `public`.`accounts`|
@@ -10099,20 +9939,16 @@ source: src/sql_snapshots.rs
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] limit and offset, no table · paged
-  |SELECT 1 LIMIT 5 OFFSET 2|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] limit and offset, no table · unpaged
-  |SELECT 1 LIMIT 5 OFFSET 2|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] non-numeric limit · paged
-  |SELECT * FROM `public`.`accounts` LIMIT x|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [clickhouse] non-numeric limit · unpaged
-  |SELECT * FROM `public`.`accounts` LIMIT x|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  (none)
 
 [mssql] plain · all
   |SELECT * FROM "public"."accounts"|

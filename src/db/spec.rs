@@ -338,6 +338,10 @@ pub enum Paging {
     /// repeat or skip rows from one page to the next, so a preview's first
     /// page waits for the structure that names the key.
     OffsetFetch,
+    /// `LIMIT … OFFSET …` as the default, but a page of an unsorted preview is
+    /// not stable without an `ORDER BY` (parallel reads, background merges), so
+    /// the relation's key orders it and the first page waits for the structure.
+    LimitOffsetByKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1105,6 +1109,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         // Quoted identifiers read backslash escapes as strings do.
         identifier_backslash_escapes: true,
         literal_offsets: false,
+        paging: Paging::LimitOffsetByKey,
         generated_defaults: &[
             DefaultMarker::Prefix("MATERIALIZED "),
             DefaultMarker::Prefix("ALIAS "),

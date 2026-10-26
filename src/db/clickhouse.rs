@@ -2534,6 +2534,36 @@ mod live {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_pages_of_an_unsorted_preview_share_no_row() {
+        let connection = live();
+        let key = connection
+            .structure("dbdelve_dev", "events")
+            .unwrap()
+            .row_key();
+        assert!(!key.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for page in 0..5 {
+            let preview = format!(
+                "SELECT * FROM `dbdelve_dev`.`events` LIMIT 1000 OFFSET {}",
+                page * 1000
+            );
+            let paged = crate::sql::paged(Engine::ClickHouse, &preview, &key).unwrap();
+            assert!(paged.contains("ORDER BY"), "{paged}");
+            let result = ran(&connection, &paged);
+            assert_eq!(result.rows.len(), 1000, "page {page}");
+            for row in cells(&result) {
+                assert!(
+                    seen.insert(row[0].clone()),
+                    "page {page} repeats {:?}",
+                    row[0]
+                );
+            }
+        }
+        assert_eq!(seen.len(), 5000);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_a_trailing_semicolon_runs() {
         let connection = live();
         for sql in ["SELECT 1;", "SELECT 1 ;\n", "SELECT 1; -- done\n"] {
