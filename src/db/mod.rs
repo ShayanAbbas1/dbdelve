@@ -423,6 +423,13 @@ impl Engine {
         }
     }
 
+    /// `sql` as the statement that explains it in `mode`, or `None` where
+    /// `explain_prefix` is.
+    pub fn explain(self, mode: ExplainMode, sql: &str) -> Option<String> {
+        self.explain_prefix(mode)
+            .map(|prefix| format!("{prefix}{sql}{}", self.explain_suffix(mode)))
+    }
+
     /// What goes after the statement to put it in `mode`: nothing on the SQL
     /// engines, whose whole difference is the prefix, and the cursor's own
     /// `.explain(verbosity)` on MongoDB.

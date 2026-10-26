@@ -62,12 +62,7 @@ fn explains_per_engine() {
                         &message,
                     ),
                 }
-                // Mirrors the composition in workspace/queries.rs
-                // (`explain_statement`'s `prefix + sql + suffix`); a change
-                // there must change this test too.
-                let composed = engine
-                    .explain_prefix(mode)
-                    .map(|prefix| format!("{prefix}{base}{}", engine.explain_suffix(mode)));
+                let composed = engine.explain(mode, base);
                 let typed = composed
                     .as_deref()
                     .map(|text| format!(" typed={:?}", sql::typed_explain(engine, text)))

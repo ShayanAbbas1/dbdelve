@@ -1063,20 +1063,17 @@ impl Workspace {
             workspace.refuse_run(tab, message.into(), cx);
         };
 
-        let Some(prefix) = engine.explain_prefix(action.mode) else {
+        let cannot = format!(
+            "{} cannot {}.",
+            engine.label(),
+            action.mode.label().to_lowercase()
+        );
+        if engine.explain_prefix(action.mode).is_none() {
             // Reachable only if a menu offers a mode the engine does not have,
             // which is what `explain_prefix` returning `None` is there to stop.
-            failure(
-                self,
-                &format!(
-                    "{} cannot {}.",
-                    engine.label(),
-                    action.mode.label().to_lowercase()
-                ),
-                cx,
-            );
+            failure(self, &cannot, cx);
             return;
-        };
+        }
         let (start, sql) = match self.sql_to_run(&editor, cx) {
             Some(Ok(statement)) => statement,
             Some(Err(message)) => return failure(self, &message, cx),
@@ -1085,17 +1082,12 @@ impl Workspace {
         if let Err(message) = sql::explainable(engine, &sql) {
             return failure(self, &message, cx);
         }
+        let Some(statement) = engine.explain(action.mode, &sql) else {
+            return failure(self, &cannot, cx);
+        };
         self.sent_from(tab, start, &sql);
 
-        let suffix = engine.explain_suffix(action.mode);
-        self.execute_and_then(
-            format!("{prefix}{sql}{suffix}"),
-            tab,
-            None,
-            false,
-            Some(action.mode),
-            cx,
-        );
+        self.execute_and_then(statement, tab, None, false, Some(action.mode), cx);
     }
 
     /// Flip the query tab's results pane between its rows and its plan.
