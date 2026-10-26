@@ -654,6 +654,7 @@ impl Connection {
             .post(&format!("{}?{params}", self.base))
             .config()
             .timeout_recv_response(bounds.limit())
+            .timeout_global(bounds.whole())
             .build()
             // Headers rather than the URL, so an `@` in a user name needs no
             // escaping and the password stays out of any proxy's log.
@@ -1766,6 +1767,50 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(1));
         });
         assert_eq!(kills(&mock).len(), 1);
+    }
+
+    #[test]
+    fn an_upload_the_server_stopped_reading_is_ended_by_cancel_and_frees_the_session() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        run(&connection, "SELECT n").unwrap();
+        mock.swallow_bodies_over(1024 * 1024);
+        let insert = format!("INSERT INTO t VALUES {}", "(1),".repeat(16 * 1024 * 1024));
+        let cancel = CancelToken::default();
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| connection.query(&insert, &cancel, Fetch::default()));
+            until("the query id on the token", || !handles(&cancel).is_empty());
+            std::thread::sleep(Duration::from_millis(200));
+            let started = Instant::now();
+            assert_eq!(connection.cancel(&cancel).unwrap_err().message, UNREACHED);
+            assert_eq!(running.join().unwrap().unwrap_err().message, CANCELLED);
+            assert!(started.elapsed() < KILL_WITHIN + Duration::from_secs(1));
+        });
+        assert!(kills(&mock).len() > 2);
+        run(&connection, "SELECT n").unwrap();
+    }
+
+    #[test]
+    fn a_kill_whose_connect_stalls_gives_up_within_its_deadline() {
+        // TEST-NET-1 (RFC 5737) is never routed: behind a default route its
+        // SYN goes unanswered, and without one the connect fails at once.
+        let server = ServerConfig {
+            host: "192.0.2.1".into(),
+            port: Some(DEFAULT_PORT),
+            sslmode: SslMode::Disable,
+            ..ServerConfig::default()
+        };
+        let agent = http::agent(&server, None, Scheme::Http, Bounds::internal()).unwrap();
+        let connection = Connection::unchecked(&server, DEFAULT_PORT, agent, Scheme::Http);
+        let started = Instant::now();
+        assert!(
+            connection
+                .kill("dbdelve-0", Duration::from_millis(500))
+                .is_err()
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1500), "{took:?}");
     }
 
     #[test]

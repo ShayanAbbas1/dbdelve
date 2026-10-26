@@ -1,11 +1,11 @@
 //! The HTTP side of ClickHouse: the agent and its TLS, the SSH tunnel as a
-//! resolver, the transport that lets one thread end another's read, and the
-//! server's errors.
+//! resolver, the transport that lets one thread end another's read or write,
+//! and the server's errors.
 
 use std::cell::RefCell;
 use std::fmt;
-use std::io;
-use std::net::SocketAddr;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,9 +14,8 @@ use ureq::config::Config;
 use ureq::http::HeaderMap;
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
-use ureq::unversioned::transport::time::Duration as UreqDuration;
 use ureq::unversioned::transport::{
-    Buffers, ConnectionDetails, Connector, NextTimeout, RustlsConnector, TcpConnector, Transport,
+    Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, RustlsConnector, Transport,
 };
 use ureq::{Agent, Error};
 
@@ -78,9 +77,10 @@ impl Scheme {
 }
 
 /// How long a request may wait, one number for both of the client's bounds: no
-/// response for this long, and no byte for this long.
+/// response for this long, and no byte for this long. A `KILL`'s also covers
+/// the whole request, the connect included.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Bounds(Option<Duration>);
+pub struct Bounds(Option<Duration>, Option<Duration>);
 
 impl Bounds {
     /// A user's statements: the profile's timeout plus slack, or none when it
@@ -89,20 +89,26 @@ impl Bounds {
         Self(
             (statement_timeout > 0)
                 .then(|| Duration::from_secs(u64::from(statement_timeout)) + SLACK),
+            None,
         )
     }
 
     /// DBDelve's own catalog and structure requests.
     pub fn internal() -> Self {
-        Self(Some(INTERNAL_BOUND))
+        Self(Some(INTERNAL_BOUND), None)
     }
 
+    /// The whole request, from the connect to the body's end.
     pub fn within(limit: Duration) -> Self {
-        Self(Some(limit))
+        Self(Some(limit), Some(limit))
     }
 
     pub fn limit(self) -> Option<Duration> {
         self.0
+    }
+
+    pub fn whole(self) -> Option<Duration> {
+        self.1
     }
 }
 
@@ -149,12 +155,9 @@ pub fn agent(
         .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
         .tls_config(tls)
         .build();
-    // TCP, then the watch, then TLS: the watch sees ciphertext arrive, which
-    // is the only idleness there is to measure.
-    let connector =
-        ().chain(TcpConnector::default())
-            .chain(WatchedConnector)
-            .chain(RustlsConnector::default());
+    // The watched TCP, then TLS: the watch sees ciphertext arrive, which is
+    // the only idleness there is to measure.
+    let connector = ().chain(WatchedConnector).chain(RustlsConnector::default());
     Ok(match tunnel {
         Some(tunnel) => Agent::with_parts(
             config,
@@ -207,8 +210,8 @@ pub enum Stop {
     Idle,
 }
 
-/// What a blocked read checks between ticks: whether another thread asked it
-/// to end, and how long it may wait for a byte.
+/// What a blocked read or write checks between ticks: whether another thread
+/// asked it to end, and how long it may wait for a byte to move.
 ///
 /// ureq offers only total timeouts and reads on the calling thread, so the
 /// watch reaches the transport through a thread-local set around each call.
@@ -246,7 +249,7 @@ impl Watch {
         Watching(WATCHING.with(|slot| slot.borrow_mut().replace(self.clone())))
     }
 
-    /// Ends the read in progress, within a tick, and every later one.
+    /// Ends the read or write in progress, within a tick, and every later one.
     pub fn abort(&self) {
         self.abort.store(true, Ordering::SeqCst);
     }
@@ -267,93 +270,204 @@ impl Watch {
     }
 }
 
+/// Opens the TCP socket itself, so [`Watched`] owns it: ureq's own TCP
+/// transport writes with one blocking `write_all`, which no other thread can
+/// end and whose partial progress it does not tell.
 #[derive(Debug)]
 struct WatchedConnector;
 
-impl<In: Transport> Connector<In> for WatchedConnector {
-    type Out = Watched<In>;
+impl Connector for WatchedConnector {
+    type Out = Watched;
 
     fn connect(
         &self,
-        _: &ConnectionDetails,
-        chained: Option<In>,
-    ) -> Result<Option<Self::Out>, Error> {
-        Ok(chained.map(|inner| Watched {
-            inner,
-            ended: false,
-        }))
+        details: &ConnectionDetails,
+        _: Option<()>,
+    ) -> Result<Option<Watched>, Error> {
+        let config = details.config;
+        let started = Instant::now();
+        let budget = (!details.timeout.after.is_not_happening()).then(|| *details.timeout.after);
+        let mut failed = None;
+        // The budget is shared out evenly, so a first address that never
+        // answers leaves time for the next.
+        for (at, address) in details.addrs.iter().enumerate() {
+            let attempt = match budget {
+                Some(budget) => {
+                    let left = budget.saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        break;
+                    }
+                    let share = left / u32::try_from(details.addrs.len() - at).unwrap_or(1);
+                    TcpStream::connect_timeout(address, share.max(Duration::from_millis(10)))
+                }
+                None => TcpStream::connect(address),
+            };
+            match attempt {
+                Ok(stream) => {
+                    if config.no_delay() {
+                        stream.set_nodelay(true)?;
+                    }
+                    let buffers =
+                        LazyBuffers::new(config.input_buffer_size(), config.output_buffer_size());
+                    return Ok(Some(Watched {
+                        stream,
+                        buffers,
+                        timeouts: (None, None),
+                        ended: false,
+                    }));
+                }
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    failed = Some(Error::Timeout(details.timeout.reason));
+                }
+                Err(error) => failed = Some(Error::Io(error)),
+            }
+        }
+        Err(failed.unwrap_or(Error::Timeout(details.timeout.reason)))
     }
 }
 
-/// A transport that waits in ticks, so the thread-local [`Watch`] is looked at
-/// between them.
-#[derive(Debug)]
-struct Watched<T> {
-    inner: T,
-    /// Its read was ended by the watch, so a byte may still be on its way:
-    /// never to be pooled.
+/// A TCP transport that waits in ticks, so the thread-local [`Watch`] is
+/// looked at between them, whether it is reading or writing.
+struct Watched {
+    stream: TcpStream,
+    buffers: LazyBuffers,
+    /// The read and write timeouts the socket has now, to set them only when
+    /// they change.
+    timeouts: (Option<Duration>, Option<Duration>),
+    /// Ended by the watch or mid-write, so the stream is in no state to be
+    /// pooled.
     ended: bool,
 }
 
-impl<T: Transport> Transport for Watched<T> {
+impl fmt::Debug for Watched {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Watched")
+            .field("peer", &self.stream.peer_addr().ok())
+            .finish()
+    }
+}
+
+impl Watched {
+    /// How long the next blocking step may take: a tick at most, less when
+    /// the idle bound or the call's budget is nearer. An error when the watch
+    /// was aborted or either has run out.
+    fn step(
+        &mut self,
+        watch: Option<&Watch>,
+        idle_since: Instant,
+        called: Instant,
+        timeout: NextTimeout,
+    ) -> Result<Duration, Error> {
+        if let Some(watch) = watch
+            && watch.abort.load(Ordering::SeqCst)
+        {
+            self.ended = true;
+            watch.stop(Stop::Aborted);
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "The request was ended from another thread.",
+            )));
+        }
+        let idle_left = watch
+            .and_then(|watch| watch.idle)
+            .map(|idle| idle.saturating_sub(idle_since.elapsed()));
+        if let Some(watch) = watch
+            && idle_left == Some(Duration::ZERO)
+        {
+            self.ended = true;
+            watch.stop(Stop::Idle);
+            return Err(Error::Timeout(timeout.reason));
+        }
+        let budget_left = match timeout.after.is_not_happening() {
+            true => None,
+            false => Some(timeout.after.saturating_sub(called.elapsed())),
+        };
+        if budget_left == Some(Duration::ZERO) {
+            return Err(Error::Timeout(timeout.reason));
+        }
+        Ok([Some(TICK), idle_left, budget_left]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(TICK))
+    }
+}
+
+/// A wait that ran out, which a tick is expected to.
+fn timed_out(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
+impl Transport for Watched {
     fn buffers(&mut self) -> &mut dyn Buffers {
-        self.inner.buffers()
+        &mut self.buffers
     }
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
-        self.inner.transmit_output(amount, timeout)
+        let watch = WATCHING.with(|slot| slot.borrow().clone());
+        let called = Instant::now();
+        let mut progressed = called;
+        let mut written = 0;
+        while written < amount {
+            let wait = self.step(watch.as_ref(), progressed, called, timeout)?;
+            if self.timeouts.1 != Some(wait) {
+                self.stream.set_write_timeout(Some(wait))?;
+                self.timeouts.1 = Some(wait);
+            }
+            match self.stream.write(&self.buffers.output()[written..amount]) {
+                Ok(0) => {
+                    self.ended = true;
+                    return Err(Error::Io(io::ErrorKind::WriteZero.into()));
+                }
+                Ok(sent) => {
+                    written += sent;
+                    progressed = Instant::now();
+                }
+                Err(error) if timed_out(&error) => {}
+                Err(error) => {
+                    self.ended = true;
+                    return Err(Error::Io(error));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        let Some(watch) = WATCHING.with(|slot| slot.borrow().clone()) else {
-            return self.inner.await_input(timeout);
-        };
-        let started = Instant::now();
+        let watch = WATCHING.with(|slot| slot.borrow().clone());
+        let called = Instant::now();
         loop {
-            if watch.abort.load(Ordering::SeqCst) {
-                self.ended = true;
-                watch.stop(Stop::Aborted);
-                return Err(Error::Io(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "The read was ended from another thread.",
-                )));
+            let wait = self.step(watch.as_ref(), called, called, timeout)?;
+            if self.timeouts.0 != Some(wait) {
+                self.stream.set_read_timeout(Some(wait))?;
+                self.timeouts.0 = Some(wait);
             }
-            let elapsed = started.elapsed();
-            let idle_left = watch.idle.map(|idle| idle.saturating_sub(elapsed));
-            if idle_left == Some(Duration::ZERO) {
-                self.ended = true;
-                watch.stop(Stop::Idle);
-                return Err(Error::Timeout(timeout.reason));
-            }
-            let budget_left = match timeout.after.is_not_happening() {
-                true => None,
-                false => Some(timeout.after.saturating_sub(elapsed)),
-            };
-            if budget_left == Some(Duration::ZERO) {
-                return Err(Error::Timeout(timeout.reason));
-            }
-            let tick = [Some(TICK), idle_left, budget_left]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(TICK);
-            let step = NextTimeout {
-                after: UreqDuration::Exact(tick),
-                reason: timeout.reason,
-            };
-            match self.inner.await_input(step) {
-                Err(Error::Timeout(_)) => {}
-                done => return done,
+            match self.stream.read(self.buffers.input_append_buf()) {
+                Ok(read) => {
+                    self.buffers.input_appended(read);
+                    return Ok(read > 0);
+                }
+                Err(error) if timed_out(&error) => {}
+                Err(error) => return Err(Error::Io(error)),
             }
         }
     }
 
+    /// Never when the watch ended it; otherwise open while nothing is
+    /// waiting to be read and the peer has not closed it, as ureq's own TCP
+    /// transport checks.
     fn is_open(&mut self) -> bool {
-        !self.ended && self.inner.is_open()
-    }
-
-    fn is_tls(&self) -> bool {
-        self.inner.is_tls()
+        if self.ended || self.stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let idle = matches!(
+            self.stream.read(&mut [0]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        );
+        idle && self.stream.set_nonblocking(false).is_ok()
     }
 }
 
@@ -640,7 +754,7 @@ EHziqoisXzppWwn2vAWvoTkc
             &server(port, SslMode::Disable),
             None,
             Scheme::Http,
-            Bounds(Some(Duration::from_millis(500))),
+            Bounds(Some(Duration::from_millis(500)), None),
         )
         .unwrap();
         let watch = Watch::new(Arc::default(), None);
@@ -650,13 +764,66 @@ EHziqoisXzppWwn2vAWvoTkc
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
+    /// Accepts one connection and neither reads nor answers it.
+    fn silent_listener() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+            drop(stream);
+        });
+        port
+    }
+
+    /// More than any socket buffer takes before the peer reads.
+    fn upload(agent: &Agent, port: u16) -> Result<(), Error> {
+        let body = vec![b'x'; 64 * 1024 * 1024];
+        agent
+            .post(&format!("http://127.0.0.1:{port}/"))
+            .send(&body[..])
+            .map(drop)
+    }
+
+    #[test]
+    fn an_upload_the_server_stops_reading_is_ended_by_an_abort() {
+        let port = silent_listener();
+        let watch = Watch::new(Arc::default(), None);
+        let other = watch.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            other.abort();
+        });
+        let _watching = watch.enter();
+        let started = Instant::now();
+        assert!(upload(&plain_agent(port, Bounds::user(0)), port).is_err());
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(300) + TICK * 2, "{took:?}");
+        assert_eq!(watch.stopped(), Some(Stop::Aborted));
+    }
+
+    #[test]
+    fn an_upload_the_server_stops_reading_is_ended_by_the_idle_bound() {
+        let port = silent_listener();
+        let watch = Watch::new(Arc::default(), Some(Duration::from_millis(400)));
+        let _watching = watch.enter();
+        let started = Instant::now();
+        assert!(upload(&plain_agent(port, Bounds::user(0)), port).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(watch.stopped(), Some(Stop::Idle));
+    }
+
     #[test]
     fn a_tunnel_resolver_dials_what_it_is_given_and_not_the_name() {
         let port = listener(|mut stream| stream.write_all(OK).unwrap());
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let agent = Agent::with_parts(
             Config::builder().proxy(None).build(),
-            ().chain(TcpConnector::default()).chain(WatchedConnector),
+            ().chain(WatchedConnector),
             TunnelResolver::new(move || Ok(address)),
         );
         let mut response = agent
@@ -670,7 +837,7 @@ EHziqoisXzppWwn2vAWvoTkc
     fn a_tunnel_that_has_closed_fails_the_dial_in_its_own_words() {
         let agent = Agent::with_parts(
             Config::builder().proxy(None).build(),
-            ().chain(TcpConnector::default()).chain(WatchedConnector),
+            ().chain(WatchedConnector),
             TunnelResolver::new(|| Err(plain_error("SSH tunnel through bastion closed.".into()))),
         );
         let error = agent

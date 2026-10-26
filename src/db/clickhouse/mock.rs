@@ -266,6 +266,8 @@ struct State {
     max_session_timeout: u32,
     /// Settings this user may not change.
     readonly: HashSet<String>,
+    /// A body longer than this is never read.
+    swallow_over: Option<usize>,
 }
 
 pub struct Mock {
@@ -291,6 +293,7 @@ impl Mock {
             sessions: HashMap::new(),
             max_session_timeout: 3600,
             readonly: HashSet::new(),
+            swallow_over: None,
         }));
         let shared = Arc::clone(&state);
         // ponytail: never joined. The listener lives until the test binary
@@ -375,6 +378,13 @@ impl Mock {
         self.state()
             .readonly
             .extend(settings.iter().map(|name| name.to_string()));
+    }
+
+    /// A request whose body is longer than `bytes` is left unread and its
+    /// connection open, as a server or a proxy that stopped reading does. It
+    /// is never seen, registered or answered.
+    pub fn swallow_bodies_over(&self, bytes: usize) {
+        self.state().swallow_over = Some(bytes);
     }
 
     /// Every request so far, in the order they arrived.
@@ -538,7 +548,11 @@ fn kill_target(statement: &str) -> Option<String> {
 }
 
 fn serve(stream: TcpStream, state: &Mutex<State>) {
-    let Some(request) = read_request(&stream) else {
+    let swallow_over = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .swallow_over;
+    let Some(request) = read_request(&stream, swallow_over) else {
         return;
     };
     let decision = {
@@ -559,7 +573,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     }
 }
 
-fn read_request(stream: &TcpStream) -> Option<Request> {
+fn read_request(stream: &TcpStream, swallow_over: Option<usize>) -> Option<Request> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
@@ -585,6 +599,10 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0);
+    if swallow_over.is_some_and(|over| length > over) {
+        std::thread::sleep(Duration::from_secs(60));
+        return None;
+    }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).ok()?;
 
