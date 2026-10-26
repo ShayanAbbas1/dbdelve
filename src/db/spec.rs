@@ -208,8 +208,7 @@ pub struct SqlSpec {
     /// The table engines a `CREATE TABLE … ENGINE =` may name and stay a
     /// write: those that keep their rows in the database. Any other engine
     /// reads or writes somewhere else (a URL, a file, another server), so it
-    /// needs Full. `None` where the `ENGINE` option is not read at all. A
-    /// leading `*` matches a suffix.
+    /// needs Full. `None` where the `ENGINE` option is not read at all.
     pub local_table_engines: Option<&'static [&'static str]>,
     /// Nothing outlives one request, so no statement leaves state behind.
     pub stateless_requests: bool,
@@ -1035,7 +1034,30 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         read_only_session: ReadOnlySession::PerRequest,
         unreadable_floor: UnreadableFloor::FirstKeyword,
         local_table_engines: Some(&[
-            "*MergeTree",
+            "MergeTree",
+            "ReplacingMergeTree",
+            "SummingMergeTree",
+            "AggregatingMergeTree",
+            "CollapsingMergeTree",
+            "VersionedCollapsingMergeTree",
+            "GraphiteMergeTree",
+            "CoalescingMergeTree",
+            "ReplicatedMergeTree",
+            "ReplicatedReplacingMergeTree",
+            "ReplicatedSummingMergeTree",
+            "ReplicatedAggregatingMergeTree",
+            "ReplicatedCollapsingMergeTree",
+            "ReplicatedVersionedCollapsingMergeTree",
+            "ReplicatedGraphiteMergeTree",
+            "ReplicatedCoalescingMergeTree",
+            "SharedMergeTree",
+            "SharedReplacingMergeTree",
+            "SharedSummingMergeTree",
+            "SharedAggregatingMergeTree",
+            "SharedCollapsingMergeTree",
+            "SharedVersionedCollapsingMergeTree",
+            "SharedGraphiteMergeTree",
+            "SharedCoalescingMergeTree",
             "Log",
             "TinyLog",
             "StripeLog",
@@ -1045,10 +1067,8 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
             "Join",
             "Buffer",
             "Merge",
-            "Distributed",
             "Dictionary",
             "EmbeddedRocksDB",
-            "KeeperMap",
             "GenerateRandom",
         ]),
         // No Explain yet, and no `skip_duplicates`: there is no clause that

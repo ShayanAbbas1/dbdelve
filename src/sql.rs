@@ -2292,21 +2292,22 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
 ///
 /// The server's lexer and sqlparser's tokenizer agree on what is a comment
 /// (`--` to a newline, `/* */` nested) and where a literal ends, so the first
-/// word read here is the one the server runs. A tokenizer error, or a token
-/// the two may read apart ([`misread`]), fails closed: Read-write at least,
-/// so Read-only refuses it.
+/// word read here is the one the server runs. Where the two may part ways
+/// ([`misread`]), a word the server runs may be one the tokenizer never saw,
+/// so the submission needs Full. A tokenizer error is placed by the words it
+/// read before the error, and at Read-write at least.
 fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict {
-    let Some(tokens) = located_tokens(dialect, sql) else {
-        return Verdict {
-            mode: Mode::ReadWrite,
-            destructive: vec![Destructive::Unreadable],
-        };
-    };
-    let misread = tokens
-        .iter()
-        .any(|(token, range)| misread(token, &sql[range.clone()]));
+    let (tokens, whole) = located_prefix(dialect, sql);
+    // What the tokenizer stopped at is unread, so anything there [`misread`]
+    // might have caught counts as caught.
+    let unread = &sql[tokens.last().map_or(0, |(_, range)| range.end)..];
+    let misread = misread(sql, &tokens)
+        || !whole
+            && (unread.contains("//")
+                || unread.contains(|c: char| matches!(c, '#' | '$' | '\\') || !c.is_ascii()));
+    let trusted = whole && !misread;
 
-    let mut unreadable = misread;
+    let mut unreadable = !trusted;
     let verdict = between_semicolons(&tokens)
         .into_iter()
         .map(|range| {
@@ -2321,9 +2322,9 @@ fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict 
                 .map(|(token, _)| token)
                 .collect();
             let text = &sql[range];
-            let parsed = match misread {
-                true => None,
-                false => match mutation_as_dml(spec, text) {
+            let parsed = match trusted {
+                false => None,
+                true => match mutation_as_dml(spec, text) {
                     Some(dml) => SqlParser::parse_sql(dialect, &dml).ok(),
                     None => SqlParser::parse_sql(dialect, text).ok(),
                 },
@@ -2338,38 +2339,49 @@ fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict 
                     first_keyword_verdict(&words)
                 }
             };
-            verdict.max(anywhere_verdict(&words))
+            verdict.max(words_verdict(&words))
         })
         .fold(Verdict::READ, Verdict::max);
 
-    match (misread, unreadable) {
-        (true, _) => Verdict {
-            mode: verdict.mode.max(Mode::ReadWrite),
+    let floor = match (misread, whole) {
+        (true, _) => Mode::Full,
+        (false, false) => Mode::ReadWrite,
+        (false, true) => Mode::ReadOnly,
+    };
+    match unreadable {
+        true => Verdict {
+            mode: verdict.mode.max(floor),
             destructive: vec![Destructive::Unreadable],
         },
-        (false, true) => Verdict {
-            mode: verdict.mode,
-            destructive: vec![Destructive::Unreadable],
-        },
-        (false, false) => verdict,
+        false => verdict,
     }
 }
 
-/// Whether the server's lexer may read `token` (`text` in the source)
-/// otherwise than sqlparser's tokenizer did, so that a word one of them sees
-/// is hidden from the other:
+/// Whether the server's lexer may read `tokens` otherwise than sqlparser's
+/// tokenizer did, so that a word one of them sees is hidden from the other:
 ///
 /// - a character the tokenizer does not know: the server skips Unicode spaces
 ///   it does not (a zero-width space), and reads curly quotes as quotes;
-/// - a `#` or `$` outside a literal: the server starts a comment at `# ` and
-///   `#!`, and keeps a `$` inside a bare word, so `a$$` is one word to it and
-///   a word and the start of a dollar-quoted string to the tokenizer;
+/// - a `#`, `$` or `//` outside a literal: the server starts a comment at
+///   `# `, `#!` and `//`, and keeps a `$` inside a bare word, so `a$$` is one
+///   word to it and a word and the start of a dollar-quoted string to the
+///   tokenizer;
 /// - a quoted identifier the server ends elsewhere: it escapes a quote with a
 ///   backslash and the tokenizer does not, so ``` `a\`` ``` ends there for
 ///   the server and runs on for the tokenizer;
 /// - a `--` comment a carriage return runs through, in case the server ends
 ///   it there.
-fn misread(token: &Token, text: &str) -> bool {
+fn misread(sql: &str, tokens: &[(Token, Range<usize>)]) -> bool {
+    tokens.iter().any(|(token, range)| {
+        // Read off the source rather than the next token: `//*` is a slash
+        // and an unended comment to the tokenizer, which stops there.
+        matches!(token, Token::Div) && sql[range.end..].starts_with('/')
+            || misread_token(token, &sql[range.clone()])
+    })
+}
+
+/// [`misread`] for one token, `text` in the source.
+fn misread_token(token: &Token, text: &str) -> bool {
     match token {
         Token::Char(_) => true,
         Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
@@ -2427,7 +2439,7 @@ const FLOOR_FULL: &[&str] = &[
 /// The mode a statement sqlparser cannot read needs, by its first word
 /// (`words` holds no whitespace or comment). A first word in neither list, or
 /// a first token that is no word at all, fails closed: Read-write, so
-/// Read-only refuses it. An `INSERT INTO FUNCTION` is [`anywhere_verdict`]'s.
+/// Read-only refuses it. An `INSERT INTO FUNCTION` is [`words_verdict`]'s.
 fn first_keyword_verdict(words: &[&Token]) -> Verdict {
     let first = |list: &[&str]| list.iter().any(|word| is_keyword(words.first(), word));
     if first(FLOOR_READS) {
@@ -2439,19 +2451,27 @@ fn first_keyword_verdict(words: &[&Token]) -> Verdict {
     }
 }
 
-/// What a statement's words say wherever they stand, read or not: an `INTO
-/// OUTFILE` writes a file, an `INTO [TABLE] FUNCTION` writes through a table
-/// function to a URL, a file or another server, and `PARALLEL WITH` runs a
-/// second statement beside the first, which the first word does not describe.
-fn anywhere_verdict(words: &[&Token]) -> Verdict {
+/// What a statement's words say, read or not, that its tree or first word
+/// does not:
+///
+/// - `INTO OUTFILE` writes a file, and `INTO [TABLE] FUNCTION` writes through
+///   a table function to a URL, a file or another server;
+/// - `PARALLEL WITH` runs a second statement beside the first;
+/// - `ON CLUSTER` runs the statement on every server of the cluster (a read's
+///   `JOIN … ON cluster = …` is left alone);
+/// - `SET DEFAULT ROLE` changes a user's stored roles, not the session.
+fn words_verdict(words: &[&Token]) -> Verdict {
     let at = |index: usize, keyword: &str| is_keyword(words.get(index), keyword);
-    let full = (0..words.len()).any(|index| {
-        at(index, "OUTFILE")
-            || at(index, "PARALLEL") && at(index + 1, "WITH")
-            || at(index, "INTO")
-                && (at(index + 1, "FUNCTION")
-                    || at(index + 1, "TABLE") && at(index + 2, "FUNCTION"))
-    });
+    let reads = FLOOR_READS.iter().any(|word| at(0, word));
+    let full = at(0, "SET") && at(1, "DEFAULT") && at(2, "ROLE")
+        || (0..words.len()).any(|index| {
+            at(index, "OUTFILE")
+                || at(index, "PARALLEL") && at(index + 1, "WITH")
+                || at(index, "INTO")
+                    && (at(index + 1, "FUNCTION")
+                        || at(index + 1, "TABLE") && at(index + 2, "FUNCTION"))
+                || !reads && at(index, "ON") && at(index + 1, "CLUSTER")
+        });
     match full {
         true => Verdict::FULL,
         false => Verdict::READ,
@@ -2475,12 +2495,7 @@ fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
         | CreateTableOptions::Plain(options)
         | CreateTableOptions::TableProperties(options) => options,
     };
-    let listed = |name: &str| {
-        local.iter().any(|engine| match engine.strip_prefix('*') {
-            Some(suffix) => name.ends_with(suffix),
-            None => name == *engine,
-        })
-    };
+    let listed = |name: &str| local.contains(&name);
     let elsewhere = options.iter().any(|option| match option {
         SqlOption::NamedParenthesizedList(list)
             if list.key.value.eq_ignore_ascii_case("ENGINE") =>
@@ -2513,10 +2528,7 @@ pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
     }
     let dialect = parser(spec.sql.parser_dialect);
     let tokens = located_tokens(dialect.as_ref(), sql)?;
-    if tokens
-        .iter()
-        .any(|(token, range)| misread(token, &sql[range.clone()]))
-    {
+    if misread(sql, &tokens) {
         return None;
     }
     let mut words: Vec<(&Token, Range<usize>)> = tokens
@@ -3701,7 +3713,17 @@ fn layout_free(tokens: impl IntoIterator<Item = Token>) -> Vec<Token> {
 /// The tokens of `sql` with the byte range each covers. `None` when `sql` does
 /// not tokenize.
 fn located_tokens(dialect: &dyn Dialect, sql: &str) -> Option<Vec<(Token, Range<usize>)>> {
-    let tokens = Tokenizer::new(dialect, sql).tokenize_with_location().ok()?;
+    let (tokens, whole) = located_prefix(dialect, sql);
+    whole.then_some(tokens)
+}
+
+/// [`located_tokens`] up to wherever the tokenizer stopped, and whether that
+/// was the end of `sql`.
+fn located_prefix(dialect: &dyn Dialect, sql: &str) -> (Vec<(Token, Range<usize>)>, bool) {
+    let mut tokens = Vec::new();
+    let whole = Tokenizer::new(dialect, sql)
+        .tokenize_with_location_into_buf(&mut tokens)
+        .is_ok();
     // Spans are lines and columns of chars, in source order, so one walk
     // forward through the text turns them all into byte offsets.
     let mut chars = sql.char_indices().peekable();
@@ -3719,15 +3741,14 @@ fn located_tokens(dialect: &dyn Dialect, sql: &str) -> Option<Vec<(Token, Range<
         }
         chars.peek().map_or(sql.len(), |(offset, _)| *offset)
     };
-    Some(
-        tokens
-            .into_iter()
-            .map(|token| {
-                let start = offset_of(token.span.start);
-                (token.token, start..offset_of(token.span.end))
-            })
-            .collect(),
-    )
+    let tokens = tokens
+        .into_iter()
+        .map(|token| {
+            let start = offset_of(token.span.start);
+            (token.token, start..offset_of(token.span.end))
+        })
+        .collect();
+    (tokens, whole)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -6739,68 +6760,73 @@ mod tests {
             }
         }
 
-        // What might be read as a comment by one side and not the other fails
-        // closed rather than trusting the word after it.
-        for sql in [
-            "# c\nSELECT 1",
-            "#!c\nSELECT 1",
-            "\u{feff}SELECT 1",
-            "\u{200b}SELECT 1",
-            "-- c\rBACKUP TABLE t TO Disk('b', 'x')",
-            "/* unended BACKUP TABLE t TO Disk('b', 'x')",
-            "SELECT 'unended",
-            "SELECT `unended",
+        // A tokenizer error is placed by the words before it, at Read-write
+        // at least.
+        for (sql, mode) in [
+            (
+                "/* unended BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::ReadWrite,
+            ),
+            ("SELECT 'unended", Mode::ReadWrite),
+            ("SELECT `unended", Mode::ReadWrite),
+            ("BACKUP TABLE t TO Disk('b', 'x') 'unended", Mode::Full),
+            (
+                "SELECT 1; RESTORE TABLE t FROM Disk('b', 'x') `",
+                Mode::Full,
+            ),
+            // Where the tokenizer stops, the server may read on.
+            (
+                "SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::Full,
+            ),
+            (
+                "SELECT `a\\`` PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::Full,
+            ),
+            ("SELECT 1 /* \u{e9}", Mode::Full),
         ] {
-            assert_eq!(classify(ch, sql), unreadable_at(Mode::ReadWrite), "{sql:?}");
+            assert_eq!(classify(ch, sql), unreadable_at(mode), "{sql:?}");
         }
 
         // The server's lexer and sqlparser's tokenizer part ways on these, so
         // a word the server runs may be one the tokenizer never sees: each
-        // fails closed, and still needs Full where the words it does see say so.
-        let backup = "BACKUP TABLE t TO Disk('b', 'x')";
-        for (sql, mode) in [
+        // needs Full.
+        let backup = "BACKUP TABLE t TO Disk('backups', 'review-poc')";
+        let restore = "RESTORE TABLE t FROM Disk('backups', 'review-poc')";
+        for sql in [
+            // `//` and `# ` comment to the server, and hide the quote that
+            // opens a string to the tokenizer.
+            format!("SELECT 1 // '\nPARALLEL WITH {backup} -- '"),
+            format!("SELECT 1 // '\nPARALLEL WITH {restore} -- '"),
+            format!("{backup} // '"),
+            format!("SELECT 1 //* '\nPARALLEL WITH {backup} -- '"),
+            format!("SELECT 1 #'\nPARALLEL WITH {backup} -- '"),
+            "# c\nSELECT 1".to_owned(),
+            "#!c\nSELECT 1".to_owned(),
             // A backslash escapes the backtick for the server alone, which
             // then reads the doubled one as the end of the name.
-            (
-                format!("SELECT `a\\`` PARALLEL WITH {backup} -- `"),
-                Mode::ReadWrite,
-            ),
-            (
-                format!("SELECT \"a\\\"\" PARALLEL WITH {backup} -- \""),
-                Mode::ReadWrite,
-            ),
-            // `# ` comments to the server, and hides the quote that opens a
-            // string to the tokenizer.
-            (
-                format!("SELECT 1 #'\nPARALLEL WITH {backup} -- '"),
-                Mode::ReadWrite,
-            ),
+            format!("SELECT `a\\`` PARALLEL WITH {backup} -- `"),
+            format!("SELECT \"a\\\"\" PARALLEL WITH {backup} -- \""),
             // `a$$` is one bare word to the server.
-            (
-                format!("SELECT a$$ PARALLEL WITH {backup} --$$"),
-                Mode::ReadWrite,
-            ),
-            (format!("SELECT $$x$$ PARALLEL WITH {backup}"), Mode::Full),
-            ("SELECT $1".to_owned(), Mode::ReadWrite),
+            format!("SELECT a$$ PARALLEL WITH {backup} --$$"),
+            format!("SELECT 1 AS a$$ PARALLEL WITH {backup} --$$"),
+            format!("SELECT $$x$$ PARALLEL WITH {backup}"),
+            "SELECT $1".to_owned(),
             // A zero-width space is a space to the server.
-            (
-                format!("SELECT 1 PARALLEL\u{200b}WITH {backup}"),
-                Mode::Full,
-            ),
-            (format!("\u{200b}{backup}"), Mode::Full),
-            (
-                "INSERT INTO\u{200b}FUNCTION file('x') VALUES (1)".to_owned(),
-                Mode::Full,
-            ),
+            format!("SELECT 1 PARALLEL\u{200b}WITH {backup}"),
+            format!("\u{200b}{backup}"),
+            "\u{200b}SELECT 1".to_owned(),
+            "\u{feff}SELECT 1".to_owned(),
+            "INSERT INTO\u{200b}FUNCTION file('x') VALUES (1)".to_owned(),
             // Curly quotes are quotes to the server.
-            (
-                format!("SELECT \u{2018}'\u{2019} PARALLEL WITH {backup} --'"),
-                Mode::ReadWrite,
-            ),
-            ("SELECT caf\u{e9}".to_owned(), Mode::ReadWrite),
+            format!("SELECT \u{2018}'\u{2019} PARALLEL WITH {backup} --'"),
+            "SELECT caf\u{e9}".to_owned(),
+            format!("-- c\r{backup}"),
         ] {
-            assert_eq!(classify(ch, &sql), unreadable_at(mode), "{sql:?}");
+            assert_eq!(classify(ch, &sql), unreadable_at(Mode::Full), "{sql:?}");
         }
+        assert_eq!(classify(ch, "SELECT 4 / 2"), Verdict::READ);
+        assert_eq!(classify(ch, "SELECT 4 / /* c */ 2"), Verdict::READ);
         // Inside a literal or a comment, none of them matters.
         for sql in [
             "SELECT 'a#b$c\u{200b}\u{2018}\\'' AS x",
@@ -6909,9 +6935,64 @@ mod tests {
             "SQLite('x.db', 't')",
             "Kafka",
             "mergetree",
+            "Distributed('one_shard_cluster', 'db', 'target')",
+            "KeeperMap('/k')",
+            "FrobMergeTree",
         ] {
             let sql = format!("CREATE TABLE t2 (a Int32) ENGINE = {engine}");
             assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+        }
+        assert_eq!(
+            classify(
+                ch,
+                "CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', \
+                 'target') AS SELECT 1"
+            ),
+            Verdict::FULL
+        );
+        for family in [
+            "",
+            "Replacing",
+            "Summing",
+            "Aggregating",
+            "Collapsing",
+            "VersionedCollapsing",
+            "Graphite",
+            "Coalescing",
+        ] {
+            for prefix in ["", "Replicated", "Shared"] {
+                let sql = format!(
+                    "CREATE TABLE t2 (a Int32) ENGINE = {prefix}{family}MergeTree ORDER BY a"
+                );
+                assert_eq!(classify(ch, &sql), Verdict::WRITE, "{sql}");
+            }
+        }
+        // `ON CLUSTER` runs it on every server of the cluster; a join on a
+        // column named `cluster` is still a read.
+        for sql in [
+            "CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a",
+            "CREATE DATABASE d ON CLUSTER c",
+            "ALTER TABLE t ON CLUSTER c ADD COLUMN b Int32",
+            "INSERT INTO t SELECT * FROM a JOIN b ON cluster = b.c",
+        ] {
+            assert_eq!(classify(ch, sql).mode, Mode::Full, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "SELECT * FROM a JOIN b ON cluster = b.c"),
+            Verdict::READ
+        );
+        // `SET DEFAULT ROLE` stores a user's roles; the other `SET`s change
+        // the session, and the server's `readonly=2` refuses any `readonly`.
+        for sql in [
+            "SET DEFAULT ROLE NONE TO CURRENT_USER",
+            "SET DEFAULT ROLE r TO u",
+            "set default role all to u",
+            "/* c */ SET DEFAULT ROLE ALL EXCEPT r TO u",
+        ] {
+            assert_eq!(classify(ch, sql).mode, Mode::Full, "{sql}");
+        }
+        for sql in ["SET readonly = 0", "SET max_threads = 1", "SET ROLE r"] {
+            assert_eq!(classify(ch, sql).mode, Mode::ReadOnly, "{sql}");
         }
         assert_eq!(
             classify(ch, "CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1"),
@@ -7047,7 +7128,7 @@ mod tests {
         );
         assert_eq!(
             classify(ch, "DELETE FROM t ON CLUSTER c WHERE a = 1"),
-            unreadable_at(Mode::ReadWrite)
+            unreadable_at(Mode::Full)
         );
         assert_eq!(
             classify(ch, "SELECT 1; DROP TABLE t"),

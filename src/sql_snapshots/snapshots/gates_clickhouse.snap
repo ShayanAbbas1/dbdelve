@@ -94,7 +94,7 @@ source: src/sql_snapshots.rs
 [clickhouse] "#c\nSELECT 1"
   |#c|
   |SELECT 1|
-  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [clickhouse] "SELECT 1 INTO OUTFILE 'x'"
   |SELECT 1 INTO OUTFILE 'x'|
@@ -585,4 +585,42 @@ source: src/sql_snapshots.rs
 
 [clickhouse] "SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x') --$$"
   |SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x') --$$|
-  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 // '\nPARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') -- '"
+  |SELECT 1 // '|
+  |PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') -- '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 // '\nPARALLEL WITH RESTORE TABLE t FROM Disk('backups', 'review-poc') -- '"
+  |SELECT 1 // '|
+  |PARALLEL WITH RESTORE TABLE t FROM Disk('backups', 'review-poc') -- '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "BACKUP TABLE t TO Disk('backups', 'review-poc') // '"
+  |BACKUP TABLE t TO Disk('backups', 'review-poc') // '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "RESTORE TABLE t FROM Disk('backups', 'review-poc') // '"
+  |RESTORE TABLE t FROM Disk('backups', 'review-poc') // '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 AS a$$ PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') --$$"
+  |SELECT 1 AS a$$ PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') --$$|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SET DEFAULT ROLE NONE TO CURRENT_USER"
+  |SET DEFAULT ROLE NONE TO CURRENT_USER|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a"
+  |CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', 'target') AS SELECT 1"
+  |CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', 'target') AS SELECT 1|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 (a Int32) ENGINE = KeeperMap('/k')"
+  |CREATE TABLE t2 (a Int32) ENGINE = KeeperMap('/k')|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false

@@ -423,6 +423,23 @@ fn clickhouse_gate_corpus() {
         }
     }
     texts.push(format!("SELECT a$$ PARALLEL WITH {backup} --$$"));
+    // Where the server lexes otherwise than the tokenizer, and the tokenizer's
+    // error: what Read-write may not run without Full.
+    let backup = "BACKUP TABLE t TO Disk('backups', 'review-poc')";
+    let restore = "RESTORE TABLE t FROM Disk('backups', 'review-poc')";
+    texts.extend([
+        format!("SELECT 1 // '\nPARALLEL WITH {backup} -- '"),
+        format!("SELECT 1 // '\nPARALLEL WITH {restore} -- '"),
+        format!("{backup} // '"),
+        format!("{restore} // '"),
+        format!("SELECT 1 AS a$$ PARALLEL WITH {backup} --$$"),
+        "SET DEFAULT ROLE NONE TO CURRENT_USER".into(),
+        "CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a".into(),
+        "CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', 'target') \
+         AS SELECT 1"
+            .into(),
+        "CREATE TABLE t2 (a Int32) ENGINE = KeeperMap('/k')".into(),
+    ]);
 
     let mut out = String::new();
     for text in &texts {
