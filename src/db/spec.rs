@@ -1202,5 +1202,8 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         switches_database: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        match_value: Some(clickhouse::match_value),
+        ..Hooks::NONE
+    },
 };

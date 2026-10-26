@@ -1,5 +1,5 @@
 use super::{
-    KEY, RELATIONS, check, column_types, fragment, home, mongo_types, outcome, refusal, set,
+    KEY, RELATIONS, check, column_types_of, fragment, home, mongo_types, outcome, refusal, set,
     statement_with,
 };
 use crate::{
@@ -237,7 +237,7 @@ fn update_batches_per_engine() {
                 );
             }
             _ => {
-                let types = column_types();
+                let types = column_types_of(engine);
                 let name = [("Name", set("it's"))];
                 let one = |sets: &[(&str, NewValue)], keys: &[(&str, &str)]| {
                     [pending(schema, table, sets, keys, &types)]
@@ -573,7 +573,7 @@ fn appended_statements_per_engine() {
         let types = if engine == Engine::MongoDb {
             mongo_types()
         } else {
-            column_types()
+            column_types_of(engine)
         };
         let generated = if engine == Engine::Redis {
             "UNLINK k".to_owned()

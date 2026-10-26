@@ -1,6 +1,6 @@
 use super::{
-    KEY, NAMES, RELATIONS, VALUES, check, column_types, fragment, long_text, mongo_types, outcome,
-    set, statement, statement_with,
+    KEY, NAMES, RELATIONS, VALUES, check, column_types_of, fragment, long_text, mongo_types,
+    outcome, set, statement, statement_with,
 };
 use crate::{
     db::{ColumnDefinition, Engine, Syntax},
@@ -28,7 +28,6 @@ fn update_rows_per_engine() {
         Vec<(&'a str, &'a str)>,
         bool,
     );
-    let types = column_types();
     let long = long_text();
     let mut cases: Vec<Case> = Vec::new();
     let id = vec![("id", "7")];
@@ -119,7 +118,7 @@ fn update_rows_per_engine() {
     let mut out = String::new();
     for engine in Engine::ALL {
         for (case, schema, table, sets, keys, expected) in &cases {
-            let text = sql::update_row(engine, schema, table, sets, keys, &types);
+            let text = sql::update_row(engine, schema, table, sets, keys, &column_types_of(engine));
             assert_eq!(text.is_some(), *expected, "[{}] {case}", engine.as_str());
             statement(&mut out, engine, case, text.as_deref());
         }
@@ -146,7 +145,7 @@ fn single_inserts_per_engine() {
     let mut out = String::new();
     let long = long_text();
     for engine in sql_engines() {
-        let types = column_types();
+        let types = column_types_of(engine);
         let mut cases: Vec<(String, &str, &str, Columns, bool)> = vec![
             (
                 "four columns".into(),
@@ -592,7 +591,7 @@ fn deletes_per_engine() {
         }
     };
     for engine in sql_engines() {
-        let types = column_types();
+        let types = column_types_of(engine);
         let mut cases: Vec<DeleteCase> = vec![
             ("id".into(), "public", "accounts", vec![("id", "7")], true),
             ("composite".into(), "public", "accounts", KEY.to_vec(), true),

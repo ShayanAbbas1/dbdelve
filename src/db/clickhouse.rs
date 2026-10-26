@@ -7,6 +7,7 @@
 //! one: a session runs one query at a time, and a preview or a catalog load
 //! must neither queue behind a long run nor take its lock.
 
+mod edit;
 mod http;
 #[cfg(test)]
 mod mock;
@@ -22,14 +23,19 @@ use ring::rand::{SecureRandom, SystemRandom};
 use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body, Timeout};
 
+pub(super) use self::edit::match_value;
+use self::edit::{
+    DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Table, TableFacts,
+};
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
 use super::{
-    CancelToken, Cancelling, Catalog, Databases, DbError, Engine, Fetch, QueryResult, RelationKind,
-    RowBuilder, ServerConfig, Stopped, Structure, assemble_catalog, assemble_databases,
-    assemble_structure, plain_error, required_cell, terminated,
+    CancelToken, Cancelling, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
+    QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_structure, plain_error, required_cell, terminated,
 };
+use crate::sql::{Projected, table_read};
 use crate::tls::SslMode;
 
 /// The HTTP interface's plaintext port; its TLS one is 8443.
@@ -183,7 +189,13 @@ pub struct Connection {
     /// Each request in flight, by query id, so a Cancel that cannot reach a
     /// statement on the server can still end its read here.
     running: Arc<Mutex<HashMap<String, Watch>>>,
+    /// What each table allows writing, by schema and name. Emptied when a
+    /// statement that may change a table's definition runs.
+    described: Arc<Mutex<Tables>>,
 }
+
+/// Each described table, by schema and name.
+type Tables = HashMap<(String, String), Arc<Table>>;
 
 /// What the connect learned, fixed for the connection's life.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -359,6 +371,7 @@ impl Connection {
             read_only: Arc::default(),
             session: Arc::default(),
             running: Arc::default(),
+            described: Arc::default(),
         }
     }
 
@@ -368,16 +381,102 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
+        self.forget_if_changing(sql);
         self.request(sql, Kind::User, cancel, fetch)
     }
 
+    /// A preview of a table also says whether its rows can be written back, or
+    /// why not; see [`Self::edit_of`].
     pub fn generated(
         &self,
         sql: &str,
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
-        self.request(sql, Kind::Generated, cancel, fetch)
+        let mut result = self.request(sql, Kind::Generated, cancel, fetch)?;
+        if let Some((schema, table)) = preview_of(sql) {
+            (result.edit, result.read_only_reason) = self.edit_of(&schema, &table, &result.columns);
+        }
+        Ok(result)
+    }
+
+    /// The edit target of a preview's result, or the reason it has none. The
+    /// statement has already succeeded, so a describe that fails answers
+    /// neither: the rows stay unwritable without a reason.
+    fn edit_of(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[Column],
+    ) -> (Option<EditTarget>, Option<String>) {
+        match self.describe(schema, table) {
+            Ok(Some(described)) => described.target(schema, table, columns),
+            _ => (None, None),
+        }
+    }
+
+    /// One sessionless look at `schema.table`, kept for the connection. `None`
+    /// where the server has no such table.
+    fn describe(&self, schema: &str, table: &str) -> Result<Option<Arc<Table>>, DbError> {
+        let key = (schema.to_string(), table.to_string());
+        if let Some(known) = lock(&self.described).get(&key) {
+            return Ok(Some(known.clone()));
+        }
+        let ask = |template| self.internal_query(&structure_sql(template, schema, table));
+        let tables = ask(DESCRIBE_TABLE_SQL)?;
+        let Some(row) = tables.rows.first() else {
+            return Ok(None);
+        };
+        let columns = ask(DESCRIBE_COLUMNS_SQL)?;
+        let settings = ask(DESCRIBE_SETTINGS_SQL)?;
+        let facts = TableFacts {
+            engine: required_cell(&tables, row, "engine")?.to_string(),
+            engine_full: required_cell(&tables, row, "engine_full")?.to_string(),
+            create_table_query: required_cell(&tables, row, "create_table_query")?.to_string(),
+            columns: columns
+                .rows
+                .iter()
+                .map(|row| {
+                    Ok(Described {
+                        name: required_cell(&columns, row, "name")?.to_string(),
+                        data_type: required_cell(&columns, row, "type")?.to_string(),
+                        default_kind: required_cell(&columns, row, "default_kind")?.to_string(),
+                        in_key: required_cell(&columns, row, "in_key")? == "1",
+                    })
+                })
+                .collect::<Result<_, DbError>>()?,
+            server: settings
+                .rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        required_cell(&settings, row, "name")?.to_string(),
+                        required_cell(&settings, row, "value")?.to_string(),
+                    ))
+                })
+                .collect::<Result<_, DbError>>()?,
+        };
+        let described = Arc::new(Table::of(facts));
+        lock(&self.described).insert(key, described.clone());
+        Ok(Some(described))
+    }
+
+    /// A definition may have changed under any statement that does not open
+    /// as a plain read, so what was described is asked again. Read off the
+    /// first word alone: a statement can be megabytes of `VALUES`, and
+    /// parsing it here would delay its send.
+    fn forget_if_changing(&self, sql: &str) {
+        let first = sql
+            .trim_start()
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or_default();
+        let reads = [
+            "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "EXISTS",
+        ];
+        if !reads.iter().any(|read| first.eq_ignore_ascii_case(read)) {
+            lock(&self.described).clear();
+        }
     }
 
     /// Without a session, so the statements of a run at once go out side by
@@ -389,6 +488,7 @@ impl Connection {
         fetch: Fetch,
         read_only: bool,
     ) -> Result<QueryResult, DbError> {
+        self.forget_if_changing(sql);
         self.request(sql, Kind::Alongside { read_only }, cancel, fetch)
     }
 
@@ -931,6 +1031,16 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     }
     sql.push_str(rest);
     sql
+}
+
+/// The schema and table of a `SELECT *` from one table, written with both
+/// names as DBDelve's previews are.
+fn preview_of(sql: &str) -> Option<(String, String)> {
+    let read = table_read(Engine::ClickHouse, sql)?;
+    match (read.table.as_slice(), read.columns.as_slice()) {
+        ([schema, table], [Projected::Every]) => Some((schema.clone(), table.clone())),
+        _ => None,
+    }
 }
 
 /// The columns of a key the server printed as SQL: `system.tables` gives
@@ -1743,6 +1853,133 @@ mod tests {
         assert!(result.columns.is_empty());
         numbers(&mock);
         assert_eq!(run(&connection, "SELECT n").unwrap().rows_affected, None);
+    }
+
+    const PREVIEW: &str = "SELECT * FROM `d`.`t` LIMIT 100";
+
+    fn described(mock: &Mock, engine: &str, engine_full: &str) {
+        mock.on_statement(
+            "FROM `d`.`t`",
+            [Response::rows(
+                &[("id", "UInt32"), ("label", "String")],
+                &[&["1", "a"]],
+            )],
+        );
+        mock.on_statement(
+            "FROM system.tables",
+            [Response::rows(
+                &[
+                    ("engine", "String"),
+                    ("engine_full", "String"),
+                    ("create_table_query", "String"),
+                ],
+                &[&[engine, engine_full, "CREATE TABLE d.t (id UInt32)"]],
+            )],
+        );
+        mock.on_statement(
+            "FROM system.columns",
+            [Response::rows(
+                &[
+                    ("name", "String"),
+                    ("type", "String"),
+                    ("default_kind", "String"),
+                    ("in_key", "UInt8"),
+                ],
+                &[&["id", "UInt32", "", "1"], &["label", "String", "", "0"]],
+            )],
+        );
+        mock.on_statement(
+            "FROM system.merge_tree_settings",
+            [Response::rows(
+                &[("name", "String"), ("value", "String")],
+                &[&["server.enable_lightweight_update", "1"]],
+            )],
+        );
+    }
+
+    fn preview(connection: &Connection, sql: &str) -> QueryResult {
+        connection
+            .generated(sql, &CancelToken::default(), Fetch::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_preview_of_a_merge_tree_carries_its_edit_target_described_once() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(
+            &mock,
+            "MergeTree",
+            "MergeTree ORDER BY id SETTINGS enable_block_number_column = 1, \
+             enable_block_offset_column = 1",
+        );
+        let result = preview(&connection, PREVIEW);
+        let target = result.edit.expect("a MergeTree table is editable");
+        assert_eq!(result.read_only_reason, None);
+        assert_eq!(target.update, crate::db::UpdateSpelling::Update);
+        assert_eq!(
+            target.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![0] }
+        );
+        preview(&connection, PREVIEW);
+        assert_eq!(mock.hits("FROM system.columns"), 1);
+        assert!(
+            mock.requests()
+                .iter()
+                .filter(|request| request.statement.contains("FROM system."))
+                .all(|request| request.param("session_id").is_none())
+        );
+    }
+
+    #[test]
+    fn a_table_that_is_not_a_merge_tree_says_why_its_rows_are_read_only() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "Memory", "Memory");
+        let result = preview(&connection, PREVIEW);
+        assert_eq!(result.edit, None);
+        assert_eq!(
+            result.read_only_reason.as_deref(),
+            Some("ClickHouse edits rows of MergeTree tables only.")
+        );
+    }
+
+    #[test]
+    fn only_a_select_star_of_a_qualified_table_is_described() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        mock.on_statement("SELECT", [Response::rows(&[("id", "UInt32")], &[&["1"]])]);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        for sql in ["SELECT id FROM `d`.`t`", "SELECT * FROM `t`"] {
+            let result = preview(&connection, sql);
+            assert_eq!(
+                (result.edit, result.read_only_reason),
+                (None, None),
+                "{sql}"
+            );
+        }
+        assert_eq!(mock.hits("FROM system.tables"), 0);
+    }
+
+    #[test]
+    fn a_statement_that_may_change_a_table_drops_what_was_described() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        described(&mock, "MergeTree", "MergeTree ORDER BY id");
+        mock.on_statement("ALTER", [Response::empty()]);
+        mock.on_statement("SELECT 7", [Response::rows(&[("7", "UInt8")], &[&["7"]])]);
+        preview(&connection, PREVIEW);
+        run(&connection, "SELECT 7").unwrap();
+        preview(&connection, PREVIEW);
+        assert_eq!(mock.hits("FROM system.tables"), 1);
+
+        run(
+            &connection,
+            "ALTER TABLE d.t MODIFY SETTING enable_block_number_column = 1",
+        )
+        .unwrap();
+        preview(&connection, PREVIEW);
+        assert_eq!(mock.hits("FROM system.tables"), 2);
     }
 
     #[test]
@@ -3770,6 +4007,156 @@ mod live {
             }),
             _guard: None,
         }
+    }
+
+    fn previewed(connection: &Connection, table: &str) -> QueryResult {
+        connection
+            .generated(
+                &format!("SELECT * FROM `dbdelve_dev`.`{table}`"),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_each_seeded_table_is_described_as_the_design_says() {
+        use crate::db::UpdateSpelling::{AlterUpdate, Update};
+        let connection = live();
+        let described = |table: &str| connection.describe("dbdelve_dev", table).unwrap().unwrap();
+        assert_eq!(described("edit_lw").update, Update);
+        assert_eq!(described("edit_heavy").update, AlterUpdate);
+        assert_eq!(described("edit_sum").update, AlterUpdate);
+        assert_eq!(described("edit_dupes").update, AlterUpdate);
+        assert_eq!(described("edit_lw").delete_refusal, None);
+        assert!(described("edit_proj").delete_refusal.is_some());
+        assert!(
+            connection
+                .describe("dbdelve_dev", "no_such_table")
+                .unwrap()
+                .is_none()
+        );
+
+        let lw = previewed(&connection, "edit_lw");
+        let target = lw.edit.expect("edit_lw is editable");
+        assert_eq!(target.keys, vec![0, 1, 2]);
+        assert_eq!(
+            target.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![0] }
+        );
+        for table in ["scratch", "active_accounts", "plan_seats"] {
+            let result = previewed(&connection, table);
+            assert_eq!(result.edit, None, "{table}");
+            assert!(result.read_only_reason.is_some(), "{table}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_modified_block_setting_shows_in_the_next_describe() {
+        use crate::db::UpdateSpelling::{AlterUpdate, Update};
+        let connection = live();
+        let table = format!("edit_modify_{}", marker());
+        let name = format!("dbdelve_dev.{table}");
+        ran(
+            &connection,
+            &format!("CREATE TABLE {name} (id UInt32) ENGINE = MergeTree ORDER BY id"),
+        );
+        let update = |connection: &Connection| {
+            connection
+                .describe("dbdelve_dev", &table)
+                .unwrap()
+                .unwrap()
+                .update
+        };
+        assert_eq!(update(&connection), AlterUpdate);
+        ran(
+            &connection,
+            &format!(
+                "ALTER TABLE {name} MODIFY SETTING enable_block_number_column = 1, \
+                 enable_block_offset_column = 1"
+            ),
+        );
+        assert_eq!(update(&connection), Update);
+        ran(&connection, &format!("DROP TABLE {name}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_every_value_read_is_found_again_by_its_match_term() {
+        let connection = live();
+        let table = format!("edit_match_{}", marker());
+        let name = format!("dbdelve_dev.{table}");
+        ran(
+            &connection,
+            &format!(
+                "CREATE TABLE {name} (id UInt32, s String, ns Nullable(String), f Float64, \
+                 nan Float64, ninf Float32, d DateTime64(6, 'UTC'), dt DateTime('UTC'), \
+                 day Date, dec Decimal(10, 2), arr Array(String), m Map(String, UInt8), \
+                 tup Tuple(String, Nullable(UInt8)), e Enum8('a' = 1, 'b' = 2), uid UUID, \
+                 ip IPv6, lc LowCardinality(String), flag Bool, fs FixedString(4), \
+                 big UInt256, pt Point) \
+                 ENGINE = MergeTree ORDER BY id"
+            ),
+        );
+        ran(
+            &connection,
+            &format!(
+                "INSERT INTO {name} VALUES \
+                 (1, 'it\\'s a \\\\ \\t tab', NULL, 1.1, nan, -inf, \
+                  '2024-01-02 03:04:05.123456', '2024-01-02 03:04:05', '2024-01-02', 12.50, \
+                  ['a\\'b', ''], {{'k': 1}}, ('x\\'', NULL), 'b', \
+                  '61f0c404-5cb3-11e7-907b-a6006ad3dba0', '::1', 'lc', true, 'abcd', \
+                  115792089237316195423570985008687907853269984665640564039457584007913129639935, \
+                  (1.5, -2.25)), \
+                 (2, '', 'present', -0.0, 1e300, inf, '1969-12-31 23:59:59.000001', \
+                  '2024-01-02 03:04:06', '1970-01-01', -0.01, [], {{}}, ('', 7), 'a', \
+                  '00000000-0000-0000-0000-000000000000', '2001:db8::ff00:42:8329', '', false, \
+                  'wxyz', 0, (0, 0))"
+            ),
+        );
+        let read = previewed(&connection, &table);
+        let target = read.edit.clone().expect("a MergeTree table is editable");
+        assert_eq!(read.rows.len(), 2);
+        for (at, row) in read.rows.iter().enumerate() {
+            let terms: Vec<String> = read
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(column, described)| {
+                    super::edit::match_value(
+                        &described.name,
+                        row.get(column),
+                        described.data_type.as_deref().unwrap_or_default(),
+                    )
+                    .unwrap_or_else(|| panic!("row {at}: {} has no term", described.name))
+                })
+                .collect();
+            let predicate = terms.join(" AND ");
+            let delete = format!("DELETE FROM `dbdelve_dev`.`{table}` WHERE {predicate}");
+            assert!(
+                crate::sql::is_generated_write_on(Engine::ClickHouse, &delete),
+                "{delete}"
+            );
+            let named: Vec<&str> = target
+                .columns
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            assert!(crate::sql::delete_matches_key_on(
+                Engine::ClickHouse,
+                &delete,
+                &named
+            ));
+            let found = ran(
+                &connection,
+                &format!("SELECT count() FROM {name} WHERE {predicate}"),
+            );
+            assert_eq!(text(&found), "1", "row {at}: {predicate}");
+        }
+        ran(&connection, &format!("DROP TABLE {name}"));
     }
 
     crate::db::conformance::suite!(

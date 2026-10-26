@@ -127,6 +127,25 @@ pub(crate) fn column_types() -> Vec<(String, String)> {
     .to_vec()
 }
 
+/// What `column_types` says, in ClickHouse's own type names: its match terms
+/// are spelled by type, and a type it does not know is not matched.
+pub(crate) fn column_types_of(engine: Engine) -> Vec<(String, String)> {
+    match engine {
+        Engine::ClickHouse => [
+            ("id", "UInt32"),
+            ("Region", "String"),
+            ("Name", "String"),
+            ("payload", "String"),
+            ("created", "DateTime"),
+            ("flag", "Bool"),
+            ("we\"ird", "String"),
+        ]
+        .map(|(name, ty)| (name.to_owned(), ty.to_owned()))
+        .to_vec(),
+        _ => column_types(),
+    }
+}
+
 pub(crate) fn mongo_types() -> Vec<(String, String)> {
     [
         ("id", "int"),

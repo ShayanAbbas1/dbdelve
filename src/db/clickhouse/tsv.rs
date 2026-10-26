@@ -76,7 +76,7 @@ impl Decoder {
 
 /// The type under `Nullable`, `LowCardinality` (in either order) and
 /// `SimpleAggregateFunction`, and whether a `Nullable` was among them.
-fn peel(data_type: &str) -> (&str, bool) {
+pub(super) fn peel(data_type: &str) -> (&str, bool) {
     let mut current = data_type.trim();
     let mut nullable = false;
     loop {
