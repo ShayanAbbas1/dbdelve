@@ -679,16 +679,49 @@ EHziqoisXzppWwn2vAWvoTkc
     }
 
     /// Accepts one connection, reads the request, then runs `serve`.
+    ///
+    /// The whole request, body and all: Windows answers a close with unread
+    /// data waiting by resetting the connection, which fails a client that
+    /// would otherwise have read the answer `serve` wrote.
     fn listener(serve: impl FnOnce(std::net::TcpStream) + Send + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut seen = [0; 4096];
-            let _ = stream.read(&mut seen);
+            read_request(&mut stream);
             serve(stream);
         });
         port
+    }
+
+    /// Reads one request through to the end of its body, or until the peer
+    /// sends something that is not HTTP (a TLS hello, which waits for an
+    /// answer rather than finishing), stops, or goes quiet.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            if let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|length| length.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if seen.len() >= end + 4 + length {
+                    return;
+                }
+            } else if seen.first().is_some_and(|byte| !byte.is_ascii_uppercase()) {
+                return;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => seen.extend_from_slice(&chunk[..read]),
+            }
+        }
     }
 
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
