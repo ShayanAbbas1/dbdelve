@@ -32,7 +32,7 @@ use lsp_types::{
 
 use crate::{
     Workspace,
-    db::{Catalog, RelationKind, Syntax},
+    db::{Catalog, Engine, RelationKind, Syntax},
     fuzzy::{Fuzzy, Query},
     mql::{self, Completing},
     redis_cmd, sql,
@@ -505,7 +505,20 @@ impl CompletionProvider for SchemaCompletions {
         // them from `InputEvent::Change` if a very large buffer ever stutters.
         let sql = text.to_string();
         let (items, wanted) = self.items(&sql, offset);
+        self.respond(text, items, wanted, cx)
+    }
+}
 
+impl SchemaCompletions {
+    /// Ask for the columns `items` wanted, and hand its rows to the popup as
+    /// edits over `text`, the rope the ranges are offsets into.
+    fn respond(
+        &self,
+        text: &Rope,
+        items: Vec<(Range<usize>, Candidate)>,
+        wanted: Wanted,
+        cx: &mut App,
+    ) -> Task<Result<CompletionResponse>> {
         // Marked before the request so a second keystroke arriving while the
         // first fetch is in flight does not ask again.
         for key in wanted {
@@ -551,6 +564,73 @@ impl CompletionProvider for SchemaCompletions {
             .collect::<Vec<_>>();
 
         Task::ready(Ok(CompletionResponse::Array(items)))
+    }
+}
+
+/// The completion source for a raw filter bar on one relation's tab.
+///
+/// A raw filter is only a `WHERE`, so on its own it names no relation and
+/// [`SchemaCompletions`] would have no columns to offer. The bar's text is read
+/// behind the statement it is spliced into, which names the relation, and
+/// everything else -- the column fetch, the keywords, the silence inside a
+/// literal -- is the query editor's own. The prefix never runs: it is only
+/// something for the scan to read.
+pub struct FilterCompletions {
+    schema: Rc<SchemaCompletions>,
+    prefix: String,
+}
+
+impl FilterCompletions {
+    /// `None` on an engine whose raw filter the schema cannot complete: Redis's
+    /// is a `MATCH` glob over key names.
+    ///
+    /// The relation is named without its schema. The scan binds a relation by
+    /// its last name segment and reads a quoted `"schema"."name"` as two
+    /// names, while the columns it offers for a name are every schema's alike.
+    pub fn new(engine: Engine, schema: Rc<SchemaCompletions>, relation: &str) -> Option<Self> {
+        let relation = engine.quote_identifier(relation);
+        let prefix = match engine.syntax() {
+            Syntax::Sql => format!("SELECT * FROM {relation} WHERE "),
+            // As `mql::browse::raw_filter` wraps it, on the call that can name
+            // any collection.
+            Syntax::Mongo => format!("db.getCollection({relation}).find(\n"),
+            Syntax::Redis => return None,
+        };
+        Some(Self { schema, prefix })
+    }
+
+    /// [`SchemaCompletions::items`] for the bar's own text, with the ranges
+    /// back in that text.
+    fn items(&self, text: &str, offset: usize) -> (Vec<(Range<usize>, Candidate)>, Wanted) {
+        let shift = self.prefix.len();
+        let (items, wanted) = self
+            .schema
+            .items(&format!("{}{text}", self.prefix), shift + offset);
+        let items = items
+            .into_iter()
+            .filter(|(word, _)| word.start >= shift)
+            .map(|(word, candidate)| (word.start - shift..word.end - shift, candidate))
+            .collect();
+        (items, wanted)
+    }
+}
+
+impl CompletionProvider for FilterCompletions {
+    /// For the reason [`SchemaCompletions`] gives.
+    fn is_completion_trigger(&self, _: usize, _: &str, _: &mut App) -> bool {
+        true
+    }
+
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: CompletionContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<CompletionResponse>> {
+        let (items, wanted) = self.items(&text.to_string(), offset);
+        self.schema.respond(text, items, wanted, cx)
     }
 }
 
@@ -1244,6 +1324,60 @@ mod tests {
         }
         assert!(!mongo_labels("db.users.find({ name: /x/ }).|").is_empty());
         assert!(!mongo_labels("// a note\ndb.|").is_empty());
+    }
+
+    /// What a raw filter on `relation` offers for a caret at `|`: each label,
+    /// with the text of the filter's own that accepting it would replace.
+    fn filter_items(engine: Engine, relation: &str, text: &str) -> Vec<(String, String)> {
+        let offset = text.find('|').expect("the test must mark the caret");
+        let text = text.replace('|', "");
+        let mut schema = catalog();
+        schema.syntax = engine.syntax();
+        FilterCompletions::new(engine, Rc::new(schema), relation)
+            .expect("the engine completes a raw filter")
+            .items(&text, offset)
+            .0
+            .into_iter()
+            .map(|(word, candidate)| (text[word].to_string(), candidate.label))
+            .collect()
+    }
+
+    #[test]
+    fn a_raw_filter_offers_its_relations_columns_over_its_own_text() {
+        for engine in [Engine::Postgres, Engine::MySql, Engine::SqlServer] {
+            let offered = filter_items(engine, "accounts", "id > 5 AND ema|");
+            assert_eq!(
+                offered.first(),
+                Some(&("ema".to_string(), "email".to_string())),
+                "{engine:?}"
+            );
+        }
+        // At the very start of the text, where the shift back reaches zero.
+        let offered = filter_items(Engine::Postgres, "orders", "tot|");
+        assert_eq!(
+            offered.first(),
+            Some(&("tot".to_string(), "total".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_raw_filter_offers_nothing_inside_a_string() {
+        assert!(filter_items(Engine::Postgres, "accounts", "email = 'ema|").is_empty());
+    }
+
+    #[test]
+    fn a_mongo_raw_filter_offers_the_collections_fields() {
+        let offered = filter_items(Engine::MongoDb, "accounts", "{ ema|");
+        assert_eq!(
+            offered.first(),
+            Some(&("ema".to_string(), "email".to_string()))
+        );
+        assert!(filter_items(Engine::MongoDb, "accounts", "{ email: \"ema|\" }").is_empty());
+    }
+
+    #[test]
+    fn a_redis_raw_filter_completes_nothing() {
+        assert!(FilterCompletions::new(Engine::Redis, Rc::new(catalog()), "keys").is_none());
     }
 
     #[test]

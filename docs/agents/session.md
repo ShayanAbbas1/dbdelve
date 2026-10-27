@@ -337,6 +337,15 @@ The provider is a snapshot, replaced whole when the catalog reloads
 (`Workspace::install_completions`), and installed on every buffer rather than
 the visible one.
 
+A raw filter bar completes too, through `FilterCompletions`: a `WHERE` names no
+relation, so the bar's text is read behind `SELECT * FROM <relation> WHERE `
+(on MongoDB, `db.getCollection(<name>).find(`) and handed to the same provider,
+with the ranges shifted back into the bar. The prefix is never run. A Redis
+filter is a `MATCH` glob and completes nothing. `install_completions` reaches
+every raw bar as well, from `Session::completions`, the provider it last built,
+which is also where a bar turned raw later takes it from. A new bar starts raw:
+one waiting on a column ignores whatever is typed into it.
+
 ## Storage and platforms
 
 - **Storage** is decided in `store.rs`: Application Support on macOS,

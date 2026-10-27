@@ -7,8 +7,10 @@
 //! Everything here was a free function or a plain data type at the crate root.
 //! They moved out whole; nothing changed but their visibility.
 
+use std::rc::Rc;
+
 use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{CompletionProvider, EditorState, InputEvent};
 use serde::Deserialize;
 
 use crate::{
@@ -270,8 +272,9 @@ impl Conjunction {
 /// every predicate is derived from and the shape that goes to disk.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct FilterBar {
-    /// `None` until the dropdown has been used, which is a bar that narrows
-    /// nothing. Unread on a raw bar.
+    /// The column picked from the dropdown. `None` on a bar that never had
+    /// one, which narrows nothing unless it is raw, as a new bar starts out.
+    /// Unread on a raw bar.
     pub(crate) column: Option<String>,
     pub(crate) operator: Operator,
     pub(crate) conjunction: Conjunction,
@@ -282,13 +285,16 @@ pub(crate) struct FilterBar {
     pub(crate) value: String,
 }
 
-/// One filter bar on screen: [`FilterBar`] with its value in an input.
+/// One filter bar on screen: [`FilterBar`] with its value in an editor.
+///
+/// A code editor rather than an input, drawn one line tall, because only an
+/// editor highlights and completes, and a raw bar is SQL being written.
 pub(crate) struct FilterRow {
     pub(crate) column: Option<String>,
     pub(crate) operator: Operator,
     pub(crate) conjunction: Conjunction,
     pub(crate) raw: bool,
-    pub(crate) value: Entity<InputState>,
+    pub(crate) value: Entity<EditorState>,
     /// The value as of this bar's last Enter, which is all that reaches a
     /// statement or the file. The input's own text can be anything typed
     /// since, and changing another bar or reopening the tab must not run it.
@@ -297,18 +303,31 @@ pub(crate) struct FilterRow {
 
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
 /// that ran on every keystroke would put a half-typed predicate on the wire.
+///
+/// `completions` is what the bar offers while it is raw
+/// (`Session::filter_completions`).
 pub(crate) fn filter_row(
     engine: Engine,
     id: u64,
     bar: FilterBar,
+    completions: Option<Rc<dyn CompletionProvider>>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> FilterRow {
-    let placeholder = value_placeholder(engine, bar.raw, bar.operator);
     let applied = bar.value.clone();
+    let (raw, operator) = (bar.raw, bar.operator);
     let input = cx.new(|cx| {
-        let mut state = InputState::new(window, cx).placeholder(placeholder);
+        let mut state = EditorState::new(window, cx)
+            .line_number(false)
+            .folding(false)
+            .indent_guides(false)
+            .searchable(false)
+            .soft_wrap(false)
+            // Plain Enter goes to an open completion popup first, and is the
+            // apply otherwise.
+            .submit_on_enter(true);
         state.set_value(bar.value, window, cx);
+        shape_value(&mut state, engine, raw, operator, completions, window, cx);
         state
     });
     cx.subscribe(&input, move |workspace, input, event: &InputEvent, cx| {
@@ -327,11 +346,46 @@ pub(crate) fn filter_row(
     }
 }
 
+/// Dress a bar's value box for the shape the bar has. Raw, it is written in
+/// the engine's own language, highlighted and completed as the query editor
+/// is; a column's bar holds a value to compare against, where a keyword's
+/// colour or a column offered would only be noise.
+pub(crate) fn shape_value(
+    state: &mut EditorState,
+    engine: Engine,
+    raw: bool,
+    operator: Operator,
+    completions: Option<Rc<dyn CompletionProvider>>,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    state.set_highlighter(value_language(engine, raw), cx);
+    state.set_placeholder(value_placeholder(engine, raw, operator), window, cx);
+    state.lsp_mut().completion_provider = completions.filter(|_| raw);
+}
+
+/// The grammar a bar's value is highlighted with, `"text"` being none.
+pub(crate) fn value_language(engine: Engine, raw: bool) -> &'static str {
+    match (raw, engine.syntax()) {
+        (true, Syntax::Sql | Syntax::Mongo) => engine.syntax().highlighter(),
+        // A `MATCH` glob, which a shell grammar would only colour wrongly.
+        (true, Syntax::Redis) | (false, _) => "text",
+    }
+}
+
 pub(crate) fn value_placeholder(engine: Engine, raw: bool, operator: Operator) -> &'static str {
     match raw {
         true => engine.raw_filter_placeholder(),
         false => operator.placeholder(),
     }
+}
+
+/// Pasted text on one line, or `None` when it already is. A bar is one row
+/// tall, so a second line would sit out of sight; a space keeps the words
+/// apart where the line break did, which a raw predicate reads the same.
+pub(crate) fn one_line(text: &str) -> Option<String> {
+    text.contains(['\n', '\r'])
+        .then(|| text.replace("\r\n", " ").replace(['\n', '\r'], " "))
 }
 
 /// Every bar as last applied, unfinished ones included.
@@ -848,6 +902,15 @@ pub(crate) fn sort_columns(
 mod tests {
     use super::*;
     use crate::{db, db::RelationKind, explorer, explorer::PREVIEW_ROW_LIMIT, sql};
+
+    #[test]
+    fn a_pasted_predicate_lands_on_one_line_with_its_words_apart() {
+        assert_eq!(
+            one_line("id > 5\nAND name IS NULL\r\nOR x\ry").as_deref(),
+            Some("id > 5 AND name IS NULL OR x y")
+        );
+        assert_eq!(one_line("id > 5"), None);
+    }
 
     #[test]
     fn mongo_operators_read_as_english_not_like() {
