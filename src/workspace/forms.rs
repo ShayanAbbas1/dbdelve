@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, StyledText, ease_out_quint};
+use gpui::{Animation, AnimationExt, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
@@ -251,6 +251,18 @@ impl Workspace {
                     &form.path,
                     mono_field(&form.path),
                     t,
+                )
+                .child(
+                    icon_button(
+                        "browse-path",
+                        icon::BROWSE,
+                        Tone::Quiet,
+                        Control::Compact,
+                        t,
+                    )
+                    .ml(px(layout::SPACE_SM))
+                    .tooltip("Choose a file")
+                    .on_click(cx.listener(Self::browse_database_file)),
                 )
                 .into_any_element(),
             ),
@@ -645,6 +657,43 @@ impl Workspace {
         // A pass without the tunnel did not test it.
         form.test = None;
         cx.notify();
+    }
+
+    /// The native Open dialog, for a database file found rather than typed.
+    /// A dismissed dialog leaves the field as it was.
+    fn browse_database_file(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let chosen = chosen.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| match chosen {
+                Ok(Ok(Some(paths))) => {
+                    let (Some(path), Some(form)) = (paths.into_iter().next(), &mut workspace.form)
+                    else {
+                        return;
+                    };
+                    let path = path.to_string_lossy().into_owned();
+                    form.path
+                        .update(cx, |input, cx| input.set_value(path, window, cx));
+                    form.needs_focus = Some(form.path.clone());
+                    // A pass was for the file that was there before.
+                    form.test = None;
+                    cx.notify();
+                }
+                Ok(Err(error)) => workspace.note(error.to_string(), cx),
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
     }
 
     /// Closes the form without saving, from its × or its Cancel.
