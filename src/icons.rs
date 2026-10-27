@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 68] = [
+const ICONS: [(&str, &IconData); 69] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -75,6 +75,7 @@ const ICONS: [(&str, &IconData); 68] = [
     ("icons/replace.svg", icondata_lu::LuReplace),
     ("icons/case-sensitive.svg", icondata_lu::LuCaseSensitive),
     ("icons/folder.svg", icondata_lu::LuFolder),
+    ("icons/folder-open.svg", icondata_lu::LuFolderOpen),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
     (
@@ -133,6 +134,7 @@ pub mod icon {
     pub const SEARCH: &str = "icons/search.svg";
     pub const DATABASE: &str = "icons/database.svg";
     pub const PROJECT: &str = "icons/folder.svg";
+    pub const BROWSE: &str = "icons/folder-open.svg";
     pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const ADD_TO_PROJECT: &str = "icons/folder-plus.svg";
     pub const TABLE: &str = "icons/table.svg";

@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, StyledText, ease_out_quint};
+use gpui::{Animation, AnimationExt, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::PopupMenuItem;
 
@@ -252,6 +252,7 @@ impl Workspace {
                     mono_field(&form.path),
                     t,
                 )
+                .child(browse_button("browse-path", &form.path, t, cx))
                 .into_any_element(),
             ),
             // No encryption row: the transport is HTTPS and always verified,
@@ -274,7 +275,13 @@ impl Workspace {
                     } else {
                         bare(input)
                     };
-                    connection.push(field_row(id, label, input, control, t).into_any_element());
+                    connection.push(
+                        field_row(id, label, input, control, t)
+                            .when(id == "private-key", |row| {
+                                row.child(browse_button("browse-private-key", input, t, cx))
+                            })
+                            .into_any_element(),
+                    );
                 }
             }
             Fields::Server => {
@@ -369,6 +376,12 @@ impl Workspace {
                         mono_field(&form.root_certificate),
                         t,
                     )
+                    .child(browse_button(
+                        "browse-root-certificate",
+                        &form.root_certificate,
+                        t,
+                        cx,
+                    ))
                     .into_any_element(),
                 );
             }
@@ -405,7 +418,13 @@ impl Workspace {
                         "Identity file",
                         &form.ssh_identity_file,
                         mono_field(&form.ssh_identity_file),
-                    ),
+                    )
+                    .child(browse_button(
+                        "browse-identity-file",
+                        &form.ssh_identity_file,
+                        t,
+                        cx,
+                    )),
                 ];
                 security.extend(
                     rows.into_iter()
@@ -645,6 +664,48 @@ impl Workspace {
         // A pass without the tunnel did not test it.
         form.test = None;
         cx.notify();
+    }
+
+    /// The native Open dialog, for a file found rather than typed into
+    /// `input`. A dismissed dialog leaves the field as it was.
+    fn browse_into(
+        &mut self,
+        input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let chosen = chosen.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| match chosen {
+                Ok(Ok(Some(paths))) => {
+                    let (Some(path), Some(form)) = (paths.into_iter().next(), &mut workspace.form)
+                    else {
+                        return;
+                    };
+                    // The dialog does not hold the window: by now the form may
+                    // be another one, or its field gone with the engine or a
+                    // switch, and the pick no longer has anywhere to go.
+                    if !shown_file_fields(form).contains(&&input) {
+                        return;
+                    }
+                    let path = path.to_string_lossy().into_owned();
+                    input.update(cx, |input, cx| input.set_value(path, window, cx));
+                    form.needs_focus = Some(input);
+                    // A pass was for the file that was there before.
+                    form.test = None;
+                    cx.notify();
+                }
+                Ok(Err(error)) => workspace.note(error.to_string(), cx),
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
     }
 
     /// Closes the form without saving, from its × or its Cancel.
@@ -2139,6 +2200,39 @@ fn nested_field_row(
 /// A field with nothing around it: the row it sits in is the box.
 fn bare(input: &Entity<InputState>) -> Input {
     Input::new(input).appearance(false).p_0()
+}
+
+/// The path fields the form is drawing, each with a [`browse_button`].
+fn shown_file_fields(form: &ConnectionForm) -> Vec<&Entity<InputState>> {
+    match form.engine.fields() {
+        Fields::File => vec![&form.path],
+        Fields::Account => vec![&form.private_key],
+        Fields::Server => {
+            let mut shown = Vec::new();
+            if form.sslmode.checks_certificate() {
+                shown.push(&form.root_certificate);
+            }
+            if form.ssh {
+                shown.push(&form.ssh_identity_file);
+            }
+            shown
+        }
+    }
+}
+
+fn browse_button(
+    id: &'static str,
+    input: &Entity<InputState>,
+    t: Theme,
+    cx: &Context<Workspace>,
+) -> gpui_component::button::Button {
+    let input = input.clone();
+    icon_button(id, icon::BROWSE, Tone::Quiet, Control::Compact, t)
+        .ml(px(layout::SPACE_SM))
+        .tooltip("Choose a file")
+        .on_click(cx.listener(move |workspace, _, window, cx| {
+            workspace.browse_into(input.clone(), window, cx);
+        }))
 }
 
 /// A port after its host, behind a hairline and the colon that joins the two
