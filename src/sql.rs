@@ -3239,9 +3239,12 @@ pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
     table_read_or_why(engine, sql).ok().map(|(read, _)| read)
 }
 
-/// [`table_read`], with the names the select list gives a column of the table
-/// by `AS` (`SELECT a AS b` gives `b`), or what refused it. A `Computed` item
-/// refuses nothing here; that is the caller's to decide.
+/// [`table_read`], with the names the select list reads as something other
+/// than a column: an alias given by `AS` (`SELECT a AS b` gives `b`) and the
+/// first part of a name it takes for the table's (`t` of `t.a`). A column of
+/// the table by one of those names makes the reading ambiguous on an engine
+/// that resolves a name to more than one thing. Or what refused it. A
+/// `Computed` item refuses nothing here; that is the caller's to decide.
 pub(crate) fn table_read_or_why(
     engine: Engine,
     sql: &str,
@@ -3366,13 +3369,19 @@ pub(crate) fn table_read_or_why(
         Some(alias) => vec![std::slice::from_ref(&alias.name.value)],
         None => (0..table.len()).map(|from| &table[from..]).collect(),
     };
+    // ClickHouse's names are case-sensitive: beside a table aliased `t`,
+    // `T.x` is a field of a column `T`.
+    let exact = engine.spec().sql.parser_dialect == ParserDialect::ClickHouse;
     let qualifies = |written: &[String]| {
         qualifiers.iter().any(|qualifier| {
             qualifier.len() == written.len()
-                && qualifier
-                    .iter()
-                    .zip(written)
-                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                && qualifier.iter().zip(written).all(|(a, b)| {
+                    if exact {
+                        a == b
+                    } else {
+                        a.eq_ignore_ascii_case(b)
+                    }
+                })
         })
     };
     let bare = |options: &WildcardAdditionalOptions| {
@@ -3383,7 +3392,8 @@ pub(crate) fn table_read_or_why(
             && options.opt_rename.is_none()
             && options.opt_alias.is_none()
     };
-    let column = |expr: &Expr| match expr {
+    let mut shadows = Vec::new();
+    let mut column = |expr: &Expr| match expr {
         Expr::Identifier(ident) => Projected::Column(ident.value.clone()),
         Expr::CompoundIdentifier(idents) => match idents.split_last() {
             Some((last, qualifier))
@@ -3394,6 +3404,7 @@ pub(crate) fn table_read_or_why(
                         .collect::<Vec<_>>(),
                 ) =>
             {
+                shadows.push(qualifier[0].value.clone());
                 Projected::Column(last.value.clone())
             }
             // A struct's field, read off a column of the table.
@@ -3403,7 +3414,7 @@ pub(crate) fn table_read_or_why(
     };
 
     let mut columns = Vec::with_capacity(select.projection.len().max(1));
-    let mut renamed = Vec::new();
+    let mut aliases = Vec::new();
     if select.projection.is_empty() && select.flavor == SelectFlavor::FromFirstNoSelect {
         columns.push(Projected::Every);
     }
@@ -3414,20 +3425,22 @@ pub(crate) fn table_read_or_why(
                 SelectItemQualifiedWildcardKind::ObjectName(name),
                 options,
             ) if bare(options) && parts(name).is_some_and(|name| qualifies(&name)) => {
+                aliases.extend(parts(name).and_then(|name| name.into_iter().next()));
                 Projected::Every
             }
             SelectItem::UnnamedExpr(expr) => column(expr),
             SelectItem::ExprWithAlias { expr, alias } => {
                 let projected = column(expr);
                 if !matches!(&projected, Projected::Column(name) if *name == alias.value) {
-                    renamed.push(alias.value.clone());
+                    aliases.push(alias.value.clone());
                 }
                 projected
             }
             _ => return Err(Unread::Projection),
         });
     }
-    Ok((TableRead { table, columns }, renamed))
+    aliases.extend(shadows);
+    Ok((TableRead { table, columns }, aliases))
 }
 
 /// Every unquoted word of `sql`, in order, outside strings and comments; `None`

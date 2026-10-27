@@ -354,20 +354,27 @@ pub(super) fn unread(why: Unread) -> &'static str {
 /// The column of `table` (named `name`) behind each of `columns`, the result
 /// of `read`, or why the rows cannot be written back. A `*` stands for as
 /// many result columns as the rest of the list leaves, which the server names
-/// as the table does; a name in the list is read as written. An alias that is
-/// also a column's name refuses the lot: the server takes the alias over the
-/// column wherever the name appears, so `SELECT a AS b, b` reads `a` twice.
+/// as the table does; a name in the list is read as written.
+///
+/// `shadows` are the names the list reads as something else (an alias, a
+/// table's qualifier); one that is also a column's name refuses the lot, since
+/// the server may read it the other way: an alias wins over a column wherever
+/// its name appears, so `SELECT a AS b, b` reads `a` twice, and `t.x` can be a
+/// field of a column `t`. So does a result column whose type is not its
+/// column's: the name was something else to the server, `inf` the literal
+/// beside a column `inf`. An `ALIAS` column is computed as it is read, so a
+/// value of one need not name the same row a moment later.
 pub(super) fn origins(
     read: &TableRead,
-    renamed: &[String],
+    shadows: &[String],
     columns: &[Column],
     table: &Table,
     name: &str,
 ) -> Result<Vec<String>, String> {
-    if let Some(alias) = renamed.iter().find(|alias| table.column(alias).is_some()) {
+    if let Some(shadow) = shadows.iter().find(|shadow| table.column(shadow).is_some()) {
         return Err(format!(
-            "The alias {alias} is also the name of a column, so DBDelve cannot tell which one \
-             each value is."
+            "{shadow} is a column's name and is read here as something else too, so DBDelve \
+             cannot tell which one each value is."
         ));
     }
     let stars = read
@@ -400,6 +407,23 @@ pub(super) fn origins(
         return Err(format!(
             "{missing} is not a column of {name}, so these rows cannot be edited."
         ));
+    }
+    for (origin, column) in origins.iter().zip(columns) {
+        let Some(described) = table.column(origin) else {
+            return Err(UNMAPPED.into());
+        };
+        if column.data_type.as_deref() != Some(described.data_type.as_str()) {
+            return Err(format!(
+                "{} is not read as the column {origin} is typed, so these rows cannot be edited.",
+                column.name
+            ));
+        }
+        if described.default_kind == "ALIAS" {
+            return Err(format!(
+                "{origin} is an ALIAS column, computed as it is read, so these rows cannot be \
+                 edited."
+            ));
+        }
     }
     let mut seen = HashSet::new();
     if !origins.iter().all(|origin| seen.insert(origin)) {
@@ -1130,21 +1154,44 @@ mod tests {
     #[test]
     fn a_query_of_one_tables_own_rows_is_read_off_its_statement() {
         let every = || vec![Projected::Every];
-        for (sql, table, columns) in [
-            ("SELECT * FROM edit_lw", vec!["edit_lw"], every()),
+        let none: Vec<&str> = Vec::new();
+        for (sql, table, columns, shadows) in [
+            (
+                "SELECT * FROM edit_lw",
+                vec!["edit_lw"],
+                every(),
+                none.clone(),
+            ),
             (
                 "SELECT * FROM `d`.`t` WHERE id > 1 ORDER BY id LIMIT 10 OFFSET 5",
                 vec!["d", "t"],
                 every(),
+                none.clone(),
             ),
-            ("/* rows */ select * from d.t", vec!["d", "t"], every()),
-            ("SELECT * FROM t LIMIT 1 BY id", vec!["t"], every()),
+            (
+                "/* rows */ select * from d.t",
+                vec!["d", "t"],
+                every(),
+                none.clone(),
+            ),
+            (
+                "SELECT * FROM t LIMIT 1 BY id",
+                vec!["t"],
+                every(),
+                none.clone(),
+            ),
             (
                 "SELECT * FROM t PREWHERE id = 1 WHERE label != ''",
                 vec!["t"],
                 every(),
+                none.clone(),
             ),
-            ("SELECT * FROM t SAMPLE 0.5", vec!["t"], every()),
+            (
+                "SELECT * FROM t SAMPLE 0.5",
+                vec!["t"],
+                every(),
+                none.clone(),
+            ),
             (
                 "SELECT label, x.id, x.* FROM d.t AS x",
                 vec!["d", "t"],
@@ -1153,15 +1200,31 @@ mod tests {
                     Projected::Column("id".into()),
                     Projected::Every,
                 ],
+                vec!["x", "x"],
+            ),
+            (
+                "SELECT id AS ident, label AS label, d.t.qty FROM d.t",
+                vec!["d", "t"],
+                vec![
+                    Projected::Column("id".into()),
+                    Projected::Column("label".into()),
+                    Projected::Column("qty".into()),
+                ],
+                vec!["ident", "d"],
+            ),
+            // Names are case-sensitive: `T` is a column, and `T.x` a field of it.
+            (
+                "SELECT T.x FROM d.t AS t",
+                vec!["d", "t"],
+                vec![Projected::Computed],
+                none.clone(),
             ),
         ] {
-            let (read, renamed) = query_shape(sql).unwrap_or_else(|why| panic!("{sql}: {why}"));
+            let (read, found) = query_shape(sql).unwrap_or_else(|why| panic!("{sql}: {why}"));
             assert_eq!(read.table, table, "{sql}");
             assert_eq!(read.columns, columns, "{sql}");
-            assert!(renamed.is_empty(), "{sql}");
+            assert_eq!(found, shadows, "{sql}");
         }
-        let (_, renamed) = query_shape("SELECT id AS ident, label AS label FROM t").unwrap();
-        assert_eq!(renamed, ["ident"]);
     }
 
     #[test]
@@ -1223,13 +1286,40 @@ mod tests {
         assert_eq!(read.columns, [Projected::Computed]);
     }
 
-    fn mapped(sql: &str, header: &[&str]) -> Result<Vec<String>, String> {
+    /// `sql` read off `(id UInt32, label String, qty Int32, inf String, total
+    /// Int64 ALIAS …, t String)`, its header `header`, each column typed as
+    /// the table types it unless `typed` says otherwise.
+    fn mapped_as(
+        sql: &str,
+        header: &[&str],
+        typed: &[(&str, &str)],
+    ) -> Result<Vec<String>, String> {
         let mut facts = facts("MergeTree", "MergeTree ORDER BY id", "");
         facts.columns.push(column("qty", "Int32", "", false));
+        facts.columns.push(column("inf", "String", "", false));
+        facts.columns.push(column("total", "Int64", "ALIAS", false));
+        facts.columns.push(column("t", "String", "", false));
+        let types: HashMap<String, String> = facts
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), column.data_type.clone()))
+            .chain(
+                typed
+                    .iter()
+                    .map(|(name, data_type)| (name.to_string(), data_type.to_string())),
+            )
+            .collect();
         let table = Table::of(facts);
-        let (read, renamed) = query_shape(sql).unwrap();
-        let columns: Vec<(&str, &str)> = header.iter().map(|name| (*name, "String")).collect();
-        origins(&read, &renamed, &result(&columns), &table, "t")
+        let (read, shadows) = query_shape(sql).unwrap();
+        let columns: Vec<(&str, &str)> = header
+            .iter()
+            .map(|name| (*name, types.get(*name).map_or("String", String::as_str)))
+            .collect();
+        origins(&read, &shadows, &result(&columns), &table, "t")
+    }
+
+    fn mapped(sql: &str, header: &[&str]) -> Result<Vec<String>, String> {
+        mapped_as(sql, header, &[])
     }
 
     #[test]
@@ -1243,21 +1333,34 @@ mod tests {
             ["qty", "id"]
         );
         assert_eq!(
-            mapped("SELECT label AS name, t.id FROM t", &["name", "id"]).unwrap(),
+            mapped("SELECT label AS name, x.id FROM t AS x", &["name", "id"]).unwrap(),
             ["label", "id"]
         );
     }
 
     #[test]
     fn a_result_column_that_cannot_be_mapped_exactly_refuses_the_rows() {
-        let alias = "The alias qty is also the name of a column, so DBDelve cannot tell which \
-                     one each value is.";
+        let shadowed = |name: &str| {
+            format!(
+                "{name} is a column's name and is read here as something else too, so DBDelve \
+                 cannot tell which one each value is."
+            )
+        };
         for (sql, header, reason) in [
             // The server reads the second `qty` as the alias: `id` twice.
             (
                 "SELECT id AS qty, qty FROM t",
                 vec!["qty", "qty"],
-                alias.to_string(),
+                shadowed("qty"),
+            ),
+            // `t.label` could be a field of the column `t`.
+            ("SELECT t.label FROM d.t AS t", vec!["label"], shadowed("t")),
+            (
+                "SELECT total, id FROM t",
+                vec!["total", "id"],
+                "total is an ALIAS column, computed as it is read, so these rows cannot be \
+                 edited."
+                    .to_string(),
             ),
             ("SELECT id, id FROM t", vec!["id", "id"], TWICE.to_string()),
             (
@@ -1286,21 +1389,36 @@ mod tests {
         ] {
             assert_eq!(mapped(sql, &header), Err(reason), "{sql}");
         }
+        // The server reads a bare `inf` as the number, not the column.
+        assert_eq!(
+            mapped_as(
+                "SELECT inf, id FROM t",
+                &["inf", "id"],
+                &[("inf", "Float64")]
+            ),
+            Err(
+                "inf is not read as the column inf is typed, so these rows cannot be edited."
+                    .to_string()
+            )
+        );
     }
 
     #[test]
     fn some_of_a_tables_columns_name_their_rows_by_those_alone_and_the_guard_keeps_it_one_row() {
         let mut facts = facts("MergeTree", &format!("MergeTree ORDER BY id{BLOCKS}"), "");
-        facts.columns.push(column("total", "Int64", "ALIAS", false));
+        facts
+            .columns
+            .push(column("day", "Date", "MATERIALIZED", false));
+        facts.columns.push(column("qty", "Int64", "", false));
         let table = Table::of(facts);
-        let columns = result(&[("total", "Int64"), ("shown", "String")]);
-        let origins = ["total".to_string(), "label".to_string()];
+        let columns = result(&[("day", "Date"), ("shown", "String")]);
+        let origins = ["day".to_string(), "label".to_string()];
         let (target, reason) = table.target_of("d", "t", &columns, &origins);
         assert_eq!(reason, None);
         let target = target.unwrap();
         assert_eq!(
             target.columns,
-            vec![Some("total".into()), Some("label".into())]
+            vec![Some("day".into()), Some("label".into())]
         );
         // Only the two columns read name the row, so other rows can share
         // them; what keeps the write to one row is the guard's count of

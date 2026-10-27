@@ -532,7 +532,7 @@ impl Connection {
             return (None, None);
         }
         let refused = |reason: &str| (None, Some(reason.to_string()));
-        let (read, renamed) = match query_shape(sql) {
+        let (read, shadows) = match query_shape(sql) {
             Ok(read) => read,
             Err(reason) => return refused(reason),
         };
@@ -563,7 +563,7 @@ impl Connection {
         if let Some(reason) = &described.refusal {
             return refused(reason);
         }
-        match edit::origins(&read, &renamed, columns, &described, &table) {
+        match edit::origins(&read, &shadows, columns, &described, &table) {
             Ok(origins) => described.target_of(&schema, &table, columns, &origins),
             Err(reason) => (None, Some(reason)),
         }
