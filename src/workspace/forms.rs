@@ -688,6 +688,12 @@ impl Workspace {
                     else {
                         return;
                     };
+                    // The dialog does not hold the window: by now the form may
+                    // be another one, or its field gone with the engine or a
+                    // switch, and the pick no longer has anywhere to go.
+                    if !shown_file_fields(form).contains(&&input) {
+                        return;
+                    }
                     let path = path.to_string_lossy().into_owned();
                     input.update(cx, |input, cx| input.set_value(path, window, cx));
                     form.needs_focus = Some(input);
@@ -2196,9 +2202,24 @@ fn bare(input: &Entity<InputState>) -> Input {
     Input::new(input).appearance(false).p_0()
 }
 
-/// A port after its host, behind a hairline and the colon that joins the two
-/// in a URL.
-/// Opens the native Open dialog for the path field beside it.
+/// The path fields the form is drawing, each with a [`browse_button`].
+fn shown_file_fields(form: &ConnectionForm) -> Vec<&Entity<InputState>> {
+    match form.engine.fields() {
+        Fields::File => vec![&form.path],
+        Fields::Account => vec![&form.private_key],
+        Fields::Server => {
+            let mut shown = Vec::new();
+            if form.sslmode.checks_certificate() {
+                shown.push(&form.root_certificate);
+            }
+            if form.ssh {
+                shown.push(&form.ssh_identity_file);
+            }
+            shown
+        }
+    }
+}
+
 fn browse_button(
     id: &'static str,
     input: &Entity<InputState>,
@@ -2214,6 +2235,8 @@ fn browse_button(
         }))
 }
 
+/// A port after its host, behind a hairline and the colon that joins the two
+/// in a URL.
 fn port_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
     div()
         .flex_shrink_0()
