@@ -3,6 +3,7 @@
 //! every connect rather than once, so a file a rotation job rewrites is what
 //! the next session signs in with.
 
+use std::io::Read as _;
 use std::path::PathBuf;
 
 pub(super) enum Lookup {
@@ -11,6 +12,7 @@ pub(super) enum Lookup {
         path: PathBuf,
     },
     /// libpq refuses a file the group or others can read, and so does dbdelve.
+    #[cfg(unix)]
     Exposed(PathBuf),
     Missing,
 }
@@ -24,6 +26,7 @@ impl Lookup {
             Self::Found { path, .. } if rejected => {
                 Some(format!("The password came from {}.", path.display()))
             }
+            #[cfg(unix)]
             Self::Exposed(path) if rejected || password_missing(error) => Some(format!(
                 "{} was not read: it is readable by other users, and Postgres clients only \
                      read it at 0600 or stricter.",
@@ -36,6 +39,7 @@ impl Lookup {
 
 /// tokio-postgres has no error kind for this one, only the words, and they
 /// sit on the source rather than in its own message.
+#[cfg(unix)]
 fn password_missing(error: &tokio_postgres::Error) -> bool {
     std::error::Error::source(error).is_some_and(|source| source.to_string() == "password missing")
 }
@@ -44,7 +48,12 @@ pub(super) fn lookup(host: &str, port: u16, database: &str, user: &str) -> Looku
     let Some(path) = path() else {
         return Lookup::Missing;
     };
-    let Ok(metadata) = std::fs::metadata(&path) else {
+    // One handle for the check and the read, so a rotation swapping the file
+    // in between cannot pass one file's permissions off as another's.
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return Lookup::Missing;
+    };
+    let Ok(metadata) = file.metadata() else {
         return Lookup::Missing;
     };
     if !metadata.is_file() {
@@ -57,9 +66,14 @@ pub(super) fn lookup(host: &str, port: u16, database: &str, user: &str) -> Looku
             return Lookup::Exposed(path);
         }
     }
-    let Ok(contents) = std::fs::read_to_string(&path) else {
+    let mut contents = Vec::new();
+    if file.read_to_end(&mut contents).is_err() {
         return Lookup::Missing;
-    };
+    }
+    // libpq reads bytes, so a stray byte in a comment or another line must not
+    // cost every line its use. A field holding one matches nothing dbdelve
+    // asks for, which leaves the first-match order as libpq has it.
+    let contents = String::from_utf8_lossy(&contents);
     match password(&contents, [host, &port.to_string(), database, user]) {
         Some(password) => Lookup::Found { password, path },
         None => Lookup::Missing,
@@ -203,6 +217,15 @@ db.internal:5432:orders:svc_orders:orders-secret
         assert_eq!(
             password("*:*:*:*:secret:trailing", WANTED).as_deref(),
             Some("secret")
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_leaves_the_others_usable() {
+        let bytes = b"# caf\xe9\n*:*:*:svc_orders:s3cret\n";
+        assert_eq!(
+            password(&String::from_utf8_lossy(bytes), WANTED).as_deref(),
+            Some("s3cret")
         );
     }
 

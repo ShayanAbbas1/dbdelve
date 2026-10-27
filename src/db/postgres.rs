@@ -1914,12 +1914,14 @@ mod tests {
 
         let config = live_config();
         let file = std::path::PathBuf::from(std::env::var_os("PGPASSFILE").unwrap());
+        let field = |value: &str| value.replace('\\', r"\\").replace(':', r"\:");
         let write = |password: &str, mode: u32| {
             let line = format!(
-                "# rotated nightly\n{}:{}:*:{}:{password}\n",
-                config.host,
+                "# rotated nightly\n{}:{}:*:{}:{}\n",
+                field(&config.host),
                 config.port.unwrap_or(DEFAULT_PORT),
-                config.user
+                field(&config.user),
+                field(password)
             );
             std::fs::write(&file, line).expect("the password file should write");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode))
