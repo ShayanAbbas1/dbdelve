@@ -925,6 +925,7 @@ fn resolve_edit_target(
         table: table.to_string(),
         columns: probed.iter().map(column_of).collect(),
         keys,
+        ..Default::default()
     })
 }
 
@@ -949,7 +950,7 @@ fn column_of(result: &QueryResult, column: &str) -> Result<Vec<String>, DbError>
 /// The driver verifies certificates itself, so `tls::connector`'s verifiers are
 /// not reusable here — see the multi-engine spec, section 4.3, for the trust
 /// store that entails and why the divergence is acceptable. What matters for
-/// hard rule 7 is that nothing below quietly accepts less than it was asked for:
+/// hard rule 6 is that nothing below quietly accepts less than it was asked for:
 /// each rung either gets its checks or fails saying so.
 fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
     let with_root = || {
@@ -977,7 +978,7 @@ fn ssl_options(server: &ServerConfig) -> Option<SslOpts> {
 
 /// The driver checks the certificate's name against the address it dials and
 /// offers no way to name another, so through a tunnel verify-full could only
-/// ever check the name against the loopback address (AGENTS.md, hard rule 7).
+/// ever check the name against the loopback address (AGENTS.md, hard rule 6).
 fn unverifiable_through_a_tunnel(server: &ServerConfig, engine: Engine) -> DbError {
     plain_error(format!(
         "sslmode=verify-full cannot be honoured through an SSH tunnel on {}: \
@@ -1208,7 +1209,7 @@ mod tests {
 
     #[test]
     fn every_rung_gets_the_checks_it_asked_for() {
-        // Hard rule 7 in code. `disable` builds nothing, the two middle rungs
+        // Hard rule 6 in code. `disable` builds nothing, the two middle rungs
         // encrypt without checking who answered, and the two verifying rungs
         // switch the checks back on -- `verify-ca` keeping only the hostname
         // check off, which is the whole difference between it and `verify-full`.
@@ -1528,7 +1529,7 @@ mod tests {
     /// What each mode does against the compose server, which speaks TLS with a
     /// certificate signed by nobody.
     ///
-    /// Hard rule 7 in code, and the mode the connection form actually defaults
+    /// Hard rule 6 in code, and the mode the connection form actually defaults
     /// to. `prefer` and `require` promise encryption and no more, so a
     /// certificate they cannot check is not their business. The two verifying
     /// rungs refuse it and say TLS was the reason, rather than quietly

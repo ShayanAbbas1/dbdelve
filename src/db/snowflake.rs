@@ -32,7 +32,7 @@ use super::{
 ///
 /// Its own struct rather than a `ServerConfig`: there is no port, no password
 /// and no `sslmode` -- the API is HTTPS and always verified, so there is
-/// nothing to weaken (hard rule 7, satisfied by having no field to set).
+/// nothing to weaken (hard rule 6, satisfied by having no field to set).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnowflakeConfig {
     /// The account identifier, which the token names regardless of which host
@@ -489,7 +489,7 @@ enum Reply {
 }
 
 /// The server's own words where it sent any, and the status where it did not
-/// -- a proxy's HTML error page has no `message` to quote (hard rule 6).
+/// -- a proxy's HTML error page has no `message` to quote.
 fn reply(host: &str, status: u16, body: &Value) -> Result<Reply, DbError> {
     match status {
         200 => Ok(Reply::Finished),
@@ -1125,9 +1125,10 @@ impl Connection {
         );
         let kind = match kind {
             RelationKind::View | RelationKind::MaterializedView => "VIEW",
-            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-                "TABLE"
-            }
+            RelationKind::Table
+            | RelationKind::PartitionedTable
+            | RelationKind::ForeignTable
+            | RelationKind::Dictionary => "TABLE",
         };
         let result = self.internal_query(&format!(
             "SELECT GET_DDL('{kind}', {})",

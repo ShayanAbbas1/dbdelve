@@ -109,6 +109,18 @@ source: src/sql_snapshots.rs
 [snowflake] ROLLBACK
   |ROLLBACK|
   = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+[clickhouse] all_or_nothing => error: |ClickHouse has no transaction, so each chunk is kept as it lands.|
+
+[clickhouse] transaction_start
+  (none)
+
+[clickhouse] COMMIT
+  |COMMIT|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
+
+[clickhouse] ROLLBACK
+  |ROLLBACK|
+  = write_on=true select=false classify=ReadOnly [] gate ro=None rw=None full=None bracket=true
 
 [mssql] all_or_nothing
   |BEGIN TRANSACTION|

@@ -555,6 +555,7 @@ pub(crate) fn sql_predicate(
             RegexMatch::RegexpCount => {
                 Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value)))
             }
+            RegexMatch::Match => Some(format!("match(toString({name}), {})", literal(value))),
             RegexMatch::None => None,
         },
     }
@@ -631,6 +632,10 @@ pub(crate) fn substring(
             })
             .collect(),
         _ => like_pattern(value),
+    };
+    let name = match spec.sql.substring {
+        SubstringMatch::LikeToString => format!("toString({name})"),
+        _ => name.to_string(),
     };
     let pattern = match operator {
         Operator::StartsWith => format!("{escaped}%"),

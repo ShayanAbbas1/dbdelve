@@ -891,6 +891,133 @@ source: src/sql_snapshots.rs
 [snowflake] empty keys
   (none)
 
+[clickhouse] plain · plain
+  |UPDATE `public`.`accounts` SET `Name` = 'ok' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · single quote
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · backslash
+  |UPDATE `public`.`accounts` SET `Name` = 'back\\\\slash' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · backslash before quote
+  |UPDATE `public`.`accounts` SET `Name` = '\\\\''' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · odd backslashes then quote
+  |UPDATE `public`.`accounts` SET `Name` = 'a\\\\\\\\\\\\''b' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · unicode
+  |UPDATE `public`.`accounts` SET `Name` = '李小龍 ünï 😀' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · empty
+  |UPDATE `public`.`accounts` SET `Name` = '' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · newline and tab
+  |UPDATE `public`.`accounts` SET `Name` = 'a|
+  |b\u{9}c' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · control characters
+  |UPDATE `public`.`accounts` SET `Name` = 'a\u{0}b\u{7}' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · like metacharacters
+  |UPDATE `public`.`accounts` SET `Name` = '100%_[x]' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · glob metacharacters
+  |UPDATE `public`.`accounts` SET `Name` = '*?[a]\\\\' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · number
+  |UPDATE `public`.`accounts` SET `Name` = '42' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · negative float
+  |UPDATE `public`.`accounts` SET `Name` = '-3.5e10' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · boolean
+  |UPDATE `public`.`accounts` SET `Name` = 'true' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · date
+  |UPDATE `public`.`accounts` SET `Name` = '2024-01-02' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · timestamp
+  |UPDATE `public`.`accounts` SET `Name` = '2024-01-02 03:04:05.123' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · hex
+  |UPDATE `public`.`accounts` SET `Name` = '0xDEADbeef' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] plain · long
+  |UPDATE `public`.`accounts` SET `Name` = '01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] null
+  |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] default
+  |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] every name
+  |UPDATE `public`.`accounts` SET `id` = 'v', `Name` = 'v', `select` = 'v', `we"ird` = 'v', `back``tick` = 'v', `with space` = 'v', `ümlaut` = 'v', `it's` = 'v', `[x]` = 'v', `a.b` = 'v', `` = 'v', `_id` = 'v' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] composite key
+  |UPDATE `public`.`accounts` SET `Name` = 'v' WHERE `id` = '7' AND `Region` = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] binary key
+  |UPDATE `public`.`accounts` SET `Name` = 'v' WHERE `payload` = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation plain
+  |UPDATE `public`.`accounts` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation quotes
+  |UPDATE `my "odd" schema`.`it's ``tick`` "dq"` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation unicode
+  |UPDATE `données`.`Ünïcødé 表` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation reserved
+  |UPDATE `select`.`order` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation mixed case
+  |UPDATE `Sales`.`OrderLines` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation brackets and dots
+  |UPDATE `[dbo]`.`a.b` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation backslash
+  |UPDATE `back\\\\slash`.`trail\\\\` SET `Name` = 'v' WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] empty sets
+  (none)
+
+[clickhouse] empty keys
+  (none)
+
 [mssql] plain · plain
   |UPDATE "public"."accounts" SET "Name" = N'ok' WHERE "id" = '7'|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None

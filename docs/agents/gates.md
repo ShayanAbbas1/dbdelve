@@ -19,7 +19,8 @@ aborts it, and only if `pg_stat_activity` shows the session's process running
 this statement's exact text, never waiting on the side session to find
 out; MySQL and MariaDB `KILL QUERY` anywhere, since a killed statement is
 rolled back alone; SQLite interrupts it; DuckDB fetches no further; MongoDB
-drops the cursor; SQL Server
+drops the cursor; ClickHouse closes the
+response and `KILL QUERY`s it by its `query_id`; SQL Server
 sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
 `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
 `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
@@ -36,7 +37,9 @@ where the user can read it:
   switching it to the server is an ask, and splices its keys the same way.
 - Grid edits on a query tab are appended to the buffer
   (`sql::appended_statement`) and run from there. On an object tab, which
-  has no buffer, the statement is shown in a review dialog before it runs.
+  has no buffer, the statement is shown in a review dialog before it runs,
+  as it is on a query tab of an engine without unique keys
+  (`Engine::reviews_query_edits`), whose writes run only behind the guard.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
@@ -49,8 +52,9 @@ where the user can read it:
 
 Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`
 into a buffer or onto the wire, whatever the user asked for. It writes
-`DELETE` only as the explicit deletion of one named row: by primary key,
-from a direct ask, with the statement shown before it runs
+`DELETE` only as the explicit deletion of one named row: by primary key (on
+an engine without unique keys, by all of the row's values as read, and only
+when exactly one row matches), from a direct ask, with the statement shown before it runs
 (`sql::delete_row`). The one exception to both is the explorer's
 right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
 `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`, Redis's Copy
@@ -80,7 +84,10 @@ passes first. It admits exactly four shapes:
   distinct, unqualified columns against single-quoted literals (or a bare
   `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
   other operator, no subquery, no function call, no CTE beside it, no
-  `RETURNING`, no `LIMIT`, and nothing else in the submission;
+  `RETURNING`, no `LIMIT`, and nothing else in the submission. ClickHouse,
+  which has no unique key, is the one exception to the terms: a row is named
+  by every value, and a term may also be `toString(col) = '…'` (the only
+  function call admitted, over a bare column) or `col IS NULL`;
 - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
   `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an
   import's transaction, which spans submissions on a connection of the
@@ -153,6 +160,15 @@ predicate. An `INSERT` has no existing row to name, so a table without a
 primary key can be inserted into and not edited. That asymmetry is
 deliberate and belongs in anything that documents either feature.
 
+The one exception is an engine without unique keys (ClickHouse): a row is
+named by all of its values as read, and a write runs only when exactly one row
+matches. Before each `UPDATE`, `DELETE` or `ALTER` write, an exactly-one-row
+`COUNT(*)` with the identical predicate (`sql::row_guard`) must return one. An
+update on a table lacking the block columns is spelled `ALTER TABLE <t> UPDATE
+<assignments> WHERE <predicate> SETTINGS mutations_sync = 2`, exactly, with
+the setting last. A row that cannot be matched exactly stays read-only and says
+why.
+
 ## Connection modes, per engine
 
 The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
@@ -161,7 +177,12 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   `Engine::holds_read_only` is false on SQLite, DuckDB, Snowflake and SQL
   Server, so a statement `sqlparser` cannot parse carries Read-write there, not
   Read-only, and the gate asks for that. A statement it parses keeps its own
-  verdict.
+  verdict. ClickHouse holds Read-only (`readonly=2`) but not for every
+  statement, so what it cannot parse is read by its first keyword
+  (`UnreadableFloor::FirstKeyword`): reads stay Read-only and run once on
+  confirmation, writes need Read-write, DDL, server control and `BACKUP` and
+  `RESTORE` need Full, and anything it does not know fails closed to
+  Read-write.
 - **`IF` conditions.** T-SQL's `IF … ELSE` and the `IF … END IF` Postgres, MySQL
   and Snowflake parse to the same variant. `condition_verdict` reads a plain
   name, value, comparison or `IS …` test as a read, and a subquery (`EXISTS`,
@@ -171,5 +192,5 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   Read-write, Full and back through `choose_mode`, so it takes the titlebar
   menu's path and nothing else.
 - **`Connection::set_read_only`** holds a Read-only session to reads on Postgres
-  and MySQL; SQLite has no such setting, Snowflake no session to hold it in,
+  and MySQL, and on ClickHouse flags every request to carry `readonly=2`; SQLite has no such setting, Snowflake no session to hold it in,
   and SQL Server no session-level switch.

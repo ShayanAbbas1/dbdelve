@@ -1036,20 +1036,20 @@ impl Workspace {
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
                 "Mode",
-                // `Destructive::Unreadable` only reaches `Upgrade` on an engine
-                // with no server-side read-only setting to fall back on
-                // (`Engine::holds_read_only`): there is nothing stopping a
-                // write it cannot parse, so the reason is worth spelling out
-                // rather than reading like an ordinary mode shortfall.
+                // `Destructive::Unreadable` only reaches `Upgrade` where the
+                // server's read-only setting cannot be relied on to stop a
+                // write dbdelve cannot parse (`Engine::unreadable_reason`), so
+                // the reason is worth spelling out rather than reading like an
+                // ordinary mode shortfall.
                 if pending
                     .verdict
                     .destructive
                     .contains(&Destructive::Unreadable)
                 {
                     format!(
-                        "{name} is in {current_mode} mode. dbdelve can't parse this, and \
-                         this database has no server-side read-only setting to stop it if \
-                         it writes, so it needs {}.",
+                        "{name} is in {current_mode} mode. dbdelve can't parse this, and {}, \
+                         so it needs {}.",
+                        profile.config.engine().unreadable_reason(),
                         needed.label()
                     )
                 } else {
@@ -1489,6 +1489,18 @@ impl Workspace {
                                 // is one run of text to the layout.
                                 .children(lines.into_iter().map(|line| div().child(line))),
                         )
+                        .children((!review.notes.is_empty()).then(|| {
+                            div()
+                                .id("apply-review-notes")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .children(review.notes.iter().map(|note| div().child(note.clone())))
+                        }))
                         .children(error.map(|message| {
                             div()
                                 .id("apply-review-error")

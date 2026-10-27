@@ -71,6 +71,16 @@ source: src/sql_snapshots.rs
 [snowflake] duplicates #0 id => |1|
 [snowflake] duplicates #1 id => |2|
 [snowflake] empty name #0  => |1|
+[clickhouse] columns #0 id => |`id`|
+[clickhouse] columns #1 Name => |`Name`|
+[clickhouse] columns #2 we"ird => |`we"ird`|
+[clickhouse] columns #3 back`tick => |`back``tick`|
+[clickhouse] columns #4 ümlaut => |`ümlaut`|
+[clickhouse] columns #5 select => |`select`|
+[clickhouse] columns #6 out of range => (none)
+[clickhouse] duplicates #0 id => |1|
+[clickhouse] duplicates #1 id => |2|
+[clickhouse] empty name #0  => |1|
 [mssql] columns #0 id => |"id"|
 [mssql] columns #1 Name => |"Name"|
 [mssql] columns #2 we"ird => |"we""ird"|

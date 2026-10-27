@@ -175,6 +175,9 @@ fn target(provider: &str, driver: &str) -> Result<Target, String> {
         // Only DBeaver's paid editions have MongoDB, and this is the provider
         // id its documentation gives; it is unverified against a real file.
         "mongodb" => Ok(Target::Server(mongo)),
+        // The id of DBeaver's ClickHouse plugin, from its source and unverified
+        // against a real file.
+        "clickhouse" => Ok(Target::Server(ConnectionConfig::ClickHouse)),
         "sqlite" if driver == "sqlite_jdbc" => Ok(Target::File),
         "sqlite" => Err(format!("the {driver} driver isn't supported")),
         // DBeaver's own spelling of one of them.
@@ -241,6 +244,7 @@ fn import(
                     ..ServerConfig::default()
                 })
             };
+            let clickhouse = matches!(config, ConnectionConfig::ClickHouse(_));
             let microsoft = matches!(config, ConnectionConfig::SqlServer(_))
                 && !driver.to_ascii_lowercase().contains("jtds");
             if matches!(config, ConnectionConfig::MongoDb(_))
@@ -260,7 +264,7 @@ fn import(
                     ssh_login,
                     &mut notes,
                 );
-                if let Some((sslmode, ca)) = ssl(configuration, microsoft, &mut notes) {
+                if let Some((sslmode, ca)) = ssl(configuration, microsoft, clickhouse, &mut notes) {
                     server.sslmode = sslmode;
                     server.root_certificate = root_certificate(sslmode, ca, &mut notes);
                 }
@@ -388,12 +392,20 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
 fn ssl(
     configuration: &Value,
     microsoft: bool,
+    clickhouse: bool,
     notes: &mut Vec<String>,
 ) -> Option<(SslMode, Option<String>)> {
     let handler = configuration["handlers"].as_object().and_then(|handlers| {
         handlers
             .iter()
-            .find(|(id, handler)| id.ends_with("_ssl") && enabled(handler))
+            .find(|(id, handler)| {
+                let ssl_tab = if clickhouse {
+                    id.as_str() == "clickhouse-ssl"
+                } else {
+                    id.ends_with("_ssl")
+                };
+                ssl_tab && enabled(handler)
+            })
             .map(|(_, handler)| &handler["properties"])
     });
     let tab = |key: &str| handler.and_then(|properties| text(properties.get(key)));
@@ -408,7 +420,9 @@ fn ssl(
     if tab("ssl.client.cert").is_some() || tab("ssl.client.key").is_some() {
         notes.push("client certificate left off: DBDelve doesn't send one".into());
     }
-    let read: &[&str] = if microsoft {
+    let read: &[&str] = if clickhouse {
+        &["ssl", "sslmode", "sslrootcert"]
+    } else if microsoft {
         &[
             "sslmode",
             "sslrootcert",
@@ -435,7 +449,29 @@ fn ssl(
     let is = |value: Option<String>, expected: &str| {
         value.is_some_and(|value| value.eq_ignore_ascii_case(expected))
     };
-    let sslmode = if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode")) {
+    let sslmode = if clickhouse {
+        // The tab's id is `clickhouse-ssl`, and enabling it sets the driver's
+        // `ssl`. Its `ssl.mode` is strict or none, which are not libpq's words;
+        // without one the tab defaults to strict.
+        if handler.is_none() && !is(driver("ssl"), "true") {
+            SslMode::Disable
+        } else {
+            match tab("ssl.mode")
+                .or_else(|| driver("sslmode"))
+                .map(|mode| mode.to_ascii_lowercase())
+                .as_deref()
+            {
+                None | Some("strict") => SslMode::VerifyFull,
+                Some("none") => SslMode::Require,
+                Some(mode) => {
+                    notes.push(format!(
+                        "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
+                    ));
+                    SslMode::VerifyFull
+                }
+            }
+        }
+    } else if let Some(mode) = tab("sslMode").or_else(|| driver("sslmode")) {
         named_mode(&mode).unwrap_or_else(|| {
             notes.push(format!(
                 "SSL mode {mode} isn't one DBDelve has, so it was set to verify-full"
@@ -970,6 +1006,177 @@ mod tests {
         assert_eq!(
             ssl("mssql", "jtds_sqlserver", json!({ "ssl": "require" })),
             (Prefer, vec!["driver property ssl left off".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_clickhouse_connection_takes_its_fields_and_login_like_the_others() {
+        let imported = imported(
+            connection(
+                "clickhouse",
+                "com_clickhouse",
+                manual("ch.example.com", "8123", "app"),
+            ),
+            Some(login("alice", "s3cret")),
+        )
+        .unwrap();
+        assert_eq!(
+            imported.config,
+            ConnectionConfig::ClickHouse(ServerConfig {
+                host: "ch.example.com".into(),
+                port: Some(8123),
+                database: "app".into(),
+                user: "alice".into(),
+                password: "s3cret".into(),
+                sslmode: SslMode::Disable,
+                ..ServerConfig::default()
+            })
+        );
+        assert!(imported.notes.is_empty());
+    }
+
+    #[test]
+    fn clickhouse_reads_its_drivers_ssl_properties_and_never_asks_for_less() {
+        let tls = |port: &str, properties: Value| {
+            let mut configuration = manual("ch.example.com", port, "app");
+            configuration["properties"] = properties;
+            let imported = imported(
+                connection("clickhouse", "com_clickhouse", configuration),
+                None,
+            )
+            .unwrap();
+            (
+                server(&imported).port,
+                server(&imported).sslmode,
+                server(&imported).root_certificate.clone(),
+                imported.notes,
+            )
+        };
+        use SslMode::*;
+
+        assert_eq!(tls("8123", json!({})), (Some(8123), Disable, None, vec![]));
+        assert_eq!(
+            tls("8123", json!({ "ssl": "false" })),
+            (Some(8123), Disable, None, vec![])
+        );
+        assert_eq!(
+            tls("8443", json!({ "ssl": "true" })),
+            (Some(8443), VerifyFull, None, vec![])
+        );
+        assert_eq!(
+            tls("8443", json!({ "ssl": "true", "sslmode": "strict" })).1,
+            VerifyFull
+        );
+        assert_eq!(
+            tls("8443", json!({ "ssl": "true", "sslmode": "none" })).1,
+            Require
+        );
+        assert_eq!(
+            tls(
+                "8443",
+                json!({ "ssl": "true", "sslrootcert": "/certs/ca.pem" })
+            ),
+            (Some(8443), VerifyFull, Some("/certs/ca.pem".into()), vec![])
+        );
+        assert_eq!(
+            tls("8443", json!({ "ssl": "true", "ssl_mode": "x" })).3,
+            ["driver property ssl_mode left off".to_string()]
+        );
+    }
+
+    #[test]
+    fn clickhouses_ssl_tab_means_tls_and_never_less_than_it_said() {
+        let tab = |enabled: bool, properties: Value, driver: Value| {
+            let mut configuration = manual("ch.example.com", "8443", "app");
+            configuration["properties"] = driver;
+            configuration["handlers"] =
+                json!({ "clickhouse-ssl": { "enabled": enabled, "properties": properties } });
+            let imported = imported(
+                connection("clickhouse", "com_clickhouse", configuration),
+                None,
+            )
+            .unwrap();
+            (
+                server(&imported).sslmode,
+                server(&imported).root_certificate.clone(),
+                imported.notes,
+            )
+        };
+        use SslMode::*;
+
+        assert_eq!(
+            tab(
+                true,
+                json!({ "ssl.mode": "STRICT", "ssl.ca.cert": "/certs/ca.pem" }),
+                json!({})
+            ),
+            (VerifyFull, Some("/certs/ca.pem".into()), vec![])
+        );
+        assert_eq!(
+            tab(true, json!({ "ssl.mode": "NONE" }), json!({})),
+            (Require, None, vec![])
+        );
+        assert_eq!(tab(true, json!({}), json!({})), (VerifyFull, None, vec![]));
+        assert_eq!(
+            tab(
+                true,
+                json!({ "ssl.mode": "NONE" }),
+                json!({ "ssl": "false" })
+            )
+            .0,
+            Require
+        );
+        assert_eq!(
+            tab(false, json!({ "ssl.mode": "STRICT" }), json!({})),
+            (Disable, None, vec![])
+        );
+        let unknown = tab(true, json!({ "ssl.mode": "PINNED" }), json!({}));
+        assert_eq!(unknown.0, VerifyFull);
+        assert_eq!(unknown.2.len(), 1);
+        let client = tab(
+            true,
+            json!({ "ssl.client.cert": "/c.pem", "ssl.mode": "STRICT" }),
+            json!({}),
+        );
+        assert!(client.2[0].contains("client certificate"));
+    }
+
+    #[test]
+    fn a_clickhouse_jdbc_url_is_left_to_its_fields() {
+        assert_eq!(
+            imported(
+                connection(
+                    "clickhouse",
+                    "com_clickhouse",
+                    json!({ "url": "jdbc:clickhouse://h:8123/app", "configurationType": "URL" }),
+                ),
+                None,
+            )
+            .map(|_| ()),
+            Err("only a JDBC URL, which DBDelve can't read for this database".into())
+        );
+    }
+
+    #[test]
+    fn a_connection_that_is_not_clickhouse_stays_with_its_own_engine() {
+        let postgres = imported(
+            connection(
+                "postgresql",
+                "postgres-jdbc",
+                manual("db.example.com", "8123", "app"),
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(postgres.config.engine(), crate::db::Engine::Postgres);
+        assert_eq!(server(&postgres).sslmode, SslMode::default());
+        assert_eq!(
+            imported(
+                connection("generic", "clickhouse", manual("h", "8123", "d")),
+                None
+            )
+            .map(|_| ()),
+            Err("clickhouse isn't supported".into())
         );
     }
 

@@ -42,6 +42,7 @@ fn pending(
         keys: owned(keys),
         types: owned(types),
         held: owned(held),
+        ..Default::default()
     }
 }
 

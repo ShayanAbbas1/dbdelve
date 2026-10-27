@@ -1675,9 +1675,9 @@ mod tests {
     const PLUGIN: &str = r#"
 [[profiles]]
 id = "ch"
-name = "ClickHouse prod"
-engine = "plugin:clickhouse"
-speaks = "clickhouse"
+name = "Oracle prod"
+engine = "plugin:oracle"
+speaks = "oracle"
 created = 2026-10-01T09:00:00Z
 statement_timeout = 30
 
@@ -1710,7 +1710,7 @@ later = "kept"
         let gone = &list.unavailable[0];
         assert_eq!(
             (gone.id.as_str(), gone.name.as_str(), gone.engine.as_str()),
-            ("ch", "ClickHouse prod", "plugin:clickhouse")
+            ("ch", "Oracle prod", "plugin:oracle")
         );
         // Table equality, so the datetime must come back a Datetime, not its string.
         let before: toml::Table = toml::from_str(PLUGIN).unwrap();
@@ -1724,10 +1724,10 @@ later = "kept"
 
 [[profiles]]
 created = 2026-10-01T09:00:00Z
-engine = "plugin:clickhouse"
+engine = "plugin:oracle"
 id = "ch"
-name = "ClickHouse prod"
-speaks = "clickhouse"
+name = "Oracle prod"
+speaks = "oracle"
 statement_timeout = 30
 
 [profiles.fields]
@@ -2031,7 +2031,7 @@ id = 0
     #[test]
     fn an_unavailable_profile_needs_an_id_and_a_name() {
         assert!(decode_profiles(&PLUGIN.replace("id = \"ch\"\n", "")).is_err());
-        assert!(decode_profiles(&PLUGIN.replace("name = \"ClickHouse prod\"\n", "")).is_err());
+        assert!(decode_profiles(&PLUGIN.replace("name = \"Oracle prod\"\n", "")).is_err());
     }
 
     #[test]
@@ -2075,10 +2075,10 @@ id = 0
     #[test]
     fn a_file_the_mixed_reader_cannot_hold_reads_as_it_does_today() {
         // A toml::Table cannot hold a u64 above i64::MAX, so the mixed pass fails
-        // and the file falls back to today's decode: clickhouse is a profile again
+        // and the file falls back to today's decode: an unknown engine is a profile again
         // (restore reads it as Postgres with its notice, as today).
         let text = stub("a", "postgres")
-            + &stub("c", "clickhouse")
+            + &stub("c", "zz-unknown")
             + "next_query_id = 18446744073709551615\n";
         assert_eq!(decode_profiles(&text), decoded_as_before(&text));
         assert!(decode_profiles(&text).unwrap().unavailable.is_empty());
@@ -3475,6 +3475,7 @@ open_objects = []
                     table: "accounts".into(),
                     columns: vec![Some("id".into()), None],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 data_types: vec![Some("int4".into()), None],
                 cell_types: Vec::new(),

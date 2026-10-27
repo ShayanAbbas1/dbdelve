@@ -194,6 +194,60 @@ source: src/sql_snapshots.rs
 [snowflake] keyless
   error: |dbdelve cannot name an edited row by its primary key.|
 
+[clickhouse] one row
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] two rows
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  |UPDATE `public`.`accounts` SET `Name` = NULL WHERE `id` = '8';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] composite keys
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '8' AND `Region` = 'us';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] default
+  |UPDATE `public`.`accounts` SET `Name` = DEFAULT WHERE `id` = '7';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] empty
+  error: |There are no edits to apply.|
+
+[clickhouse] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[clickhouse] null terms
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7' AND `Region` IS NULL AND `flag` IS NULL;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] only null terms
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` IS NULL AND `Region` IS NULL;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] alter update
+  |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '7' AND `Region` = 'eu-west ''x''' SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] alter update, null terms
+  |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '7' AND `Region` IS NULL SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] alter update, two rows
+  |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '7' AND `Region` IS NULL SETTINGS mutations_sync = 2;|
+  |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '8' SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] both spellings
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '7';|
+  |ALTER TABLE `public`.`accounts` UPDATE `Name` = 'it''s' WHERE `id` = '8' AND `Region` IS NULL SETTINGS mutations_sync = 2;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] delete, null terms
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7' AND `Region` IS NULL AND `flag` IS NULL|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
 [mssql] one row
   |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '7';|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None

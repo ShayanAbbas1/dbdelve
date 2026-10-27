@@ -1817,6 +1817,7 @@ fn resolve_edit_target(
             })
             .collect(),
         keys,
+        ..Default::default()
     })
 }
 
@@ -2206,7 +2207,7 @@ mod tests {
 
     #[test]
     fn every_rung_gets_the_encryption_and_trust_it_asked_for() {
-        // Hard rule 7 in code. tiberius keeps both settings private, so its
+        // Hard rule 6 in code. tiberius keeps both settings private, so its
         // own `Debug` is what there is to read them from.
         let settings = |sslmode, root: Option<&str>| {
             let server = ServerConfig {
@@ -3540,6 +3541,7 @@ mod tests {
             keys: vec![("id".into(), id.into())],
             types: Vec::new(),
             held: Vec::new(),
+            ..Default::default()
         };
         for id in ["901", "902"] {
             let _ = connection.query(
@@ -3674,7 +3676,7 @@ mod tests {
                 run(&batch);
                 assert_eq!(name().as_deref(), Some("after"), "{batch}");
 
-                let (schema, relation, keys) = grid.row_key(0).expect("a key names the row");
+                let (schema, relation, keys, _) = grid.row_key(0).expect("a key names the row");
                 let keys: Vec<(&str, &str)> = keys
                     .iter()
                     .map(|(column, value)| (column.as_str(), value.as_str()))
@@ -4558,7 +4560,7 @@ mod tests {
     }
 
     /// What each mode does against the compose server, whose certificate is
-    /// signed by nobody. Hard rule 7: the rungs that promise only encryption
+    /// signed by nobody. Hard rule 6: the rungs that promise only encryption
     /// connect, and the two verifying rungs refuse and say why.
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]

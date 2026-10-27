@@ -1,8 +1,8 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB and
-Redis.
+speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB,
+Redis and ClickHouse.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -30,7 +30,9 @@ require it, stop and raise it instead.
    where the user can read it: on a view the server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
    rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
-   or shown in a review dialog on an object tab, which has no buffer; Import
+   or shown in a review dialog on an object tab, which has no buffer, and on
+   a query tab of an engine whose rows are named by every value, whose writes
+   must run behind their guard (`Engine::reviews_query_edits`); Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
@@ -38,9 +40,10 @@ require it, stop and raise it instead.
 
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary
-   key, shown before it runs (`sql::delete_row`). The explorer's Copy DROP and
-   Copy TRUNCATE put text on the clipboard and nothing else. It never writes
-   into a statement it cannot parse whole: `sql::with_order_by` refuses rather
+   key (on an engine without unique keys, by all of the row's values as read, and
+   only when exactly one row matches), shown before it runs (`sql::delete_row`).
+   The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
+   nothing else. It never writes into a statement it cannot parse whole: `sql::with_order_by` refuses rather
    than guessing at a clause boundary, because a corrupted statement is worse
    than an unsorted grid.
 
@@ -58,7 +61,10 @@ require it, stop and raise it instead.
    A cell is editable only when DBDelve can name its row by primary key; when
    it cannot, the grid stays read-only and says why, and never guesses at a
    predicate. A table without a primary key can be inserted into and not
-   edited, deliberately. **Multi-row deletion is not admitted.** When it is
+   edited, deliberately. An engine without unique keys is the one exception: a
+   row is named by all of its values as read, and a write runs only when exactly
+   one row matches, checked by an exactly-one-row `COUNT(*)` with the identical
+   predicate before each write. **Multi-row deletion is not admitted.** When it is
    wanted, the path is one `DELETE` per row, each naming its own key, inside
    the `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering
    several.
@@ -91,11 +97,7 @@ require it, stop and raise it instead.
 5. **Blank passwords are valid.** Never warn about them. Usernames containing `@`
    must work. Both are required by cloud IAM auth and both are commonly broken.
 
-6. **Errors describe what happened, not what to do about it.** "Connection
-   refused: nothing is listening on `host:port`" and stop. No speculation about
-   the user's machine, no process-list inspection.
-
-7. **An `sslmode` is never quietly weakened.** A connection either gets what it
+6. **An `sslmode` is never quietly weakened.** A connection either gets what it
    asked for or fails saying which certificate check failed. This is a rule
    because the failure is silent by construction: the driver's default is
    `prefer`, and `prefer` with a connector that cannot do TLS hands back a
@@ -199,6 +201,7 @@ mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
 redis://dbdelve:dbdelve@127.0.0.1:56379/0
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
 ```
 
 What a change should pass locally:

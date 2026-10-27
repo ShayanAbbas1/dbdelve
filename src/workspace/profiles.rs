@@ -333,6 +333,7 @@ impl Workspace {
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server)
+            | ConnectionConfig::ClickHouse(server)
             | ConnectionConfig::Redis(server)
             | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
                 (&form.name, default_profile_name(&config)),
@@ -1991,6 +1992,7 @@ fn stored_config(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::SqlServer
+        | Engine::ClickHouse
         | Engine::MongoDb
         | Engine::Redis => {
             let server = ServerConfig {
@@ -2010,6 +2012,7 @@ fn stored_config(
                 Engine::MySql => ConnectionConfig::MySql(server),
                 Engine::MariaDb => ConnectionConfig::MariaDb(server),
                 Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                Engine::ClickHouse => ConnectionConfig::ClickHouse(server),
                 Engine::Redis => ConnectionConfig::Redis(server),
                 Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
                     server,
@@ -2204,8 +2207,8 @@ mod tests {
     fn an_unavailable_profile_says_what_it_is_missing() {
         assert_eq!(unavailable_reason("plugin:odbc"), "Needs the odbc plugin");
         assert_eq!(
-            unavailable_reason("clickhouse"),
-            "Made by a newer DBDelve (engine `clickhouse`)"
+            unavailable_reason("zz-unknown"),
+            "Made by a newer DBDelve (engine `zz-unknown`)"
         );
         // No id to name: not a plugin anyone could install.
         assert_eq!(

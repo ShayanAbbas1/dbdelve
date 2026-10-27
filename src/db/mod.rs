@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+mod clickhouse;
 #[cfg(test)]
 mod conformance;
 mod duckdb;
@@ -39,13 +40,14 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
-use spec::ReadOnlySession;
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, SqlSpec};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
 pub use spec::{
-    EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, Paging, Params, ParserDialect,
-    RegexMatch, SelectTop, SkipDuplicates, StatementSplit, SubstringMatch, Truncate, TypedExplain,
+    EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
+    ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
+    Truncate, TypedExplain,
 };
+pub use spec::{ReadOnlySession, UnreadableFloor};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -117,6 +119,7 @@ pub enum Engine {
     Turso,
     DuckDb,
     Snowflake,
+    ClickHouse,
     SqlServer,
     MongoDb,
     Redis,
@@ -224,6 +227,7 @@ impl Engine {
             Self::Turso => &spec::TURSO,
             Self::DuckDb => &spec::DUCKDB,
             Self::Snowflake => &spec::SNOWFLAKE,
+            Self::ClickHouse => &spec::CLICKHOUSE,
             Self::SqlServer => &spec::SQL_SERVER,
             Self::MongoDb => &spec::MONGODB,
             Self::Redis => &spec::REDIS,
@@ -241,7 +245,7 @@ impl Engine {
     }
 
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
@@ -249,6 +253,7 @@ impl Engine {
         Self::Turso,
         Self::DuckDb,
         Self::Snowflake,
+        Self::ClickHouse,
         Self::SqlServer,
         Self::MongoDb,
         Self::Redis,
@@ -413,6 +418,16 @@ impl Engine {
         }
     }
 
+    /// What the review of a generated batch says beyond its statements: how
+    /// the engine matches rows, what it cannot undo, what it cannot write.
+    /// Empty for every engine that has nothing to add.
+    pub fn review_notes(self, sql: &str) -> Vec<String> {
+        match self {
+            Self::ClickHouse => clickhouse::review_notes(sql),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether New row may insert into a relation of `kind`.
     pub fn takes_inserts(self, kind: RelationKind) -> bool {
         self.spec().takes_inserts(kind)
@@ -521,10 +536,10 @@ impl Engine {
     }
 
     /// Whether a preview page is ordered by the relation's key when nothing
-    /// else sorts it, which `OFFSET … FETCH` paging needs (`sql::paged`
-    /// writes it).
+    /// else sorts it, which `OFFSET … FETCH` paging needs and an unsorted
+    /// ClickHouse page needs to be stable (`sql::paged` writes it).
     pub fn pages_by_key(self) -> bool {
-        self.spec().sql.paging == Paging::OffsetFetch
+        self.spec().sql.paging != Paging::LimitOffset
     }
 
     /// Whether the row count the catalog carries for a table is exact rather
@@ -546,7 +561,20 @@ impl Engine {
     /// cannot read has nothing behind it that would stop a write, so the gate
     /// refuses it in Read-only instead of offering to run it once.
     pub fn holds_read_only(self) -> bool {
-        read_only_statement(self, true).is_some()
+        self.spec().sql.read_only_session != ReadOnlySession::None
+    }
+
+    /// Why a statement `sql::classify` cannot read is refused in Read-only,
+    /// finishing "dbdelve can't parse this, and …".
+    pub fn unreadable_reason(self) -> &'static str {
+        match self.spec().sql.unreadable_floor {
+            UnreadableFloor::None => {
+                "this database has no server-side read-only setting to stop it if it writes"
+            }
+            UnreadableFloor::FirstKeyword => {
+                "the server's read-only setting does not stop every statement of this kind"
+            }
+        }
     }
 
     /// Whether switching the schema has to wait for an open transaction to
@@ -649,6 +677,7 @@ impl Engine {
 
     /// Whether a backslash in a single-quoted literal escapes the character
     /// after it.
+    #[cfg(test)]
     pub fn backslash_escapes(self) -> bool {
         self.spec().sql.backslash_escapes
     }
@@ -682,6 +711,13 @@ impl Engine {
         self.spec().is_binary_type(data_type)
     }
 
+    /// Whether a column of `data_type` holds numbers on this engine: the names
+    /// [`is_numeric_type`] knows, plus the ones its spec adds, read through
+    /// the wrappers its spec peels.
+    pub fn is_numeric_type(self, data_type: &str) -> bool {
+        self.spec().is_numeric_type(data_type)
+    }
+
     /// Whether a cell whose type is known as each of `types` -- none, where
     /// no driver named one -- holds what an edit of it would write back: on an
     /// engine that edits rows at all, not bytes ([`Engine::is_binary_type`]),
@@ -702,13 +738,24 @@ impl Engine {
     /// does, shown for review before it runs and never written into the
     /// buffer. Redis opens a key as a query tab of its own, its contents having
     /// no relation to open, and that is where its fields, items and members
-    /// are taken out. A new row needs no such gate: any grid written back to
-    /// one table takes one.
+    /// are taken out; an engine that reviews a query tab's edits
+    /// ([`Engine::reviews_query_edits`]) takes them there too. A new row needs
+    /// no such gate: any grid written back to one table takes one.
     pub fn edits_query_rows(self) -> bool {
         match self.syntax() {
             Syntax::Redis => true,
-            Syntax::Sql | Syntax::Mongo => false,
+            Syntax::Sql => self.reviews_query_edits(),
+            Syntax::Mongo => false,
         }
+    }
+
+    /// Whether a query tab's edits are shown in the review dialog an object
+    /// tab's are, rather than appended to its buffer. A row named by every
+    /// value is written only behind the exactly-one-row count DBDelve runs
+    /// before each write; a copy left in the buffer would run without it when
+    /// the user ran it again.
+    pub fn reviews_query_edits(self) -> bool {
+        self.syntax() == Syntax::Sql && self.spec().sql.row_terms
     }
 
     /// Whether `column`, part of what names a grid's row, can be edited all
@@ -948,6 +995,7 @@ pub enum ConnectionConfig {
         schema: Option<String>,
     },
     Snowflake(SnowflakeConfig),
+    ClickHouse(ServerConfig),
     MongoDb(MongoConfig),
     /// `database` is the database's number, blank for 0.
     Redis(ServerConfig),
@@ -974,6 +1022,7 @@ impl ConnectionConfig {
             Self::Turso { .. } => Engine::Turso,
             Self::DuckDb { .. } => Engine::DuckDb,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
         }
@@ -987,6 +1036,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
             Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
@@ -1003,6 +1053,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
             Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
@@ -1019,9 +1070,10 @@ impl ConnectionConfig {
                 server.database = name;
                 server.schema = None;
             }
-            Self::MySql(server) | Self::MariaDb(server) | Self::SqlServer(server) => {
-                server.database = name
-            }
+            Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server)
+            | Self::ClickHouse(server) => server.database = name,
             Self::MongoDb(mongo) => mongo.set_database(name),
             Self::Snowflake(account) => account.set_database(name),
             // Listed as `db3`, stored as the number a URL's path holds.
@@ -1105,6 +1157,7 @@ impl ConnectionConfig {
             Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
             Engine::MongoDb => mongo::config_from_url(url).map(Self::MongoDb),
             Engine::Redis => redis::config_from_url(url).map(Self::Redis),
+            Engine::ClickHouse => server_from_url(url, "ClickHouse").map(Self::ClickHouse),
             Engine::Sqlite => sqlite::path_from_url(url).map(|path| Self::Sqlite {
                 path,
                 // A URL has nowhere to say it; the form is where it is set.
@@ -1131,6 +1184,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => server.statement_timeout,
             Self::MongoDb(mongo) => mongo.server.statement_timeout,
             Self::Sqlite {
@@ -1172,6 +1226,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::ClickHouse(server)
             | Self::Redis(server) => server.endpoint(),
             Self::MongoDb(mongo) => mongo.endpoint(),
             Self::Sqlite { path, .. } | Self::Turso { path, .. } => path.clone(),
@@ -1194,6 +1249,7 @@ pub enum Connection {
     Turso(turso::Connection),
     DuckDb(duckdb::Connection),
     Snowflake(snowflake::Connection),
+    ClickHouse(clickhouse::Connection),
     MongoDb(mongo::Connection),
     Redis(redis::Connection),
 }
@@ -1234,6 +1290,9 @@ impl Connection {
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
+            ConnectionConfig::ClickHouse(server) => {
+                clickhouse::Connection::open(&server).map(Self::ClickHouse)
+            }
             ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
             ConnectionConfig::Redis(server) => redis::Connection::open(&server).map(Self::Redis),
         }
@@ -1267,6 +1326,7 @@ impl Connection {
             Self::Turso(connection) => connection.query(sql, fetch),
             Self::DuckDb(connection) => connection.query(sql, fetch),
             Self::Snowflake(connection) => connection.query_with(sql, cancel, fetch),
+            Self::ClickHouse(connection) => connection.query(sql, cancel, fetch),
             Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
             Self::Redis(connection) => connection.query(sql, fetch),
         }
@@ -1289,6 +1349,11 @@ impl Connection {
     ) -> Result<QueryResult, DbError> {
         let opened = match self {
             Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            // Never joined to the arm above: that would put every statement
+            // of a queue run at once on the session's mutex, one after another.
+            Self::ClickHouse(connection) => {
+                return connection.query_alongside(sql, cancel, fetch, read_only);
+            }
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
@@ -1358,6 +1423,7 @@ impl Connection {
     pub fn apart(&self) -> Result<Self, DbError> {
         match self {
             Self::Snowflake(_) | Self::MongoDb(_) => Ok(self.clone()),
+            Self::ClickHouse(connection) => Ok(Self::ClickHouse(connection.apart())),
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
@@ -1421,6 +1487,15 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
+            Self::ClickHouse(connection) => connection.generated(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
@@ -1455,6 +1530,7 @@ impl Connection {
             Self::Turso(connection) => connection.catalog(),
             Self::DuckDb(connection) => connection.catalog(),
             Self::Snowflake(connection) => connection.catalog(),
+            Self::ClickHouse(connection) => connection.catalog(),
             Self::MongoDb(connection) => connection.catalog(),
             Self::Redis(connection) => connection.catalog(),
         }
@@ -1471,6 +1547,7 @@ impl Connection {
             Self::Turso(connection) => connection.routines(),
             Self::DuckDb(connection) => connection.routines(),
             Self::Snowflake(connection) => connection.routines(),
+            Self::ClickHouse(_) => Ok(Catalog::default()),
             Self::MongoDb(connection) => connection.routines(),
             Self::Redis(_) => Ok(Catalog::default()),
         }
@@ -1495,6 +1572,7 @@ impl Connection {
             | Self::Turso(_)
             | Self::DuckDb(_)
             | Self::Snowflake(_)
+            | Self::ClickHouse(_)
             | Self::Redis(_) => Ok(Sizes::new()),
         }
     }
@@ -1512,7 +1590,9 @@ impl Connection {
             Self::Turso(connection) => connection.references(schema, relation),
             Self::DuckDb(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
-            Self::Snowflake(_) | Self::MongoDb(_) | Self::Redis(_) => Ok(Vec::new()),
+            Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => {
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -1526,6 +1606,7 @@ impl Connection {
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
             Self::Snowflake(connection) => connection.databases(),
+            Self::ClickHouse(connection) => connection.databases(),
             Self::DuckDb(connection) => connection.databases(),
             Self::Sqlite(_) | Self::Turso(_) => Ok(Databases::default()),
         }?;
@@ -1607,6 +1688,7 @@ impl Connection {
             Self::Turso(connection) => connection.structure(schema, relation),
             Self::DuckDb(connection) => connection.structure(schema, relation),
             Self::Snowflake(connection) => connection.structure(schema, relation),
+            Self::ClickHouse(connection) => connection.structure(schema, relation),
             Self::MongoDb(connection) => connection.structure(schema, relation),
             Self::Redis(connection) => connection.structure(schema, relation),
         }
@@ -1625,6 +1707,7 @@ impl Connection {
             Self::Turso(connection) => connection.ddl(schema, relation),
             Self::DuckDb(connection) => connection.ddl(schema, relation),
             Self::Snowflake(connection) => connection.ddl(schema, relation, kind),
+            Self::ClickHouse(connection) => connection.ddl(schema, relation, kind),
             Self::MongoDb(connection) => connection.ddl(schema, relation),
             Self::Redis(connection) => connection.ddl(schema, relation),
         }
@@ -1652,7 +1735,10 @@ impl Connection {
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
         if let Some(alongside) = cancel.stop_alongside()
-            && !matches!(self, Self::Snowflake(_) | Self::MongoDb(_))
+            && !matches!(
+                self,
+                Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_)
+            )
         {
             return alongside
                 .iter()
@@ -1667,6 +1753,7 @@ impl Connection {
             Self::Turso(connection) => connection.cancel(),
             Self::DuckDb(connection) => connection.cancel(),
             Self::Snowflake(connection) => connection.cancel(cancel),
+            Self::ClickHouse(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
             Self::Redis(connection) => connection.cancel(),
         }
@@ -1687,6 +1774,7 @@ impl Connection {
             | Self::Turso(_)
             | Self::DuckDb(_)
             | Self::Snowflake(_)
+            | Self::ClickHouse(_)
             | Self::MongoDb(_)
             | Self::Redis(_) => false,
         }
@@ -1701,6 +1789,9 @@ impl Connection {
     /// `sql::gate` (src/sql.rs:1268), the real boundary, is not the only thing
     /// standing between Read-only and a write reaching the server.
     pub fn set_read_only(&self, read_only: bool) -> Result<(), DbError> {
+        if let Self::ClickHouse(connection) = self {
+            return connection.set_read_only(read_only);
+        }
         let engine = match self {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(connection) => connection.engine(),
@@ -1709,6 +1800,7 @@ impl Connection {
             Self::Turso(_) => Engine::Turso,
             Self::DuckDb(_) => Engine::DuckDb,
             Self::Snowflake(_) => Engine::Snowflake,
+            Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
         };
@@ -1969,6 +2061,8 @@ pub enum RelationKind {
     View,
     MaterializedView,
     ForeignTable,
+    /// ClickHouse only: dropped with `DROP DICTIONARY`, and never truncated.
+    Dictionary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2247,6 +2341,9 @@ pub struct QueryResult {
     /// `None` is the answer for every result set dbdelve cannot address a single
     /// row of, and it is not an error — see [`Connection::edit_target`].
     pub edit: Option<EditTarget>,
+    /// Why these rows cannot be written back, where the engine knows and the
+    /// user would otherwise be told only that the row has no primary key.
+    pub read_only_reason: Option<String>,
     /// The submission's result sets after this one, in order.
     ///
     /// One level deep and never a tree: a nested `rest` is always empty,
@@ -2288,6 +2385,7 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
         Engine::MongoDb => message == "Cancelled.",
         Engine::Redis => message == redis::CANCELLED,
+        Engine::ClickHouse => message == clickhouse::CANCELLED,
     }
 }
 
@@ -2311,9 +2409,18 @@ pub fn applied(engine: Engine, error: &DbError) -> u64 {
 /// whether a transaction was open, and a cancel aborts the one it lands in,
 /// even a read's; SQLite rolls back the transaction an interrupted write was
 /// in. MySQL's `KILL QUERY` and SQLite's interrupt of a read undo only the
-/// statement, and Snowflake has no session to lose.
-pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<String> {
+/// statement, and Snowflake has no session to lose. A ClickHouse `KILL QUERY`
+/// ends only the wait on a mutation `statement` started, not the mutation.
+pub fn cancel_cost(
+    engine: Engine,
+    error: &DbError,
+    reads: bool,
+    statement: &str,
+) -> Option<String> {
     match engine {
+        Engine::ClickHouse if crate::sql::mutation_as_dml(engine.spec(), statement).is_some() => {
+            Some("The mutation keeps running in the background; KILL MUTATION stops it.".into())
+        }
         Engine::SqlServer => Some(error.message.clone()),
         Engine::Postgres => Some(
             "A cancel aborts the transaction it lands in: if one was open, it refuses every \
@@ -2341,7 +2448,13 @@ pub fn cancel_cost(engine: Engine, error: &DbError, reads: bool) -> Option<Strin
              next command opens a new one."
                 .into(),
         ),
-        Engine::Sqlite
+        Engine::ClickHouse if !reads => Some(
+            "ClickHouse has no transaction to roll back: what the statement had already written \
+             stays."
+                .into(),
+        ),
+        Engine::ClickHouse
+        | Engine::Sqlite
         | Engine::Turso
         | Engine::MySql
         | Engine::MariaDb
@@ -2562,7 +2675,7 @@ impl QueryResult {
 /// The identity work — which oid, which attribute number — happens inside this
 /// module and stops here (hard rule 4). A caller gets an answer it can build
 /// SQL from, not a puzzle it has to ask the catalog about.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditTarget {
     pub schema: String,
     pub table: String,
@@ -2572,6 +2685,34 @@ pub struct EditTarget {
     pub columns: Vec<Option<String>>,
     /// Result-column indices that together identify one row. Never empty.
     pub keys: Vec<usize>,
+    /// What `keys` is: a unique key, or every value the row was read with.
+    #[serde(default)]
+    pub row_match: RowMatch,
+    /// How an update of a row is written.
+    #[serde(default)]
+    pub update: UpdateSpelling,
+}
+
+/// How a row is named when it is written back.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowMatch {
+    /// By a unique key, whose values are never NULL.
+    #[default]
+    Key,
+    /// By every value the row was read with, for an engine with no unique key;
+    /// `keys` lists them all, and a NULL is matched as `IS NULL`. `fixed` are
+    /// the result columns that cannot be set.
+    EveryColumn { fixed: Vec<usize> },
+}
+
+/// The statement an edited row is written with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateSpelling {
+    /// `UPDATE t SET … WHERE …`.
+    #[default]
+    Update,
+    /// `ALTER TABLE t UPDATE … WHERE … SETTINGS mutations_sync = 2`.
+    AlterUpdate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2605,6 +2746,7 @@ pub(super) fn assemble_catalog(
             "view" => RelationKind::View,
             "materialized_view" => RelationKind::MaterializedView,
             "foreign_table" => RelationKind::ForeignTable,
+            "dictionary" => RelationKind::Dictionary,
             kind => return Err(unexpected_catalog_value("relation kind", kind)),
         };
 
@@ -2925,6 +3067,8 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
         // MongoDB and Redis land here too: no session setting holds a client
         // to reads; the classifier is the boundary there.
         (ReadOnlySession::None, _) => None,
+        // Carried by each request's settings, not set on the session.
+        (ReadOnlySession::PerRequest, _) => None,
     }
 }
 
@@ -3029,6 +3173,7 @@ pub(super) mod at_once {
                     .alongside
                     .as_ref()
                     .map_or(0, |alongside| alongside.iter().flatten().count())
+                    + running.handles.len()
             }) < count
         {
             std::thread::sleep(Duration::from_millis(50));
@@ -3259,6 +3404,19 @@ mod tests {
     }
 
     #[test]
+    fn only_an_engine_naming_rows_by_every_value_reviews_a_query_tabs_edits() {
+        for engine in Engine::ALL {
+            let clickhouse = engine == Engine::ClickHouse;
+            assert_eq!(engine.reviews_query_edits(), clickhouse, "{engine:?}");
+            assert_eq!(
+                engine.edits_query_rows(),
+                clickhouse || engine == Engine::Redis,
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
         for engine in Engine::ALL {
             assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
@@ -3273,6 +3431,32 @@ mod tests {
                 "{engine:?}"
             );
         }
+    }
+
+    #[test]
+    fn clickhouse_brackets_no_batch_and_says_why_an_import_has_no_transaction() {
+        let spec = Engine::ClickHouse.spec();
+        assert_eq!(spec.sql.transaction_opening(), None);
+        assert!(spec.abilities.chunk_refusal.is_some());
+    }
+
+    #[test]
+    fn numeric_types_are_per_engine_and_clickhouse_peels_its_wrappers() {
+        for numeric in [
+            "Nullable(UInt64)",
+            "LowCardinality(Nullable(Float64))",
+            "Decimal(10, 2)",
+            "Decimal256(4)",
+            "Int256",
+            "BFloat16",
+        ] {
+            assert!(Engine::ClickHouse.is_numeric_type(numeric), "{numeric}");
+        }
+        for other in ["Nullable(String)", "LowCardinality(String)", "Date"] {
+            assert!(!Engine::ClickHouse.is_numeric_type(other), "{other}");
+        }
+        assert!(!Engine::Sqlite.is_numeric_type("int32"));
+        assert!(!Engine::Sqlite.is_numeric_type("float64"));
     }
 
     #[test]
@@ -3656,6 +3840,56 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_is_a_server_engine_with_a_url_that_takes_only_the_tls_keys() {
+        let config = ConnectionConfig::from_url(
+            "clickhouse://someone%40example.com:pw@ch.example.test:8443/logs?sslmode=verify-full&sslrootcert=/certs/ca.pem",
+        )
+        .unwrap();
+        assert_eq!(config.engine(), Engine::ClickHouse);
+        let server = config.server().expect("a server half, for the Keychain");
+        assert_eq!(
+            (
+                server.user.as_str(),
+                server.password.as_str(),
+                server.host.as_str(),
+                server.port,
+                server.database.as_str(),
+            ),
+            (
+                "someone@example.com",
+                "pw",
+                "ch.example.test",
+                Some(8443),
+                "logs"
+            )
+        );
+        assert_eq!(server.sslmode, SslMode::VerifyFull);
+        assert_eq!(server.root_certificate.as_deref(), Some("/certs/ca.pem"));
+        assert_eq!(config.endpoint(), server.endpoint());
+
+        let error = ConnectionConfig::from_url("clickhouse://u@h/db?compress=1").unwrap_err();
+        assert_eq!(
+            error,
+            "Connection URL parameter compress is not one dbdelve can pass to ClickHouse."
+        );
+
+        assert_eq!(Engine::parse("clickhouse"), Ok(Engine::ClickHouse));
+        assert_eq!(Engine::ClickHouse.as_str(), "clickhouse");
+        assert_eq!(Engine::ClickHouse.fields(), Fields::Server);
+        assert_eq!(Engine::ClickHouse.default_port(), Some(8123));
+        assert_eq!(
+            crate::connection_form::placeholders(Engine::ClickHouse).port,
+            "8123"
+        );
+        assert!(Engine::ClickHouse.holds_read_only());
+        assert_eq!(
+            read_only_statement(Engine::ClickHouse, true),
+            None,
+            "the hold rides on each request"
+        );
+    }
+
+    #[test]
     fn sql_server_is_a_server_engine_reached_by_either_url_scheme() {
         for url in [
             "mssql://someone%40example.com@db.example.test:1433/dbdelve_dev",
@@ -3696,6 +3930,22 @@ mod tests {
         );
         assert_eq!(Engine::MariaDb.quote_identifier("a`b"), "`a``b`");
         assert!(Engine::MariaDb.holds_read_only());
+    }
+
+    #[test]
+    fn clickhouse_plans_a_copy_and_has_nothing_to_analyze() {
+        assert_eq!(
+            Engine::ClickHouse.explain(ExplainMode::Plan, "SELECT 1"),
+            Some("EXPLAIN SELECT 1".to_string())
+        );
+        assert_eq!(
+            Engine::ClickHouse.explain_prefix(ExplainMode::Analyze),
+            None
+        );
+        assert_eq!(
+            Engine::ClickHouse.explain(ExplainMode::Analyze, "SELECT 1"),
+            None
+        );
     }
 
     #[test]
@@ -4253,6 +4503,66 @@ mod tests {
         assert!(Engine::MySql.holds_read_only());
         assert!(!Engine::Sqlite.holds_read_only());
         assert!(!Engine::Snowflake.holds_read_only());
+    }
+
+    #[test]
+    fn holding_read_only_is_unchanged_for_the_ten() {
+        let held = |engine: Engine| engine.holds_read_only();
+        for engine in [Engine::Postgres, Engine::MySql, Engine::MariaDb] {
+            assert!(held(engine), "{engine:?}");
+        }
+        for engine in [
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::DuckDb,
+            Engine::Snowflake,
+            Engine::SqlServer,
+            Engine::MongoDb,
+            Engine::Redis,
+        ] {
+            assert!(!held(engine), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn only_clickhouse_gives_another_reason_for_refusing_the_unreadable() {
+        for engine in Engine::ALL {
+            let expected = match engine {
+                Engine::ClickHouse => {
+                    "the server's read-only setting does not stop every statement of this kind"
+                }
+                _ => "this database has no server-side read-only setting to stop it if it writes",
+            };
+            assert_eq!(engine.unreadable_reason(), expected, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_clickhouse_mutation_is_said_to_keep_running() {
+        let error = plain_error(clickhouse::CANCELLED.into());
+        let mutation = "ALTER TABLE t DELETE WHERE a = 1 SETTINGS mutations_sync = 2;";
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, false, mutation).as_deref(),
+            Some("The mutation keeps running in the background; KILL MUTATION stops it.")
+        );
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, false, "INSERT INTO t SELECT 1").as_deref(),
+            Some(
+                "ClickHouse has no transaction to roll back: what the statement had already \
+                 written stays."
+            )
+        );
+        assert_eq!(
+            cancel_cost(Engine::ClickHouse, &error, true, "SELECT 1"),
+            None
+        );
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
+            assert_eq!(
+                cancel_cost(engine, &error, false, mutation),
+                None,
+                "{engine:?}"
+            );
+        }
     }
 
     #[test]

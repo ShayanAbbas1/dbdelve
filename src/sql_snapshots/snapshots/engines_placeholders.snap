@@ -43,6 +43,12 @@ source: src/sql_snapshots.rs
 [snowflake] database => |Required|
 [snowflake] user => |Required|
 [snowflake] path => |/path/to/app.sqlite|
+[clickhouse] name => |Named after the database|
+[clickhouse] host => |localhost|
+[clickhouse] port => |8123|
+[clickhouse] database => |default|
+[clickhouse] user => |default|
+[clickhouse] path => |/path/to/app.sqlite|
 [mssql] name => |Named after the database|
 [mssql] host => |localhost|
 [mssql] port => |1433|

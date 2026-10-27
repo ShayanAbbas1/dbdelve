@@ -64,6 +64,15 @@ source: src/sql_snapshots.rs
 [snowflake] explain_suffix Plan => ||
 [snowflake] explain_prefix Analyze => (none)
 [snowflake] explain_suffix Analyze => ||
+[clickhouse] boolean_literal true => |true|
+[clickhouse] boolean_literal false => |false|
+[clickhouse] count_all => |COUNT(*)|
+[clickhouse] transaction_start => (none)
+[clickhouse] all_or_nothing => error: |ClickHouse has no transaction, so each chunk is kept as it lands.|
+[clickhouse] explain_prefix Plan => |EXPLAIN |
+[clickhouse] explain_suffix Plan => ||
+[clickhouse] explain_prefix Analyze => (none)
+[clickhouse] explain_suffix Analyze => ||
 [mssql] boolean_literal true => |1|
 [mssql] boolean_literal false => |0|
 [mssql] count_all => |COUNT_BIG(*)|

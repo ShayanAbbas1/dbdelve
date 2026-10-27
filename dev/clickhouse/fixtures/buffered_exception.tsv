@@ -1,0 +1,6 @@
+sleepEachRow(1)
+UInt8
+0
+0
+0
+Code: 394. DB::Exception: Query was cancelled. (QUERY_WAS_CANCELLED) (version 26.8.35.10 (official build))

@@ -183,3 +183,28 @@ redis Redis(
         schema: None,
     },
 )
+clk ClickHouse(
+    ServerConfig {
+        host: "ch.internal",
+        port: Some(
+            8443,
+        ),
+        database: "analytics",
+        user: "ada",
+        password: "",
+        sslmode: VerifyFull,
+        root_certificate: Some(
+            "/certs/ch.pem",
+        ),
+        statement_timeout: 45,
+        ssh: Some(
+            SshTunnel {
+                host: "bastion.internal",
+                port: None,
+                user: "jump",
+                identity_file: None,
+            },
+        ),
+        schema: None,
+    },
+)

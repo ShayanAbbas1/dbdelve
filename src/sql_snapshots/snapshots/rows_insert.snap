@@ -814,6 +814,122 @@ source: src/sql_snapshots.rs
   |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
+[clickhouse] four columns
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `created`) VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] every name
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `select`, `we"ird`, `back``tick`, `with space`, `ümlaut`, `it's`, `[x]`, `a.b`, ``, `_id`) VALUES ('v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] null
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES (NULL)|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] long
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] no columns
+  error: |There is nothing in this row to insert.|
+
+[clickhouse] value plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('ok')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value single quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('it''s')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value backslash
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('back\\\\slash')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value backslash before quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('\\\\''')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value odd backslashes then quote
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\\\\\\\\\\\\''b')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value unicode
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('李小龍 ünï 😀')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value empty
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value newline and tab
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a|
+  |b\u{9}c')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value control characters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('a\u{0}b\u{7}')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value like metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('100%_[x]')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value glob metacharacters
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('*?[a]\\\\')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value number
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('42')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value negative float
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('-3.5e10')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value boolean
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('true')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value date
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value timestamp
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('2024-01-02 03:04:05.123')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] value hex
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('0xDEADbeef')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation plain
+  |INSERT INTO `public`.`accounts` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation quotes
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation unicode
+  |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation reserved
+  |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation mixed case
+  |INSERT INTO `Sales`.`OrderLines` (`Name`) VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation brackets and dots
+  |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation backslash
+  |INSERT INTO `back\\\\slash`.`trail\\\\` (`Name`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
 [mssql] four columns
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', N'it''s', 'true', '2024-01-02T03:04:05.123')|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None

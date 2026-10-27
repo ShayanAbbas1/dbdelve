@@ -450,6 +450,70 @@ source: src/sql_snapshots.rs
   |SELECT COUNT(*) FROM "public"."accounts" WHERE "Name" = 'it''s'|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
+[clickhouse] no bars · preview
+  |SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] no bars · count
+  |SELECT COUNT(*) FROM `public`.`accounts`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] one equals · preview
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] one equals · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] and · preview
+  |SELECT * FROM `public`.`accounts` WHERE (`Name` = 'it''s') AND (`n` > '5') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] and · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE (`Name` = 'it''s') AND (`n` > '5')|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] or · preview
+  |SELECT * FROM `public`.`accounts` WHERE (`Name` = 'it''s') OR (`n` > '5') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] or · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE (`Name` = 'it''s') OR (`n` > '5')|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] raw alone · preview
+  |SELECT * FROM `public`.`accounts` WHERE n > 1 LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] raw alone · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE n > 1|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] raw or equals · preview
+  |SELECT * FROM `public`.`accounts` WHERE (n > 1) OR (`Name` = 'ok') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] raw or equals · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE (n > 1) OR (`Name` = 'ok')|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] and then or · preview
+  |SELECT * FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (toString(`Name`) LIKE '%z%') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] and then or · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE ((`Name` = 'it''s') AND (`n` > '5')) OR (toString(`Name`) LIKE '%z%')|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] skipped bar · preview
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] skipped bar · count
+  |SELECT COUNT(*) FROM `public`.`accounts` WHERE `Name` = 'it''s'|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
 [mssql] no bars · preview
   |SELECT * FROM "public"."accounts" LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

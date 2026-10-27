@@ -193,6 +193,7 @@ impl Workspace {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Insert",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -752,9 +753,13 @@ impl Workspace {
         // and one it can has this column alone refused.
         // A snapshot written before edit targets were kept has none, so it
         // would read as untraceable too.
-        let (traced, snapshot) = {
+        let (traced, snapshot, reason) = {
             let grid = results.read(cx).delegate();
-            (grid.row_editable(row), grid.captured().is_some())
+            (
+                grid.row_editable(row),
+                grid.captured().is_some(),
+                grid.read_only_reason().map(str::to_string),
+            )
         };
         // Checked before the snapshot: running a write again is not the way
         // back to editable rows.
@@ -768,19 +773,21 @@ impl Workspace {
                     .is_some_and(|statement| !sql::rerunnable(engine, statement))
             });
         self.note(
-            match (traced, wrote, snapshot) {
-                (true, _, _) => "This column cannot be edited.".into(),
-                (false, true, _) => {
+            match (traced, reason, wrote, snapshot) {
+                (true, _, _, _) => "This column cannot be edited.".into(),
+                // The engine's own word on why, where it gave one.
+                (false, Some(reason), _, _) => reason,
+                (false, None, true, _) => {
                     "These rows came from a statement that writes. Fetch them with a query that only reads to edit them.".into()
                 }
-                (false, false, true) => match tab {
+                (false, None, false, true) => match tab {
                     Tab::Query(_) => {
                         "These rows are from an earlier session. Run the query again to edit them."
                             .into()
                     }
                     _ => "These rows are from an earlier session. Refresh them to edit.".into(),
                 },
-                (false, false, false) => {
+                (false, None, false, false) => {
                     "dbdelve cannot tell which table these rows come from.".into()
                 }
             },
@@ -1182,8 +1189,9 @@ impl Workspace {
         }
         // Browsing surfaces only. A query tab's grid is a view of the user's own
         // statement, and a delete there would be dbdelve writing into a buffer to
-        // destroy rows -- bar an engine whose opened rows are a query tab, where
-        // the delete is reviewed as a relation's is and the buffer is left be.
+        // destroy rows -- bar an engine that takes them there
+        // (`Engine::edits_query_rows`), where the delete is reviewed as a
+        // relation's is and the buffer is left be.
         if !matches!(tab, Tab::Object(_)) && !engine.edits_query_rows() {
             self.note(
                 "Deleting a row is offered on a table's rows, not on a query's results.".into(),
@@ -1195,17 +1203,21 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
+        let unnameable = grid.delegate().read_only_reason().map_or_else(
+            || {
+                "dbdelve cannot name this row by its primary key, so it will not delete it."
+                    .to_string()
+            },
+            str::to_string,
+        );
         let key = grid.delegate().active().and_then(|(row, _)| {
             Some((
                 grid.delegate().row_key(row)?,
                 grid.delegate().row_types(row),
             ))
         });
-        let Some(((schema, table, keys), types)) = key else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let Some(((schema, table, keys, null_keys), types)) = key else {
+            self.note(unnameable, cx);
             return;
         };
         if !self.confirm_stale(StaleResume::Delete, cx) {
@@ -1216,11 +1228,11 @@ impl Workspace {
             .iter()
             .map(|(column, value)| (column.as_str(), value.as_str()))
             .collect();
-        let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed, &types) else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let nulls: Vec<&str> = null_keys.iter().map(String::as_str).collect();
+        let Some(statement) =
+            sql::delete_row_matching(engine, &schema, &table, &borrowed, &nulls, &types)
+        else {
+            self.note(unnameable, cx);
             return;
         };
         // Both halves of the admission, before anything is shown: the gate every
@@ -1228,7 +1240,11 @@ impl Workspace {
         // cannot give alone — that the predicate is this row's key and not some
         // other set of columns. Failing either is dbdelve disagreeing with itself,
         // a bug in dbdelve rather than a user error, so it is said and not run.
-        let columns: Vec<&str> = borrowed.iter().map(|&(column, _)| column).collect();
+        let columns: Vec<&str> = borrowed
+            .iter()
+            .map(|&(column, _)| column)
+            .chain(nulls.iter().copied())
+            .collect();
         if !sql::is_generated_write_on(engine, &statement)
             || !sql::delete_matches_key_on(engine, &statement, &columns)
         {
@@ -1248,6 +1264,7 @@ impl Workspace {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Delete row",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -1624,7 +1641,8 @@ impl Workspace {
     }
 
     /// Turn the grid's pending edits into SQL and put it where the user can read
-    /// it: the query tab's buffer, or a relation tab's modal.
+    /// it: the query tab's buffer, or the review modal on a relation tab and on
+    /// a query tab whose engine reviews them (`Engine::reviews_query_edits`).
     ///
     /// Binds to `cmd+s` -- a deliberate departure from `cmd+enter` ("run the
     /// statement under the cursor"), which stays unrelated so neither
@@ -1668,15 +1686,20 @@ impl Workspace {
             return;
         }
 
+        let notes = self.engine().review_notes(&batch);
         match tab {
-            Tab::Query(_) if own_review => {}
-            Tab::Query(_) => self.apply_in_buffer(batch, window, cx),
-            Tab::Object(_) if !self.review_slot_free(tab, true, window, cx) => {}
-            Tab::Object(_) => {
+            Tab::Query(_) if !self.engine().reviews_query_edits() => {
+                if !own_review {
+                    self.apply_in_buffer(batch, window, cx);
+                }
+            }
+            _ if !self.review_slot_free(tab, true, window, cx) => {}
+            _ => {
                 if let Some(profile) = self.profile_mut() {
                     profile.session.apply_review = Some(ApplyReview {
                         tab,
                         title: "Apply edits",
+                        notes,
                         sql: batch,
                     });
                     cx.notify();

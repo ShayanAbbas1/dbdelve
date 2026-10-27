@@ -1416,6 +1416,7 @@ impl Connection {
                 .map(|column| mql::writable_field(&column.name).then(|| column.name.clone()))
                 .collect(),
             keys: vec![key],
+            ..Default::default()
         })
     }
 

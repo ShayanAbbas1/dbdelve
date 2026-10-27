@@ -5042,6 +5042,726 @@ source: src/sql_snapshots.rs
   |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
+[clickhouse] Equals none · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals none · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals none · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals none · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals none · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals nvarchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals nvarchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals int · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals int · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals int · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals int · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals int · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bit · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bit · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bit · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bit · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals datetime · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals datetime · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals datetime · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals datetime · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals date · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals date · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals date · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals date · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals date · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varbinary(16) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varbinary(16) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals varbinary(16) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals uniqueidentifier · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals uniqueidentifier · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bytea · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bytea · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bytea · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Equals bytea · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals none · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals none · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals none · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals none · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals none · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals nvarchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals nvarchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals int · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals int · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals int · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals int · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals int · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bit · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bit · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bit · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bit · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals datetime · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals datetime · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals datetime · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals datetime · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals date · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals date · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals date · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals date · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals date · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varbinary(16) · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varbinary(16) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals varbinary(16) · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals uniqueidentifier · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals uniqueidentifier · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bytea · ok
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bytea · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bytea · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] NotEquals bytea · 42
+  |SELECT * FROM `public`.`accounts` WHERE `Name` <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains none · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains none · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains none · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains none · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains none · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains nvarchar(20) · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains nvarchar(20) · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains int · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains int · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains int · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains int · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains int · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bit · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bit · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bit · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bit · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains datetime · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains datetime · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains datetime · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains datetime · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains date · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains date · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains date · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains date · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains date · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varbinary(16) · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varbinary(16) · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains varbinary(16) · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains uniqueidentifier · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains uniqueidentifier · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bytea · ok
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bytea · 李小龍 ünï 😀
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bytea · 0xDEADbeef
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Contains bytea · 42
+  |SELECT * FROM `public`.`accounts` WHERE toString(`Name`) LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList none · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList varchar(20) · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList nvarchar(20) · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList int · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList bit · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList datetime · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList date · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList varbinary(16) · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList uniqueidentifier · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] InList bytea · 1, 2
+  |SELECT * FROM `public`.`accounts` WHERE `Name` IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between none · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between varchar(20) · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between nvarchar(20) · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between int · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between bit · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between datetime · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between date · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between varbinary(16) · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between uniqueidentifier · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] Between bytea · 1..9
+  |SELECT * FROM `public`.`accounts` WHERE `Name` BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty none · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty varchar(20) · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty nvarchar(20) · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty int · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty bit · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty datetime · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty date · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty varbinary(16) · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty uniqueidentifier · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] IsEmpty bytea · 
+  |SELECT * FROM `public`.`accounts` WHERE `Name` = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
 [mssql] Equals none · ok
   |SELECT * FROM "public"."accounts" WHERE "Name" = N'ok' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

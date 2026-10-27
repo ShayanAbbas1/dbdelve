@@ -556,9 +556,10 @@ impl CompletionProvider for SchemaCompletions {
 
 fn relation_kind(kind: RelationKind) -> CompletionItemKind {
     match kind {
-        RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-            CompletionItemKind::STRUCT
-        }
+        RelationKind::Table
+        | RelationKind::PartitionedTable
+        | RelationKind::ForeignTable
+        | RelationKind::Dictionary => CompletionItemKind::STRUCT,
         RelationKind::View | RelationKind::MaterializedView => CompletionItemKind::INTERFACE,
     }
 }

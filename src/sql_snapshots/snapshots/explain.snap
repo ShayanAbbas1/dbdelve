@@ -190,6 +190,33 @@ source: src/sql_snapshots.rs
 
 [snowflake] delete · Analyze
   (none)
+[clickhouse] plain · Plan · explainable => |ok|
+
+[clickhouse] plain · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[clickhouse] filtered · Plan · explainable => |ok|
+
+[clickhouse] filtered · Plan
+  |EXPLAIN SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[clickhouse] delete · Plan · explainable => |ok|
+
+[clickhouse] delete · Plan
+  |EXPLAIN DELETE FROM `public`.`accounts` WHERE `id` = '7'|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None typed=None
+[clickhouse] plain · Analyze · explainable => |ok|
+
+[clickhouse] plain · Analyze
+  (none)
+[clickhouse] filtered · Analyze · explainable => |ok|
+
+[clickhouse] filtered · Analyze
+  (none)
+[clickhouse] delete · Analyze · explainable => |ok|
+
+[clickhouse] delete · Analyze
+  (none)
 [mssql] plain · Plan · explainable => |ok|
 
 [mssql] plain · Plan

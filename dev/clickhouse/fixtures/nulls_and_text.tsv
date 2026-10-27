@@ -1,0 +1,5 @@
+id	label	whole	fraction	ratio	flag	day	moment	bytes
+Int32	String	Nullable(Int64)	Nullable(Decimal(10, 2))	Nullable(Float64)	Nullable(Bool)	Nullable(Date)	Nullable(DateTime(\'UTC\'))	Nullable(String)
+1	alpha	9007199254740993	12.5	0.5	true	2024-02-29	2024-02-29 12:34:56	\0ÿ
+2	ZoÃ« æ ğŸ‰ \'quoted\'	-42	-0.01	-1.25	false	1999-12-31	1999-12-31 23:59:59	Ş­¾ï
+3	nulls	\N	\N	\N	\N	\N	\N	\N

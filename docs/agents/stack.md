@@ -62,7 +62,10 @@ graph through `mysql`. Named rather than inherited so a release that changes
 its defaults cannot bring `aws-lc-rs` in. `gzip` is not optional: every result
 partition after the first arrives compressed. Snowflake publishes no Rust
 driver and the community ones are tokio futures, which is why this is an HTTP
-client and not a driver.
+client and not a driver. ClickHouse uses the same `ureq`, with DBDelve's own
+connector chain (TCP, the `Watched` transport that checks Cancel and an idle
+bound between ticks, then TLS) in `src/db/clickhouse/http.rs`, and `memchr`
+for finding a late exception's marker across reads.
 
 **Do not put tokio on GPUI's executor.** GPUI's executor is `async-task` with no
 reactor (Grand Central Dispatch on macOS). A tokio future on

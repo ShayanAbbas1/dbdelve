@@ -918,6 +918,7 @@ mod tests {
                 .map(|(column, tag)| (column.to_string(), tag.to_string()))
                 .collect(),
             held: Vec::new(),
+            ..Default::default()
         }
     }
 

@@ -34,7 +34,7 @@ docker compose up -d
 cargo run
 ```
 
-`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB and Redis dev databases (see
+`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB, Redis and ClickHouse dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
 `dev/ssh/.generated/` (gitignored). `compose.yaml` pins the project name to
@@ -50,6 +50,7 @@ mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 redis://dbdelve:dbdelve@127.0.0.1:56379/0
+clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
 ```
 
 The MongoDB service is `mongo` in `compose.yaml`, on port 57017; its seed is
@@ -60,6 +61,12 @@ The Redis service is `redis` in `compose.yaml` (the `redis:8` image, which ships
 JSON and Search), on port 56379, moved with `DBDELVE_REDIS_PORT`. Its ACL user
 and seed are in `dev/redis/`; nothing is persisted, so every start seeds afresh
 and the healthcheck passes only once the seed finished.
+
+The ClickHouse service is `clickhouse` in `compose.yaml` (the `clickhouse-server:26.8`
+image built from `dev/clickhouse/`), on port 58123, moved with `DBDELVE_CLICKHOUSE_PORT`.
+The seed in `dev/clickhouse/init/` is baked into the image and runs only on an empty data
+volume, ending with `type_gallery`, whose rows the healthcheck counts. Its HTTP bodies
+recorded for the unit tests are in `dev/clickhouse/fixtures/`.
 
 SQLite has no server to start — build the file once and point the form at its
 absolute path:
@@ -102,6 +109,7 @@ export dbdelve_MYSQL_URL=mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 export dbdelve_MARIADB_URL=mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 export dbdelve_MONGO_URL=mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 export dbdelve_REDIS_URL=redis://dbdelve:dbdelve@127.0.0.1:56379/0
+export dbdelve_CLICKHOUSE_URL='clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable'
 export dbdelve_SQLITE_PATH=$(pwd)/dev/dbdelve_dev.db
 
 cargo test -- --include-ignored
@@ -234,7 +242,7 @@ chore(release): bump version to 0.3.8
 
 | Scope         | Covers                                                                  |
 | ------------- | ----------------------------------------------------------------------- |
-| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb`, `clickhouse` | One engine's module in `src/db/` (MySQL covers MariaDB) |
 | `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
 | `ssh`         | SSH tunnels                                                             |
 | `connections` | Connection form, profiles, TLS                                          |

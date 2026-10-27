@@ -5,9 +5,21 @@ on its welcome surface, where New connection takes one of the development
 database URLs listed in `AGENTS.md`.
 
 The ports can be moved with `DBDELVE_POSTGRES_PORT`, `DBDELVE_MYSQL_PORT`,
-`DBDELVE_MARIADB_PORT`, `DBDELVE_MSSQL_PORT`, `DBDELVE_REDIS_PORT` and `DBDELVE_MONGO_PORT`. The SQL Server image is
+`DBDELVE_MARIADB_PORT`, `DBDELVE_MSSQL_PORT`, `DBDELVE_REDIS_PORT`, `DBDELVE_MONGO_PORT` and
+`DBDELVE_CLICKHOUSE_PORT`. The SQL Server image is
 `linux/amd64` only, so on Apple silicon it runs under emulation and takes a
 while to come up.
+
+The ClickHouse container (`clickhouse-server:26.8`, built from
+`dev/clickhouse/` with its seed baked in, so no bind mount records a worktree
+path) serves the HTTP interface on 58123 and has no TLS listener, so the
+TLS modes are tested offline only. The seed makes `conformance`, `accounts`,
+`events` (partitioned, about a million rows), a view, a materialized view and
+its target, a dictionary, the `analytics` database, the `edit_*` tables
+(lightweight, heavy, projection, duplicates, summing), the `dbdelve_reader`
+(`readonly = 1`) and `dbdelve_noalter` users, and `type_gallery` last: its
+healthcheck counts the two rows of `type_gallery`, so a half-seeded container
+is not healthy. The live tests are `cargo test clickhouse -- --include-ignored`.
 
 Snowflake has no container. Its unit tests need nothing, and neither do its
 mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses
@@ -61,7 +73,7 @@ reseeds from scratch instead of colliding with what it left behind.
 
 The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `PGUSER`, `PGPASSWORD`, `dbdelve_MYSQL_URL`, `dbdelve_MARIADB_URL`,
-`dbdelve_MSSQL_URL`, `dbdelve_REDIS_URL`, `dbdelve_MONGO_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
+`dbdelve_MSSQL_URL`, `dbdelve_REDIS_URL`, `dbdelve_MONGO_URL`, `dbdelve_CLICKHOUSE_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
 lowercase prefix is what they read; the last points `live_ssh_*` at the
 config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
 string); the `tests` job in `ci.yml` has the values

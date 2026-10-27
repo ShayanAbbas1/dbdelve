@@ -211,6 +211,36 @@ source: src/sql_snapshots.rs
 [snowflake] update => (none)
 [snowflake] unpaged preview => |[] (0 keys)|
 [snowflake] paged preview => |[] (0 keys)|
+[clickhouse] no order by => |[] (0 keys)|
+[clickhouse] simple => |[a asc=true] (1 keys)|
+[clickhouse] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[clickhouse] lower-case desc => |[a asc=false] (1 keys)|
+[clickhouse] asc spelled out => |[a asc=true] (1 keys)|
+[clickhouse] ordinal => |[1 asc=true] (1 keys)|
+[clickhouse] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[clickhouse] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[clickhouse] double-quoted, escaped quote => (none)
+[clickhouse] backticked, escaped tick => (none)
+[clickhouse] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[clickhouse] bracketed => (none)
+[clickhouse] subquery only => |[] (0 keys)|
+[clickhouse] subquery and outer => |[b asc=false] (1 keys)|
+[clickhouse] then limit => |[a asc=false] (1 keys)|
+[clickhouse] then limit offset => |[a asc=true] (1 keys)|
+[clickhouse] then offset fetch => (none)
+[clickhouse] where, group by, order by => |[a asc=false] (1 keys)|
+[clickhouse] union ordered => |[a asc=false] (1 keys)|
+[clickhouse] cte => |[a asc=true] (1 keys)|
+[clickhouse] trailing comment => |[a asc=true] (1 keys)|
+[clickhouse] semicolon => |[a asc=true] (1 keys)|
+[clickhouse] two statements => (none)
+[clickhouse] nulls first => (none)
+[clickhouse] explain => (none)
+[clickhouse] no from => (none)
+[clickhouse] unparseable => (none)
+[clickhouse] update => (none)
+[clickhouse] unpaged preview => |[] (0 keys)|
+[clickhouse] paged preview => |[] (0 keys)|
 [mssql] no order by => |[] (0 keys)|
 [mssql] simple => |[a asc=true] (1 keys)|
 [mssql] desc then bare => |[a asc=false ; b asc=true] (2 keys)|

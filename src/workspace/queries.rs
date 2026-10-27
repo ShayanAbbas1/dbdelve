@@ -1856,7 +1856,13 @@ impl Workspace {
         // grammar cannot read; its sort is read from the spelling it was
         // generated in. A buffer's statement is read as typed.
         let keys = match tab {
-            Tab::Object(_) => sql::order_by(engine, &sql::unpaged(&sql)),
+            Tab::Object(object) => {
+                let before_paging = (engine.spec().sql.paging
+                    == crate::db::Paging::LimitOffsetByKey)
+                    .then(|| self.statement_before_paging(object, &sql))
+                    .flatten();
+                sql::order_by(engine, &before_paging.unwrap_or_else(|| sql::unpaged(&sql)))
+            }
             Tab::Query(_) => sql::order_by(engine, &sql),
         };
         let sortable = keys.is_some();
@@ -1885,18 +1891,6 @@ impl Workspace {
             let ran = statement.as_ref().or(explained.as_ref());
             tab.ran_from = tab.sent_from.take().filter(|(_, sent)| Some(sent) == ran);
         }
-        // Recorded on the way out rather than on the way back: the history is
-        // what the user ran, and a statement that failed is exactly the one
-        // worth getting back. Only the buffer's — a relation's preview is SQL
-        // dbdelve wrote, and nobody asked to keep it.
-        if let Some(statement) = &statement
-            && let Some(profile) = self.issued_to(&id, generation)
-        {
-            // A line that could not be written is not worth a notice on every
-            // run: the statement is still in the buffer, so nothing is lost.
-            let _ = store::append_history(&profile.id, statement);
-            remember_statement(&mut profile.session.history, statement);
-        }
         // Everything an object tab runs is dbdelve's, and a query tab runs
         // dbdelve's statement only when an edit is applied from its grid, the
         // one run that carries a refresh -- bar a `Return`, which the user's
@@ -1905,6 +1899,21 @@ impl Workspace {
             || refresh
                 .as_ref()
                 .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
+        // Recorded on the way out rather than on the way back: the history is
+        // what the user ran, and a statement that failed is exactly the one
+        // worth getting back. Only the buffer's — a relation's preview is SQL
+        // dbdelve wrote, and nobody asked to keep it. Nor an edit reviewed
+        // rather than appended: recalled into a buffer, it would run without
+        // the count that guards it.
+        if let Some(statement) = &statement
+            && !(generated && engine.reviews_query_edits())
+            && let Some(profile) = self.issued_to(&id, generation)
+        {
+            // A line that could not be written is not worth a notice on every
+            // run: the statement is still in the buffer, so nothing is lost.
+            let _ = store::append_history(&profile.id, statement);
+            remember_statement(&mut profile.session.history, statement);
+        }
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
         if !generated && let Some(profile) = self.issued_to(&id, generation) {
@@ -2069,6 +2078,7 @@ impl Workspace {
                         // Not a write's, which the cancel undid, and not when
                         // something other than the cancel ended it. Whatever
                         // the cancel cost besides is said either way.
+                        let ran = statement.as_deref().unwrap_or_default();
                         let result = match result {
                             Err(error)
                                 if cancelled
@@ -2080,12 +2090,12 @@ impl Workspace {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
-                                    notice: db::cancel_cost(engine, &error, true),
+                                    notice: db::cancel_cost(engine, &error, true, ran),
                                     ..QueryResult::default()
                                 })
                             }
                             Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
-                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only)
+                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only, ran)
                                     && cost != error.message
                                 {
                                     error.message = format!("{}\n\n{cost}", error.message);

@@ -425,6 +425,8 @@ impl ConnectionForm {
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
+            // A blank username sends none, and the server signs in `default`.
+            Engine::ClickHouse => ConnectionConfig::ClickHouse(self.server_requiring(&[], cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
             Engine::MongoDb => {
                 let mut server = self.server_requiring(&[], cx)?;
@@ -789,6 +791,7 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         | ConnectionConfig::MySql(server)
         | ConnectionConfig::MariaDb(server)
         | ConnectionConfig::SqlServer(server)
+        | ConnectionConfig::ClickHouse(server)
         | ConnectionConfig::MongoDb(MongoConfig { server, .. }) => if server.database.is_empty() {
             &server.host
         } else {

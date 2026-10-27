@@ -147,10 +147,12 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
     "ring",
 ] }
 
-# Snowflake. It publishes no Rust driver, and the community ones are tokio plus
-# reqwest, so this speaks its documented SQL REST API over a blocking client --
-# the same "blocking, owns no runtime GPUI has to host" rule as the three
-# drivers above.
+# Snowflake and ClickHouse. Snowflake publishes no Rust driver, and the
+# community ones are tokio plus reqwest, so this speaks its documented SQL REST
+# API over a blocking client -- the same "blocking, owns no runtime GPUI has to
+# host" rule as the three drivers above. ClickHouse is raw HTTP on the same
+# client, with `ureq::unversioned` for the tunnel resolver and the watched
+# transport; that module is not semver-covered, which the exact pin makes safe.
 #
 # Default features off for the usual reason, though here they happen to be the
 # right ones: `rustls` is ureq's spelling of rustls *on ring* with webpki-roots,
@@ -253,6 +255,11 @@ nucleo-matcher = "=0.3.1"
 # back into the text they cover. Already in the graph through it; pinned to the
 # locked version so naming it links no second copy.
 unicode-segmentation = "=1.13.3"
+# ClickHouse's result reader: `memmem` finds the exception frame a server
+# appends to a body across read boundaries, and `memchr_iter` counts the rows
+# of a result being drained. Already in the graph through nucleo-matcher and
+# the regex stack; pinned to the locked version so naming it links no second copy.
+memchr = "=2.8.3"
 
 serde = { version = "1", features = ["derive"] }
 # `raw_value` lets Import Rows keep a JSON number's own text (`import_rows::Json`),

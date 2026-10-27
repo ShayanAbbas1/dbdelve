@@ -1374,6 +1374,202 @@ source: src/sql_snapshots.rs
   |TRUNCATE TABLE "back\\slash"."trail\\";|
   = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
 
+[clickhouse] plain · select top
+  |SELECT * FROM `public`.`accounts` LIMIT 100|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] plain · drop Table
+  |DROP TABLE `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] plain · drop PartitionedTable
+  |DROP TABLE `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] plain · drop View
+  |DROP VIEW `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] plain · drop MaterializedView
+  |DROP VIEW `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] plain · drop ForeignTable
+  |DROP TABLE `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] plain · truncate
+  |TRUNCATE TABLE `public`.`accounts`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] quotes · select top
+  |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"` LIMIT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] quotes · drop Table
+  |DROP TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] quotes · drop PartitionedTable
+  |DROP TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] quotes · drop View
+  |DROP VIEW `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] quotes · drop MaterializedView
+  |DROP VIEW `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] quotes · drop ForeignTable
+  |DROP TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] quotes · truncate
+  |TRUNCATE TABLE `my "odd" schema`.`it's ``tick`` "dq"`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] unicode · select top
+  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] unicode · drop Table
+  |DROP TABLE `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] unicode · drop PartitionedTable
+  |DROP TABLE `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] unicode · drop View
+  |DROP VIEW `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] unicode · drop MaterializedView
+  |DROP VIEW `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] unicode · drop ForeignTable
+  |DROP TABLE `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] unicode · truncate
+  |TRUNCATE TABLE `données`.`Ünïcødé 表`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] reserved · select top
+  |SELECT * FROM `select`.`order` LIMIT 100|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] reserved · drop Table
+  |DROP TABLE `select`.`order`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] reserved · drop PartitionedTable
+  |DROP TABLE `select`.`order`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] reserved · drop View
+  |DROP VIEW `select`.`order`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] reserved · drop MaterializedView
+  |DROP VIEW `select`.`order`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] reserved · drop ForeignTable
+  |DROP TABLE `select`.`order`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] reserved · truncate
+  |TRUNCATE TABLE `select`.`order`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] mixed case · select top
+  |SELECT * FROM `Sales`.`OrderLines` LIMIT 100|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] mixed case · drop Table
+  |DROP TABLE `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] mixed case · drop PartitionedTable
+  |DROP TABLE `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] mixed case · drop View
+  |DROP VIEW `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] mixed case · drop MaterializedView
+  |DROP VIEW `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] mixed case · drop ForeignTable
+  |DROP TABLE `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] mixed case · truncate
+  |TRUNCATE TABLE `Sales`.`OrderLines`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] brackets and dots · select top
+  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] brackets and dots · drop Table
+  |DROP TABLE `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] brackets and dots · drop PartitionedTable
+  |DROP TABLE `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] brackets and dots · drop View
+  |DROP VIEW `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] brackets and dots · drop MaterializedView
+  |DROP VIEW `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] brackets and dots · drop ForeignTable
+  |DROP TABLE `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] brackets and dots · truncate
+  |TRUNCATE TABLE `[dbo]`.`a.b`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
+[clickhouse] backslash · select top
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[clickhouse] backslash · drop Table
+  |DROP TABLE `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] backslash · drop PartitionedTable
+  |DROP TABLE `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] backslash · drop View
+  |DROP VIEW `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] backslash · drop MaterializedView
+  |DROP VIEW `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] backslash · drop ForeignTable
+  |DROP TABLE `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop))
+
+[clickhouse] backslash · truncate
+  |TRUNCATE TABLE `back\\\\slash`.`trail\\\\`;|
+  = write_on=false select=false classify=Full [Truncate] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Truncate))
+
 [mssql] plain · select top
   |SELECT TOP 100 * FROM "public"."accounts"|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None

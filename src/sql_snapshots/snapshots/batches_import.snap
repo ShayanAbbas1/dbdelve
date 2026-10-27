@@ -1287,6 +1287,163 @@ source: src/sql_snapshots.rs
 [snowflake] relation backslash · skip=true
   error: |This engine cannot skip rows that already exist.|
 
+[clickhouse] base · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] base · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] json cell · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `doc`) VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] json cell · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] json null and scalar · skip=false
+  |INSERT INTO `public`.`accounts` (`doc`) VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] json null and scalar · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[clickhouse] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[clickhouse] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[clickhouse] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[clickhouse] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[clickhouse] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[clickhouse] big numbers · skip=false
+  |INSERT INTO `public`.`accounts` (`n`) VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] big numbers · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column we"ird · skip=false
+  |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column we"ird · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column back`tick · skip=false
+  |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column back`tick · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column it's · skip=false
+  |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column it's · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column [x] · skip=false
+  |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column [x] · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column a.b · skip=false
+  |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column a.b · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] conflict column  · skip=false
+  |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] conflict column  · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] operator column · skip=false
+  |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] operator column · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation plain · skip=false
+  |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation plain · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation quotes · skip=false
+  |INSERT INTO `my "odd" schema`.`it's ``tick`` "dq"` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation quotes · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation unicode · skip=false
+  |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation unicode · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation reserved · skip=false
+  |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation reserved · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation mixed case · skip=false
+  |INSERT INTO `Sales`.`OrderLines` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation mixed case · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation brackets and dots · skip=false
+  |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation brackets and dots · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[clickhouse] relation backslash · skip=false
+  |INSERT INTO `back\\\\slash`.`trail\\\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] relation backslash · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
 [mssql] base · skip=false
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES (N'1', N'it''s \\ é', N'1', N'2024-01-02T03:04:05.123Z'),|
   |(N'-2.5', NULL, N'0', N'')|

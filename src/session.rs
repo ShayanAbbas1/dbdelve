@@ -337,6 +337,8 @@ pub(crate) struct ApplyReview {
     /// the confirmation lying about what it confirms.
     pub(crate) title: &'static str,
     pub(crate) sql: String,
+    /// What the engine adds about running `sql`, one paragraph each.
+    pub(crate) notes: Vec<String>,
 }
 
 impl ApplyReview {
@@ -2042,6 +2044,10 @@ pub(crate) enum ObjectBody {
         /// `COUNT(*)` under the current `filter`, run only when the user asks:
         /// on a large table it is a full scan holding the connection.
         count: RowCount,
+        /// The statement last sent, with the one it was paged from. An engine
+        /// that pages by key writes the key's `ORDER BY` into the first, which
+        /// the headers must not show as a sort the user chose.
+        sent_from: Option<(String, String)>,
     },
     /// A relation's definition, opened only when asked for. It runs no query:
     /// the structure is all it loads.
@@ -2364,6 +2370,7 @@ mod tests {
             tab,
             title: "Apply edits",
             sql: "UPDATE t SET a = 1".into(),
+            notes: Vec::new(),
         }
     }
 

@@ -117,6 +117,30 @@ services:
       timeout: 3s
       retries: 30
 
+  clickhouse:
+    # The seed is baked into the image rather than mounted: a bind mount would
+    # record this checkout's path in the stack that every worktree shares.
+    build: ./dev/clickhouse
+    environment:
+      CLICKHOUSE_DB: dbdelve_dev
+      CLICKHOUSE_USER: dbdelve
+      CLICKHOUSE_PASSWORD: dbdelve
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "${DBDELVE_CLICKHOUSE_PORT:-58123}:8123"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - dbdelve-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      # Asked on the container's own address: the seed runs against a
+      # temporary server bound to localhost only. type_gallery is seeded last,
+      # so its rows prove the whole seed applied.
+      test: ["CMD-SHELL", "clickhouse-client --host \"$$(hostname -i)\" -u dbdelve --password dbdelve -q 'SELECT count() FROM dbdelve_dev.type_gallery' | grep -qx 2"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
   # Dev SSH bastions for the tunnel feature: `bastion` is reachable from the
   # host, `bastion2` only through it (no published port), so a tunnel through
   # either can be exercised against `postgres`/`mysql`/`mssql` by name. Regular
@@ -151,3 +175,4 @@ volumes:
   dbdelve-mariadb-data:
   dbdelve-mssql-data:
   dbdelve-mongo-data:
+  dbdelve-clickhouse-data:

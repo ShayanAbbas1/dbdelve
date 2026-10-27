@@ -1,4 +1,4 @@
-use super::{check, fragment, home, refusal, sample_filter, statement_with};
+use super::{check, column_types_of, fragment, home, refusal, sample_filter, statement_with};
 use crate::{
     db::{Engine, ExplainMode, Syntax},
     explorer::{PREVIEW_ROW_LIMIT, preview_sql},
@@ -10,6 +10,10 @@ fn explains_per_engine() {
     let mut out = String::new();
     for engine in Engine::ALL {
         let (schema, relation) = home(engine);
+        let types = match engine {
+            Engine::ClickHouse => column_types_of(engine),
+            _ => Vec::new(),
+        };
         let mut bases = vec![
             (
                 "plain",
@@ -30,7 +34,7 @@ fn explains_per_engine() {
         match engine.syntax() {
             Syntax::Sql => bases.push((
                 "delete",
-                sql::delete_row(engine, schema, relation, &[("id", "7")], &[]).unwrap(),
+                sql::delete_row(engine, schema, relation, &[("id", "7")], &types).unwrap(),
             )),
             Syntax::Mongo => {
                 let c = r#"db.getCollection("accounts")"#;

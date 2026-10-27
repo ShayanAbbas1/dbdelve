@@ -182,20 +182,36 @@ pub fn connector(
 }
 
 /// The roots a certificate is checked against.
+fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
+    let mut store = RootCertStore::empty();
+    for certificate in root_certificates(root_certificate)? {
+        // Each was added once already, to prove it usable.
+        let _ = store.add(certificate);
+    }
+    Ok(store)
+}
+
+/// The certificates a verifying connection trusts, for a client that takes
+/// them as bytes rather than a store.
 ///
 /// A named file *replaces* the platform's trust store rather than adding to it,
 /// which is what libpq's `sslrootcert` does and the only reading that makes a
 /// cloud provider's bundle mean anything: the point of pinning RDS's authority
 /// is that nothing else is accepted.
-fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
+pub fn root_certificates(
+    root_certificate: Option<&str>,
+) -> Result<Vec<CertificateDer<'static>>, String> {
     let mut store = RootCertStore::empty();
+    let mut kept = Vec::new();
 
     let Some(path) = root_certificate else {
         let loaded = rustls_native_certs::load_native_certs();
         for certificate in loaded.certs {
             // A single unparsable certificate in the platform store is not a
             // reason to refuse every connection; an empty store is.
-            let _ = store.add(certificate);
+            if store.add(certificate.clone()).is_ok() {
+                kept.push(certificate);
+            }
         }
         if store.is_empty() {
             return Err(match loaded.errors.first() {
@@ -203,7 +219,7 @@ fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
                 None => "The system holds no certificate authorities.".to_string(),
             });
         }
-        return Ok(store);
+        return Ok(kept);
     };
 
     let file = std::fs::File::open(crate::store::home_expanded(path))
@@ -212,13 +228,14 @@ fn roots(root_certificate: Option<&str>) -> Result<RootCertStore, String> {
     for certificate in rustls_pemfile::certs(&mut reader) {
         let certificate = certificate.map_err(|error| format!("Could not read {path}: {error}"))?;
         store
-            .add(certificate)
+            .add(certificate.clone())
             .map_err(|error| format!("{path} does not hold a usable certificate: {error}"))?;
+        kept.push(certificate);
     }
     if store.is_empty() {
         return Err(format!("{path} holds no certificates."));
     }
-    Ok(store)
+    Ok(kept)
 }
 
 /// libpq's `prefer` and `require`: encryption, and no question about who is on

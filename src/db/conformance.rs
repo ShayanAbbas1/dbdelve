@@ -513,7 +513,11 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
         rollback: false,
         read_write: false,
     };
-    if let Some(delete) = &cleanup {
+    // An engine that names rows by every value refuses a delete that matches none.
+    if let Some(delete) = cleanup
+        .as_ref()
+        .filter(|_| !subject.label_of(scenario, "901").is_empty())
+    {
         generated(delete);
     }
 
@@ -551,6 +555,19 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             keys: vec![(key.to_string(), "901".to_string())],
             types: types.clone(),
             held: vec![("label".into(), "inserted".into())],
+            // The spelling is the preview's to say, as on an object tab.
+            update: if engine == Engine::ClickHouse {
+                generated(&format!(
+                    "SELECT * FROM {}",
+                    engine.qualified(schema, relation)
+                ))
+                .edit
+                .map(|target| target.update)
+                .unwrap_or_default()
+            } else {
+                Default::default()
+            },
+            ..Default::default()
         };
         let update = sql::update_batch(engine, &[row])
             .unwrap_or_else(|error| panic!("{at}: update_batch: {error}"));
