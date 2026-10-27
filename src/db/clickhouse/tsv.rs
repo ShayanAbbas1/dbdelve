@@ -203,12 +203,7 @@ fn render_as(bytes: &[u8], binary: bool) -> Cow<'_, str> {
     if !binary && let Ok(text) = std::str::from_utf8(bytes) {
         return Cow::Borrowed(text);
     }
-    let mut hex = String::with_capacity(2 + bytes.len() * 2);
-    hex.push_str("0x");
-    for byte in bytes {
-        hex.push_str(&format!("{byte:02X}"));
-    }
-    Cow::Owned(hex)
+    Cow::Owned(format!("0x{}", hex::encode_upper(bytes)))
 }
 
 /// A response body up to the tagged exception frame a server (25.11 and

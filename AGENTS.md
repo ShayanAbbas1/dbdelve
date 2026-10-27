@@ -30,7 +30,9 @@ require it, stop and raise it instead.
    where the user can read it: on a view the server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
    rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
-   or shown in a review dialog on an object tab, which has no buffer; Import
+   or shown in a review dialog on an object tab, which has no buffer, and on
+   a query tab of an engine whose rows are named by every value, whose writes
+   must run behind their guard (`Engine::reviews_query_edits`); Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which

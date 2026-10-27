@@ -220,9 +220,10 @@ Decided, and not to be re-litigated:
   does. SQL Server offers neither: its plans come from `SET SHOWPLAN_XML`, a
   session switch that must be a batch of its own, which is not a prefix on a
   copy of the statement. Server versions are not detected: an older server
-  refuses the statement and says so. ClickHouse offers plain `EXPLAIN` only
-  and no analyze: its `EXPLAIN` plans the statement and never runs it, and its
-  rows stay in the grid. `sqlparser`
+  refuses the statement and says so. On ClickHouse DBDelve offers plain
+  `EXPLAIN` only, not the server's `EXPLAIN ANALYZE` (26.7+): its `EXPLAIN`
+  plans the statement and never runs it, and its rows stay in the grid.
+  `sqlparser`
   cannot read MariaDB's `ANALYZE <statement>`, so on MariaDB `sql::classify`
   reads it as `EXPLAIN ANALYZE <statement>`, classified by the statement it
   runs as MySQL's is. Only when a `SELECT`, `WITH`, `INSERT`, `REPLACE`,

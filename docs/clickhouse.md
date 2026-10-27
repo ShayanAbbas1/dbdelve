@@ -75,12 +75,14 @@ and the write.
 
 ## Cancel and the row limit
 
-Cancel and a read stopped at the row limit both end in `KILL QUERY` on the
-server. The statement timeout is sent as `max_execution_time`, and DBDelve also
-stops waiting a little after it. Mutations keep running on the server after a
-Cancel; `KILL MUTATION` stops one.
+Cancel and a read stopped at the row limit both send `KILL QUERY` to the
+server, again every 100 ms until it lands. If it has not landed after 10
+seconds, DBDelve stops reading and says the statement may still be running on
+the server. The statement timeout is sent as `max_execution_time`, and DBDelve
+also stops waiting a little after it. Mutations keep running on the server
+after a Cancel; `KILL MUTATION` stops one.
 
 ## Explain
 
 Explain runs `EXPLAIN` on a copy of the statement, which plans it and never
-runs it. There is no analyze form.
+runs it. DBDelve does not offer the server's `EXPLAIN ANALYZE` (26.7+).
