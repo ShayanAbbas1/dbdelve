@@ -219,6 +219,17 @@ impl SchemaCompletions {
     /// the server to describe something it has already said does not exist,
     /// once per keystroke, for as long as the typo is on screen.
     fn columns_of(&self, relation: &str, wanted: &mut Vec<(String, String)>) -> Vec<Candidate> {
+        self.columns_of_except(relation, None, wanted)
+    }
+
+    /// [`Self::columns_of`], less the one relation `except` names, whose
+    /// columns the caller has already offered.
+    fn columns_of_except(
+        &self,
+        relation: &str,
+        except: Option<&(String, String)>,
+        wanted: &mut Wanted,
+    ) -> Vec<Candidate> {
         let mut candidates = Vec::new();
         for schema in &self.catalog.schemas {
             for named in schema
@@ -226,8 +237,10 @@ impl SchemaCompletions {
                 .iter()
                 .filter(|named| named.name.eq_ignore_ascii_case(relation))
             {
-                candidates
-                    .extend(self.columns_at((schema.name.clone(), named.name.clone()), wanted));
+                let key = (schema.name.clone(), named.name.clone());
+                if except != Some(&key) {
+                    candidates.extend(self.columns_at(key, wanted));
+                }
             }
         }
         candidates
@@ -252,7 +265,16 @@ impl SchemaCompletions {
 
     /// The columns held for one relation, recording it into `wanted` when
     /// they are not.
+    ///
+    /// Recorded once however often a statement names it: each entry is a
+    /// describe on the wire, and a second would reset the first's count of
+    /// failed attempts.
     fn columns_at(&self, key: (String, String), wanted: &mut Wanted) -> Vec<Candidate> {
+        let mut want = |key| {
+            if !wanted.contains(&key) {
+                wanted.push(key);
+            }
+        };
         match self.columns.borrow().get(&key) {
             Some(ColumnState::Loaded(columns)) => columns
                 .iter()
@@ -262,13 +284,13 @@ impl SchemaCompletions {
                 .collect(),
             // Failed, but not yet often enough to give up on.
             Some(ColumnState::Failed(attempts)) if *attempts < FETCH_ATTEMPTS => {
-                wanted.push(key);
+                want(key);
                 Vec::new()
             }
             // In flight, or asked for as often as it is going to be.
             Some(ColumnState::Loading(_) | ColumnState::Failed(_)) => Vec::new(),
             None => {
-                wanted.push(key);
+                want(key);
                 Vec::new()
             }
         }
@@ -375,7 +397,8 @@ impl SchemaCompletions {
         // Columns of the relations this statement actually names come first:
         // in a statement about `accounts`, `email` is a better guess than
         // every other `email` in the database, and than `EXISTS`. The scope's
-        // lead them, as the relation the text is about without naming it.
+        // columns lead them, as the relation the text is about without naming
+        // it, and are not offered again when the text names it too.
         let mut candidates = scope
             .map(|scope| self.columns_in(scope, wanted))
             .unwrap_or_default();
@@ -390,7 +413,7 @@ impl SchemaCompletions {
                     relations
                 })
                 .iter()
-                .flat_map(|relation| self.columns_of(relation, wanted)),
+                .flat_map(|relation| self.columns_of_except(relation, scope, wanted)),
         );
 
         candidates.extend(
@@ -1429,6 +1452,55 @@ mod tests {
             offered.first(),
             Some(&("ema".to_string(), "email".to_string()))
         );
+    }
+
+    #[test]
+    fn a_raw_filter_naming_its_own_relation_offers_and_asks_for_it_once() {
+        let catalog = Catalog {
+            schemas: vec![
+                Schema {
+                    name: "public".to_string(),
+                    relations: vec![relation("accounts")],
+                    routines: Vec::new(),
+                },
+                Schema {
+                    name: "audit".to_string(),
+                    relations: vec![relation("accounts")],
+                    routines: Vec::new(),
+                },
+            ],
+        };
+        let text = "parent_id IN (SELECT id FROM accounts) AND ema";
+        let scope = ("public".to_string(), "accounts".to_string());
+        let filter = |held: &[(&str, &str, &[&str])]| {
+            FilterCompletions::new(
+                Syntax::Sql,
+                Rc::new(detached(catalog.clone(), held)),
+                scope.clone(),
+            )
+            .expect("SQL completes a raw filter")
+            .items(text, text.len())
+        };
+
+        let (items, _) = filter(&[
+            ("public", "accounts", &["id", "email"]),
+            ("audit", "accounts", &["id", "embargo"]),
+        ]);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|(_, candidate)| candidate.label.as_str())
+            .collect();
+        assert_eq!(
+            labels.iter().filter(|label| **label == "email").count(),
+            1,
+            "{labels:?}"
+        );
+        // Another schema's relation of the same name is still the text's.
+        assert!(labels.contains(&"embargo"), "{labels:?}");
+
+        let (_, wanted) = filter(&[]);
+        let asked = wanted.iter().filter(|key| **key == scope).count();
+        assert_eq!(asked, 1, "{wanted:?}");
     }
 
     #[test]
