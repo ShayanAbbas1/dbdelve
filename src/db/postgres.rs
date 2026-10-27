@@ -24,6 +24,8 @@ use super::{
     terminated,
 };
 
+mod pgpass;
+
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 5432;
 
@@ -469,16 +471,9 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 /// that a username containing `@` or a password containing a space is
 /// passed through intact instead of truncating the string.
 fn connection_string(server: &ServerConfig) -> String {
-    // An empty `dbname` would have the server pick the user's name, often a
-    // database that does not exist; `postgres` is what createdb connects to.
-    let dbname = if server.database.is_empty() {
-        "postgres"
-    } else {
-        &server.database
-    };
     let mut parts = vec![
         format!("host={}", quote(&server.host)),
-        format!("dbname={}", quote(dbname)),
+        format!("dbname={}", quote(dbname(server))),
         format!("user={}", quote(&server.user)),
     ];
     if let Some(port) = server.port {
@@ -554,6 +549,29 @@ fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
 
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
 /// through `hostaddr`, which the certificate check never sees.
+/// An empty `dbname` would have the server pick the user's name, often a
+/// database that does not exist; `postgres` is what createdb connects to.
+fn dbname(server: &ServerConfig) -> &str {
+    if server.database.is_empty() {
+        "postgres"
+    } else {
+        &server.database
+    }
+}
+
+/// The profile's own host and port, not the tunnel's local end: those are
+/// what a `.pgpass` line written for the server names.
+fn password_file(server: &ServerConfig) -> Option<pgpass::Lookup> {
+    server.password.is_empty().then(|| {
+        pgpass::lookup(
+            &server.host,
+            server.port.unwrap_or(DEFAULT_PORT),
+            dbname(server),
+            &server.user,
+        )
+    })
+}
+
 fn tunnelled_string(server: &ServerConfig, dial: SocketAddr) -> String {
     let dialled = ServerConfig {
         port: Some(dial.port()),
@@ -682,9 +700,19 @@ impl Connection {
                 message,
                 position: None,
             })?;
+        let password_file = password_file(server);
+        // Only for this connect: the profile keeps its blank password, so the
+        // file is read again by the next one and never reaches the Keychain.
+        let signing_in = match &password_file {
+            Some(pgpass::Lookup::Found { password, .. }) => &ServerConfig {
+                password: password.clone(),
+                ..server.clone()
+            },
+            _ => server,
+        };
         let string = match &tunnel {
-            None => connection_string(server),
-            Some(tunnel) => tunnelled_string(server, tunnel.dial()?),
+            None => connection_string(signing_in),
+            Some(tunnel) => tunnelled_string(signing_in, tunnel.dial()?),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -698,7 +726,17 @@ impl Connection {
                 .block_on(tokio_postgres::connect(&string, connector.clone()))
                 .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
         }
-        .map_err(|error| connect_error(&error, server))?;
+        .map_err(|error| {
+            let mut failure = connect_error(&error, server);
+            if let Some(note) = password_file
+                .as_ref()
+                .and_then(|lookup| lookup.note(&error))
+            {
+                failure.message.push('\n');
+                failure.message.push_str(&note);
+            }
+            failure
+        })?;
         let mut client = Client {
             client,
             driver: Driver {
@@ -1841,6 +1879,78 @@ mod tests {
         assert!(
             set_search_path_sql(r#"it's "odd" \here"#).contains(r#"E'"it''s ""odd"" \\here"'"#)
         );
+    }
+
+    /// Run again in a child process, `PGPASSFILE` set before it starts: a
+    /// `set_var` here would race every other test thread reading the
+    /// environment. The file sits in a directory only this user can enter,
+    /// since it holds the live password.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_blank_password_signs_in_from_the_password_file() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+        const CHILD: &str = "DBDELVE_PGPASS_CHILD";
+        let name = "db::postgres::tests::live_a_blank_password_signs_in_from_the_password_file";
+        if std::env::var_os(CHILD).is_none() {
+            let directory =
+                std::env::temp_dir().join(format!("dbdelve-pgpass-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .expect("the private directory should create");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--include-ignored", "--nocapture"])
+                .env(CHILD, "1")
+                .env("PGPASSFILE", directory.join("pgpass"))
+                .status()
+                .expect("the child test should run");
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(status.success());
+            return;
+        }
+
+        let config = live_config();
+        let file = std::path::PathBuf::from(std::env::var_os("PGPASSFILE").unwrap());
+        let field = |value: &str| value.replace('\\', r"\\").replace(':', r"\:");
+        let write = |password: &str, mode: u32| {
+            let line = format!(
+                "# rotated nightly\n{}:{}:*:{}:{}\n",
+                field(&config.host),
+                config.port.unwrap_or(DEFAULT_PORT),
+                field(&config.user),
+                field(password)
+            );
+            std::fs::write(&file, line).expect("the password file should write");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode))
+                .expect("the password file should chmod");
+        };
+        let blank = ServerConfig {
+            password: String::new(),
+            ..config.clone()
+        };
+        let failure = || {
+            Connection::open(&blank)
+                .err()
+                .expect("the connection should fail")
+                .message
+        };
+
+        write(&config.password, 0o600);
+        Connection::open(&blank).expect("the file's password should sign in");
+
+        write("rotated-away", 0o600);
+        let rejected = failure();
+        assert!(
+            rejected.ends_with(&format!("The password came from {}.", file.display())),
+            "{rejected}"
+        );
+
+        write("never-read", 0o644);
+        let skipped = failure();
+        assert!(skipped.contains("is readable by other users"), "{skipped}");
     }
 
     #[test]
