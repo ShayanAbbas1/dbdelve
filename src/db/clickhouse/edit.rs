@@ -4,7 +4,7 @@
 //! ClickHouse has no unique key, so a row is named by every value it was read
 //! with, and each spelling here has to be one the write gate admits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::tsv::peel;
 use super::{opens_with, queued_statements, write_of};
@@ -12,6 +12,7 @@ use crate::db::{
     Column, DbError, EditTarget, Engine, RowMatch, UpdateSpelling, cancel_cost, is_cancel,
     plain_error,
 };
+use crate::sql::{Projected, TableRead, Unread, bare_words, table_read_or_why};
 
 const NOT_MERGE_TREE: &str = "ClickHouse edits rows of MergeTree tables only.";
 
@@ -210,14 +211,31 @@ impl Table {
         table: &str,
         columns: &[Column],
     ) -> (Option<EditTarget>, Option<String>) {
+        let origins: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+        self.target_of(schema, table, columns, &origins)
+    }
+
+    /// The edit target of a result of this table whose columns are `columns`,
+    /// each read from the table's column `origins` names at its place, or the
+    /// reason its rows cannot be written. `(None, None)` where an origin is no
+    /// column of the table, or there are none. A result of some of the
+    /// table's columns names its rows by those alone, which the guard keeps
+    /// safe: a write still runs only where exactly one row has those values.
+    pub fn target_of(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[Column],
+        origins: &[String],
+    ) -> (Option<EditTarget>, Option<String>) {
         if let Some(reason) = &self.refusal {
             return (None, Some(reason.clone()));
         }
-        let described: Option<Vec<&Described>> = columns
-            .iter()
-            .map(|column| self.columns.iter().find(|known| known.name == column.name))
-            .collect();
-        let Some(described) = described.filter(|described| !described.is_empty()) else {
+        let described: Option<Vec<&Described>> =
+            origins.iter().map(|origin| self.column(origin)).collect();
+        let Some(described) =
+            described.filter(|described| !described.is_empty() && described.len() == columns.len())
+        else {
             return (None, None);
         };
         let types = columns
@@ -235,7 +253,7 @@ impl Table {
             .enumerate()
             .filter(|(_, (known, data_type))| {
                 known.in_key
-                    || known.default_kind == "MATERIALIZED"
+                    || matches!(known.default_kind.as_str(), "MATERIALIZED" | "ALIAS")
                     || peel(data_type).0.starts_with("AggregateFunction")
                     // The server casts a string to a Map nowhere an assignment
                     // takes one, though an INSERT parses the same text.
@@ -246,15 +264,16 @@ impl Table {
         let target = EditTarget {
             schema: schema.to_string(),
             table: table.to_string(),
-            columns: columns
-                .iter()
-                .map(|column| Some(column.name.clone()))
-                .collect(),
+            columns: origins.iter().cloned().map(Some).collect(),
             keys: (0..columns.len()).collect(),
             row_match: RowMatch::EveryColumn { fixed },
             update: self.update,
         };
         (Some(target), None)
+    }
+
+    fn column(&self, name: &str) -> Option<&Described> {
+        self.columns.iter().find(|known| known.name == name)
     }
 
     /// Why `write` may not run on this table, when it may not.
@@ -267,6 +286,126 @@ impl Table {
             Write::Update(spelling) => (spelling != self.update).then(|| RESPELLED.to_string()),
         }
     }
+}
+
+const SELECT_LIST: &str = "Only rows selected as the table's own columns, or *, can be edited.";
+
+const FINAL: &str = "FINAL merges rows as they are read, so these rows cannot be edited.";
+
+pub(super) const SESSION_SET: &str = "This session ran a SET, which can change how values are \
+                                      shown, so DBDelve cannot match these rows by value. Open \
+                                      the table from the explorer to edit its rows.";
+
+pub(super) const TEMPORARY: &str = "These rows are from a temporary table, which only this session \
+                                    can see, so they cannot be edited.";
+
+const TWICE: &str = "These rows hold a column twice, so they cannot be edited.";
+
+const UNMAPPED: &str = "DBDelve could not tell which column of the table each result column is, \
+                        so these rows cannot be edited.";
+
+/// What a user's query reads when it is a select of one table's own rows
+/// ([`table_read_or_why`]), with the names its select list gives by `AS`, or
+/// why its rows cannot be written back.
+pub(super) fn query_shape(sql: &str) -> Result<(TableRead, Vec<String>), &'static str> {
+    // The grammar takes `t FINAL` for `t` aliased as `FINAL`, and cannot read
+    // `t AS x FINAL` at all.
+    if bare_words(Engine::ClickHouse, sql)
+        .is_some_and(|words| words.iter().any(|word| word.eq_ignore_ascii_case("FINAL")))
+    {
+        return Err(FINAL);
+    }
+    table_read_or_why(Engine::ClickHouse, sql).map_err(unread)
+}
+
+/// Why a user's query has no edit target, by what [`table_read_or_why`]
+/// found in it.
+pub(super) fn unread(why: Unread) -> &'static str {
+    match why {
+        Unread::Unparsed => {
+            "DBDelve cannot read this statement whole, so it cannot tell which table its rows are \
+             from."
+        }
+        Unread::NotAQuery => "Only the rows of a SELECT can be edited.",
+        Unread::With => "These rows are read through WITH, so they cannot be edited.",
+        Unread::NotOneSelect => {
+            "These rows are not from one SELECT of a table, so they cannot be edited."
+        }
+        Unread::Settings => {
+            "A SETTINGS clause can change how values are shown, so rows read with one cannot be \
+             edited."
+        }
+        Unread::Format => "Rows read in a FORMAT of their own cannot be edited.",
+        Unread::Distinct => "DISTINCT merges identical rows, so these rows cannot be edited.",
+        Unread::Grouped => "Grouped rows are not rows of the table, so they cannot be edited.",
+        Unread::Filled => {
+            "WITH FILL adds rows the table does not hold, so these rows cannot be edited."
+        }
+        Unread::Join => "These rows come from a join, so they cannot be edited.",
+        Unread::ArrayJoin => {
+            "ARRAY JOIN repeats a row once for each element, so these rows cannot be edited."
+        }
+        Unread::NotATable => "These rows are not read from a table, so they cannot be edited.",
+        Unread::Projection => SELECT_LIST,
+        Unread::Other => "DBDelve edits the rows of a plain SELECT of one table only.",
+    }
+}
+
+/// The column of `table` (named `name`) behind each of `columns`, the result
+/// of `read`, or why the rows cannot be written back. A `*` stands for as
+/// many result columns as the rest of the list leaves, which the server names
+/// as the table does; a name in the list is read as written. An alias that is
+/// also a column's name refuses the lot: the server takes the alias over the
+/// column wherever the name appears, so `SELECT a AS b, b` reads `a` twice.
+pub(super) fn origins(
+    read: &TableRead,
+    renamed: &[String],
+    columns: &[Column],
+    table: &Table,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(alias) = renamed.iter().find(|alias| table.column(alias).is_some()) {
+        return Err(format!(
+            "The alias {alias} is also the name of a column, so DBDelve cannot tell which one \
+             each value is."
+        ));
+    }
+    let stars = read
+        .columns
+        .iter()
+        .filter(|projected| matches!(projected, Projected::Every))
+        .count();
+    if stars > 1 {
+        return Err(TWICE.into());
+    }
+    let spread = columns
+        .len()
+        .checked_sub(read.columns.len() - stars)
+        .ok_or_else(|| UNMAPPED.to_string())?;
+    let mut origins = Vec::with_capacity(columns.len());
+    for projected in &read.columns {
+        match projected {
+            Projected::Every => {
+                let at = origins.len();
+                origins.extend(columns[at..at + spread].iter().map(|c| c.name.clone()));
+            }
+            Projected::Column(written) => origins.push(written.clone()),
+            Projected::Computed => return Err(SELECT_LIST.into()),
+        }
+    }
+    if origins.len() != columns.len() {
+        return Err(UNMAPPED.into());
+    }
+    if let Some(missing) = origins.iter().find(|origin| table.column(origin).is_none()) {
+        return Err(format!(
+            "{missing} is not a column of {name}, so these rows cannot be edited."
+        ));
+    }
+    let mut seen = HashSet::new();
+    if !origins.iter().all(|origin| seen.insert(origin)) {
+        return Err(TWICE.into());
+    }
+    Ok(origins)
 }
 
 const NO_TRANSACTION: &str = "ClickHouse has no transaction. The statements run one at a time and \
@@ -986,6 +1125,190 @@ mod tests {
             );
             facts.columns.pop();
         }
+    }
+
+    #[test]
+    fn a_query_of_one_tables_own_rows_is_read_off_its_statement() {
+        let every = || vec![Projected::Every];
+        for (sql, table, columns) in [
+            ("SELECT * FROM edit_lw", vec!["edit_lw"], every()),
+            (
+                "SELECT * FROM `d`.`t` WHERE id > 1 ORDER BY id LIMIT 10 OFFSET 5",
+                vec!["d", "t"],
+                every(),
+            ),
+            ("/* rows */ select * from d.t", vec!["d", "t"], every()),
+            ("SELECT * FROM t LIMIT 1 BY id", vec!["t"], every()),
+            (
+                "SELECT * FROM t PREWHERE id = 1 WHERE label != ''",
+                vec!["t"],
+                every(),
+            ),
+            ("SELECT * FROM t SAMPLE 0.5", vec!["t"], every()),
+            (
+                "SELECT label, x.id, x.* FROM d.t AS x",
+                vec!["d", "t"],
+                vec![
+                    Projected::Column("label".into()),
+                    Projected::Column("id".into()),
+                    Projected::Every,
+                ],
+            ),
+        ] {
+            let (read, renamed) = query_shape(sql).unwrap_or_else(|why| panic!("{sql}: {why}"));
+            assert_eq!(read.table, table, "{sql}");
+            assert_eq!(read.columns, columns, "{sql}");
+            assert!(renamed.is_empty(), "{sql}");
+        }
+        let (_, renamed) = query_shape("SELECT id AS ident, label AS label FROM t").unwrap();
+        assert_eq!(renamed, ["ident"]);
+    }
+
+    #[test]
+    fn every_other_shape_of_query_is_refused_saying_why() {
+        for (sql, reason) in [
+            ("SELECT * FROM t FINAL", FINAL),
+            ("SELECT * FROM d.t final WHERE id = 1", FINAL),
+            ("SELECT * FROM t AS x FINAL", FINAL),
+            (
+                "SELECT * FROM t JOIN u ON t.id = u.id",
+                unread(Unread::Join),
+            ),
+            ("SELECT * FROM t, u", unread(Unread::Join)),
+            (
+                "SELECT id, count() FROM t GROUP BY id",
+                unread(Unread::Grouped),
+            ),
+            (
+                "SELECT id FROM t ARRAY JOIN tags",
+                unread(Unread::ArrayJoin),
+            ),
+            (
+                "SELECT id FROM t LEFT ARRAY JOIN tags AS tag",
+                unread(Unread::ArrayJoin),
+            ),
+            (
+                "WITH x AS (SELECT * FROM t) SELECT * FROM x",
+                unread(Unread::With),
+            ),
+            ("SELECT * FROM (SELECT * FROM t)", unread(Unread::NotATable)),
+            ("SELECT * FROM numbers(10)", unread(Unread::NotATable)),
+            ("SELECT 1", unread(Unread::NotATable)),
+            (
+                "SELECT * FROM t SETTINGS session_timezone = 'Asia/Tokyo'",
+                unread(Unread::Settings),
+            ),
+            (
+                "SELECT * FROM t SETTINGS max_threads = 1",
+                unread(Unread::Settings),
+            ),
+            ("SELECT * FROM t FORMAT JSON", unread(Unread::Format)),
+            ("SELECT DISTINCT * FROM t", unread(Unread::Distinct)),
+            (
+                "SELECT * FROM t UNION ALL SELECT * FROM t",
+                unread(Unread::NotOneSelect),
+            ),
+            (
+                "SELECT * FROM t ORDER BY id WITH FILL",
+                unread(Unread::Filled),
+            ),
+            ("SHOW TABLES", unread(Unread::NotAQuery)),
+            ("SELECT * FROM t WHERE", unread(Unread::Unparsed)),
+            ("SELECT * EXCEPT (id) FROM t", unread(Unread::Projection)),
+        ] {
+            assert_eq!(query_shape(sql).map(drop), Err(reason), "{sql}");
+        }
+        // A select item that is not a column is the caller's to refuse.
+        let (read, _) = query_shape("SELECT id + 1 FROM t").unwrap();
+        assert_eq!(read.columns, [Projected::Computed]);
+    }
+
+    fn mapped(sql: &str, header: &[&str]) -> Result<Vec<String>, String> {
+        let mut facts = facts("MergeTree", "MergeTree ORDER BY id", "");
+        facts.columns.push(column("qty", "Int32", "", false));
+        let table = Table::of(facts);
+        let (read, renamed) = query_shape(sql).unwrap();
+        let columns: Vec<(&str, &str)> = header.iter().map(|name| (*name, "String")).collect();
+        origins(&read, &renamed, &result(&columns), &table, "t")
+    }
+
+    #[test]
+    fn each_result_column_is_mapped_to_the_table_column_it_was_read_from() {
+        assert_eq!(
+            mapped("SELECT * FROM t", &["id", "label", "qty"]).unwrap(),
+            ["id", "label", "qty"]
+        );
+        assert_eq!(
+            mapped("SELECT qty, id FROM t", &["qty", "id"]).unwrap(),
+            ["qty", "id"]
+        );
+        assert_eq!(
+            mapped("SELECT label AS name, t.id FROM t", &["name", "id"]).unwrap(),
+            ["label", "id"]
+        );
+    }
+
+    #[test]
+    fn a_result_column_that_cannot_be_mapped_exactly_refuses_the_rows() {
+        let alias = "The alias qty is also the name of a column, so DBDelve cannot tell which \
+                     one each value is.";
+        for (sql, header, reason) in [
+            // The server reads the second `qty` as the alias: `id` twice.
+            (
+                "SELECT id AS qty, qty FROM t",
+                vec!["qty", "qty"],
+                alias.to_string(),
+            ),
+            ("SELECT id, id FROM t", vec!["id", "id"], TWICE.to_string()),
+            (
+                "SELECT id, * FROM t",
+                vec!["id", "id", "label", "qty"],
+                TWICE.to_string(),
+            ),
+            ("SELECT *, * FROM t", vec!["id", "id"], TWICE.to_string()),
+            (
+                "SELECT _part, * FROM t",
+                vec!["_part", "id", "label", "qty"],
+                "_part is not a column of t, so these rows cannot be edited.".to_string(),
+            ),
+            // An alias naming no column is read as the alias it is.
+            (
+                "SELECT id AS ident, ident FROM t",
+                vec!["ident", "ident"],
+                "ident is not a column of t, so these rows cannot be edited.".to_string(),
+            ),
+            (
+                "SELECT id + 1 FROM t",
+                vec!["plus(id, 1)"],
+                SELECT_LIST.to_string(),
+            ),
+            ("SELECT id, label FROM t", vec!["id"], UNMAPPED.to_string()),
+        ] {
+            assert_eq!(mapped(sql, &header), Err(reason), "{sql}");
+        }
+    }
+
+    #[test]
+    fn some_of_a_tables_columns_name_their_rows_by_those_alone_and_the_guard_keeps_it_one_row() {
+        let mut facts = facts("MergeTree", &format!("MergeTree ORDER BY id{BLOCKS}"), "");
+        facts.columns.push(column("total", "Int64", "ALIAS", false));
+        let table = Table::of(facts);
+        let columns = result(&[("total", "Int64"), ("shown", "String")]);
+        let origins = ["total".to_string(), "label".to_string()];
+        let (target, reason) = table.target_of("d", "t", &columns, &origins);
+        assert_eq!(reason, None);
+        let target = target.unwrap();
+        assert_eq!(
+            target.columns,
+            vec![Some("total".into()), Some("label".into())]
+        );
+        // Only the two columns read name the row, so other rows can share
+        // them; what keeps the write to one row is the guard's count of
+        // exactly this predicate, which refuses any count but one.
+        assert_eq!(target.keys, vec![0, 1]);
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![0] });
+        assert_eq!(count_refusal(1), None);
+        assert!(count_refusal(2).is_some());
     }
 
     #[test]

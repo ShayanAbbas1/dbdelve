@@ -3197,6 +3197,38 @@ pub(crate) enum Projected {
     Computed,
 }
 
+/// Why a statement's rows are not one table's rows, as [`table_read_or_why`]
+/// finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unread {
+    /// Nothing the grammar reads whole.
+    Unparsed,
+    /// A statement other than a query.
+    NotAQuery,
+    /// A `WITH` beside the select.
+    With,
+    /// A set operation, `VALUES` or a parenthesised query.
+    NotOneSelect,
+    /// A `SETTINGS` clause on the query.
+    Settings,
+    /// A `FORMAT` clause on the query.
+    Format,
+    Distinct,
+    /// `GROUP BY`, `HAVING`, a window or `QUALIFY`.
+    Grouped,
+    /// `ORDER BY … WITH FILL` or `INTERPOLATE`.
+    Filled,
+    /// A join, or a second relation in `FROM`.
+    Join,
+    ArrayJoin,
+    /// No `FROM`, a subquery or a table function in it.
+    NotATable,
+    /// A `*` with a modifier, or a select item that is not a column.
+    Projection,
+    /// Anything else the plain select does not have.
+    Other,
+}
+
 /// [`TableRead`] for the last statement of `sql`, when it is a plain select of
 /// one table: no join, subquery, table function, CTE, set operation,
 /// `DISTINCT`, grouping or window clause, and no table alias renaming the
@@ -3204,52 +3236,98 @@ pub(crate) enum Projected {
 /// row of the table, or a column something other than the column it names,
 /// so each refuses rather than being read past.
 pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
+    table_read_or_why(engine, sql).ok().map(|(read, _)| read)
+}
+
+/// [`table_read`], with the names the select list gives a column of the table
+/// by `AS` (`SELECT a AS b` gives `b`), or what refused it. A `Computed` item
+/// refuses nothing here; that is the caller's to decide.
+pub(crate) fn table_read_or_why(
+    engine: Engine,
+    sql: &str,
+) -> Result<(TableRead, Vec<String>), Unread> {
     use sqlparser::ast::{
-        GroupByExpr, ObjectName, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
-        TableFactor, WildcardAdditionalOptions,
+        GroupByExpr, JoinOperator, ObjectName, OrderByKind, SelectFlavor, SelectItem,
+        SelectItemQualifiedWildcardKind, TableFactor, WildcardAdditionalOptions,
     };
 
-    let dialect = dialect(engine)?;
-    let Statement::Query(query) = SqlParser::parse_sql(dialect.as_ref(), sql).ok()?.pop()? else {
-        return None;
+    let dialect = dialect(engine).ok_or(Unread::Unparsed)?;
+    let statement = SqlParser::parse_sql(dialect.as_ref(), sql)
+        .map_err(|_| Unread::Unparsed)?
+        .pop()
+        .ok_or(Unread::Unparsed)?;
+    let Statement::Query(query) = statement else {
+        return Err(Unread::NotAQuery);
     };
     let Query {
-        with: None,
+        with,
         body,
+        order_by,
         locks,
-        for_clause: None,
-        settings: None,
-        format_clause: None,
+        for_clause,
+        settings,
+        format_clause,
         pipe_operators,
         ..
-    } = *query
-    else {
-        return None;
-    };
+    } = *query;
+    if with.is_some() {
+        return Err(Unread::With);
+    }
+    if settings.is_some() {
+        return Err(Unread::Settings);
+    }
+    if format_clause.is_some() {
+        return Err(Unread::Format);
+    }
+    if order_by.as_ref().is_some_and(|order_by| {
+        order_by.interpolate.is_some()
+            || matches!(&order_by.kind, OrderByKind::Expressions(by)
+                if by.iter().any(|by| by.with_fill.is_some()))
+    }) {
+        return Err(Unread::Filled);
+    }
+    if for_clause.is_some() || !locks.is_empty() || !pipe_operators.is_empty() {
+        return Err(Unread::Other);
+    }
     let SetExpr::Select(select) = *body else {
-        return None;
+        return Err(Unread::NotOneSelect);
     };
-    let plain = select.distinct.is_none()
-        && select.select_modifiers.is_none()
+    if select.distinct.is_some() {
+        return Err(Unread::Distinct);
+    }
+    if !matches!(&select.group_by, GroupByExpr::Expressions(by, with) if by.is_empty() && with.is_empty())
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+    {
+        return Err(Unread::Grouped);
+    }
+    let plain = select.select_modifiers.is_none()
         && select.top.is_none()
         && select.exclude.is_none()
         && select.into.is_none()
         && select.lateral_views.is_empty()
-        && select.prewhere.is_none()
         && select.connect_by.is_empty()
-        && matches!(&select.group_by, GroupByExpr::Expressions(by, with) if by.is_empty() && with.is_empty())
         && select.cluster_by.is_empty()
         && select.distribute_by.is_empty()
         && select.sort_by.is_empty()
-        && select.having.is_none()
-        && select.named_window.is_empty()
-        && select.qualify.is_none()
-        && select.value_table_mode.is_none()
-        && locks.is_empty()
-        && pipe_operators.is_empty();
-    let [from] = select.from.as_slice() else {
-        return None;
+        && select.value_table_mode.is_none();
+    if !plain {
+        return Err(Unread::Other);
+    }
+    let from = match select.from.as_slice() {
+        [from] => from,
+        [] => return Err(Unread::NotATable),
+        _ => return Err(Unread::Join),
     };
+    if let Some(join) = from.joins.first() {
+        return Err(match join.join_operator {
+            JoinOperator::ArrayJoin
+            | JoinOperator::LeftArrayJoin
+            | JoinOperator::InnerArrayJoin => Unread::ArrayJoin,
+            _ => Unread::Join,
+        });
+    }
     let TableFactor::Table {
         name,
         alias,
@@ -3263,18 +3341,16 @@ pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
         ..
     } = &from.relation
     else {
-        return None;
+        return Err(Unread::NotATable);
     };
-    if !plain
-        || !from.joins.is_empty()
-        || !with_hints.is_empty()
+    if !with_hints.is_empty()
         || !partitions.is_empty()
         || !index_hints.is_empty()
         || alias
             .as_ref()
             .is_some_and(|alias| !alias.columns.is_empty())
     {
-        return None;
+        return Err(Unread::Other);
     }
 
     let parts = |name: &ObjectName| -> Option<Vec<String>> {
@@ -3283,7 +3359,7 @@ pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
             .map(|part| part.as_ident().map(|ident| ident.value.clone()))
             .collect()
     };
-    let table = parts(name)?;
+    let table = parts(name).ok_or(Unread::NotATable)?;
     // Once aliased, the table is named by its alias alone. Unaliased, by any
     // tail of the name it was written with.
     let qualifiers: Vec<&[String]> = match alias {
@@ -3327,6 +3403,7 @@ pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
     };
 
     let mut columns = Vec::with_capacity(select.projection.len().max(1));
+    let mut renamed = Vec::new();
     if select.projection.is_empty() && select.flavor == SelectFlavor::FromFirstNoSelect {
         columns.push(Projected::Every);
     }
@@ -3336,12 +3413,37 @@ pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
             SelectItem::QualifiedWildcard(
                 SelectItemQualifiedWildcardKind::ObjectName(name),
                 options,
-            ) if bare(options) && qualifies(&parts(name)?) => Projected::Every,
-            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => column(expr),
-            _ => return None,
+            ) if bare(options) && parts(name).is_some_and(|name| qualifies(&name)) => {
+                Projected::Every
+            }
+            SelectItem::UnnamedExpr(expr) => column(expr),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let projected = column(expr);
+                if !matches!(&projected, Projected::Column(name) if *name == alias.value) {
+                    renamed.push(alias.value.clone());
+                }
+                projected
+            }
+            _ => return Err(Unread::Projection),
         });
     }
-    Some(TableRead { table, columns })
+    Ok((TableRead { table, columns }, renamed))
+}
+
+/// Every unquoted word of `sql`, in order, outside strings and comments; `None`
+/// where the tokenizer cannot read it.
+pub(crate) fn bare_words(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    let dialect = dialect(engine)?;
+    let tokens = Tokenizer::new(dialect.as_ref(), sql).tokenize().ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Word(word) if word.quote_style.is_none() => Some(word.value),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,

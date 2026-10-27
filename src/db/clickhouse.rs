@@ -26,7 +26,7 @@ use ureq::{Agent, Body, Timeout};
 
 use self::edit::{
     DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Stage, Table,
-    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted,
+    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted, query_shape, unread,
 };
 pub(super) use self::edit::{match_value, review_notes};
 use self::http::{Bounds, Scheme, Stop, Watch};
@@ -38,7 +38,7 @@ use super::{
     assemble_catalog, assemble_databases, assemble_structure, plain_error, required_cell,
     terminated,
 };
-use crate::sql::{Projected, queued_statements, row_guard, table_read};
+use crate::sql::{Projected, Unread, bare_words, queued_statements, row_guard, table_read};
 use crate::tls::SslMode;
 
 /// The HTTP interface's plaintext port; its TLS one is 8443.
@@ -228,6 +228,10 @@ struct Session {
     opened: bool,
     /// The server refused [`SESSION_TIMEOUT`].
     default_timeout: bool,
+    /// A statement that may change the settings the session keeps was sent
+    /// on it ([`sets_session`]), so what it reads may be shown otherwise
+    /// than a request without the session would show it.
+    set: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -395,7 +399,10 @@ impl Connection {
         self.forget_if_changing(sql);
         let result = self.request(sql, Kind::User, cancel, fetch);
         self.forget_if_changing(sql);
-        result.map_err(hinted)
+        let mut result = result.map_err(hinted)?;
+        (result.edit, result.read_only_reason) =
+            self.edit_of_query(sql, &result.columns, Kind::User, cancel);
+        Ok(result)
     }
 
     /// A preview of a table also says whether its rows can be written back, or
@@ -510,6 +517,83 @@ impl Connection {
         }
     }
 
+    /// The edit target of the rows a user's statement read, as `kind` ran it,
+    /// or the reason it has none. Only a select of one table's own columns
+    /// has one ([`query_shape`]). The statement has already succeeded, so a
+    /// lookup that fails answers neither.
+    fn edit_of_query(
+        &self,
+        sql: &str,
+        columns: &[Column],
+        kind: Kind,
+        cancel: &CancelToken,
+    ) -> (Option<EditTarget>, Option<String>) {
+        if columns.is_empty() {
+            return (None, None);
+        }
+        let refused = |reason: &str| (None, Some(reason.to_string()));
+        let (read, renamed) = match query_shape(sql) {
+            Ok(read) => read,
+            Err(reason) => return refused(reason),
+        };
+        // The guard and the write go without the session, and match each
+        // value as the text it was shown as: after a `SET session_timezone`,
+        // say, that text would name another instant, and so another row.
+        if matches!(kind, Kind::User) && lock(&self.session).set {
+            return refused(edit::SESSION_SET);
+        }
+        let (schema, table) = match read.table.as_slice() {
+            [schema, table] => (schema.clone(), table.clone()),
+            [table] => match self.resolve(table, kind, cancel) {
+                Ok(Some(schema)) => (schema, table.clone()),
+                Ok(None) => return refused(edit::TEMPORARY),
+                Err(_) => return (None, None),
+            },
+            _ => return refused(unread(Unread::NotATable)),
+        };
+        let described = match self.describe(&schema, &table) {
+            Ok(Some(described)) => described,
+            Ok(None) => {
+                return refused(&format!(
+                    "DBDelve found no table {schema}.{table}, so these rows cannot be edited."
+                ));
+            }
+            Err(_) => return (None, None),
+        };
+        if let Some(reason) = &described.refusal {
+            return refused(reason);
+        }
+        match edit::origins(&read, &renamed, columns, &described, &table) {
+            Ok(origins) => described.target_of(&schema, &table, columns, &origins),
+            Err(reason) => (None, Some(reason)),
+        }
+    }
+
+    /// The database an unqualified `table` was read from, as `kind` reads it
+    /// (a `USE` of the user's moves the session's), or `None` where it names
+    /// a temporary table of the session's, which is read first and no other
+    /// request can see.
+    fn resolve(
+        &self,
+        table: &str,
+        kind: Kind,
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, DbError> {
+        let sql = format!(
+            "SELECT currentDatabase() AS database, \
+             (SELECT count() FROM system.tables WHERE is_temporary AND name = {}) AS temporary",
+            Engine::ClickHouse.quote_literal(table)
+        );
+        let read = self.request(&sql, kind, cancel, Fetch::default())?;
+        let row = read
+            .rows
+            .first()
+            .ok_or_else(|| plain_error("The current database could not be read.".into()))?;
+        (required_cell(&read, row, "temporary")? == "0")
+            .then(|| required_cell(&read, row, "database").map(str::to_string))
+            .transpose()
+    }
+
     /// One sessionless look at `schema.table`, kept for the connection. `None`
     /// where the server has no such table.
     fn describe(&self, schema: &str, table: &str) -> Result<Option<Arc<Table>>, DbError> {
@@ -588,10 +672,14 @@ impl Connection {
         fetch: Fetch,
         read_only: bool,
     ) -> Result<QueryResult, DbError> {
+        let kind = Kind::Alongside { read_only };
         self.forget_if_changing(sql);
-        let result = self.request(sql, Kind::Alongside { read_only }, cancel, fetch);
+        let result = self.request(sql, kind, cancel, fetch);
         self.forget_if_changing(sql);
-        result.map_err(hinted)
+        let mut result = result.map_err(hinted)?;
+        (result.edit, result.read_only_reason) =
+            self.edit_of_query(sql, &result.columns, kind, cancel);
+        Ok(result)
     }
 
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
@@ -811,9 +899,11 @@ impl Connection {
                     id: Some(random_id()?),
                     opened: false,
                     default_timeout: session.default_timeout,
+                    set: false,
                 };
             }
             self.enter(session, cancel)?;
+            session.set |= sets_session(sql);
         }
         self.send(sql, kind, cancel, fetch, session.as_deref_mut(), started)
     }
@@ -1149,6 +1239,26 @@ fn opens_with(sql: &str, words: &[&str]) -> bool {
         .next()
         .unwrap_or_default();
     words.iter().any(|word| first.eq_ignore_ascii_case(word))
+}
+
+/// Whether `statement` may change a setting the session it runs on keeps: a
+/// `SET` (`SET ROLE` among them, a role's profile can carry settings) or an
+/// `EXECUTE AS`, read past any comment. One the tokenizer cannot read counts.
+/// Tokenized only when it does not open with a word, so a megabyte of
+/// `VALUES` is not read twice on its way out.
+fn sets_session(statement: &str) -> bool {
+    const SETS: [&str; 2] = ["SET", "EXECUTE"];
+    if statement
+        .trim_start()
+        .starts_with(|c: char| c.is_ascii_alphabetic())
+    {
+        return opens_with(statement, &SETS);
+    }
+    bare_words(Engine::ClickHouse, statement).is_none_or(|words| {
+        words
+            .first()
+            .is_some_and(|first| SETS.iter().any(|word| first.eq_ignore_ascii_case(word)))
+    })
 }
 
 /// Whether a generated statement runs only behind a guard: anything but a
@@ -2172,6 +2282,228 @@ mod tests {
         });
         preview(&connection, PREVIEW);
         assert_eq!(mock.hits("FROM system.tables"), 2);
+    }
+
+    const QUERIED: &str = "SELECT label, id FROM d.t";
+
+    /// `d.t` as a query tab reads it, its columns the other way round.
+    fn queried(mock: &Mock) {
+        mock.on_statement(
+            QUERIED,
+            [Response::rows(
+                &[("label", "String"), ("id", "UInt32")],
+                &[&["a", "1"]],
+            )],
+        );
+    }
+
+    fn system_requests(mock: &Mock) -> Vec<Request> {
+        mock.requests()
+            .into_iter()
+            .filter(|request| request.statement.contains("FROM system.columns"))
+            .collect()
+    }
+
+    #[test]
+    fn a_query_tabs_select_of_a_merge_tree_is_described_and_carries_an_edit_target() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        queried(&mock);
+        let result = run(&connection, QUERIED).unwrap();
+        assert_eq!(result.read_only_reason, None);
+        let target = result.edit.expect("a MergeTree table is editable");
+        assert_eq!((target.schema.as_str(), target.table.as_str()), ("d", "t"));
+        assert_eq!(
+            target.columns,
+            [Some("label".to_string()), Some("id".to_string())]
+        );
+        assert_eq!(
+            target.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![1] }
+        );
+        assert_eq!(target.update, UpdateSpelling::Update);
+        let [describe] = system_requests(&mock).try_into().unwrap();
+        assert_eq!(describe.param("session_id"), None);
+    }
+
+    #[test]
+    fn a_query_tabs_edit_is_counted_and_written_without_the_session_by_the_columns_it_read() {
+        use crate::result_grid::{NewValue, ResultGrid};
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        queried(&mock);
+        let read = run(&connection, QUERIED).unwrap();
+        let mut grid =
+            ResultGrid::new(read, crate::sql::Mode::ReadWrite).with_engine(Engine::ClickHouse);
+        assert!(grid.set_pending(0, 0, NewValue::Value("b".into())));
+        let batch = crate::sql::update_batch(Engine::ClickHouse, &grid.pending_updates()).unwrap();
+        assert!(crate::sql::is_generated_write_on(
+            Engine::ClickHouse,
+            &batch
+        ));
+        let predicate = "WHERE `label` = 'a' AND `id` = '1'";
+        assert!(batch.contains(predicate), "{batch}");
+        mock.on_statement(
+            "SELECT COUNT(*) FROM `d`.`t`",
+            [Response::rows(&[("COUNT()", "UInt64")], &[&["1"]])],
+        );
+        mock.on_statement("UPDATE `d`.`t`", [Response::empty()]);
+        write(&connection, &batch).unwrap();
+        let sent: Vec<Request> = mock
+            .requests()
+            .into_iter()
+            .filter(|request| request.statement.contains(predicate))
+            .collect();
+        let statements: Vec<&str> = sent
+            .iter()
+            .map(|request| request.statement.as_str())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                format!("SELECT COUNT(*) FROM `d`.`t` {predicate}"),
+                format!("UPDATE `d`.`t` SET `label` = 'b' {predicate}"),
+            ]
+        );
+        assert!(
+            sent.iter()
+                .all(|request| request.param("session_id").is_none())
+        );
+    }
+
+    /// Where the session reads an unqualified name: `database`, and whether a
+    /// temporary table of its own goes by it.
+    fn resolves(mock: &Mock, database: &str, temporary: &str) {
+        mock.on_statement(
+            "currentDatabase() AS database",
+            [Response::rows(
+                &[("database", "String"), ("temporary", "UInt64")],
+                &[&[database, temporary]],
+            )],
+        );
+    }
+
+    #[test]
+    fn an_unqualified_table_is_the_one_in_the_database_the_session_was_moved_to() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        mock.on_statement("USE analytics", [Response::empty()]);
+        mock.on_statement(
+            "SELECT * FROM page_views",
+            [Response::rows(
+                &[("id", "UInt32"), ("label", "String")],
+                &[&["1", "a"]],
+            )],
+        );
+        resolves(&mock, "analytics", "0");
+        run(&connection, "USE analytics").unwrap();
+        let result = run(&connection, "SELECT * FROM page_views").unwrap();
+        let target = result.edit.expect("an editable table");
+        assert_eq!(
+            (target.schema.as_str(), target.table.as_str()),
+            ("analytics", "page_views")
+        );
+        let [asked] = sent(&mock, "currentDatabase()").try_into().unwrap();
+        let [query] = sent(&mock, "SELECT * FROM page_views").try_into().unwrap();
+        assert!(asked.param("session_id").is_some());
+        assert_eq!(asked.param("session_id"), query.param("session_id"));
+        let [describe] = system_requests(&mock).try_into().unwrap();
+        assert!(
+            describe
+                .statement
+                .contains("database = 'analytics' AND table = 'page_views'"),
+            "{}",
+            describe.statement
+        );
+    }
+
+    #[test]
+    fn a_temporary_table_of_the_sessions_has_no_edit_target() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        mock.on_statement(
+            "SELECT * FROM t",
+            [Response::rows(&[("id", "UInt32")], &[&["1"]])],
+        );
+        resolves(&mock, "d", "1");
+        let result = run(&connection, "SELECT * FROM t").unwrap();
+        assert_eq!(result.edit, None);
+        assert_eq!(result.read_only_reason.as_deref(), Some(edit::TEMPORARY));
+        assert!(system_requests(&mock).is_empty());
+    }
+
+    #[test]
+    fn after_a_set_on_the_session_its_rows_are_not_matched_but_a_run_at_once_is() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        queried(&mock);
+        mock.on_statement("SET session_timezone", [Response::empty()]);
+        assert!(run(&connection, QUERIED).unwrap().edit.is_some());
+        run(
+            &connection,
+            "/* zone */ SET session_timezone = 'Asia/Tokyo'",
+        )
+        .unwrap();
+        let result = run(&connection, QUERIED).unwrap();
+        assert_eq!(result.edit, None);
+        assert_eq!(result.read_only_reason.as_deref(), Some(edit::SESSION_SET));
+        // A run at once goes without the session, as the guard does.
+        let alongside = connection
+            .query_alongside(QUERIED, &CancelToken::alongside(), Fetch::default(), false)
+            .unwrap();
+        assert!(alongside.edit.is_some());
+        // A session of its own has run nothing.
+        assert!(run(&connection.apart(), QUERIED).unwrap().edit.is_some());
+    }
+
+    #[test]
+    fn a_query_whose_rows_are_not_one_tables_says_why_and_describes_nothing() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        editable(&mock);
+        mock.on_statement("FINAL", [Response::rows(&[("id", "UInt32")], &[&["1"]])]);
+        numbers(&mock);
+        let result = run(&connection, "SELECT * FROM d.t FINAL").unwrap();
+        assert_eq!(
+            result.read_only_reason.as_deref(),
+            Some("FINAL merges rows as they are read, so these rows cannot be edited.")
+        );
+        let result = run(&connection, "SELECT n").unwrap();
+        assert_eq!(
+            result.read_only_reason.as_deref(),
+            Some("These rows are not read from a table, so they cannot be edited.")
+        );
+        assert_eq!(result.edit, None);
+        assert!(system_requests(&mock).is_empty());
+        assert!(sent(&mock, "currentDatabase()").is_empty());
+    }
+
+    #[test]
+    fn a_set_or_an_execute_as_is_what_changes_the_sessions_settings() {
+        for statement in [
+            "SET session_timezone = 'UTC'",
+            "  set date_time_output_format = 'iso'",
+            "-- zone\nSET session_timezone = 'UTC'",
+            "/* role */ SET ROLE admin",
+            "EXECUTE AS other",
+            "/* unterminated",
+        ] {
+            assert!(sets_session(statement), "{statement}");
+        }
+        for statement in [
+            "SELECT 1 SETTINGS session_timezone = 'UTC'",
+            "USE analytics",
+            "/* SET */ SELECT 1",
+            "INSERT INTO t VALUES ('SET')",
+            "SETTINGS",
+        ] {
+            assert!(!sets_session(statement), "{statement}");
+        }
     }
 
     /// `` `d`.`t` `` described as a MergeTree that takes lightweight updates.
@@ -3780,6 +4112,7 @@ mod live {
             id: Some(id),
             opened: true,
             default_timeout: false,
+            set: false,
         };
         std::thread::sleep(Duration::from_secs(4));
         let error = run(&connection, "SELECT 1").expect_err("the session should be gone");
@@ -5461,6 +5794,164 @@ mod live {
             assert_eq!(labels(&owner, &table), "one\ntwo");
             ran(&owner, &format!("DROP TABLE dbdelve_dev.{table}"));
         }
+    }
+
+    /// The batch the grid writes for `read` once the cell at `row`, `col` is
+    /// set to `value`, built as a query tab's grid builds it.
+    fn edited(read: &QueryResult, row: usize, col: usize, value: &str) -> String {
+        use crate::result_grid::{NewValue, ResultGrid};
+        let mut grid =
+            ResultGrid::new(read.clone(), Mode::ReadWrite).with_engine(Engine::ClickHouse);
+        assert!(grid.set_pending(row, col, NewValue::Value(value.into())));
+        let batch = crate::sql::update_batch(Engine::ClickHouse, &grid.pending_updates()).unwrap();
+        assert!(
+            crate::sql::is_generated_write_on(Engine::ClickHouse, &batch),
+            "{batch}"
+        );
+        batch
+    }
+
+    /// The `DELETE` the grid writes for `read`'s row `row`.
+    fn deleted(read: &QueryResult, row: usize) -> String {
+        use crate::result_grid::ResultGrid;
+        let grid = ResultGrid::new(read.clone(), Mode::ReadWrite).with_engine(Engine::ClickHouse);
+        let (schema, table, keys, nulls) = grid.row_key(row).unwrap();
+        let keys: Vec<(&str, &str)> = keys.iter().map(|(c, v)| (c.as_str(), v.as_str())).collect();
+        let nulls: Vec<&str> = nulls.iter().map(String::as_str).collect();
+        crate::sql::delete_row_matching(
+            Engine::ClickHouse,
+            &schema,
+            &table,
+            &keys,
+            &nulls,
+            &grid.row_types(row),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_query_tabs_edit_lands_on_its_one_row_in_either_update_spelling() {
+        use crate::db::UpdateSpelling::{AlterUpdate, Update};
+        let connection = live();
+        for (settings, spelling) in [(BLOCKS, Update), ("", AlterUpdate)] {
+            let table = scratch(
+                &connection,
+                "id UInt32, label String, qty Int32",
+                settings,
+                "(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)",
+            );
+            let read = ran(&connection, &format!("SELECT * FROM {table} ORDER BY id"));
+            let target = read
+                .edit
+                .as_ref()
+                .expect("a query tab's MergeTree rows are editable");
+            assert_eq!(
+                (target.schema.as_str(), target.table.as_str(), target.update),
+                ("dbdelve_dev", table.as_str(), spelling)
+            );
+            let update = edited(&read, 0, 1, "uno");
+            written(&connection, &update).unwrap_or_else(|error| panic!("{update}: {error}"));
+            assert_eq!(
+                labels(&connection, &table),
+                "uno\ntwo\nthree",
+                "{spelling:?}"
+            );
+
+            let delete = deleted(&read, 1);
+            written(&connection, &delete).unwrap_or_else(|error| panic!("{delete}: {error}"));
+            assert_eq!(labels(&connection, &table), "uno\nthree", "{spelling:?}");
+            ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_some_columns_name_a_row_by_those_alone_and_rows_alike_in_them_are_refused() {
+        let connection = live();
+        let table = scratch(
+            &connection,
+            "id UInt32, label String, qty Int32",
+            BLOCKS,
+            "(1, 'one', 10), (2, 'two', 20), (3, 'two', 30), (4, 'same', 40), (4, 'same', 40)",
+        );
+        let alike = "2 rows have exactly these values, so DBDelve will not change one of them.";
+
+        let read = ran(
+            &connection,
+            &format!("SELECT qty, label FROM {table} ORDER BY id, qty"),
+        );
+        let target = read.edit.as_ref().unwrap();
+        assert_eq!(target.columns, [Some("qty".into()), Some("label".into())]);
+        written(&connection, &edited(&read, 0, 1, "uno")).unwrap();
+        assert_eq!(labels(&connection, &table), "uno\ntwo\ntwo\nsame\nsame");
+
+        // `two` alone is two rows, whatever their quantities.
+        let read = ran(
+            &connection,
+            &format!("SELECT label FROM {table} ORDER BY id"),
+        );
+        let error = written(&connection, &edited(&read, 1, 0, "dos")).unwrap_err();
+        assert_eq!(error.message, alike);
+
+        // Identical rows are two rows by every value too.
+        let read = ran(&connection, &format!("SELECT * FROM {table} ORDER BY id"));
+        for statement in [edited(&read, 3, 1, "changed"), deleted(&read, 3)] {
+            let error = written(&connection, &statement).unwrap_err();
+            assert_eq!(error.message, alike, "{statement}");
+        }
+        assert_eq!(labels(&connection, &table), "uno\ntwo\ntwo\nsame\nsame");
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_after_a_session_timezone_is_set_a_query_tabs_rows_are_not_matched() {
+        let connection = live();
+        let table = scratch(
+            &connection,
+            "id UInt32, label String, ts DateTime",
+            BLOCKS,
+            "(1, 'one', '2024-01-01 00:00:00')",
+        );
+        let select = format!("SELECT * FROM {table}");
+        let before = ran(&connection, &select);
+        assert!(before.edit.is_some());
+        ran(&connection, "SET session_timezone = 'Asia/Tokyo'");
+        let after = ran(&connection, &select);
+        // The same instant, shown as another wall-clock time than the guard,
+        // which runs without the session, would match it by.
+        assert_ne!(cells(&before)[0][2], cells(&after)[0][2]);
+        assert_eq!(after.edit, None);
+        assert_eq!(after.read_only_reason.as_deref(), Some(edit::SESSION_SET));
+        // A preview reads without the session, as its guard does.
+        let preview = previewed(&connection, &table);
+        assert_eq!(cells(&preview)[0][2], cells(&before)[0][2]);
+        written(&connection, &edited(&preview, 0, 1, "uno")).unwrap();
+        assert_eq!(labels(&connection, &table), "uno");
+        ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_an_unqualified_name_is_read_where_use_moved_the_session_and_a_temporary_table_is_not() {
+        let connection = live();
+        ran(&connection, "USE analytics");
+        let read = ran(&connection, "SELECT * FROM page_views LIMIT 1");
+        let target = read.edit.expect("page_views is a MergeTree");
+        assert_eq!(
+            (target.schema.as_str(), target.table.as_str()),
+            ("analytics", "page_views")
+        );
+        let temporary = format!("edit_tmp_{}", marker());
+        ran(
+            &connection,
+            &format!("CREATE TEMPORARY TABLE {temporary} (id UInt32)"),
+        );
+        ran(&connection, &format!("INSERT INTO {temporary} VALUES (1)"));
+        let read = ran(&connection, &format!("SELECT * FROM {temporary}"));
+        assert_eq!(read.edit, None);
+        assert_eq!(read.read_only_reason.as_deref(), Some(edit::TEMPORARY));
     }
 
     crate::db::conformance::suite!(

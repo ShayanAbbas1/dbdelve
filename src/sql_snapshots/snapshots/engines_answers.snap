@@ -1109,7 +1109,7 @@ source: src/sql_snapshots.rs
 [clickhouse] switches_database => |true|
 [clickhouse] switches_database_in_session => |false|
 [clickhouse] picks_schema => |false|
-[clickhouse] edits_query_rows => |false|
+[clickhouse] edits_query_rows => |true|
 [clickhouse] sort_clause => |an ORDER BY|
 [clickhouse] raw_filter_placeholder => |SQL…|
 [clickhouse] raw_filter_label => |Raw SQL|

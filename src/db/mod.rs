@@ -738,13 +738,24 @@ impl Engine {
     /// does, shown for review before it runs and never written into the
     /// buffer. Redis opens a key as a query tab of its own, its contents having
     /// no relation to open, and that is where its fields, items and members
-    /// are taken out. A new row needs no such gate: any grid written back to
-    /// one table takes one.
+    /// are taken out; an engine that reviews a query tab's edits
+    /// ([`Engine::reviews_query_edits`]) takes them there too. A new row needs
+    /// no such gate: any grid written back to one table takes one.
     pub fn edits_query_rows(self) -> bool {
         match self.syntax() {
             Syntax::Redis => true,
-            Syntax::Sql | Syntax::Mongo => false,
+            Syntax::Sql => self.reviews_query_edits(),
+            Syntax::Mongo => false,
         }
+    }
+
+    /// Whether a query tab's edits are shown in the review dialog an object
+    /// tab's are, rather than appended to its buffer. A row named by every
+    /// value is written only behind the exactly-one-row count DBDelve runs
+    /// before each write; a copy left in the buffer would run without it when
+    /// the user ran it again.
+    pub fn reviews_query_edits(self) -> bool {
+        self.syntax() == Syntax::Sql && self.spec().sql.row_terms
     }
 
     /// Whether `column`, part of what names a grid's row, can be edited all
@@ -3390,6 +3401,19 @@ mod tests {
         }
         assert_eq!(Engine::MongoDb.syntax(), Syntax::Mongo);
         assert_eq!(Engine::SqlServer.syntax(), Syntax::Sql);
+    }
+
+    #[test]
+    fn only_an_engine_naming_rows_by_every_value_reviews_a_query_tabs_edits() {
+        for engine in Engine::ALL {
+            let clickhouse = engine == Engine::ClickHouse;
+            assert_eq!(engine.reviews_query_edits(), clickhouse, "{engine:?}");
+            assert_eq!(
+                engine.edits_query_rows(),
+                clickhouse || engine == Engine::Redis,
+                "{engine:?}"
+            );
+        }
     }
 
     #[test]
