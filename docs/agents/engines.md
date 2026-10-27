@@ -721,7 +721,37 @@ Decided, and not to be re-litigated:
   tree the gate reads, and refuses a count other than one: a duplicate not yet
   merged is refused. Another client can still insert an identical row between
   the count and the write; nothing in ClickHouse closes that window.
-- **Edit targets exist for MergeTree-family previews only, and the spelling is
+- **A query tab's result has an edit target when its statement provably reads
+  one table's own rows** (owner decision): `edit::query_shape` over
+  `sql::table_read_or_why` admits one plain `SELECT` of columns or `*` with
+  `WHERE`, `PREWHERE`, `ORDER BY`, `LIMIT` (`BY` too) or `SAMPLE`, and refuses
+  every other shape in words (`Unread`, `edit::unread`); `FINAL` is found among
+  the bare words, since the grammar takes it for a table alias. `edit::origins`
+  maps each result column back: a `*` by the header's names, a name as written,
+  and any alias or qualifier that is also a column's name refuses, because the
+  server reads that name as the alias everywhere (`SELECT a AS b, b` is `a`
+  twice) and `t.x` can be a field of a column `t`. Names compare
+  case-sensitively there, each result column must carry its column's type (a
+  bare `inf` is the literal), and an `ALIAS` column, computed as it is read,
+  refuses. A
+  subset of columns names a row by those alone, which the guard keeps to one
+  row. An unqualified name is resolved on the request's own session
+  (`Connection::resolve`: `currentDatabase()`, and refused as a temporary
+  table of the session's), never guessed from `USE`s seen.
+- **A query tab's rows read after a `SET` are not matched.** The guard and the
+  write stay sessionless, so the rendered text they compare must be the
+  sessionless rendering: `Session::set` is raised by any user statement that
+  opens with `SET` or `EXECUTE` (`sets_session`, past comments) and cleared
+  only with the session. Running the guard on the session instead was
+  rejected: `SET final = 1` or `apply_deleted_mask = 0` would make its count
+  disagree with the rows a write touches. A run at once and a preview are
+  sessionless and unaffected.
+- **A query tab's edits are reviewed, never appended**
+  (`Engine::reviews_query_edits`, true where `row_terms` is): a statement left
+  in the buffer, or in the history, would run without its guard when run
+  again. Delete row is offered on a query tab for the same engines
+  (`edits_query_rows`).
+- **Edit targets exist for MergeTree-family tables only, and the spelling is
   decided at describe time.** Once per table per connection
   (`Connection::describe`, forgotten when a statement that changes a table
   starts and again when it ends) from `system.tables`, `system.columns` and
@@ -730,10 +760,10 @@ Decided, and not to be re-litigated:
   `enable_block_number_column` and `enable_block_offset_column` are set;
   otherwise `ALTER TABLE … UPDATE … SETTINGS mutations_sync = 2`, which
   rewrites parts and returns once every replica has applied it. Sorting-key,
-  primary-key and partition-key columns, `MATERIALIZED` and `AggregateFunction`
-  columns cannot be set, and a `Map` cannot be edited, only inserted: the
-  server casts a string to one nowhere an assignment reaches. Delete is the
-  lightweight `DELETE`, withheld on a table with projections when
+  primary-key and partition-key columns, `MATERIALIZED`, `ALIAS` and
+  `AggregateFunction` columns cannot be set, and a `Map` cannot be edited, only
+  inserted: the server casts a string to one nowhere an assignment reaches.
+  Delete is the lightweight `DELETE`, withheld on a table with projections when
   `lightweight_mutation_projection_mode` is `throw`. Values go as quoted text
   and the server converts them (`input_format_values_interpret_expressions`).
 - **There is no transaction.** `SqlSpec::transactions` is false, so a batch is

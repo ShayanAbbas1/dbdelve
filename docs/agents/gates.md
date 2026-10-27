@@ -37,7 +37,9 @@ where the user can read it:
   switching it to the server is an ask, and splices its keys the same way.
 - Grid edits on a query tab are appended to the buffer
   (`sql::appended_statement`) and run from there. On an object tab, which
-  has no buffer, the statement is shown in a review dialog before it runs.
+  has no buffer, the statement is shown in a review dialog before it runs,
+  as it is on a query tab of an engine without unique keys
+  (`Engine::reviews_query_edits`), whose writes run only behind the guard.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the

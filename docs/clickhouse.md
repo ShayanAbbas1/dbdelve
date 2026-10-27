@@ -46,8 +46,26 @@ and the write.
 - Only MergeTree-family tables are editable. A row holding an
   `AggregateFunction`, `Variant`, `Dynamic` or `JSON` value, or bytes that are
   not text, cannot be matched and is read-only, and the grid says why.
-- Key columns, `MATERIALIZED` columns and `AggregateFunction` columns cannot be
-  set, and a `Map` cannot be edited, only inserted.
+- Key columns, `MATERIALIZED` and `ALIAS` columns and `AggregateFunction`
+  columns cannot be set, and a `Map` cannot be edited, only inserted.
+- A query tab's rows are editable too when its `SELECT` reads one table's own
+  columns or `*`, with any `WHERE`, `PREWHERE`, `ORDER BY`, `LIMIT` or `SAMPLE`.
+  A join, `GROUP BY`, `DISTINCT`, `ARRAY JOIN`, `FINAL`, `WITH FILL`, a `WITH`,
+  a subquery or table function in `FROM`, a `SETTINGS` or `FORMAT` clause, a
+  computed or `ALIAS` column, a column read twice, or an alias or qualifier
+  that is also a column's name makes them read-only, and the grid says why. A query of some of the
+  columns names each row by those columns alone; the count still refuses a
+  write that more than one row would take. An unqualified name is the table in
+  the session's current database, so a `USE` is followed, and a temporary table
+  is read-only.
+- Those edits, deletes and new rows open the same review dialog a table's tab
+  does, and nothing is written into the buffer or the history: run again from
+  there, the statement would skip the count.
+- After a `SET` on the query tabs' session (or `EXECUTE AS`), their rows are
+  read-only until the session is new again. The count and the write run outside
+  the session, and a value it shows otherwise, a `DateTime` under another
+  `session_timezone`, could match a different row there. A table opened from
+  the explorer reads outside the session and stays editable.
 - An update is a lightweight `UPDATE` when the server and the table support it,
   else `ALTER TABLE … UPDATE … SETTINGS mutations_sync = 2`, which rewrites the
   parts holding the row. If the server refuses a lightweight update for want
