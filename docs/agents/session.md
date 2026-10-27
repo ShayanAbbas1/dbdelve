@@ -337,6 +337,17 @@ The provider is a snapshot, replaced whole when the catalog reloads
 (`Workspace::install_completions`), and installed on every buffer rather than
 the visible one.
 
+A raw filter bar completes too, through `FilterCompletions`: a `WHERE` names no
+relation, so the tab's schema and relation are handed to the same provider as
+its scope, whose columns lead the list. The name is never written into the text
+the scan reads, where a `'`, a `--` or a space in it would read as a literal, a
+comment or two names. On MongoDB the text is read inside `db.c.find(`, since a
+document is only one inside a call, and the ranges are shifted back. A Redis
+filter is a `MATCH` glob and completes nothing. `install_completions` reaches
+every raw bar as well, from `Session::completions`, the provider it last built,
+which is also where a bar turned raw later takes it from. A new bar starts raw:
+one waiting on a column ignores whatever is typed into it.
+
 ## Storage and platforms
 
 - **Storage** is decided in `store.rs`: Application Support on macOS,

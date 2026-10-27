@@ -679,16 +679,50 @@ EHziqoisXzppWwn2vAWvoTkc
     }
 
     /// Accepts one connection, reads the request, then runs `serve`.
+    ///
+    /// The whole request, body and all: Windows answers a close with unread
+    /// data waiting by resetting the connection, which fails a client that
+    /// would otherwise have read the answer `serve` wrote.
     fn listener(serve: impl FnOnce(std::net::TcpStream) + Send + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut seen = [0; 4096];
-            let _ = stream.read(&mut seen);
+            read_request(&mut stream);
             serve(stream);
         });
         port
+    }
+
+    /// Reads one request through to the end of its body, or until the peer
+    /// sends something that is not HTTP (a TLS hello, which waits for an
+    /// answer rather than finishing), stops, or goes quiet. Returns what it
+    /// read.
+    fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            if let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|length| length.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if seen.len() >= end + 4 + length {
+                    return seen;
+                }
+            } else if seen.first().is_some_and(|byte| !byte.is_ascii_uppercase()) {
+                return seen;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return seen,
+                Ok(read) => seen.extend_from_slice(&chunk[..read]),
+            }
+        }
     }
 
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
@@ -857,6 +891,24 @@ EHziqoisXzppWwn2vAWvoTkc
         let _watching = watch.enter();
         assert!(post(&plain_agent(port, Bounds::user(0)), port).is_err());
         assert!(watch.sent());
+    }
+
+    #[test]
+    fn a_request_is_read_through_a_body_that_arrives_in_parts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .write_all(b"POST / HTTP/1.1\r\nContent-Length: 8\r\n\r\nSELE")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"CT 1").unwrap();
+            stream
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        assert!(read_request(&mut stream).ends_with(b"\r\n\r\nSELECT 1"));
+        drop(client.join().unwrap());
     }
 
     #[test]

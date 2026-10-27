@@ -219,9 +219,18 @@ impl SchemaCompletions {
     /// the server to describe something it has already said does not exist,
     /// once per keystroke, for as long as the typo is on screen.
     fn columns_of(&self, relation: &str, wanted: &mut Vec<(String, String)>) -> Vec<Candidate> {
-        let held = self.columns.borrow();
-        let mut candidates = Vec::new();
+        self.columns_of_except(relation, None, wanted)
+    }
 
+    /// [`Self::columns_of`], less the one relation `except` names, whose
+    /// columns the caller has already offered.
+    fn columns_of_except(
+        &self,
+        relation: &str,
+        except: Option<&(String, String)>,
+        wanted: &mut Wanted,
+    ) -> Vec<Candidate> {
+        let mut candidates = Vec::new();
         for schema in &self.catalog.schemas {
             for named in schema
                 .relations
@@ -229,28 +238,62 @@ impl SchemaCompletions {
                 .filter(|named| named.name.eq_ignore_ascii_case(relation))
             {
                 let key = (schema.name.clone(), named.name.clone());
-                match held.get(&key) {
-                    Some(ColumnState::Loaded(columns)) => {
-                        candidates.extend(columns.iter().map(|column| {
-                            Candidate::new(
-                                column,
-                                Some(named.name.clone()),
-                                CompletionItemKind::FIELD,
-                            )
-                        }));
-                    }
-                    // Failed, but not yet often enough to give up on.
-                    Some(ColumnState::Failed(attempts)) if *attempts < FETCH_ATTEMPTS => {
-                        wanted.push(key)
-                    }
-                    // In flight, or asked for as often as it is going to be.
-                    Some(ColumnState::Loading(_) | ColumnState::Failed(_)) => {}
-                    None => wanted.push(key),
+                if except != Some(&key) {
+                    candidates.extend(self.columns_at(key, wanted));
                 }
             }
         }
-
         candidates
+    }
+
+    /// The columns of exactly this schema's relation, for a caller that knows
+    /// which one it means. Nothing for one the catalog does not list, for the
+    /// reason [`Self::columns_of`] gives.
+    fn columns_in(
+        &self,
+        (schema, relation): &(String, String),
+        wanted: &mut Wanted,
+    ) -> Vec<Candidate> {
+        let listed = self.catalog.schemas.iter().any(|listed| {
+            &listed.name == schema && listed.relations.iter().any(|named| &named.name == relation)
+        });
+        match listed {
+            true => self.columns_at((schema.clone(), relation.clone()), wanted),
+            false => Vec::new(),
+        }
+    }
+
+    /// The columns held for one relation, recording it into `wanted` when
+    /// they are not.
+    ///
+    /// Recorded once however often a statement names it: each entry is a
+    /// describe on the wire, and a second would reset the first's count of
+    /// failed attempts.
+    fn columns_at(&self, key: (String, String), wanted: &mut Wanted) -> Vec<Candidate> {
+        let mut want = |key| {
+            if !wanted.contains(&key) {
+                wanted.push(key);
+            }
+        };
+        match self.columns.borrow().get(&key) {
+            Some(ColumnState::Loaded(columns)) => columns
+                .iter()
+                .map(|column| {
+                    Candidate::new(column, Some(key.1.clone()), CompletionItemKind::FIELD)
+                })
+                .collect(),
+            // Failed, but not yet often enough to give up on.
+            Some(ColumnState::Failed(attempts)) if *attempts < FETCH_ATTEMPTS => {
+                want(key);
+                Vec::new()
+            }
+            // In flight, or asked for as often as it is going to be.
+            Some(ColumnState::Loading(_) | ColumnState::Failed(_)) => Vec::new(),
+            None => {
+                want(key);
+                Vec::new()
+            }
+        }
     }
 
     fn relations_in(&self, schema_name: &str) -> Vec<Candidate> {
@@ -320,6 +363,7 @@ impl SchemaCompletions {
         statement: &str,
         before: &str,
         qualifier: Option<&str>,
+        scope: Option<&(String, String)>,
         wanted: &mut Vec<(String, String)>,
     ) -> Vec<Candidate> {
         if let Some(qualifier) = qualifier {
@@ -352,19 +396,25 @@ impl SchemaCompletions {
 
         // Columns of the relations this statement actually names come first:
         // in a statement about `accounts`, `email` is a better guess than
-        // every other `email` in the database, and than `EXISTS`.
-        let mut candidates: Vec<Candidate> = bindings(statement)
-            .into_iter()
-            .map(|(_, relation)| relation)
-            .fold(Vec::new(), |mut relations, relation| {
-                if !relations.iter().any(|held| held == &relation) {
-                    relations.push(relation);
-                }
-                relations
-            })
-            .iter()
-            .flat_map(|relation| self.columns_of(relation, wanted))
-            .collect();
+        // every other `email` in the database, and than `EXISTS`. The scope's
+        // columns lead them, as the relation the text is about without naming
+        // it, and are not offered again when the text names it too.
+        let mut candidates = scope
+            .map(|scope| self.columns_in(scope, wanted))
+            .unwrap_or_default();
+        candidates.extend(
+            bindings(statement)
+                .into_iter()
+                .map(|(_, relation)| relation)
+                .fold(Vec::new(), |mut relations, relation| {
+                    if !relations.iter().any(|held| held == &relation) {
+                        relations.push(relation);
+                    }
+                    relations
+                })
+                .iter()
+                .flat_map(|relation| self.columns_of_except(relation, scope, wanted)),
+        );
 
         candidates.extend(
             KEYWORDS
@@ -383,6 +433,7 @@ impl SchemaCompletions {
         &self,
         text: &str,
         word: Range<usize>,
+        scope: Option<&(String, String)>,
         wanted: &mut Wanted,
     ) -> Vec<Candidate> {
         fn methods(names: impl Iterator<Item = &'static str>) -> Vec<Candidate> {
@@ -402,9 +453,12 @@ impl SchemaCompletions {
             // As in SQL, nothing typed is not a question.
             Some(Completing::Document { .. }) if word.is_empty() => Vec::new(),
             Some(Completing::Document { collection }) => {
-                let mut candidates = collection
-                    .map(|collection| self.columns_of(&collection, wanted))
-                    .unwrap_or_default();
+                let mut candidates = match scope {
+                    Some(scope) => self.columns_in(scope, wanted),
+                    None => collection
+                        .map(|collection| self.columns_of(&collection, wanted))
+                        .unwrap_or_default(),
+                };
                 candidates.extend(
                     mql::OPERATORS.iter().map(|operator| {
                         Candidate::new(*operator, None, CompletionItemKind::OPERATOR)
@@ -423,6 +477,17 @@ impl SchemaCompletions {
     /// not yet held — which the caller fetches, because this one is `&self` and
     /// has no window to spawn from.
     fn items(&self, sql: &str, offset: usize) -> (Vec<(Range<usize>, Candidate)>, Wanted) {
+        self.items_in(sql, offset, None)
+    }
+
+    /// [`Self::items`] for text about one relation it does not name: its
+    /// `(schema, relation)` is `scope`, whose columns are offered first.
+    fn items_in(
+        &self,
+        sql: &str,
+        offset: usize,
+        scope: Option<&(String, String)>,
+    ) -> (Vec<(Range<usize>, Candidate)>, Wanted) {
         let mut wanted = Vec::new();
         let offset = offset.min(sql.len());
         if !sql.is_char_boundary(offset) {
@@ -441,7 +506,7 @@ impl SchemaCompletions {
                 return (ranked, wanted);
             }
             Syntax::Mongo => {
-                let candidates = self.mongo_candidates(sql, word.clone(), &mut wanted);
+                let candidates = self.mongo_candidates(sql, word.clone(), scope, &mut wanted);
                 let ranked = rank(candidates, &sql[word.clone()], &mut self.fuzzy.borrow_mut())
                     .into_iter()
                     .map(|candidate| (word.clone(), candidate))
@@ -470,7 +535,7 @@ impl SchemaCompletions {
             .unwrap_or(sql);
         let before = &sql[..word.start];
 
-        let candidates = self.candidates(statement, before, qualifier, &mut wanted);
+        let candidates = self.candidates(statement, before, qualifier, scope, &mut wanted);
         let ranked = rank(candidates, prefix, &mut self.fuzzy.borrow_mut())
             .into_iter()
             .map(|candidate| (word.clone(), candidate))
@@ -505,7 +570,20 @@ impl CompletionProvider for SchemaCompletions {
         // them from `InputEvent::Change` if a very large buffer ever stutters.
         let sql = text.to_string();
         let (items, wanted) = self.items(&sql, offset);
+        self.respond(text, items, wanted, cx)
+    }
+}
 
+impl SchemaCompletions {
+    /// Ask for the columns `items` wanted, and hand its rows to the popup as
+    /// edits over `text`, the rope the ranges are offsets into.
+    fn respond(
+        &self,
+        text: &Rope,
+        items: Vec<(Range<usize>, Candidate)>,
+        wanted: Wanted,
+        cx: &mut App,
+    ) -> Task<Result<CompletionResponse>> {
         // Marked before the request so a second keystroke arriving while the
         // first fetch is in flight does not ask again.
         for key in wanted {
@@ -551,6 +629,82 @@ impl CompletionProvider for SchemaCompletions {
             .collect::<Vec<_>>();
 
         Task::ready(Ok(CompletionResponse::Array(items)))
+    }
+}
+
+/// The completion source for a raw filter bar on one relation's tab.
+///
+/// A raw filter is only a `WHERE`, so on its own it names no relation and
+/// [`SchemaCompletions`] would have no columns to offer. The tab's relation is
+/// handed over as the scope instead, and everything else -- the column fetch,
+/// the keywords, the silence inside a literal -- is the query editor's own.
+///
+/// The relation is never written into the text the scan reads: a name holding
+/// a `'`, a `--` or a space would read as a literal, a comment or two names,
+/// and silence the completion it was there to feed.
+pub struct FilterCompletions {
+    schema: Rc<SchemaCompletions>,
+    relation: (String, String),
+    /// What the text is read behind. A MongoDB filter is a document, which
+    /// the scan only reads as one inside a call.
+    prefix: &'static str,
+}
+
+impl FilterCompletions {
+    /// `None` on an engine whose raw filter the schema cannot complete: Redis's
+    /// is a `MATCH` glob over key names.
+    pub fn new(
+        syntax: Syntax,
+        schema: Rc<SchemaCompletions>,
+        relation: (String, String),
+    ) -> Option<Self> {
+        let prefix = match syntax {
+            Syntax::Sql => "",
+            // As `mql::browse::raw_filter` wraps it.
+            Syntax::Mongo => "db.c.find(\n",
+            Syntax::Redis => return None,
+        };
+        Some(Self {
+            schema,
+            relation,
+            prefix,
+        })
+    }
+
+    /// [`SchemaCompletions::items`] for the bar's own text, with the ranges
+    /// back in that text.
+    fn items(&self, text: &str, offset: usize) -> (Vec<(Range<usize>, Candidate)>, Wanted) {
+        let shift = self.prefix.len();
+        let (items, wanted) = self.schema.items_in(
+            &format!("{}{text}", self.prefix),
+            shift + offset,
+            Some(&self.relation),
+        );
+        let items = items
+            .into_iter()
+            .filter(|(word, _)| word.start >= shift)
+            .map(|(word, candidate)| (word.start - shift..word.end - shift, candidate))
+            .collect();
+        (items, wanted)
+    }
+}
+
+impl CompletionProvider for FilterCompletions {
+    /// For the reason [`SchemaCompletions`] gives.
+    fn is_completion_trigger(&self, _: usize, _: &str, _: &mut App) -> bool {
+        true
+    }
+
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: CompletionContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<CompletionResponse>> {
+        let (items, wanted) = self.items(&text.to_string(), offset);
+        self.schema.respond(text, items, wanted, cx)
     }
 }
 
@@ -792,7 +946,7 @@ fn bindings(statement: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Relation, Routine, RoutineKind, Schema};
+    use crate::db::{Engine, Relation, Routine, RoutineKind, Schema};
 
     /// A provider whose cache already holds every relation's columns, as it
     /// would once the statement had named them and the fetches had landed.
@@ -1244,6 +1398,133 @@ mod tests {
         }
         assert!(!mongo_labels("db.users.find({ name: /x/ }).|").is_empty());
         assert!(!mongo_labels("// a note\ndb.|").is_empty());
+    }
+
+    /// What a raw filter on relation `name` offers for a caret at `|`: each label,
+    /// with the text of the filter's own that accepting it would replace.
+    ///
+    /// Over a catalog whose relations are named the way a scan of SQL would
+    /// misread, each with the same columns.
+    fn filter_items(engine: Engine, name: &str, text: &str) -> Vec<(String, String)> {
+        const AWKWARD: &[&str] = &["people's", "a--b", "has space", "say \"hi\"", "accounts"];
+        let offset = text.find('|').expect("the test must mark the caret");
+        let text = text.replace('|', "");
+        let held = AWKWARD
+            .iter()
+            .map(|awkward| ("public", *awkward, &["id", "email"][..]))
+            .collect::<Vec<_>>();
+        let mut schema = detached(
+            Catalog {
+                schemas: vec![Schema {
+                    name: "public".to_string(),
+                    relations: AWKWARD.iter().map(|awkward| relation(awkward)).collect(),
+                    routines: Vec::new(),
+                }],
+            },
+            &held,
+        );
+        schema.syntax = engine.syntax();
+        let scope = ("public".to_string(), name.to_string());
+        FilterCompletions::new(engine.syntax(), Rc::new(schema), scope)
+            .expect("the engine completes a raw filter")
+            .items(&text, offset)
+            .0
+            .into_iter()
+            .map(|(word, candidate)| (text[word].to_string(), candidate.label))
+            .collect()
+    }
+
+    #[test]
+    fn a_raw_filter_offers_its_relations_columns_over_its_own_text() {
+        for engine in [Engine::Postgres, Engine::MySql, Engine::SqlServer] {
+            for relation in ["accounts", "people's", "a--b", "has space", "say \"hi\""] {
+                let offered = filter_items(engine, relation, "id > 5 AND ema|");
+                assert_eq!(
+                    offered.first(),
+                    Some(&("ema".to_string(), "email".to_string())),
+                    "{engine:?} {relation}"
+                );
+            }
+        }
+        // At the very start of the text.
+        let offered = filter_items(Engine::Postgres, "people's", "ema|");
+        assert_eq!(
+            offered.first(),
+            Some(&("ema".to_string(), "email".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_raw_filter_naming_its_own_relation_offers_and_asks_for_it_once() {
+        let catalog = Catalog {
+            schemas: vec![
+                Schema {
+                    name: "public".to_string(),
+                    relations: vec![relation("accounts")],
+                    routines: Vec::new(),
+                },
+                Schema {
+                    name: "audit".to_string(),
+                    relations: vec![relation("accounts")],
+                    routines: Vec::new(),
+                },
+            ],
+        };
+        let text = "parent_id IN (SELECT id FROM accounts) AND ema";
+        let scope = ("public".to_string(), "accounts".to_string());
+        let filter = |held: &[(&str, &str, &[&str])]| {
+            FilterCompletions::new(
+                Syntax::Sql,
+                Rc::new(detached(catalog.clone(), held)),
+                scope.clone(),
+            )
+            .expect("SQL completes a raw filter")
+            .items(text, text.len())
+        };
+
+        let (items, _) = filter(&[
+            ("public", "accounts", &["id", "email"]),
+            ("audit", "accounts", &["id", "embargo"]),
+        ]);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|(_, candidate)| candidate.label.as_str())
+            .collect();
+        assert_eq!(
+            labels.iter().filter(|label| **label == "email").count(),
+            1,
+            "{labels:?}"
+        );
+        // Another schema's relation of the same name is still the text's.
+        assert!(labels.contains(&"embargo"), "{labels:?}");
+
+        let (_, wanted) = filter(&[]);
+        let asked = wanted.iter().filter(|key| **key == scope).count();
+        assert_eq!(asked, 1, "{wanted:?}");
+    }
+
+    #[test]
+    fn a_raw_filter_offers_nothing_inside_a_string() {
+        assert!(filter_items(Engine::Postgres, "accounts", "email = 'ema|").is_empty());
+    }
+
+    #[test]
+    fn a_mongo_raw_filter_offers_the_collections_fields() {
+        for collection in ["accounts", "people's", "say \"hi\""] {
+            let offered = filter_items(Engine::MongoDb, collection, "{ ema|");
+            assert_eq!(
+                offered.first(),
+                Some(&("ema".to_string(), "email".to_string())),
+                "{collection}"
+            );
+        }
+        assert!(filter_items(Engine::MongoDb, "accounts", "{ email: \"ema|\" }").is_empty());
+    }
+
+    #[test]
+    fn a_redis_raw_filter_completes_nothing() {
+        let scope = ("0".to_string(), "keys".to_string());
+        assert!(FilterCompletions::new(Syntax::Redis, Rc::new(catalog()), scope).is_none());
     }
 
     #[test]

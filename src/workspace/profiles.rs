@@ -1763,25 +1763,43 @@ impl Workspace {
     }
 
     pub(crate) fn install_completions(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        let provider = match &profile.catalog {
+        let engine = profile.config.engine();
+        profile.session.completions = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
-                profile.config.engine().syntax(),
+                engine.syntax(),
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 cx.weak_entity(),
-            )) as Rc<dyn CompletionProvider>),
+            ))),
             _ => None,
         };
+        let session = &profile.session;
+        let provider = session
+            .completions
+            .clone()
+            .map(|provider| provider as Rc<dyn CompletionProvider>);
 
         // Every buffer, not just the one in front: a tab switch must not be a
         // moment where completion quietly stops working.
-        for tab in &profile.session.queries {
+        for tab in &session.queries {
             tab.editor.update(cx, |editor, _| {
                 editor.lsp_mut().completion_provider = provider.clone();
             });
+        }
+        // And every raw filter bar, which completes from the same catalog.
+        for tab in &session.objects {
+            let ObjectBody::Relation { filters, .. } = &tab.body else {
+                continue;
+            };
+            let completions = session.filter_completions(engine, &tab.schema, &tab.name);
+            for row in filters.iter().filter(|row| row.raw) {
+                row.value.update(cx, |editor, _| {
+                    editor.lsp_mut().completion_provider = completions.clone();
+                });
+            }
         }
     }
 

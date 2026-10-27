@@ -9,11 +9,11 @@
 //! These were plain types at the crate root. They moved out whole; nothing
 //! changed but their visibility.
 
-use std::{collections::HashMap, ops::Range, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{App, AppContext, Context, Entity, Window};
 use gpui_component::{
-    input::{EditorState, InputEvent, InputState},
+    input::{CompletionProvider, EditorState, InputEvent, InputState},
     resizable::ResizableState,
     table::TableState,
     tree::TreeState,
@@ -257,6 +257,10 @@ pub(crate) struct Session {
     /// question about yet. A relation lands here the first time a statement
     /// names it, so what is held is bounded by what was written.
     pub(crate) completion_columns: completion::ColumnCache,
+    /// What every editor on this connection completes from, as
+    /// `Workspace::install_completions` last built it. Kept for a filter bar
+    /// turned raw after that, which completes from the same one.
+    pub(crate) completions: Option<Rc<completion::SchemaCompletions>>,
     pub(crate) explorer_filter: Entity<InputState>,
     pub(crate) explorer_tree: Entity<TreeState>,
     pub(crate) explorer_leaves: Arc<HashMap<String, ExplorerLeaf>>,
@@ -550,6 +554,23 @@ pub(crate) enum StaleResume {
 }
 
 impl Session {
+    /// What a raw filter bar on `schema`'s `relation` completes from: nothing until the
+    /// catalog has loaded, and nothing on an engine whose raw filter is not
+    /// one the schema can complete.
+    pub(crate) fn filter_completions(
+        &self,
+        engine: Engine,
+        schema: &str,
+        relation: &str,
+    ) -> Option<Rc<dyn CompletionProvider>> {
+        let provider = completion::FilterCompletions::new(
+            engine.syntax(),
+            self.completions.clone()?,
+            (schema.to_string(), relation.to_string()),
+        )?;
+        Some(Rc::new(provider))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: String,
@@ -639,6 +660,7 @@ impl Session {
             next_object_id: 0,
             pending_objects,
             completion_columns: completion::ColumnCache::default(),
+            completions: None,
             explorer_filter,
             explorer_tree: cx.new(|cx| TreeState::new(cx)),
             explorer_leaves: Arc::new(HashMap::new()),

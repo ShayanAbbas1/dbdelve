@@ -8,14 +8,14 @@
 //! surface it assembles, which is why the rest of the module is private.
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, StyledText, Window, div,
-    prelude::FluentBuilder, px,
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Div,
+    Entity, Focusable, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    StyledText, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
 use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable,
+    ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable, ThemeStyled,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{self, Editor, EditorState, Input, InputState, Rope, Textarea, TextareaState},
@@ -952,8 +952,10 @@ fn render_filter_bar(
                 // An absence needs no value, and a box that cannot change what
                 // runs is a box to read past.
                 .children(
-                    (filter.raw || filter.operator.takes_value())
-                        .then(|| Input::new(&filter.value).small().min_w_0().flex_1()),
+                    (filter.raw || filter.operator.takes_value()).then(|| FilterValue {
+                        editor: filter.value.clone(),
+                        raw: filter.raw,
+                    }),
                 )
                 .child(
                     icon_button(
@@ -995,6 +997,77 @@ fn render_filter_bar(
 /// menu to open for something a click already says.
 fn join_button(id: impl Into<gpui::ElementId>, conjunction: Conjunction, t: Theme) -> Button {
     button(id, conjunction.as_str(), Tone::Quiet, Control::Compact, t).tooltip("AND or OR")
+}
+
+/// A filter bar's value box: a code editor, dressed as the small one-line
+/// input it sits among.
+///
+/// The editor reserves two rows whatever it holds, so the box is cut to one
+/// and clips the other; the completion popup is drawn deferred, outside the
+/// clip. The library draws no focus ring on an editor, so this draws the one
+/// an input would have.
+#[derive(IntoElement)]
+struct FilterValue {
+    editor: Entity<EditorState>,
+    raw: bool,
+}
+
+impl RenderOnce for FilterValue {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focused = self.editor.read(cx).focus_handle(cx).is_focused(window);
+        let font = match self.raw {
+            true => fonts(cx).editor.clone(),
+            false => fonts(cx).chrome.clone(),
+        };
+        // A small input's height. The extra-small size puts no inset above
+        // the text, so a line as tall as the space inside the border centres.
+        let height = window.rem_size() * 1.5;
+        let editor = self.editor.clone();
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .rounded(cx.theme().radius)
+            // Plain Enter applies the bar; Shift+Enter would still break the
+            // line, onto the row the box clips.
+            .capture_action(|enter: &input::Enter, _, cx| {
+                if enter.shift {
+                    cx.stop_propagation();
+                }
+            })
+            .when(focused, |this| this.focus_ring_style(window, cx))
+            .child(
+                Editor::new(&self.editor)
+                    .with_size(gpui_component::Size::XSmall)
+                    .h(height)
+                    .overflow_hidden()
+                    .bg(cx.theme().input_background())
+                    .when(focused, |this| this.border_color(cx.theme().ring))
+                    .font_family(font)
+                    .text_sm()
+                    .line_height(height - px(2.))
+                    .on_paste(move |item, window, cx| {
+                        let Some(text) = item.text().as_deref().and_then(crate::filter::one_line)
+                        else {
+                            return false;
+                        };
+                        editor.update(cx, |editor, cx| editor.replace(text, window, cx));
+                        true
+                    })
+                    // The query editor's menu, less what a filter has no use for.
+                    .context_menu(|menu, _, cx| {
+                        menu.menu("Cut", Box::new(input::Cut))
+                            .menu("Copy", Box::new(input::Copy))
+                            .menu_with_disabled(
+                                "Paste",
+                                cx.read_from_clipboard().is_none(),
+                                Box::new(input::Paste),
+                            )
+                            .separator()
+                            .menu("Select All", Box::new(input::SelectAll))
+                    }),
+            )
+    }
 }
 
 /// One line of controls, at the height every other control strip is.
