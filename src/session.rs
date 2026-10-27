@@ -554,16 +554,20 @@ pub(crate) enum StaleResume {
 }
 
 impl Session {
-    /// What a raw filter bar on `relation` completes from: nothing until the
+    /// What a raw filter bar on `schema`'s `relation` completes from: nothing until the
     /// catalog has loaded, and nothing on an engine whose raw filter is not
     /// one the schema can complete.
     pub(crate) fn filter_completions(
         &self,
         engine: Engine,
+        schema: &str,
         relation: &str,
     ) -> Option<Rc<dyn CompletionProvider>> {
-        let provider =
-            completion::FilterCompletions::new(engine, self.completions.clone()?, relation)?;
+        let provider = completion::FilterCompletions::new(
+            engine.syntax(),
+            self.completions.clone()?,
+            (schema.to_string(), relation.to_string()),
+        )?;
         Some(Rc::new(provider))
     }
 

@@ -1794,7 +1794,7 @@ impl Workspace {
             let ObjectBody::Relation { filters, .. } = &tab.body else {
                 continue;
             };
-            let completions = session.filter_completions(engine, &tab.name);
+            let completions = session.filter_completions(engine, &tab.schema, &tab.name);
             for row in filters.iter().filter(|row| row.raw) {
                 row.value.update(cx, |editor, _| {
                     editor.lsp_mut().completion_provider = completions.clone();

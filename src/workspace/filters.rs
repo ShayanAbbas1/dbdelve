@@ -363,7 +363,7 @@ impl Workspace {
     fn filter_completions(&self, id: u64) -> Option<Rc<dyn CompletionProvider>> {
         let session = &self.profile()?.session;
         let tab = session.objects.iter().find(|tab| tab.id == id)?;
-        session.filter_completions(self.engine(), &tab.name)
+        session.filter_completions(self.engine(), &tab.schema, &tab.name)
     }
 
     pub(crate) fn active_object_id(&self) -> Option<u64> {

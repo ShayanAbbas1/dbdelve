@@ -87,7 +87,7 @@ impl Workspace {
 
         let id = profile.session.next_object_id;
         profile.session.next_object_id += 1;
-        let completions = profile.session.filter_completions(engine, &name);
+        let completions = profile.session.filter_completions(engine, &schema, &name);
         // A data tab for the relation has already read this definition, and
         // reading it again is several statements -- on Snowflake, a warehouse
         // woken -- for the same answer. Recorded as asked, so `load_relation`
