@@ -281,6 +281,9 @@ fn refusal(command: &Command) -> Option<String> {
 enum Kind {
     Read,
     Write,
+    /// Runs a script whose body DBDelve cannot read, which may do anything a
+    /// `Drop` does.
+    Script,
     /// Throws data or the server's state away wholesale.
     Drop,
 }
@@ -306,6 +309,7 @@ pub(crate) fn classify(text: &str) -> Verdict {
         verdict = verdict.max(match kind(&command) {
             Some(Kind::Read) => Verdict::READ,
             Some(Kind::Write) => Verdict::WRITE,
+            Some(Kind::Script) => Verdict::FULL,
             Some(Kind::Drop) => Verdict::destroys(Destructive::Drop),
             None => return unreadable,
         });
@@ -336,6 +340,7 @@ pub(crate) fn names() -> impl Iterator<Item = (&'static str, Option<&'static str
     let tagged = |names: &'static [&'static str], tag| names.iter().map(move |n| (*n, Some(tag)));
     tagged(READS, "read")
         .chain(tagged(WRITES, "write"))
+        .chain(tagged(SCRIPTS, "script"))
         .chain(tagged(DROPS, "destructive"))
         .chain(SUBCOMMANDED.iter().map(|name| (*name, None)))
         .filter(|(name, _)| {
@@ -419,6 +424,7 @@ fn kind(command: &Command) -> Option<Kind> {
         (name, _) if SUBCOMMANDED.contains(&name) => return None,
         (name, _) if READS.contains(&name) => Read,
         (name, _) if WRITES.contains(&name) => Write,
+        (name, _) if SCRIPTS.contains(&name) => Script,
         (name, _) if DROPS.contains(&name) => Drop,
         _ => return None,
     })
@@ -738,10 +744,7 @@ const WRITES: &[&str] = &[
     "GEORADIUS",
     "GEORADIUSBYMEMBER",
     "GEOSEARCHSTORE",
-    // Scripts, transactions, messages.
-    "EVAL",
-    "EVALSHA",
-    "FCALL",
+    // Transactions, messages.
     "MULTI",
     "EXEC",
     "DISCARD",
@@ -817,6 +820,11 @@ const WRITES: &[&str] = &[
     "VREM",
     "VSETATTR",
 ];
+
+/// Commands that run a script, whose `redis.call`s are DBDelve's to guess at:
+/// `EVAL "return redis.call('flushall')" 0` is a `FLUSHALL`. Their `_RO`
+/// forms, which the server holds to reads, are in `READS`.
+const SCRIPTS: &[&str] = &["EVAL", "EVALSHA", "FCALL"];
 
 /// Commands that empty a database, hand the server to another, or stop it.
 const DROPS: &[&str] = &[
@@ -947,6 +955,7 @@ mod tests {
         let read = Verdict::READ;
         let write = Verdict::WRITE;
         let drop = Verdict::destroys(Drop);
+        let full = Verdict::FULL;
         for (text, verdict) in [
             ("GET a", &read),
             ("hgetall h", &read),
@@ -970,8 +979,16 @@ mod tests {
             ("JSON.GET doc $", &read),
             ("JSON.SET doc $ 1", &write),
             ("FT.DROPINDEX idx", &drop),
-            ("EVAL \"return 1\" 0", &write),
+            ("EVAL \"return 1\" 0", &full),
+            ("eval \"return redis.call('flushall')\" 0", &full),
+            ("EVALSHA abc 0", &full),
+            ("FCALL f 0", &full),
             ("EVAL_RO \"return 1\" 0", &read),
+            ("EVALSHA_RO abc 0", &read),
+            ("FCALL_RO f 0", &read),
+            ("SCRIPT LOAD \"return 1\"", &write),
+            ("GET a\nEVALSHA abc 0", &full),
+            ("EVALSHA abc 0\nFLUSHDB", &drop),
             ("SET a 1", &write),
             ("DEL a", &write),
             ("MULTI", &write),

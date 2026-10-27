@@ -28,8 +28,8 @@ use crate::{
         popup_theme,
     },
     ui::{
-        Control, Tone, button, chord_hint, highlighted, icon_button, keycap_text, keycaps,
-        option_row, picker, raised_card, segment, switch, well,
+        Control, Tone, button, button_label, chord_hint, highlighted, icon_button, keycap_text,
+        keycaps, option_row, picker, raised_card, segment, stacked_option_row, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -706,13 +706,13 @@ fn render_row(
             SharedString::from(description)
         }
     });
-    option_row(
-        highlighted(row.title, matched, t),
-        description,
-        render_control(workspace, row.id, t, cx),
-        t,
-    )
-    .into_any_element()
+    let title = highlighted(row.title, matched, t);
+    let control = render_control(workspace, row.id, t, cx);
+    if matches!(row.id, SettingId::Font(_)) {
+        stacked_option_row(title, description, control, t).into_any_element()
+    } else {
+        option_row(title, description, control, t).into_any_element()
+    }
 }
 
 fn render_control(
@@ -889,22 +889,17 @@ fn render_font(
                 workspace.step_font_size(slot, -FONT_SIZE_STEP, cx);
             })),
         )
-        // The readout is the reset: clicking a size that is not the default
-        // puts it back.
         .child(
-            button(
-                ("font-size", index),
-                format!("{size}"),
-                Tone::Quiet,
-                Control::Compact,
-                t,
-            )
-            .min_w(px(layout::chrome(layout::CONTROL_HEIGHT)))
-            .disabled(size == default)
-            .tooltip(format!("Reset to {default}"))
-            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                workspace.set_font_size(slot, default, cx);
-            })),
+            div()
+                .min_w(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                .flex()
+                .justify_center()
+                .child(button_label(
+                    format!("{size}"),
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )),
         )
         .child(
             button(
@@ -919,7 +914,22 @@ fn render_font(
                 workspace.step_font_size(slot, FONT_SIZE_STEP, cx);
             })),
         );
+    let reset = icon_button(
+        ("font-size-reset", index),
+        icon::RESET,
+        Tone::Quiet,
+        Control::Compact,
+        t,
+    )
+    .disabled(size == default)
+    .tooltip(format!("Reset to {default}"))
+    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+        workspace.set_font_size(slot, default, cx);
+    }));
+    // The picker takes what the family's name needs and the rest of the row
+    // is air, so the steppers line up down the three rows.
     div()
+        .w_full()
         .min_w_0()
         .flex()
         .items_center()
@@ -929,7 +939,8 @@ fn render_font(
                 workspace.open_palette(PaletteMode::Font(slot), window, cx);
             },
         )))
-        .child(stepper)
+        .child(div().flex_1())
+        .child(stepper.child(reset))
         .into_any_element()
 }
 

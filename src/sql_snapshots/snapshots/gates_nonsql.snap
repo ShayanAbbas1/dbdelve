@@ -244,11 +244,11 @@ source: src/sql_snapshots.rs
 
 [redis] "EVAL \"return redis.call('flushall')\" 0"
   |EVAL "return redis.call('flushall')" 0|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [redis] "EVALSHA abc 0"
   |EVALSHA abc 0|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [redis] "SCRIPT FLUSH"
   |SCRIPT FLUSH|
