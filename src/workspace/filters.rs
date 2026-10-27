@@ -174,7 +174,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Point a bar at a column and ask again.
+    /// Point a bar at a column and ask again. A value it held for another
+    /// column stays; SQL it held as a raw bar goes, since as a value to
+    /// compare against it would only be quoted into a predicate nobody meant.
     pub(crate) fn set_filter_column(
         &mut self,
         action: &SetFilterColumn,
@@ -189,7 +191,10 @@ impl Workspace {
             return;
         };
         filter.column = Some(action.column.clone());
-        filter.raw = false;
+        let was_raw = std::mem::replace(&mut filter.raw, false);
+        if was_raw {
+            filter.applied.clear();
+        }
         // One the new column does not take would leave the bar narrowing
         // nothing under an operator the dropdown no longer lists.
         if !filter.operator.offered(engine, filter.column.as_deref()) {
@@ -197,15 +202,18 @@ impl Workspace {
         }
         let (operator, input) = (filter.operator, filter.value.clone());
         input.update(cx, |input, cx| {
+            if was_raw {
+                input.set_value("", window, cx);
+            }
             shape_value(input, engine, false, operator, None, window, cx);
         });
         self.apply_filter(id, cx);
         cx.notify();
     }
 
-    /// Turn a bar into a raw one. The value it already holds stays: it is the
-    /// only thing the two shapes have in common, and dropping it would lose
-    /// what was typed to a dropdown.
+    /// Turn a bar into a raw one. The value it already holds stays in the box:
+    /// it is the only thing the two shapes have in common, and dropping it
+    /// would lose what was typed to a dropdown.
     pub(crate) fn set_filter_raw(
         &mut self,
         action: &SetFilterRaw,
