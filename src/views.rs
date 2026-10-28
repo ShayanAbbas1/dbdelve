@@ -10,10 +10,13 @@
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Div,
     Entity, Focusable, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    StyledText, Window, div, prelude::FluentBuilder, px,
+    MouseButton, MouseDownEvent, ParentElement, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, StyledText, Window, div, prelude::FluentBuilder, px,
 };
-use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
+use gpui_base::{
+    SelectableText,
+    actions::{SelectNextColumn, SelectPrevColumn},
+};
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable, ThemeStyled,
     button::Button,
@@ -1879,6 +1882,9 @@ fn result_chip(
 /// to bottom like the log it is. In the editor's face, as an error is: it
 /// quotes the server. Under a heading per statement only when more than one
 /// said something, the heading reading as that statement's chip does.
+///
+/// Each message is plain selectable text, never Markdown: a `PRINT` is the
+/// server's words and its `*` and `#` are not formatting.
 fn render_messages(
     said: &[Said],
     tail: Option<AnyElement>,
@@ -1889,6 +1895,9 @@ fn render_messages(
     let t = *theme(cx);
     let (code, chrome) = (fonts(cx).editor.clone(), fonts(cx).chrome.clone());
     let headed = said.len() > 1;
+    // The window's selection is a map of runs, so a copy across several only
+    // comes out in reading order, a line apiece, if each says where it sits.
+    let mut order: usize = 0;
     let groups: Vec<_> = said
         .iter()
         .map(|said| {
@@ -1913,11 +1922,13 @@ fn render_messages(
                             .child(query_label(said.sql)),
                     )
                 })
-                .children(
-                    said.messages
-                        .iter()
-                        .map(|message| div().text_color(t.text).child(message.clone())),
-                )
+                .children(said.messages.iter().map(|message| {
+                    order += 1;
+                    div().text_color(t.text).child(
+                        SelectableText::new(("message", order), message.clone())
+                            .document_order(order as u64),
+                    )
+                }))
         })
         .collect();
     div()
@@ -1931,6 +1942,15 @@ fn render_messages(
         .flex_col()
         .gap(px(layout::SPACE_MD))
         .font_family(code)
+        // Copy is `Root`'s, which reads the window's selection, and a focused
+        // buffer or grid would take the keystroke for a copy of its own
+        // first. The window's floor has no copy of its own to take it with.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|workspace, _: &MouseDownEvent, window, cx| {
+                workspace.focus.focus(window, cx)
+            }),
+        )
         .children(groups)
         .children(tail.map(|tail| div().font_family(chrome).child(tail)))
         .into_any_element()
