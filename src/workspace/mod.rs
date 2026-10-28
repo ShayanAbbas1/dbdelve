@@ -2105,7 +2105,7 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.render_apply_review(cx))
             .children(self.render_import_rows(window, cx))
-            .children(self.render_close_confirmation(cx))
+            .children(self.render_delete_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))
             .children(self.render_queue_failure(cx))

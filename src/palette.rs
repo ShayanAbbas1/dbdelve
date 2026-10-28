@@ -160,6 +160,8 @@ pub enum Mode {
     NameProject(Option<usize>),
     /// Every project, to rename or delete one.
     Projects(ProjectVerb),
+    /// Every saved query, to delete one.
+    DeleteQuery,
     /// The one row that removes a connection or deletes a project, so a
     /// keystroke aimed at something else never does.
     Confirm(Target),
@@ -206,6 +208,7 @@ impl Mode {
             Mode::NameProject(Some(_)) => "Rename the project…",
             Mode::Projects(ProjectVerb::Rename) => "Rename a project…",
             Mode::Projects(ProjectVerb::Delete) => "Delete a project…",
+            Mode::DeleteQuery => "Delete a saved query…",
             Mode::Confirm(Target::Connection(_) | Target::Unavailable(_)) => {
                 "Remove this connection?"
             }
@@ -227,6 +230,7 @@ impl Mode {
             Mode::Schema => "Schemas",
             Mode::Columns => "Columns",
             Mode::Engine => "Engines",
+            Mode::DeleteQuery => "Delete query",
             Mode::ConnectionActions(_) => "Connection",
             Mode::ProjectActions(_) => "Project",
             Mode::MoveToProject(_) => "Move to project",
@@ -251,7 +255,7 @@ impl Mode {
             Mode::NameProject(None) => "Create",
             Mode::NameProject(Some(_)) => "Rename",
             Mode::Confirm(Target::Connection(_) | Target::Unavailable(_)) => "Remove",
-            Mode::Confirm(Target::Project(_)) => "Delete",
+            Mode::Confirm(Target::Project(_)) | Mode::DeleteQuery => "Delete",
             _ => "Select",
         }
     }
@@ -280,6 +284,11 @@ pub enum Command {
     ShowPlan(bool),
     SaveQuery,
     RenameQuery,
+    /// Put the palette back up over the saved queries, to delete one.
+    PickQueryToDelete,
+    /// Ask before deleting this saved query, in the dialog the sidebar's
+    /// Delete raises.
+    DeleteQuery(String),
     /// Narrow the palette to the History scope. The one command that keeps the
     /// palette up rather than doing something behind it.
     QueryHistory,
@@ -778,6 +787,8 @@ pub fn remembered(scope: Scope, command: &Command) -> bool {
             command,
             Command::Confirm(_)
                 | Command::PickProject(ProjectVerb::Delete)
+                | Command::PickQueryToDelete
+                | Command::DeleteQuery(_)
                 | Command::RemoveConnection(_)
                 | Command::RemoveUnavailable(_)
                 | Command::DeleteProject(_)
@@ -952,6 +963,7 @@ impl Palette {
                 .map(|profile| move_items(index, &profile.id, &workspace.projects))
                 .unwrap_or_default(),
             (Mode::Projects(verb), _) => project_items(verb, &workspace.projects),
+            (Mode::DeleteQuery, Some(profile)) => delete_query_items(profile),
             (Mode::Confirm(target), _) => confirm_items(workspace, target),
             (Mode::NameProject(_), _) => Vec::new(),
             (Mode::Search(_), Some(profile)) => search_items(workspace, profile, cx),
@@ -1892,6 +1904,26 @@ fn query_items(profile: &Profile) -> Vec<Item> {
         .collect()
 }
 
+/// Every saved query, open or not, each raising the delete dialog.
+fn delete_query_items(profile: &Profile) -> Vec<Item> {
+    profile
+        .session
+        .saved_queries
+        .iter()
+        .map(|name| {
+            Item::new(
+                name.clone(),
+                icon::SAVED_QUERY,
+                Command::DeleteQuery(name.clone()),
+            )
+            .hint(match profile.session.tab_holding(name) {
+                Some(_) => "open",
+                None => "query",
+            })
+        })
+        .collect()
+}
+
 /// Every relation and routine in the catalog, schema by schema.
 fn object_items(profile: &Profile) -> Vec<Item> {
     let CatalogState::Loaded(catalog, _) = &profile.catalog else {
@@ -2710,6 +2742,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 "rename_query_tab",
             ));
         }
+    }
+
+    // Not gated on a query tab: a saved query need not be open to be deleted.
+    if !session.saved_queries.is_empty() {
+        items.push(command(
+            "Delete saved query…",
+            icon::DELETE,
+            Command::PickQueryToDelete,
+            QUERY,
+        ));
     }
 
     // Not gated on the query tab being in front: recalling a statement brings

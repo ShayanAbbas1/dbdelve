@@ -1000,10 +1000,13 @@ impl Workspace {
         )
     }
 
-    /// What `cmd+w` asks before it takes a saved query with the tab.
-    pub(crate) fn render_close_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What Delete asks before a saved query's file goes, since nothing
+    /// brings it back.
+    pub(crate) fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
-        let name = self.profile()?.session.pending_close.clone()?;
+        let session = &self.profile()?.session;
+        let name = session.pending_delete.clone()?;
+        let open = session.tab_holding(&name).is_some();
         let cancel_workspace = cx.entity().downgrade();
         let delete_workspace = cancel_workspace.clone();
         let deleted = name.clone();
@@ -1018,17 +1021,19 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close query"))
+                        .child(section_label(t, "Delete query"))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                // The whole point of the dialog: a saved query
-                                // is listed while its file exists, so closing
-                                // its tab and deleting it are one act.
-                                .child(format!(
-                                    "{name} is a saved query. Closing its tab deletes it."
-                                )),
+                                .child(if open {
+                                    format!(
+                                        "Delete {name}? Its tab stays open as an unsaved \
+                                         buffer, with its text."
+                                    )
+                                } else {
+                                    format!("Delete {name}? This cannot be undone.")
+                                }),
                         )
                         .child(
                             div()
@@ -1037,7 +1042,7 @@ impl Workspace {
                                 .gap(px(layout::SPACE_SM))
                                 .child(
                                     button(
-                                        "cancel-close-tab",
+                                        "cancel-delete-query",
                                         "Cancel",
                                         Tone::Quiet,
                                         Control::Standard,
@@ -1046,27 +1051,23 @@ impl Workspace {
                                     .on_click(
                                         move |_, _, cx| {
                                             _ = cancel_workspace.update(cx, |workspace, cx| {
-                                                workspace.cancel_close_tab(cx);
+                                                workspace.cancel_delete_query(cx);
                                             });
                                         },
                                     ),
                                 )
                                 .child(
                                     button(
-                                        "confirm-close-tab",
+                                        "confirm-delete-query",
                                         "Delete",
                                         Tone::Danger,
                                         Control::Standard,
                                         t,
                                     )
                                     .on_click(
-                                        move |_, window, cx| {
+                                        move |_, _, cx| {
                                             _ = delete_workspace.update(cx, |workspace, cx| {
-                                                workspace.delete_saved_query(
-                                                    deleted.clone(),
-                                                    window,
-                                                    cx,
-                                                );
+                                                workspace.delete_saved_query(deleted.clone(), cx);
                                             });
                                         },
                                     ),

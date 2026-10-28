@@ -87,10 +87,10 @@ use icons::{Icons, icon};
 use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke};
 use result_grid::{NewValue, ResultGrid};
 use session::{
-    ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,
-    ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines,
-    RowCount, Session, Sorting, StructureState, Tab, TabKey, close_target, insert_value,
-    matching_tab, relation_kind, restored_state, show_snapshot,
+    ApplyReview, CatalogState, Explained, Focus, InsertField, InsertForm, ObjectBody, ObjectTab,
+    OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines, RowCount,
+    Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab, relation_kind,
+    restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};

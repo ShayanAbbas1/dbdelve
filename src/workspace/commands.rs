@@ -606,6 +606,8 @@ impl Workspace {
             Command::ShowPlan(showing) => self.show_plan(showing, cx),
             Command::SaveQuery => self.save_query(&SaveQuery, window, cx),
             Command::RenameQuery => self.rename_query(window, cx),
+            Command::PickQueryToDelete => self.open_palette(PaletteMode::DeleteQuery, window, cx),
+            Command::DeleteQuery(name) => self.ask_delete_saved_query(name, cx),
             Command::QueryHistory => {
                 self.open_palette(PaletteMode::Search(Scope::History), window, cx)
             }
@@ -619,7 +621,7 @@ impl Workspace {
             Command::ClearFilter => self.clear_filter(&ClearFilter, window, cx),
             Command::NewRow => self.new_row(&NewRow, window, cx),
             Command::ImportRows => self.import_rows(&ImportRows, window, cx),
-            Command::CloseObject(id) => self.ask_before_close(CloseTarget::Object(id), window, cx),
+            Command::CloseObject(id) => self.ask_before_close(Tab::Object(id), window, cx),
             Command::SetNull => self.set_null(&SetNull, window, cx),
             Command::SetEmpty => self.set_empty(&SetEmpty, window, cx),
             Command::SetDefault => self.set_default(&SetDefault, window, cx),

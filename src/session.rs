@@ -273,6 +273,8 @@ pub(crate) struct Session {
     /// The same hazard for the name field: an unfocused input asks for a name
     /// nobody can type into.
     pub(crate) save_name_needs_focus: bool,
+    /// Every query file this profile has, open in a tab or not: what the
+    /// sidebar's Queries group and the palette list.
     pub(crate) saved_queries: Vec<String>,
     /// The statements this profile has run, newest first. Held rather than read
     /// off disk when the palette opens, for the reason `saved_queries` is: the
@@ -287,19 +289,11 @@ pub(crate) struct Session {
     /// from one that is being typed over.
     pub(crate) page_shown: usize,
     pub(crate) naming: bool,
+    /// The saved query the delete dialog is asking about.
     pub(crate) pending_delete: Option<String>,
-    /// The saved query `cmd+w` is asking about.
-    ///
-    /// A saved query has no closed state — it is in the strip while its file
-    /// exists and gone when it does not — so closing its tab is deleting it,
-    /// and it is the one tab that says so before it goes. Separate from
-    /// `pending_delete`, which is the chip's own quieter two-click arming.
-    pub(crate) pending_close: Option<String>,
-    /// The close `cmd+w` is asking about, because the tab it names holds cell
-    /// edits nobody has applied. Held as the target rather than the tab, so
-    /// confirming runs exactly the close the keystroke had decided on --
-    /// including a saved query's own second question.
-    pub(crate) pending_discard: Option<CloseTarget>,
+    /// The tab a close is asking about, because it holds cell edits nobody
+    /// has applied.
+    pub(crate) pending_discard: Option<Tab>,
     pub(crate) notice: Option<String>,
     /// The generated batch a relation tab is showing before it runs. That tab
     /// has no buffer to put SQL in, so the modal is where the statement is on
@@ -674,7 +668,6 @@ impl Session {
             page_shown: 0,
             naming: false,
             pending_delete: None,
-            pending_close: None,
             pending_discard: None,
             notice,
             apply_review: None,
@@ -744,18 +737,20 @@ impl Session {
     }
 
     /// Every chip the strip draws, left to right: the dragged order first,
-    /// then anything newer than it in the default one -- unsaved buffers, saved
-    /// queries, objects.
+    /// then anything newer than it in the default one.
     pub(crate) fn strip_order(&self) -> Vec<TabKey> {
-        let chips: Vec<TabKey> = self
-            .queries
-            .iter()
-            .filter(|tab| tab.open_query.is_none())
-            .map(|tab| TabKey::Unsaved(tab.id))
-            .chain(self.saved_queries.iter().cloned().map(TabKey::Saved))
-            .chain(self.objects.iter().map(|tab| TabKey::Object(tab.id)))
-            .collect();
-        strip_order(chips, &self.tab_order)
+        strip_order(self.default_chips(), &self.tab_order)
+    }
+
+    /// One chip per open tab, in the order a strip nobody has dragged shows
+    /// them.
+    pub(crate) fn default_chips(&self) -> Vec<TabKey> {
+        default_chips(
+            self.queries
+                .iter()
+                .map(|tab| (tab.id, tab.open_query.as_deref())),
+            self.objects.iter().map(|tab| tab.id),
+        )
     }
 
     /// Put a chip just opened at the right end of the strip as it is drawn.
@@ -777,8 +772,7 @@ impl Session {
         self.tab_order = order;
     }
 
-    /// The tabs behind the strip's chips, left to right. A saved query with
-    /// no buffer open is a chip with no tab, and is not here.
+    /// The tabs behind the strip's chips, left to right.
     pub(crate) fn strip_tabs(&self) -> Vec<Tab> {
         self.strip_order()
             .iter()
@@ -1020,7 +1014,6 @@ impl Session {
     /// clicked.
     pub(crate) fn clear_prompts(&mut self) {
         self.pending_delete = None;
-        self.pending_close = None;
         self.pending_discard = None;
         self.naming = false;
         self.save_name_needs_focus = false;
@@ -1083,8 +1076,9 @@ impl Tab {
     }
 }
 
-/// A chip of the tab strip, which is not the same set as `Tab`: a saved query
-/// is listed whether or not a buffer holds it.
+/// A chip of the tab strip. A saved query's is keyed by its name rather than
+/// its tab, so the place a drag left it in survives the query being closed and
+/// opened again.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TabKey {
     Unsaved(u64),
@@ -1092,31 +1086,20 @@ pub(crate) enum TabKey {
     Object(u64),
 }
 
-/// What `cmd+w` has to do with the surface in front of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CloseTarget {
-    /// Close it. It is a view onto something the database still holds, and
-    /// reopening it costs a click.
-    Object(u64),
-    /// Ask first. A saved query is listed while its file exists and gone when
-    /// it does not, so closing its tab is deleting it.
-    SavedQuery(String),
-    /// Close it. An unsaved buffer is a scratch pad someone is done with; its text goes with it, which is what closing an
-    /// unnamed buffer means everywhere else.
-    Buffer(u64),
-}
-
-impl CloseTarget {
-    /// The tab this close takes out of the strip. A saved query names its file
-    /// rather than its tab, so the strip is what says which tab that is -- and
-    /// `None` is a saved query with no tab open, which no close comes from.
-    pub(crate) fn tab(&self, session: &Session) -> Option<Tab> {
-        match self {
-            Self::Object(id) => Some(Tab::Object(*id)),
-            Self::Buffer(id) => Some(Tab::Query(*id)),
-            Self::SavedQuery(name) => session.tab_holding(name).map(Tab::Query),
-        }
-    }
+/// Unsaved buffers, then saved queries, then objects, each kind in the order
+/// its tabs were opened. A saved query is a chip only while a tab holds it:
+/// the sidebar is where the rest are listed.
+fn default_chips<'a>(
+    queries: impl Iterator<Item = (u64, Option<&'a str>)> + Clone,
+    objects: impl Iterator<Item = u64>,
+) -> Vec<TabKey> {
+    queries
+        .clone()
+        .filter(|(_, name)| name.is_none())
+        .map(|(id, _)| TabKey::Unsaved(id))
+        .chain(queries.filter_map(|(_, name)| name.map(|name| TabKey::Saved(name.to_string()))))
+        .chain(objects.map(TabKey::Object))
+        .collect()
 }
 
 /// `chips` in default order, rearranged by the order the strip was last left
@@ -1146,14 +1129,6 @@ fn neighbour(tabs: &[Tab], closing: Tab) -> Option<Tab> {
         .and_then(|left| tabs.get(left))
         .or(tabs.get(at + 1))
         .copied()
-}
-
-pub(crate) fn close_target(active: Tab, open_query: Option<&str>) -> CloseTarget {
-    match (active, open_query) {
-        (Tab::Object(id), _) => CloseTarget::Object(id),
-        (Tab::Query(_), Some(name)) => CloseTarget::SavedQuery(name.to_string()),
-        (Tab::Query(id), None) => CloseTarget::Buffer(id),
-    }
 }
 
 /// Who orders a view's rows on a header click. Per view, because a table read
@@ -3078,20 +3053,19 @@ mod tests {
     }
 
     #[test]
-    fn only_the_tab_that_is_a_file_is_asked_about_before_it_closes() {
-        let saved = |name: &str| CloseTarget::SavedQuery(name.to_string());
-
-        assert_eq!(close_target(Tab::Object(3), None), CloseTarget::Object(3));
-        assert_eq!(close_target(Tab::Query(0), Some("daily")), saved("daily"));
-        // Any unsaved buffer, the last one too, is a scratch pad someone is
-        // done with: it goes without a question, the way an unnamed buffer
-        // does everywhere.
-        assert_eq!(close_target(Tab::Query(7), None), CloseTarget::Buffer(7));
-        // What the query tab happens to be holding says nothing about an
-        // object tab, which is the one in front.
+    fn a_saved_query_is_a_chip_only_while_a_tab_holds_it() {
+        // The strip draws open tabs and nothing else: a query closed is still
+        // on disk and in the sidebar, but takes no room here.
+        let queries = [(0, None), (1, Some("daily")), (2, None), (3, Some("adhoc"))];
         assert_eq!(
-            close_target(Tab::Object(3), Some("daily")),
-            CloseTarget::Object(3)
+            default_chips(queries.into_iter(), [4].into_iter()),
+            [
+                TabKey::Unsaved(0),
+                TabKey::Unsaved(2),
+                TabKey::Saved("daily".into()),
+                TabKey::Saved("adhoc".into()),
+                TabKey::Object(4),
+            ]
         );
     }
 
