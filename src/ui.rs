@@ -157,6 +157,16 @@ pub(crate) fn status_dot(t: Theme, status: impl Into<Status>) -> Div {
         .bg(fill)
 }
 
+/// A saved query whose buffer differs from its file, on its tab and its
+/// sidebar row alike.
+pub(crate) fn modified_dot(t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(layout::SPACE_XS + 2.))
+        .rounded_full()
+        .bg(t.text_muted)
+}
+
 /// The way back from a failed or dropped connection, wherever that failure is
 /// on screen: beside the status bar's message and under a query's error.
 pub(crate) fn reconnect_button(id: &'static str, t: Theme) -> Button {

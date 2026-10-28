@@ -17,7 +17,7 @@ use crate::explorer::{
 };
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
-use crate::ui::Status;
+use crate::ui::{Status, modified_dot, raised_card};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -1825,12 +1825,23 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
-        let open_queries: HashSet<String> = profile
+        // Each open query, and whether its buffer differs from its file.
+        let open_queries: HashMap<String, bool> = profile
             .session
             .queries
             .iter()
-            .filter_map(|tab| tab.open_query.clone())
+            .filter_map(|tab| {
+                let name = tab.open_query.clone()?;
+                Some((name, tab.disk.get().modified()))
+            })
             .collect();
+        let renaming = profile.session.query_rename.as_ref().map(|rename| {
+            (
+                rename.name.clone(),
+                rename.input.clone(),
+                rename.error.clone(),
+            )
+        });
         let message = match &profile.catalog {
             CatalogState::Loading => Some(("Loading database objects…".to_string(), t.text_muted)),
             CatalogState::Failed(message) => Some((message.clone(), t.danger)),
@@ -1854,7 +1865,12 @@ impl Workspace {
                         && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
-                        .is_some_and(|name| open_queries.contains(name));
+                        .and_then(|name| open_queries.get(name).copied());
+                    let modified = open == Some(true);
+                    let open = open.is_some();
+                    let rename = renaming
+                        .as_ref()
+                        .filter(|(name, ..)| query.as_ref() == Some(name));
                     let matched = highlights
                         .get(entry.item().id.as_str())
                         .map_or(&[][..], Vec::as_slice);
@@ -1910,23 +1926,30 @@ impl Workspace {
                                 .min_w_0()
                                 .flex_1()
                                 .child(row_icon(t, row_icon_path))
-                                .child(
-                                    div()
+                                .child(match rename {
+                                    Some((_, input, error)) => {
+                                        rename_field(label, input, error.clone(), t)
+                                    }
+                                    None => div()
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .child(label),
-                                )
-                                .when(active || open, |row| {
+                                })
+                                .when(rename.is_none() && (active || open), |row| {
                                     row.child(
                                         div()
                                             .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(layout::SPACE_XS))
                                             .whitespace_nowrap()
                                             .text_color(t.text_faint)
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .font_weight(FontWeight::NORMAL)
+                                            .when(modified, |marker| marker.child(modified_dot(t)))
                                             .child(if open { "open" } else { "active" }),
                                     )
                                 })
@@ -1941,6 +1964,10 @@ impl Workspace {
                                     )
                                 }),
                         );
+                    // A click inside the field is the field's.
+                    if rename.is_some() {
+                        return row;
+                    }
                     if let Some(name) = query {
                         let workspace = workspace.clone();
                         return row.on_click(move |_, window, cx| {
@@ -2122,12 +2149,83 @@ fn saved_query_menu(
         workspace.open_saved_query(name, window, cx)
     }))
     .item(action("Rename…", |workspace, name, window, cx| {
-        workspace.rename_saved_query(name, window, cx)
+        workspace.start_query_rename(name, window, cx)
     }))
     .separator()
     .item(action("Delete…", |workspace, name, _, cx| {
         workspace.ask_delete_saved_query(name, cx)
     }))
+}
+
+/// A saved query's name as a field, laid over the label it replaces. The
+/// label stays, unseen, to hold the row's height: the tree's rows are all as
+/// tall as its first, and a field taller than a label would push nothing but
+/// spill over its neighbours. A refusal floats under the field for the same
+/// reason.
+fn rename_field(
+    label: StyledText,
+    input: &Entity<InputState>,
+    error: Option<String>,
+    t: Theme,
+) -> gpui::Div {
+    let field = div()
+        .relative()
+        .w_full()
+        .h(px(layout::chrome(layout::CONTROL_HEIGHT_INLINE)))
+        .flex()
+        .items_center()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .border_1()
+        .border_color(if error.is_some() { t.danger } else { t.accent })
+        .bg(t.bg)
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .h_full()
+                .px(px(layout::SPACE_XS))
+                .py_0()
+                .text_size(px(layout::chrome(layout::TEXT_MD))),
+        )
+        .children(error.map(|message| {
+            div()
+                .absolute()
+                .top_full()
+                .left_0()
+                .mt(px(2.))
+                .child(gpui::deferred(
+                    gpui::anchored()
+                        .snap_to_window_with_margin(px(layout::SPACE_SM))
+                        .child(raised_card(
+                            div()
+                                .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                                .px(px(layout::SPACE_SM))
+                                .py(px(layout::SPACE_XS))
+                                .rounded(px(layout::RADIUS_CONTROL))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.danger)
+                                .child(message),
+                            t,
+                        )),
+                ))
+        }));
+    div()
+        .flex_1()
+        .min_w_0()
+        .relative()
+        .child(div().invisible().whitespace_nowrap().child(label))
+        .child(
+            // Out by the field's own inset, so the name does not move as the
+            // row turns into it.
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-(layout::SPACE_XS + 1.)))
+                .right_0()
+                .flex()
+                .items_center()
+                .child(field),
+        )
 }
 
 fn note(t: Theme, text: &'static str) -> AnyElement {

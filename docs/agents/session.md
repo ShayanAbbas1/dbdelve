@@ -256,7 +256,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   palette, both through one dialog) removes it. Deleting a query whose tab is
   open keeps the tab as an unsaved buffer with the same text, written to its
   scratch file before the query file goes, as a tab whose file vanished comes
-  back at launch.
+  back at launch. Rename… on a sidebar row turns the row into a field
+  (`Session::query_rename`) that renames through `store::save_query_as`,
+  the tab's own path, so an open tab follows the name.
+- **A saved query's tab and sidebar row carry a dot while its buffer differs
+  from its file** (`QueryTab::disk`, a `DiskState`). It holds the length and
+  a digest of what the file was last read as or written with, compared on
+  each edit rather than each frame, and the text is read out only when the
+  length is the same; undoing back to the file's text clears it.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Every buffer is written on a swap (a new tab, a
   profile switch, Save) and on quit, not just the visible one, and a saved

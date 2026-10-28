@@ -291,6 +291,10 @@ pub(crate) struct Session {
     pub(crate) naming: bool,
     /// The saved query the delete dialog is asking about.
     pub(crate) pending_delete: Option<String>,
+    /// The sidebar row a saved query is being renamed in.
+    pub(crate) query_rename: Option<QueryRename>,
+    /// The same hazard as `save_name_needs_focus`, for the row's field.
+    pub(crate) query_rename_needs_focus: bool,
     /// The tab a close is asking about, because it holds cell edits nobody
     /// has applied.
     pub(crate) pending_discard: Option<Tab>,
@@ -660,6 +664,8 @@ impl Session {
             page_shown: 0,
             naming: false,
             pending_delete: None,
+            query_rename: None,
+            query_rename_needs_focus: false,
             pending_discard: None,
             notice,
             apply_review: None,
@@ -1006,6 +1012,8 @@ impl Session {
     /// clicked.
     pub(crate) fn clear_prompts(&mut self) {
         self.pending_delete = None;
+        self.query_rename = None;
+        self.query_rename_needs_focus = false;
         self.pending_discard = None;
         self.naming = false;
         self.save_name_needs_focus = false;
@@ -1014,6 +1022,72 @@ impl Session {
         self.pending_run = None;
         self.stale_edit = None;
     }
+}
+
+/// A saved query's sidebar row turned into a field holding its name.
+pub(crate) struct QueryRename {
+    /// The name it has on disk now.
+    pub(crate) name: String,
+    pub(crate) input: Entity<InputState>,
+    /// Why the name typed was refused, until it is typed over.
+    pub(crate) error: Option<String>,
+}
+
+/// Why `name` cannot be what a saved query is saved or renamed as, if it
+/// cannot. `keeping` is the query's own name on a rename, which it may keep.
+pub(crate) fn query_name_refusal(
+    name: &str,
+    keeping: Option<&str>,
+    saved_queries: &[String],
+) -> Option<String> {
+    if let Err(message) = store::validate_query_name(name) {
+        return Some(message);
+    }
+    (keeping != Some(name) && saved_queries.iter().any(|saved| saved == name))
+        .then(|| format!("A query named {name} already exists."))
+}
+
+/// Whether a saved query's buffer still reads as its file does, as far as
+/// this buffer knows: what it last read from the file or wrote to it, kept
+/// as a length and a digest rather than a second copy of the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskState {
+    /// `None` for an unsaved buffer, which has no file to differ from.
+    file: Option<(usize, u64)>,
+    modified: bool,
+}
+
+impl DiskState {
+    /// The file holds `text`, which is also what the buffer holds.
+    pub(crate) fn holding(text: &str) -> Self {
+        Self {
+            file: Some((text.len(), digest(text))),
+            modified: false,
+        }
+    }
+
+    /// The buffer now holds `len` bytes, read out by `text` only when the
+    /// length alone cannot tell: most keystrokes change it.
+    pub(crate) fn edited(self, len: usize, text: impl FnOnce() -> String) -> Self {
+        let Some((on_disk, hash)) = self.file else {
+            return self;
+        };
+        Self {
+            modified: len != on_disk || digest(&text()) != hash,
+            ..self
+        }
+    }
+
+    pub(crate) fn modified(self) -> bool {
+        self.modified
+    }
+}
+
+fn digest(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a
@@ -1218,6 +1292,9 @@ pub(crate) struct QueryTab {
     /// It is also which file the buffer persists to: a name means the query
     /// file, no name means this tab's own scratch file.
     pub(crate) open_query: Option<String>,
+    /// Whether the buffer differs from its query's file. A `Cell` because
+    /// `write_buffer` writes through a shared borrow of the profile.
+    pub(crate) disk: std::cell::Cell<DiskState>,
     /// The statement behind this tab's grid.
     ///
     /// Held rather than derived from the buffer, unlike the sort path, and a
@@ -1690,22 +1767,37 @@ impl QueryTab {
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
         let (sql, notice) = match stored_text(profile_id, stored) {
-            Ok(sql) => (sql.unwrap_or_default(), None),
-            Err(message) => (String::new(), Some(message)),
+            Ok(sql) => (sql, None),
+            Err(message) => (None, Some(message)),
         };
+        let read = sql.is_some();
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language(engine.syntax().highlighter())
+                .soft_wrap(false)
+                .placeholder(engine.syntax().placeholder())
+                .default_value(sql.unwrap_or_default())
+        });
+        // From the editor rather than the file: it normalises what it is
+        // given, and a buffer is compared with what it holds, not the bytes.
+        let disk = match stored.name.is_some() && read {
+            true => DiskState::holding(&editor.read(cx).value()),
+            false => DiskState::default(),
+        };
+        cx.subscribe(&editor, |workspace, editor, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                workspace.buffer_edited(&editor, cx);
+            }
+        })
+        .detach();
 
         let tab = Self {
             id: stored.id,
-            editor: cx.new(|cx| {
-                EditorState::new(window, cx)
-                    .language(engine.syntax().highlighter())
-                    .soft_wrap(false)
-                    .placeholder(engine.syntax().placeholder())
-                    .default_value(sql)
-            }),
+            editor,
             results: result_grid::new_grid(window, cx),
             query: QueryState::Idle,
             open_query: stored.name.clone(),
+            disk: std::cell::Cell::new(disk),
             last_query: None,
             sent_from: None,
             ran_from: None,
@@ -2231,7 +2323,8 @@ pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
     for tab in &profile.session.queries {
         let sql = tab.editor.read(cx).value().to_string();
         let written = match &tab.open_query {
-            Some(name) => store::write_query(&profile.id, name, &sql),
+            Some(name) => store::write_query(&profile.id, name, &sql)
+                .inspect(|()| tab.disk.set(DiskState::holding(&sql))),
             None => store::write_scratch(&profile.id, tab.id, &sql),
         };
         if let Err(message) = written {
@@ -3086,6 +3179,49 @@ mod tests {
                 Ok(Some("SELECT 1 -- open".to_string()))
             );
         });
+    }
+
+    #[test]
+    fn a_buffer_is_modified_until_it_reads_as_its_file_again() {
+        let typed = |state: DiskState, text: &str| state.edited(text.len(), || text.to_string());
+        let loaded = DiskState::holding("SELECT 1");
+        assert!(!loaded.modified());
+
+        let edited = typed(loaded, "SELECT 12");
+        assert!(edited.modified());
+        // Same length, different text: the digest has to tell them apart.
+        assert!(typed(loaded, "SELECT 2").modified());
+        // Undone back to what the file holds.
+        assert!(!typed(edited, "SELECT 1").modified());
+        // Written: the new text is the file's.
+        assert!(!typed(DiskState::holding("SELECT 12"), "SELECT 12").modified());
+    }
+
+    #[test]
+    fn an_unsaved_buffer_is_never_modified_and_reads_nothing_to_say_so() {
+        let state = DiskState::default().edited(3, || unreachable!("no file to compare with"));
+        assert!(!state.modified());
+    }
+
+    #[test]
+    fn a_length_that_changed_is_modified_without_reading_the_text() {
+        let state =
+            DiskState::holding("SELECT 1").edited(20, || unreachable!("the length already says"));
+        assert!(state.modified());
+    }
+
+    #[test]
+    fn a_query_name_is_refused_when_taken_but_a_rename_may_keep_its_own() {
+        let saved = ["daily".to_string(), "weekly".to_string()];
+        assert_eq!(query_name_refusal("monthly", Some("daily"), &saved), None);
+        assert_eq!(query_name_refusal("daily", Some("daily"), &saved), None);
+        assert_eq!(
+            query_name_refusal("weekly", Some("daily"), &saved).as_deref(),
+            Some("A query named weekly already exists.")
+        );
+        assert!(query_name_refusal("weekly", None, &saved).is_some());
+        assert!(query_name_refusal(".hidden", None, &saved).is_some());
+        assert!(query_name_refusal("  ", None, &saved).is_some());
     }
 
     #[test]

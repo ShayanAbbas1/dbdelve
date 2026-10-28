@@ -1241,6 +1241,16 @@ impl Render for Workspace {
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
+        // After the tab's own focus, which a context menu closing over the
+        // sidebar can ask for in the same frame the row's field opens.
+        if let Some(profile) = self.profile_mut()
+            && std::mem::take(&mut profile.session.query_rename_needs_focus)
+            && let Some(rename) = &profile.session.query_rename
+        {
+            let input = rename.input.clone();
+            input.focus_handle(cx).focus(window, cx);
+            input.update(cx, |input, cx| input.select_all(window, cx));
+        }
         if std::mem::take(&mut self.settings_search_needs_focus) && self.settings_open {
             self.settings_search.focus_handle(cx).focus(window, cx);
         }

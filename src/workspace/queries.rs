@@ -11,7 +11,10 @@ use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
 use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
-use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
+use crate::session::{
+    DiskState, Finished, Lane, PendingRun, QueryRename, Queue, Resume, Step, TabKey, next_step,
+    query_name_refusal,
+};
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -1148,9 +1151,9 @@ impl Workspace {
         {
             return;
         }
-        // A named query is written on every swap and on quit, so calling this
-        // on one is a confirmation rather than a decision. Only a buffer with
-        // nowhere to go has to ask for a name.
+        // A named query is written now, as it is on every swap and on quit,
+        // and its modified dot clears with it. Only a buffer with nowhere to
+        // go has to ask for a name.
         if self.named() {
             match self.persist_buffer(cx) {
                 Ok(()) => self.note("Saved query.".into(), cx),
@@ -1211,10 +1214,6 @@ impl Workspace {
             .value()
             .trim()
             .to_string();
-        if let Err(message) = store::validate_query_name(&name) {
-            self.note(message, cx);
-            return;
-        }
         let id = profile.id.clone();
         let tab = profile.session.active;
         let Some(editor) = profile.session.editor(tab) else {
@@ -1230,10 +1229,10 @@ impl Workspace {
                 .and_then(|tab| tab.open_query.clone()),
             Tab::Object(_) => None,
         };
-        if previous.as_deref() != Some(name.as_str())
-            && profile.session.saved_queries.contains(&name)
+        if let Some(message) =
+            query_name_refusal(&name, previous.as_deref(), &profile.session.saved_queries)
         {
-            self.note(format!("A query named {name} already exists."), cx);
+            self.note(message, cx);
             return;
         }
 
@@ -1273,6 +1272,7 @@ impl Workspace {
                 if let Some(profile) = self.profile_mut() {
                     if let Some(tab) = profile.session.query_tab_mut(id) {
                         tab.open_query = Some(name.clone());
+                        tab.disk.set(DiskState::holding(&sql));
                     }
                     profile.session.editor_needs_focus = true;
                 }
@@ -1542,22 +1542,168 @@ impl Workspace {
         }
     }
 
-    /// Open a saved query and ask for its new name, from a row that may have
-    /// no tab behind it. Nothing is asked if it would not open: the prompt
-    /// renames the tab in front, which would then be some other buffer.
-    pub(crate) fn rename_saved_query(
+    /// Turn a saved query's sidebar row into a field holding its name, all
+    /// of it selected. `enter` renames, and `escape` or a click elsewhere
+    /// leaves it as it was.
+    pub(crate) fn start_query_rename(
         &mut self,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_saved_query(name.clone(), window, cx);
-        if self
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("Query name");
+            input.set_value(name.clone(), window, cx);
+            input
+        });
+        cx.subscribe_in(
+            &input,
+            window,
+            |workspace, input, event: &InputEvent, _, cx| {
+                let Some(rename) = workspace
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_rename.as_mut())
+                    .filter(|rename| rename.input == *input)
+                else {
+                    return;
+                };
+                match event {
+                    InputEvent::PressEnter { .. } => workspace.commit_query_rename(cx),
+                    InputEvent::Change => {
+                        if rename.error.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::Blur => {
+                        workspace.drop_query_rename();
+                        cx.notify();
+                    }
+                    InputEvent::Focus => {}
+                }
+            },
+        )
+        .detach();
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.session.query_rename = Some(QueryRename {
+            name,
+            input,
+            error: None,
+        });
+        profile.session.query_rename_needs_focus = true;
+        cx.notify();
+    }
+
+    /// Rename the query the sidebar's field is over to what it holds, through
+    /// the same checks and store call as the tab's own rename, so a tab
+    /// holding it follows the new name.
+    pub(crate) fn commit_query_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(rename) = profile.session.query_rename.as_ref() else {
+            return;
+        };
+        let (previous, typed) = (
+            rename.name.clone(),
+            rename.input.read(cx).value().trim().to_string(),
+        );
+        if typed == previous {
+            self.end_query_rename(cx);
+            return;
+        }
+        let id = profile.id.clone();
+        let holder = profile.session.tab_holding(&previous);
+        let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
+        // An open tab's text is the query's, written or not: renaming it is
+        // what the tab's own rename would write.
+        let sql = match refused {
+            Some(message) => Err(message),
+            None => match holder.and_then(|tab| profile.session.query_tab(tab)) {
+                Some(tab) => Ok(tab.editor.read(cx).value().to_string()),
+                None => store::read_query(&id, &previous)
+                    .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
+            },
+        };
+        let written = sql.and_then(|sql| {
+            store::save_query_as(&id, Some(&previous), &typed, &sql).map(|left| (sql, left))
+        });
+        let (sql, left) = match written {
+            Ok(written) => written,
+            Err(message) => {
+                if let Some(rename) = self
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_rename.as_mut())
+                {
+                    rename.error = Some(message);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(profile) = self.profile_mut() {
+            if let Some(holder) = holder {
+                profile.session.rekey(
+                    &TabKey::Saved(previous.clone()),
+                    TabKey::Saved(typed.clone()),
+                );
+                if let Some(tab) = profile.session.query_tab_mut(holder) {
+                    tab.open_query = Some(typed.clone());
+                    tab.disk.set(DiskState::holding(&sql));
+                }
+            }
+            profile.session.notice =
+                Some(left.unwrap_or_else(|| format!("Renamed {previous} to {typed}.")));
+        }
+        self.end_query_rename(cx);
+        self.reload_saved_queries(cx);
+        self.remember_profiles(cx);
+    }
+
+    /// `escape` over the sidebar's rename field: the name stays as it was.
+    pub(crate) fn cancel_query_rename(&mut self, cx: &mut Context<Self>) -> bool {
+        let renaming = self
             .profile()
-            .and_then(|profile| profile.session.open_query())
-            == Some(name.as_str())
-        {
-            self.rename_query(window, cx);
+            .is_some_and(|profile| profile.session.query_rename.is_some());
+        if renaming {
+            self.end_query_rename(cx);
+        }
+        renaming
+    }
+
+    /// Put the field away while it holds focus, and hand the keyboard back:
+    /// an unmounted field keeps the window's focus, and every binding with it.
+    fn end_query_rename(&mut self, cx: &mut Context<Self>) {
+        self.drop_query_rename();
+        self.refocus_front();
+        cx.notify();
+    }
+
+    fn drop_query_rename(&mut self) {
+        if let Some(profile) = self.profile_mut() {
+            profile.session.query_rename = None;
+            profile.session.query_rename_needs_focus = false;
+        }
+    }
+
+    /// A buffer's text changed: say whether it now differs from its query's
+    /// file, redrawing only when that answer moved.
+    pub(crate) fn buffer_edited(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.session.queries)
+            .find(|tab| tab.editor == *editor)
+        else {
+            return;
+        };
+        let was = tab.disk.get();
+        let state = editor.read(cx);
+        let now = was.edited(state.text().len(), || state.value().to_string());
+        if now != was {
+            tab.disk.set(now);
+            cx.notify();
         }
     }
 
@@ -1599,6 +1745,7 @@ impl Workspace {
                     .rekey(&TabKey::Saved(name.clone()), TabKey::Unsaved(holder));
                 if let Some(tab) = profile.session.query_tab_mut(holder) {
                     tab.open_query = None;
+                    tab.disk.set(DiskState::default());
                 }
             }
         }
