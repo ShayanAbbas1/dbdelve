@@ -938,41 +938,78 @@ fn column_of(result: &QueryResult, column: &str) -> Result<Vec<String>, DbError>
 /// The key list and the `WHERE` condition of a `CREATE INDEX` as it was
 /// written. SQLite keeps neither in a catalog: `pragma_index_xinfo` gives an
 /// expression no name, and a partial index's condition is only in this text.
-///
-/// ponytail: a comment inside the statement is read as part of it; skipping
-/// `--` and `/* */` here is the upgrade path if one ever shows up.
+/// A comment is stepped over like a quoted string, so a `)` or `,` inside one
+/// ends nothing, and one before or after a key is left out of it.
 fn written_index(sql: &str) -> (Vec<&str>, Option<&str>) {
-    let (mut depth, mut quote, mut start, mut keys) = (0, None, 0, Vec::new());
-    for (at, c) in sql.char_indices() {
-        match (quote, c) {
-            (Some(close), _) if c == close => quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"' | '`') => quote = Some(c),
-            (None, '[') => quote = Some(']'),
-            (None, '(') => {
+    let (mut depth, mut start, mut end, mut at) = (0, 0, 0, 0);
+    let mut keys = Vec::new();
+    while let Some(c) = sql[at..].chars().next() {
+        let rest = &sql[at..];
+        if let Some(length) = comment_length(rest) {
+            at += length;
+            continue;
+        }
+        let step = match c {
+            '\'' | '"' | '`' | '[' => {
+                let close = if c == '[' { ']' } else { c };
+                rest[1..].find(close).map_or(rest.len(), |close| close + 2)
+            }
+            '(' => {
                 depth += 1;
                 if depth == 1 {
                     start = at + 1;
                 }
+                1
             }
-            (None, ',') if depth == 1 => {
-                keys.push(sql[start..at].trim());
+            ',' if depth == 1 => {
+                keys.push(past_comments(&sql[start..end.max(start)]));
                 start = at + 1;
+                1
             }
-            (None, ')') if depth == 1 => {
-                keys.push(sql[start..at].trim());
-                let rest = sql[at + 1..].trim_start();
+            ')' if depth == 1 => {
+                keys.push(past_comments(&sql[start..end.max(start)]));
+                let rest = past_comments(&sql[at + 1..]);
                 let predicate = rest
                     .get(..5)
                     .filter(|word| word.eq_ignore_ascii_case("WHERE"))
                     .map(|_| rest[5..].trim());
                 return (keys, predicate);
             }
-            (None, ')') => depth -= 1,
-            _ => {}
+            ')' => {
+                depth -= 1;
+                1
+            }
+            c => c.len_utf8(),
+        };
+        if !c.is_whitespace() {
+            end = at + step;
         }
+        at += step;
     }
     (Vec::new(), None)
+}
+
+/// `text` from its first character that is neither blank nor in a comment.
+fn past_comments(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        match comment_length(text) {
+            Some(length) => text = &text[length..],
+            None => return text,
+        }
+    }
+}
+
+/// How long the comment `text` starts with is, an unclosed one running to
+/// the end.
+fn comment_length(text: &str) -> Option<usize> {
+    if let Some(rest) = text.strip_prefix("/*") {
+        Some(rest.find("*/").map_or(text.len(), |close| close + 4))
+    } else if text.starts_with("--") {
+        Some(text.find('\n').map_or(text.len(), |close| close + 1))
+    } else {
+        None
+    }
 }
 
 fn quoted_list(names: &[String]) -> String {
@@ -1832,6 +1869,24 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                     default: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_written_index_is_read_past_its_quotes_and_comments() {
+        assert_eq!(
+            written_index(
+                "CREATE INDEX i ON t (/* ) */ lower(a), \"b)\" -- ,\n) WHERE a IS NOT NULL"
+            ),
+            (vec!["lower(a)", "\"b)\""], Some("a IS NOT NULL"))
+        );
+        assert_eq!(
+            written_index("CREATE INDEX i ON t(a) /* why */ WHERE a > 0"),
+            (vec!["a"], Some("a > 0"))
+        );
+        assert_eq!(
+            written_index("CREATE INDEX i ON t(a, 'x,y')"),
+            (vec!["a", "'x,y'"], None)
         );
     }
 
