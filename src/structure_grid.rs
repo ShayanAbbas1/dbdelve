@@ -207,7 +207,8 @@ pub(crate) struct StructureGrid {
     /// table's context has no other way to reach.
     workspace: WeakEntity<Workspace>,
     /// What the code cells are highlighted as. One grid only ever shows one
-    /// connection's relations.
+    /// connection's relations, though an edit can move that connection to an
+    /// engine written in another language.
     syntax: Syntax,
     section: Section,
     headers: Vec<(&'static str, f32)>,
@@ -238,6 +239,11 @@ impl StructureGrid {
 
     fn text(&self, row: usize, col: Option<usize>) -> Option<String> {
         copy_text(self.rows.get(row)?, col)
+    }
+
+    pub(crate) fn set_syntax(&mut self, syntax: Syntax) {
+        self.syntax = syntax;
+        self.highlights.clear();
     }
 }
 
