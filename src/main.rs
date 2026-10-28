@@ -319,7 +319,12 @@ fn main() {
                 // by nothing else, so without this the app runs with a blank
                 // icon however well the .desktop file is installed. It has to
                 // equal the entry's basename.
-                app_id: Some("dbdelve".into()),
+                app_id: Some(
+                    std::env::var("DBDELVE_APP_ID")
+                        .ok()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| "dbdelve".into()),
+                ),
                 ..Default::default()
             };
 

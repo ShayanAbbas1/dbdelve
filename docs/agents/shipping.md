@@ -48,6 +48,13 @@ Four things in the script are load-bearing:
 - **The font licences ship inside the bundle**, because the fonts are compiled
   into the binary and the OFL asks the licence to travel with them.
 
+## Linux desktop identity
+
+Packagers can set `DBDELVE_APP_ID` at launch to match their installed desktop
+entry's basename without `.desktop`, so Wayland associates the window with
+the entry and its icon. For `dbdelve_dbdelve.desktop`, set
+`DBDELVE_APP_ID=dbdelve_dbdelve`. Unset or empty keeps the default `dbdelve`.
+
 ## Releasing
 
 A release is cut from the Actions tab: run `.github/workflows/release.yml` with
