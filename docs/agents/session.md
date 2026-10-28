@@ -254,24 +254,22 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   saved query's tab writes its text to its file and keeps the file; only an
   explicit Delete (the sidebar row's menu, or "Delete saved query…" in the
   palette, both through one dialog) removes it. Deleting a query whose tab is
-  open keeps the tab as an unsaved buffer with the same text, written to its
-  scratch file before the query file goes, as a tab whose file vanished comes
-  back at launch. Rename… on a sidebar row turns the row into a field
+  open closes that tab, its text with it; a tab holding cell edits nobody
+  applied asks first, as any close does (`PendingDiscard::deleting`), and the
+  file stays until it is told. Rename… on a sidebar row turns the row into a field
   (`Session::query_rename`) that renames through `store::save_query_as`,
   the tab's own path, so an open tab follows the name. A rename is one
   `fs::rename`, never a write and a delete: on a case-insensitive filesystem
   `daily` and `Daily` are one file. A name taken in any case is refused.
-- **A saved query's tab and sidebar row carry a dot while its buffer differs
-  from its file** (`QueryTab::disk`, a `DiskState`). It holds the length and
-  a digest of what the file was last read as or written with, compared on
-  each edit rather than each frame, and the text is read out only when the
-  length is the same; undoing back to the file's text clears it. A file that
-  could not be read leaves no baseline (`DiskState::Unknown`), which reads
-  as modified until a write succeeds.
 - **A named buffer persists to its query file, an unnamed one to its own
-  `.scratch-{id}.sql`.** Every buffer is written on a swap (a new tab, a
-  profile switch, Save) and on quit, not just the visible one, and a saved
-  query's is written again as its tab closes. `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
+  `.scratch-{id}.sql`.** The model is autosave, with no modified state:
+  every buffer is written 500 ms after its last edit (`QueryTab::autosave`,
+  a timer task each edit replaces and the tab's close drops), on a swap (a
+  new tab, a profile switch, Save) and on quit, and a saved query's again as
+  its tab closes. The timed write re-checks that the tab still holds the file
+  it was scheduled for, so a rename or save in between never writes the old
+  name back into existence; a failure is said once until a write succeeds
+  (`session::autosave_notice`). `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on

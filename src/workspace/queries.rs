@@ -3,7 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
 
 use gpui_component::table::TableState;
 
@@ -12,9 +12,12 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
 use crate::session::{
-    DiskState, Finished, Lane, PendingRun, QueryRename, Queue, Resume, Step, TabKey, next_step,
-    query_name_refusal,
+    Finished, Lane, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step, TabKey,
+    autosave_notice, next_step, query_name_refusal,
 };
+
+/// How long typing has to pause before a buffer is written to its file.
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -1268,7 +1271,6 @@ impl Workspace {
                 if let Some(profile) = self.profile_mut() {
                     if let Some(tab) = profile.session.query_tab_mut(id) {
                         tab.open_query = Some(name.clone());
-                        tab.disk.set(DiskState::holding(&sql));
                     }
                     profile.session.editor_needs_focus = true;
                 }
@@ -1338,20 +1340,26 @@ impl Workspace {
         let Some(tab) = profile.session.query_tab(id) else {
             return;
         };
-        let saved = tab.open_query.clone();
-        if let Some(name) = &saved {
+        if let Some(name) = &tab.open_query {
             let sql = tab.editor.read(cx).value().to_string();
             if let Err(message) = store::write_query(&profile.id, name, &sql) {
                 self.note(message, cx);
                 return;
             }
         }
+        self.remove_query_tab(id, window, cx);
+    }
+
+    /// Take a query tab out of the strip, its text written or not: closing
+    /// writes it first, deleting its query does not.
+    fn remove_query_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
         let Some(position) = profile.session.queries.iter().position(|tab| tab.id == id) else {
             return;
         };
+        let saved = profile.session.queries[position].open_query.is_some();
         self.stop_run(Tab::Query(id), cx);
         let Some(profile) = self.profile_mut() else {
             return;
@@ -1365,9 +1373,7 @@ impl Workspace {
             self.front_after_close(fallback, window, cx);
         }
 
-        if saved.is_none()
-            && let Err(message) = store::delete_scratch(&profile_id, id)
-        {
+        if !saved && let Err(message) = store::delete_scratch(&profile_id, id) {
             self.note(message, cx);
         }
         // The tab is gone, so its snapshot has nothing left to come back to --
@@ -1622,10 +1628,9 @@ impl Workspace {
                     .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
             },
         };
-        let written = sql
-            .and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql).map(|()| sql));
-        let sql = match written {
-            Ok(written) => written,
+        let written = sql.and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql));
+        match written {
+            Ok(()) => {}
             Err(message) => {
                 if let Some(rename) = self
                     .profile_mut()
@@ -1636,7 +1641,7 @@ impl Workspace {
                 cx.notify();
                 return;
             }
-        };
+        }
         if let Some(profile) = self.profile_mut() {
             if let Some(holder) = holder {
                 profile.session.rekey(
@@ -1645,7 +1650,6 @@ impl Workspace {
                 );
                 if let Some(tab) = profile.session.query_tab_mut(holder) {
                     tab.open_query = Some(typed.clone());
-                    tab.disk.set(DiskState::holding(&sql));
                 }
             }
             profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
@@ -1681,22 +1685,62 @@ impl Workspace {
         }
     }
 
-    /// A buffer's text changed: say whether it now differs from its query's
-    /// file, redrawing only when that answer moved.
+    /// A buffer's text changed: write it to its file once typing pauses, so
+    /// a crash loses at most that pause. Each edit drops the write the one
+    /// before it scheduled.
     pub(crate) fn buffer_edited(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
-        let Some(tab) = self
+        let Some((profile_id, tab)) = self.profiles.iter_mut().find_map(|profile| {
+            let tab = profile
+                .session
+                .queries
+                .iter_mut()
+                .find(|tab| tab.editor == *editor)?;
+            Some((profile.id.clone(), tab))
+        }) else {
+            return;
+        };
+        let (id, name) = (tab.id, tab.open_query.clone());
+        tab.autosave = Some(cx.spawn(async move |workspace, cx| {
+            cx.background_executor().timer(AUTOSAVE_DELAY).await;
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.autosave(&profile_id, id, name, cx);
+            });
+        }));
+    }
+
+    /// The write `buffer_edited` scheduled, to the file it was scheduled for.
+    /// A tab renamed, saved under a name or turned unsaved since then holds a
+    /// different file now, which its rename or save already wrote, and the
+    /// old name must not be written back into existence.
+    fn autosave(
+        &mut self,
+        profile_id: &str,
+        id: u64,
+        scheduled: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
             .profiles
-            .iter()
-            .flat_map(|profile| &profile.session.queries)
-            .find(|tab| tab.editor == *editor)
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
         else {
             return;
         };
-        let was = tab.disk.get();
-        let text = editor.read(cx).text();
-        let now = was.edited(text.len(), || text.chunks());
-        if now != was {
-            tab.disk.set(now);
+        let Some(tab) = profile
+            .session
+            .queries
+            .iter_mut()
+            .find(|tab| tab.id == id && tab.open_query == scheduled)
+        else {
+            return;
+        };
+        let sql = tab.editor.read(cx).value().to_string();
+        let written = match &scheduled {
+            Some(name) => store::write_query(profile_id, name, &sql),
+            None => store::write_scratch(profile_id, id, &sql),
+        };
+        if let Some(message) = autosave_notice(&mut tab.autosave_failing, written) {
+            profile.session.notice = Some(message);
             cx.notify();
         }
     }
@@ -1711,37 +1755,54 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Delete a saved query's file. A tab holding it stays open as an unsaved
-    /// buffer with the same text, as a tab whose file vanished comes back at
-    /// launch: deleting the query is not discarding what is on screen.
-    pub(crate) fn delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {
+    /// Delete a saved query's file, and close the tab holding it: the query
+    /// is gone, and its text with it. A tab with cell edits nobody applied
+    /// asks first, as any close does, and the file stays until it is told.
+    pub(crate) fn delete_saved_query(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.session.pending_delete = None;
+        let holder = profile.session.tab_holding(&name).map(Tab::Query);
+        if let Some(tab) = holder.filter(|tab| self.has_unapplied_edits(*tab, cx)) {
+            if let Some(profile) = self.profile_mut() {
+                profile.session.pending_discard = Some(PendingDiscard {
+                    tab,
+                    deleting: Some(name),
+                });
+            }
+            cx.notify();
+            return;
+        }
+        self.delete_saved_query_now(name, window, cx);
+    }
+
+    /// The delete itself, once nothing is left to ask.
+    pub(crate) fn delete_saved_query_now(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profile() else {
             return;
         };
         let id = profile.id.clone();
-        let kept = profile
-            .session
-            .tab_holding(&name)
-            .and_then(|tab| profile.session.query_tab(tab))
-            .map(|tab| (tab.id, tab.editor.read(cx).value().to_string()));
-        let holder = kept.as_ref().map(|(tab, _)| *tab);
-        let kept = kept.as_ref().map(|(tab, sql)| (*tab, sql.as_str()));
-        if let Err(message) = store::delete_query_keeping(&id, &name, kept) {
+        let holder = profile.session.tab_holding(&name);
+        if let Err(message) = store::delete_query(&id, &name) {
             self.note(message, cx);
             return;
         }
+        if let Some(holder) = holder {
+            self.remove_query_tab(holder, window, cx);
+        }
         if let Some(profile) = self.profile_mut() {
-            profile.session.pending_delete = None;
             profile.session.notice = Some(format!("Deleted {name}."));
-            if let Some(holder) = holder {
-                profile
-                    .session
-                    .rekey(&TabKey::Saved(name.clone()), TabKey::Unsaved(holder));
-                if let Some(tab) = profile.session.query_tab_mut(holder) {
-                    tab.open_query = None;
-                    tab.disk.set(DiskState::Unsaved);
-                }
-            }
         }
         self.reload_saved_queries(cx);
         self.remember_profiles(cx);

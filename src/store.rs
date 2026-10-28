@@ -1036,21 +1036,6 @@ pub fn same_query_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-/// Delete `name`, first writing `kept`, the text of the tab holding it, to
-/// that tab's scratch file so the tab carries on as an unsaved buffer. A
-/// scratch file that will not write stops the delete: the query stays where
-/// it was rather than its text going nowhere.
-pub fn delete_query_keeping(
-    profile_id: &str,
-    name: &str,
-    kept: Option<(u64, &str)>,
-) -> Result<(), String> {
-    if let Some((tab, sql)) = kept {
-        write_scratch(profile_id, tab, sql)?;
-    }
-    delete_query(profile_id, name)
-}
-
 pub fn validate_query_name(name: &str) -> Result<(), String> {
     match unsafe_component(name) {
         Some(reason) => Err(format!("Query name {reason}.")),
@@ -3345,37 +3330,6 @@ open_objects = []
             // A write that fails is an error, which keeps the tab open.
             block("dev", "stuck.sql");
             assert!(write_query("dev", "stuck", "SELECT 2").is_err());
-        });
-    }
-
-    #[test]
-    fn a_scratch_that_will_not_write_stops_the_delete() {
-        with_home(|| {
-            write_query("dev", "daily", "SELECT 1").expect("a query must write");
-            block("dev", &scratch_file(3));
-
-            assert!(delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open"))).is_err());
-            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".to_string())));
-        });
-    }
-
-    #[test]
-    fn deleting_an_open_query_hands_its_text_to_the_tab() {
-        with_home(|| {
-            write_query("dev", "daily", "SELECT 1").expect("a query must write");
-
-            delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open")))
-                .expect("the delete must go through");
-
-            assert_eq!(read_query("dev", "daily"), Ok(None));
-            assert_eq!(
-                read_scratch("dev", 3),
-                Ok(Some("SELECT 1 -- open".to_string()))
-            );
-            // A query no tab holds needs nothing kept.
-            write_query("dev", "weekly", "SELECT 7").expect("a query must write");
-            delete_query_keeping("dev", "weekly", None).expect("the delete must go through");
-            assert!(saved_queries("dev").is_empty());
         });
     }
 

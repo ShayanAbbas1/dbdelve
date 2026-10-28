@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
 
 /// How tall an Edit mode input grows before it scrolls instead.
@@ -784,20 +785,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let unapplied = self.profile().is_some_and(|profile| {
-            profile
-                .session
-                .results(tab)
-                .is_some_and(|results| results.read(cx).delegate().has_pending())
-        });
-        if !unapplied {
+        if !self.has_unapplied_edits(tab, cx) {
             self.close_now(tab, window, cx);
             return;
         }
         if let Some(profile) = self.profile_mut() {
-            profile.session.pending_discard = Some(tab);
+            profile.session.pending_discard = Some(PendingDiscard {
+                tab,
+                deleting: None,
+            });
         }
         cx.notify();
+    }
+
+    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .results(tab)
+                .is_some_and(|results| results.read(cx).delegate().has_pending())
+        })
     }
 
     /// Carry out a close that has been decided on.
@@ -858,13 +865,16 @@ impl Workspace {
 
     /// Close the tab the discard prompt was raised over, edits and all.
     pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self
+        let Some(discard) = self
             .profile_mut()
             .and_then(|profile| profile.session.pending_discard.take())
         else {
             return;
         };
-        self.close_now(tab, window, cx);
+        match discard.deleting {
+            Some(name) => self.delete_saved_query_now(name, window, cx),
+            None => self.close_now(discard.tab, window, cx),
+        }
     }
 
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {

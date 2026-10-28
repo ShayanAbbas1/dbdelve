@@ -297,7 +297,7 @@ pub(crate) struct Session {
     pub(crate) query_rename_needs_focus: bool,
     /// The tab a close is asking about, because it holds cell edits nobody
     /// has applied.
-    pub(crate) pending_discard: Option<Tab>,
+    pub(crate) pending_discard: Option<PendingDiscard>,
     pub(crate) notice: Option<String>,
     /// The generated batch a relation tab is showing before it runs. That tab
     /// has no buffer to put SQL in, so the modal is where the statement is on
@@ -1051,71 +1051,27 @@ pub(crate) fn query_name_refusal(
         .map(|saved| format!("A query named {saved} already exists."))
 }
 
-/// Whether a saved query's buffer still reads as its file does, as far as
-/// this buffer knows: what it last read from the file or wrote to it, kept
-/// as a length and a digest rather than a second copy of the text.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum DiskState {
-    /// An unsaved buffer, which has no file to differ from.
-    #[default]
-    Unsaved,
-    /// A saved query whose file could not be read, so nothing says the buffer
-    /// matches it: modified until a write puts the buffer there.
-    Unknown,
-    /// What the file holds, and whether the buffer has moved off it.
-    Known {
-        len: usize,
-        hash: u64,
-        modified: bool,
-    },
+/// A close held up by the unapplied-edits question, and the saved query to
+/// delete once the tab goes, when deleting it is what closes the tab.
+pub(crate) struct PendingDiscard {
+    pub(crate) tab: Tab,
+    pub(crate) deleting: Option<String>,
 }
 
-impl DiskState {
-    /// The file holds `text`, which is also what the buffer holds.
-    pub(crate) fn holding(text: &str) -> Self {
-        Self::Known {
-            len: text.len(),
-            hash: digest([text]),
-            modified: false,
+/// What an autosave's result puts on the status bar: a failure once, and not
+/// again on every keystroke after it until a write goes through.
+pub(crate) fn autosave_notice(failing: &mut bool, written: Result<(), String>) -> Option<String> {
+    match written {
+        Ok(()) => {
+            *failing = false;
+            None
+        }
+        Err(_) if *failing => None,
+        Err(message) => {
+            *failing = true;
+            Some(message)
         }
     }
-
-    /// The buffer now holds `len` bytes, whose pieces `chunks` reads out
-    /// only when the length alone cannot tell: most keystrokes change it.
-    pub(crate) fn edited<'a, I>(self, len: usize, chunks: impl FnOnce() -> I) -> Self
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        match self {
-            Self::Known {
-                len: on_disk, hash, ..
-            } => Self::Known {
-                len: on_disk,
-                hash,
-                modified: len != on_disk || digest(chunks()) != hash,
-            },
-            other => other,
-        }
-    }
-
-    pub(crate) fn modified(self) -> bool {
-        match self {
-            Self::Unsaved => false,
-            Self::Unknown => true,
-            Self::Known { modified, .. } => modified,
-        }
-    }
-}
-
-/// One digest for a text however it is split into pieces, so a rope's chunks
-/// hash as the string they make up.
-fn digest<'a>(chunks: impl IntoIterator<Item = &'a str>) -> u64 {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for chunk in chunks {
-        hasher.write(chunk.as_bytes());
-    }
-    hasher.finish()
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a
@@ -1320,9 +1276,13 @@ pub(crate) struct QueryTab {
     /// It is also which file the buffer persists to: a name means the query
     /// file, no name means this tab's own scratch file.
     pub(crate) open_query: Option<String>,
-    /// Whether the buffer differs from its query's file. A `Cell` because
-    /// `write_buffer` writes through a shared borrow of the profile.
-    pub(crate) disk: std::cell::Cell<DiskState>,
+    /// The write of this buffer to its file that waits out a pause in
+    /// typing. Replaced on each edit, which drops the one before it, and
+    /// dropped with the tab, which cancels it.
+    pub(crate) autosave: Option<gpui::Task<()>>,
+    /// Whether the last autosave failed, so the next failure is not said
+    /// again on every keystroke.
+    pub(crate) autosave_failing: bool,
     /// The statement behind this tab's grid.
     ///
     /// Held rather than derived from the buffer, unlike the sort path, and a
@@ -1798,7 +1758,6 @@ impl QueryTab {
             Ok(sql) => (sql, None),
             Err(message) => (None, Some(message)),
         };
-        let read = sql.is_some();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(engine.syntax().highlighter())
@@ -1806,13 +1765,6 @@ impl QueryTab {
                 .placeholder(engine.syntax().placeholder())
                 .default_value(sql.unwrap_or_default())
         });
-        // From the editor rather than the file: it normalises what it is
-        // given, and a buffer is compared with what it holds, not the bytes.
-        let disk = match (&stored.name, read) {
-            (Some(_), true) => DiskState::holding(&editor.read(cx).value()),
-            (Some(_), false) => DiskState::Unknown,
-            (None, _) => DiskState::Unsaved,
-        };
         cx.subscribe(&editor, |workspace, editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 workspace.buffer_edited(&editor, cx);
@@ -1826,7 +1778,8 @@ impl QueryTab {
             results: result_grid::new_grid(window, cx),
             query: QueryState::Idle,
             open_query: stored.name.clone(),
-            disk: std::cell::Cell::new(disk),
+            autosave: None,
+            autosave_failing: false,
             last_query: None,
             sent_from: None,
             ran_from: None,
@@ -2317,8 +2270,8 @@ pub(crate) enum QueryState {
 }
 
 /// The stored tabs, each naming a query whose file has gone turned into the
-/// unsaved buffer it now is, rather than a tab pointing at nothing. Its text
-/// is then its scratch file's, which a delete from DBDelve wrote first.
+/// unsaved buffer it now is, rather than a tab pointing at nothing: a file
+/// removed outside DBDelve, since deleting one inside it closes its tab.
 fn unsaved_where_gone(
     stored: Vec<store::StoredQueryTab>,
     saved_queries: &[String],
@@ -2352,8 +2305,7 @@ pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
     for tab in &profile.session.queries {
         let sql = tab.editor.read(cx).value().to_string();
         let written = match &tab.open_query {
-            Some(name) => store::write_query(&profile.id, name, &sql)
-                .inspect(|()| tab.disk.set(DiskState::holding(&sql))),
+            Some(name) => store::write_query(&profile.id, name, &sql),
             None => store::write_scratch(&profile.id, tab.id, &sql),
         };
         if let Err(message) = written {
@@ -3187,7 +3139,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_open_query_comes_back_as_an_unsaved_buffer_with_its_text() {
+    fn a_tab_whose_query_was_deleted_comes_back_as_an_unsaved_buffer() {
         store::tests::with_home(|| {
             store::write_query("dev", "daily", "SELECT 1").expect("a query must write");
             let open = store::StoredQueryTab {
@@ -3198,68 +3150,26 @@ mod tests {
             };
             assert_eq!(stored_text("dev", &open), Ok(Some("SELECT 1".to_string())));
 
-            store::delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open")))
-                .expect("the delete must go through");
+            store::delete_query("dev", "daily").expect("the delete must go through");
 
             let restored = unsaved_where_gone(vec![open], &store::saved_queries("dev"));
             assert_eq!(restored[0].name, None);
-            assert_eq!(
-                stored_text("dev", &restored[0]),
-                Ok(Some("SELECT 1 -- open".to_string()))
-            );
+            assert_eq!(stored_text("dev", &restored[0]), Ok(None));
         });
     }
 
-    fn typed(state: DiskState, text: &str) -> DiskState {
-        state.edited(text.len(), || [text])
-    }
-
     #[test]
-    fn a_buffer_is_modified_until_it_reads_as_its_file_again() {
-        let loaded = DiskState::holding("SELECT 1");
-        assert!(!loaded.modified());
+    fn an_autosave_failure_is_said_once_until_a_write_goes_through() {
+        let mut failing = false;
+        let failed = || Err("Could not write daily.sql".to_string());
 
-        let edited = typed(loaded, "SELECT 12");
-        assert!(edited.modified());
-        // Same length, different text: the digest has to tell them apart.
-        assert!(typed(loaded, "SELECT 2").modified());
-        // Undone back to what the file holds.
-        assert!(!typed(edited, "SELECT 1").modified());
-        // Written: the new text is the file's.
-        assert!(!typed(DiskState::holding("SELECT 12"), "SELECT 12").modified());
-    }
-
-    #[test]
-    fn a_text_split_into_chunks_reads_as_the_whole_of_it() {
-        let state = DiskState::holding("SELECT 1 FROM t");
-        let split = state.edited(15, || ["SEL", "ECT 1 F", "ROM t"]);
-        assert!(!split.modified());
-    }
-
-    #[test]
-    fn an_unsaved_buffer_is_never_modified_and_reads_nothing_to_say_so() {
-        let state = DiskState::Unsaved.edited(3, || -> [&str; 0] {
-            unreachable!("no file to compare with")
-        });
-        assert!(!state.modified());
-    }
-
-    #[test]
-    fn a_file_that_could_not_be_read_is_modified_until_written() {
-        // Nothing says the buffer matches a file it never saw, so no edit
-        // makes it clean; only the write that puts the buffer there does.
-        let unread = DiskState::Unknown;
-        assert!(unread.modified());
-        assert!(typed(unread, "").modified());
-        assert!(!DiskState::holding("").modified());
-    }
-
-    #[test]
-    fn a_length_that_changed_is_modified_without_reading_the_text() {
-        let state = DiskState::holding("SELECT 1").edited(20, || -> [&str; 0] {
-            unreachable!("the length already says")
-        });
-        assert!(state.modified());
+        assert_eq!(
+            autosave_notice(&mut failing, failed()).as_deref(),
+            Some("Could not write daily.sql")
+        );
+        assert_eq!(autosave_notice(&mut failing, failed()), None);
+        assert_eq!(autosave_notice(&mut failing, Ok(())), None);
+        assert!(autosave_notice(&mut failing, failed()).is_some());
     }
 
     #[test]

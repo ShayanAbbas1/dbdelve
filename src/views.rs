@@ -52,7 +52,7 @@ use crate::{
     theme::{Theme, fonts, layout, theme},
     ui::{
         Control, Tone, button, compact_count, group_thousands, icon_button, key_hint, keycap_text,
-        kind_color, modified_dot, object_icon, reconnect_button, row_icon, section_label,
+        kind_color, object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
 };
@@ -2949,7 +2949,6 @@ fn render_tab_strip(
         let group = format!("saved-query-tab-{id}");
         let open_workspace = workspace.clone();
         let close_workspace = workspace.clone();
-        let modified = tab.disk.get().modified();
         Some(
             chip(session.active == Tab::Query(id))
                 .id(("saved-query-tab", id as usize))
@@ -2958,51 +2957,26 @@ fn render_tab_strip(
                 .child(row_icon(t, icon::SAVED_QUERY))
                 .child(name_label(name.clone()))
                 .child(
-                    // A buffer that differs from its file holds the close
-                    // button's place with a dot until the pointer is over the
-                    // chip, as editors mark an unsaved file.
                     div()
-                        .relative()
-                        .when(modified, |slot| {
-                            slot.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .group_hover(group.clone(), |style| style.opacity(0.))
-                                    .child(modified_dot(t)),
-                            )
-                        })
+                        .opacity(0.)
+                        .group_hover(group, |style| style.opacity(1.))
                         .child(
-                            div()
-                                .opacity(0.)
-                                .group_hover(group, |style| style.opacity(1.))
-                                .child(
-                                    icon_button(
-                                        ("close-saved-query", id as usize),
-                                        icon::CLOSE,
-                                        Tone::Quiet,
-                                        Control::Inline,
-                                        t,
-                                    )
-                                    .tooltip("Close tab")
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            // Or the chip underneath activates the tab
-                                            // this just closed, in the same click.
-                                            cx.stop_propagation();
-                                            _ = close_workspace.update(cx, |workspace, cx| {
-                                                workspace.ask_before_close(
-                                                    Tab::Query(id),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ),
-                                ),
+                            icon_button(
+                                ("close-saved-query", id as usize),
+                                icon::CLOSE,
+                                Tone::Quiet,
+                                Control::Inline,
+                                t,
+                            )
+                            .tooltip("Close tab")
+                            .on_click(move |_, window, cx| {
+                                // Or the chip underneath activates the tab
+                                // this just closed, in the same click.
+                                cx.stop_propagation();
+                                _ = close_workspace.update(cx, |workspace, cx| {
+                                    workspace.ask_before_close(Tab::Query(id), window, cx);
+                                });
+                            }),
                         ),
                 )
                 .on_click(move |_, window, cx| {

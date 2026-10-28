@@ -17,7 +17,7 @@ use crate::explorer::{
 };
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
-use crate::ui::{Status, modified_dot, raised_card};
+use crate::ui::{Status, raised_card};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -1030,8 +1030,8 @@ impl Workspace {
                                 .text_color(t.text_muted)
                                 .child(if open {
                                     format!(
-                                        "Delete {name}? Its tab stays open as an unsaved \
-                                         buffer, with its text."
+                                        "Delete {name}? Its tab is closed too. This cannot \
+                                         be undone."
                                     )
                                 } else {
                                     format!("Delete {name}? This cannot be undone.")
@@ -1067,9 +1067,13 @@ impl Workspace {
                                         t,
                                     )
                                     .on_click(
-                                        move |_, _, cx| {
+                                        move |_, window, cx| {
                                             _ = delete_workspace.update(cx, |workspace, cx| {
-                                                workspace.delete_saved_query(deleted.clone(), cx);
+                                                workspace.delete_saved_query(
+                                                    deleted.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                             });
                                         },
                                     ),
@@ -1825,15 +1829,11 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
-        // Each open query, and whether its buffer differs from its file.
-        let open_queries: HashMap<String, bool> = profile
+        let open_queries: HashSet<String> = profile
             .session
             .queries
             .iter()
-            .filter_map(|tab| {
-                let name = tab.open_query.clone()?;
-                Some((name, tab.disk.get().modified()))
-            })
+            .filter_map(|tab| tab.open_query.clone())
             .collect();
         let renaming = profile.session.query_rename.as_ref().map(|rename| {
             (
@@ -1865,9 +1865,7 @@ impl Workspace {
                         && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
-                        .and_then(|name| open_queries.get(name).copied());
-                    let modified = open == Some(true);
-                    let open = open.is_some();
+                        .is_some_and(|name| open_queries.contains(name));
                     let rename = renaming
                         .as_ref()
                         .filter(|(name, ..)| query.as_ref() == Some(name));
@@ -1942,14 +1940,10 @@ impl Workspace {
                                     row.child(
                                         div()
                                             .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(layout::SPACE_XS))
                                             .whitespace_nowrap()
                                             .text_color(t.text_faint)
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .font_weight(FontWeight::NORMAL)
-                                            .when(modified, |marker| marker.child(modified_dot(t)))
                                             .child(if open { "open" } else { "active" }),
                                     )
                                 })
