@@ -98,7 +98,11 @@ impl Section {
                     ]
                 })
                 .collect(),
-            Section::Indexes => named(&structure.indexes),
+            Section::Indexes => structure
+                .indexes
+                .iter()
+                .map(|index| vec![index.name.clone().into(), index.definition.clone().into()])
+                .collect(),
             Section::Constraints => named(&structure.constraints),
             Section::ForeignKeys => structure
                 .foreign_keys

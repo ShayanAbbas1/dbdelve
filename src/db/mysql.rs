@@ -145,8 +145,24 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY ORDINAL_POSITION
 ";
 
+// A functional key part has no `COLUMN_NAME`, only an `EXPRESSION`, a column
+// MySQL grew in 8.0.13 and MariaDB lacks. The versioned comment reads it on
+// such a MySQL alone: MariaDB skips one written for a MySQL version.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
+       CASE
+           WHEN INDEX_NAME = 'PRIMARY' THEN 'primary'
+           WHEN NON_UNIQUE = 0 THEN 'unique'
+           ELSE 'plain'
+       END AS index_kind,
+       GROUP_CONCAT(
+           CONCAT(
+               COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+               COALESCE(CONCAT('(', SUB_PART, ')'), ''),
+               CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
+           )
+           ORDER BY SEQ_IN_INDEX SEPARATOR '\x1f'
+       ) AS index_columns,
        CONCAT(
            CASE WHEN NON_UNIQUE = 0 THEN 'UNIQUE INDEX' ELSE 'INDEX' END,
            ' (',
@@ -1071,7 +1087,7 @@ fn describe(error: &::mysql::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ColumnDefinition, ForeignKey, RelationKind, RoutineKind};
+    use crate::db::{ColumnDefinition, ForeignKey, IndexKind, RelationKind, RoutineKind};
 
     /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
     /// `dbdelve_MARIADB_URL`.
@@ -1753,7 +1769,48 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition.starts_with("PRIMARY KEY"))
         );
-        assert!(!structure.indexes.is_empty(), "the primary key is an index");
+        let mut kinds: Vec<_> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        kinds.sort_by_key(|(name, ..)| *name);
+        assert_eq!(
+            kinds,
+            [
+                ("PRIMARY", IndexKind::Primary, vec!["id".into()]),
+                ("external_id", IndexKind::Unique, vec!["external_id".into()]),
+            ]
+        );
+
+        let connection = live(engine);
+        // MariaDB has no functional key part.
+        let functional = match engine {
+            Engine::MariaDb => "",
+            _ => ", KEY by_lower ((lower(email)), id DESC)",
+        };
+        connection
+            .query(
+                &format!(
+                    "DROP TABLE IF EXISTS dbdelve_test_indexes; \
+                     CREATE TABLE dbdelve_test_indexes (id INT, email VARCHAR(80), \
+                         UNIQUE KEY by_email (email(10), id){functional})"
+                ),
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let fixture = connection.structure("dbdelve_dev", "dbdelve_test_indexes");
+        connection
+            .query("DROP TABLE dbdelve_test_indexes", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let fixture = fixture.expect("structure should load");
+        let by_email = &fixture.indexes[0];
+        assert_eq!(by_email.kind, IndexKind::Unique);
+        assert_eq!(by_email.columns, ["email(10)", "id"]);
+        assert_eq!(by_email.predicate, None);
+        if engine == Engine::MySql {
+            assert_eq!(fixture.indexes[1].columns, ["lower(`email`)", "id DESC"]);
+        }
     }
 
     fn live_a_single_table_select_is_editable_by_its_primary_key(engine: Engine) {

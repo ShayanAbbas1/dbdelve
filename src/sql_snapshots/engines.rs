@@ -1,7 +1,7 @@
 use super::{check, fragment, visible};
 use crate::{
     connection_form,
-    db::{ColumnDefinition, Engine, NamedDefinition, RelationKind, Structure},
+    db::{ColumnDefinition, Engine, Index, IndexKind, NamedDefinition, RelationKind, Structure},
     filter::{self, Operator},
 };
 
@@ -43,9 +43,15 @@ fn structures() -> [(&'static str, Structure); 4] {
             },
         ),
         (
-            "lower-case unique index",
+            "unique index",
             Structure {
-                indexes: vec![named("create unique index u on t (email)")],
+                indexes: vec![Index {
+                    name: "u".into(),
+                    kind: IndexKind::Unique,
+                    columns: vec!["email".into()],
+                    predicate: None,
+                    definition: "create unique index u on t (email)".into(),
+                }],
                 ..Structure::default()
             },
         ),

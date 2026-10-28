@@ -25,9 +25,10 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, NamedDefinition, QueryResult,
-    Reference, RowBuilder, Stopped, Structure, assemble_catalog, assemble_references,
-    assemble_structure, non_utf8_error, percent_decoded, plain_error, required_cell,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, Index, IndexKind,
+    NamedDefinition, QueryResult, Reference, RowBuilder, Stopped, Structure, assemble_catalog,
+    assemble_references, assemble_structure, non_utf8_error, optional_cell, percent_decoded,
+    plain_error, required_cell,
 };
 
 /// The path out of a `sqlite:` or `file:` URL.
@@ -563,55 +564,81 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
     /// An index the user wrote has its `CREATE INDEX` in `sqlite_master`. One
     /// SQLite created to enforce a `UNIQUE` or `PRIMARY KEY` has no row there at
     /// all, so its definition is reconstructed from the columns it covers.
-    fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<NamedDefinition>, DbError> {
+    fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<Index>, DbError> {
         let listed = (self.run)(&format!(
             "SELECT index_list.name AS object_name,
                     index_list.\"unique\" AS is_unique,
-                    COALESCE(sqlite_master.sql, '') AS definition
+                    index_list.origin AS origin,
+                    index_list.partial AS partial,
+                    COALESCE(sqlite_master.sql, '') AS definition,
+                    key_column.name AS column_name,
+                    key_column.\"desc\" AS descending
              FROM pragma_index_list({relation}{schema}) AS index_list
+             JOIN pragma_index_xinfo(index_list.name{schema}) AS key_column
              LEFT JOIN {schema_identifier}.sqlite_master
                     ON sqlite_master.type = 'index'
                    AND sqlite_master.name = index_list.name
-             ORDER BY index_list.name",
+             WHERE key_column.key = 1
+             ORDER BY index_list.name, key_column.seqno",
             relation = self.engine.quote_literal(relation),
             schema = self.argument(schema),
             schema_identifier = self.engine.quote_identifier(schema),
         ))?;
 
+        let cell = |row, column| required_cell(&listed, row, column);
         let mut indexes = Vec::new();
-        for row in &listed.rows {
-            let name = required_cell(&listed, row, "object_name")?.to_string();
-            let definition = required_cell(&listed, row, "definition")?;
-            let definition = if definition.is_empty() {
-                // ponytail: one pragma per constraint-owned index. These are
-                // few, and only for a relation the user has opened; batch them
-                // into one correlated query if opening a wide table drags.
-                let unique = required_cell(&listed, row, "is_unique")? != "0";
-                let covered = self.index_columns(schema, &name)?;
-                format!(
-                    "{} ({})",
-                    if unique { "UNIQUE" } else { "INDEX" },
-                    quoted_list(&covered)
-                )
-            } else {
-                definition.to_string()
+        // One row per key column, grouped by `object_name`, the first.
+        for rows in listed.rows.chunk_by(|a, b| a.get(0) == b.get(0)) {
+            let first = &rows[0];
+            let sql = cell(first, "definition")?;
+            let (written, predicate) = written_index(sql);
+            let keys = rows
+                .iter()
+                .map(|row| {
+                    let descending = cell(row, "descending")? == "1";
+                    Ok((optional_cell(&listed, row, "column_name"), descending))
+                })
+                .collect::<Result<Vec<_>, DbError>>()?;
+            let columns = keys
+                .iter()
+                .enumerate()
+                .map(|(at, key)| match key {
+                    (Some(name), true) => format!("{name} DESC"),
+                    (Some(name), false) => name.to_string(),
+                    // An expression has no name, so it is shown as written.
+                    (None, _) => written.get(at).unwrap_or(&"(expression)").to_string(),
+                })
+                .collect();
+            let unique = cell(first, "is_unique")? != "0";
+            let partial = cell(first, "partial")? == "1";
+            let definition = match sql {
+                "" => {
+                    let covered: Vec<String> = keys
+                        .iter()
+                        .filter_map(|(name, _)| name.map(str::to_string))
+                        .collect();
+                    format!(
+                        "{} ({})",
+                        if unique { "UNIQUE" } else { "INDEX" },
+                        quoted_list(&covered)
+                    )
+                }
+                sql => sql.to_string(),
             };
-            indexes.push(NamedDefinition { name, definition });
+            indexes.push(Index {
+                name: cell(first, "object_name")?.to_string(),
+                kind: match (cell(first, "origin")?, unique) {
+                    ("pk", _) => IndexKind::Primary,
+                    (_, true) => IndexKind::Unique,
+                    (_, false) => IndexKind::Plain,
+                },
+                columns,
+                predicate: predicate.filter(|_| partial).map(str::to_string),
+                definition,
+            });
         }
 
         Ok(indexes)
-    }
-
-    fn index_columns(&self, schema: &str, index: &str) -> Result<Vec<String>, DbError> {
-        let result = (self.run)(&format!(
-            "SELECT name AS column_name
-             FROM pragma_index_info({index}{schema})
-             ORDER BY seqno",
-            index = self.engine.quote_literal(index),
-            schema = self.argument(schema),
-        ))?;
-
-        column_of(&result, "column_name")
     }
 
     /// The primary key and the foreign keys.
@@ -906,6 +933,46 @@ fn column_of(result: &QueryResult, column: &str) -> Result<Vec<String>, DbError>
         .iter()
         .map(|row| required_cell(result, row, column).map(str::to_string))
         .collect()
+}
+
+/// The key list and the `WHERE` condition of a `CREATE INDEX` as it was
+/// written. SQLite keeps neither in a catalog: `pragma_index_xinfo` gives an
+/// expression no name, and a partial index's condition is only in this text.
+///
+/// ponytail: a comment inside the statement is read as part of it; skipping
+/// `--` and `/* */` here is the upgrade path if one ever shows up.
+fn written_index(sql: &str) -> (Vec<&str>, Option<&str>) {
+    let (mut depth, mut quote, mut start, mut keys) = (0, None, 0, Vec::new());
+    for (at, c) in sql.char_indices() {
+        match (quote, c) {
+            (Some(close), _) if c == close => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(c),
+            (None, '[') => quote = Some(']'),
+            (None, '(') => {
+                depth += 1;
+                if depth == 1 {
+                    start = at + 1;
+                }
+            }
+            (None, ',') if depth == 1 => {
+                keys.push(sql[start..at].trim());
+                start = at + 1;
+            }
+            (None, ')') if depth == 1 => {
+                keys.push(sql[start..at].trim());
+                let rest = sql[at + 1..].trim_start();
+                let predicate = rest
+                    .get(..5)
+                    .filter(|word| word.eq_ignore_ascii_case("WHERE"))
+                    .map(|_| rest[5..].trim());
+                return (keys, predicate);
+            }
+            (None, ')') => depth -= 1,
+            _ => {}
+        }
+    }
+    (Vec::new(), None)
 }
 
 fn quoted_list(names: &[String]) -> String {
@@ -1778,7 +1845,9 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                  parent_id INTEGER REFERENCES parent(id),
                  PRIMARY KEY (a, b)
              );
-             CREATE INDEX child_b ON child(b);",
+             CREATE INDEX child_b ON child(b);
+             CREATE UNIQUE INDEX child_lower ON child (lower(b), \"a\" DESC)
+                 WHERE coalesce(b, 'x, (y') <> '';",
         )
         .structure("main", "child")
         .expect("structure should load");
@@ -1806,9 +1875,24 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 .indexes
                 .iter()
                 .any(|index| index.name.starts_with("sqlite_autoindex")
+                    && index.kind == IndexKind::Primary
+                    && index.columns == ["a", "b"]
                     && index.definition == "UNIQUE (\"a\", \"b\")"),
             "{:?}",
             structure.indexes
+        );
+        // An expression and a partial index's condition are read out of the
+        // `CREATE INDEX`, which is the only place SQLite keeps either.
+        let lower = structure
+            .indexes
+            .iter()
+            .find(|index| index.name == "child_lower")
+            .expect("child_lower is listed");
+        assert_eq!(lower.kind, IndexKind::Unique);
+        assert_eq!(lower.columns, ["lower(b)", "a DESC"]);
+        assert_eq!(
+            lower.predicate.as_deref(),
+            Some("coalesce(b, 'x, (y') <> ''")
         );
 
         assert!(

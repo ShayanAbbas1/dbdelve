@@ -396,8 +396,15 @@ impl Connection {
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
                  ORDER BY column_index"
         ))?;
+        // `expressions` is a list printed as text, `[a, 'lower(b)']`, which the
+        // cast reads back, quoting and all. DuckDB has no partial index.
         let indexes = self.internal_query(&format!(
-            "SELECT index_name AS object_name, COALESCE(sql, '') AS definition
+            "SELECT index_name AS object_name,
+                        CASE WHEN is_primary THEN 'primary'
+                             WHEN is_unique THEN 'unique'
+                             ELSE 'plain' END AS index_kind,
+                        array_to_string(expressions::VARCHAR[], chr(31)) AS index_columns,
+                        COALESCE(sql, '') AS definition
                  FROM duckdb_indexes()
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
@@ -1197,6 +1204,7 @@ fn query_error(error: duckdb::Error) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::IndexKind;
 
     /// The fixtures beside the other engines' seeds, by absolute path: a
     /// relative one would resolve against wherever the test runner stands.
@@ -1739,6 +1747,7 @@ mod tests {
              CREATE TABLE facturas (id INTEGER PRIMARY KEY,
                                     cliente INTEGER REFERENCES clientes(id));
              CREATE INDEX facturas_cliente ON facturas (cliente);
+             CREATE UNIQUE INDEX facturas_par ON facturas (cliente, coalesce(id, 0));
              CREATE VIEW v AS SELECT id FROM clientes;",
         );
         let catalog = connection.catalog().unwrap();
@@ -1767,11 +1776,25 @@ mod tests {
         let facturas = connection.structure("main", "facturas").unwrap();
         assert_eq!(facturas.primary_key(), ["id"]);
         assert_eq!(facturas.foreign_keys[0].referenced_table, "clientes");
-        assert!(
-            facturas
-                .indexes
-                .iter()
-                .any(|index| index.name == "facturas_cliente")
+        let kinds: Vec<_> = facturas
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "facturas_cliente",
+                    IndexKind::Plain,
+                    vec!["cliente".to_string()]
+                ),
+                (
+                    "facturas_par",
+                    IndexKind::Unique,
+                    vec!["cliente".into(), "(COALESCE(id, 0))".into()]
+                ),
+            ]
         );
         let references = connection.references("main", "clientes").unwrap();
         assert_eq!(references[0].table, "facturas");
