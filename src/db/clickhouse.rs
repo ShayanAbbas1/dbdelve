@@ -1307,14 +1307,29 @@ fn preview_of(sql: &str) -> Option<(String, String)> {
     }
 }
 
-/// `a, toDate(b)` as its two expressions.
-fn key_expressions(mut key: &str) -> Vec<String> {
+/// `a, toDate(b)` as its two expressions. A comma inside brackets, a string
+/// or a quoted name splits nothing. Not TSV's `first_top_level_comma`, which
+/// reads a type, where only `'` quotes.
+fn key_expressions(key: &str) -> Vec<String> {
+    let (mut depth, mut quote, mut escaped, mut start) = (0usize, None, false, 0);
     let mut expressions = Vec::new();
-    while let Some(at) = tsv::first_top_level_comma(key) {
-        expressions.push(key[..at].trim().to_string());
-        key = &key[at + 1..];
+    for (at, c) in key.char_indices() {
+        match (quote, c) {
+            _ if escaped => escaped = false,
+            (Some(_), '\\') => escaped = true,
+            (Some(close), _) if c == close => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '`' | '"') => quote = Some(c),
+            (None, '(' | '[') => depth += 1,
+            (None, ')' | ']') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                expressions.push(key[start..at].trim().to_string());
+                start = at + 1;
+            }
+            _ => {}
+        }
     }
-    expressions.push(key.trim().to_string());
+    expressions.push(key[start..].trim().to_string());
     expressions
 }
 
@@ -4976,6 +4991,10 @@ mod live {
             ["a", "concat('x, y', b)", "tuple(c, d)"]
         );
         assert_eq!(key_expressions("toYYYYMM(ts)"), ["toYYYYMM(ts)"]);
+        assert_eq!(
+            key_expressions(r#"`a,b`, c, "d(", `e\`,f`, [1, 2]"#),
+            ["`a,b`", "c", r#""d(""#, "`e\\`,f`", "[1, 2]"]
+        );
     }
 
     #[test]

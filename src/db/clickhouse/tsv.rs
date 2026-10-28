@@ -107,7 +107,7 @@ pub(super) fn peel(data_type: &str) -> (&str, bool) {
     }
 }
 
-pub(super) fn first_top_level_comma(text: &str) -> Option<usize> {
+fn first_top_level_comma(text: &str) -> Option<usize> {
     let mut depth = 0usize;
     let mut quoted = false;
     let mut escaped = false;
