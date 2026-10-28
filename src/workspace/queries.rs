@@ -1545,6 +1545,25 @@ impl Workspace {
         }
     }
 
+    /// Open a saved query and ask for its new name, from a row that may have
+    /// no tab behind it. Nothing is asked if it would not open: the prompt
+    /// renames the tab in front, which would then be some other buffer.
+    pub(crate) fn rename_saved_query(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_saved_query(name.clone(), window, cx);
+        if self
+            .profile()
+            .and_then(|profile| profile.session.open_query())
+            == Some(name.as_str())
+        {
+            self.rename_query(window, cx);
+        }
+    }
+
     /// Raise the dialog that asks before a saved query is deleted. The one
     /// way in from the sidebar and the palette alike.
     pub(crate) fn ask_delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {

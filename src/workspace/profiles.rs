@@ -149,6 +149,7 @@ impl Workspace {
         if let Some(message) = notice {
             session.notice = Some(message);
         }
+        let id = stored.id.clone();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -184,6 +185,8 @@ impl Workspace {
             left_database: false,
             session,
         });
+        // The saved queries are listed before anything has connected.
+        self.refresh_explorer(&id, cx);
     }
 
     // Eight, because a connection is eight things and a struct holding them for
@@ -1095,6 +1098,7 @@ impl Workspace {
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
         let set = on_own_thread(move || applying.apply_schema());
+        self.refresh_explorer(&id, cx);
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let result = set.await;
@@ -1445,6 +1449,9 @@ impl Workspace {
         let id = profile.id.clone();
         let mut config = profile.config.clone();
         let mode = profile.mode;
+        // The sidebar draws the tree whenever there are saved queries, so the
+        // old catalog's rows have to leave it with the catalog.
+        self.refresh_explorer(&id, cx);
         cx.notify();
 
         let connection_task = cx.background_executor().spawn({
@@ -1541,6 +1548,7 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            self.refresh_explorer(id, cx);
             self.catalog_landed(id, cx);
             return;
         };
@@ -1808,10 +1816,10 @@ impl Workspace {
             return;
         };
         let filter = profile.session.explorer_filter.read(cx).value();
-        let explorer = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
-            _ => explorer::ExplorerTree::default(),
-        };
+        let mut explorer = explorer::queries(&profile.session.saved_queries, &filter);
+        if let CatalogState::Loaded(catalog, _) = &profile.catalog {
+            explorer.extend(build_explorer_tree(catalog, &filter));
+        }
         let tree = profile.session.explorer_tree.clone();
 
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {

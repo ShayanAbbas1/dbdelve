@@ -35,6 +35,19 @@ const ROUTINE_CATEGORIES: [(RoutineKind, &str); 2] = [
     (RoutineKind::Procedure, "Procedures"),
 ];
 
+/// The id of the sidebar's Queries group, the profile's saved queries listed
+/// above its schemas.
+pub const QUERIES_GROUP: &str = "queries";
+
+/// What a saved query's row id starts with. Its name follows: query names are
+/// file names, so no other row's id can take this shape.
+const QUERY_ROW: &str = "query:";
+
+/// The saved query a row stands for, by its row id.
+pub fn saved_query(id: &str) -> Option<&str> {
+    id.strip_prefix(QUERY_ROW)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -73,6 +86,15 @@ pub struct ExplorerTree {
     /// The characters of each row's own name the filter matched, by row id.
     /// A row kept only because its schema or parent matched has none.
     pub highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+impl ExplorerTree {
+    /// `other`'s rows after this one's.
+    pub fn extend(&mut self, other: ExplorerTree) {
+        self.items.extend(other.items);
+        self.leaves.extend(other.leaves);
+        self.highlights.extend(other.highlights);
+    }
 }
 
 /// One filter pass over the catalog: the query parsed once, and what the rows
@@ -215,6 +237,35 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     ExplorerTree {
         items,
         leaves: builder.leaves,
+        highlights: builder.highlights,
+    }
+}
+
+/// The Queries group, holding every saved query whose name the filter keeps,
+/// or no row at all when it keeps none. Only the names are matched: a filter
+/// that matched the group's own label would keep every query for typing `q`.
+pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
+    let mut builder = Builder::new(filter);
+    let children: Vec<TreeItem> = names
+        .iter()
+        .filter_map(|name| {
+            let id = format!("{QUERY_ROW}{name}");
+            builder
+                .name_matches(&id, name)
+                .then(|| TreeItem::new(id, name.clone()))
+        })
+        .collect();
+    let items = match children.is_empty() {
+        true => Vec::new(),
+        false => vec![
+            TreeItem::new(QUERIES_GROUP, "Queries")
+                .expanded(true)
+                .children(children),
+        ],
+    };
+    ExplorerTree {
+        items,
+        leaves: HashMap::new(),
         highlights: builder.highlights,
     }
 }
@@ -753,6 +804,55 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "analytics");
         assert_eq!(items[0].children[0].children[0].label, "events");
+    }
+
+    #[test]
+    fn every_saved_query_is_listed_under_its_group_and_a_filter_narrows_them() {
+        let names = ["daily revenue".to_string(), "signups".to_string()];
+
+        let all = queries(&names, "");
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(all.items[0].id.as_ref(), QUERIES_GROUP);
+        let rows: Vec<_> = all.items[0]
+            .children
+            .iter()
+            .map(|row| (saved_query(&row.id), row.label.as_ref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("daily revenue"), "daily revenue"),
+                (Some("signups"), "signups")
+            ]
+        );
+
+        let narrowed = queries(&names, "rev");
+        assert_eq!(narrowed.items[0].children.len(), 1);
+        assert_eq!(
+            marked(&narrowed, "query:daily revenue", "daily revenue").as_deref(),
+            Some("rev")
+        );
+
+        // No query, or none the filter keeps, is no group rather than an
+        // empty one.
+        assert!(queries(&names, "zzz").items.is_empty());
+        assert!(queries(&[], "").items.is_empty());
+    }
+
+    #[test]
+    fn no_catalog_rows_id_reads_as_a_saved_query() {
+        let explorer = tree(&catalog(), "");
+        let mut ids = Vec::new();
+        let mut stack: Vec<&TreeItem> = explorer.items.iter().collect();
+        while let Some(item) = stack.pop() {
+            ids.push(item.id.to_string());
+            stack.extend(item.children.iter());
+        }
+        assert!(!ids.is_empty());
+        assert!(
+            ids.iter()
+                .all(|id| saved_query(id).is_none() && id != QUERIES_GROUP)
+        );
     }
 
     fn marked(explorer: &ExplorerTree, id: &str, label: &str) -> Option<String> {

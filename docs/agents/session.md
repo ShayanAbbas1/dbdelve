@@ -247,10 +247,20 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   on one empty buffer instead. `active` may
   then name a tab that is gone, which every lookup by id already answers with
   `None`, and focus falls back to the window so the bindings that open a tab
-  still work. Deleting the saved query in a tab closes that tab.
+  still work.
+- **Closing a tab never deletes a saved query.** The strip holds open tabs
+  only; every query file a profile has is listed in the sidebar's Queries
+  group and the palette, open or not (`Session::saved_queries`). Closing a
+  saved query's tab writes its text to its file and keeps the file; only an
+  explicit Delete (the sidebar row's menu, or "Delete saved query…" in the
+  palette, both through one dialog) removes it. Deleting a query whose tab is
+  open keeps the tab as an unsaved buffer with the same text, written to its
+  scratch file before the query file goes, as a tab whose file vanished comes
+  back at launch.
 - **A named buffer persists to its query file, an unnamed one to its own
-  `.scratch-{id}.sql`.** Every buffer is written on quit, not just the visible
-  one. `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
+  `.scratch-{id}.sql`.** Every buffer is written on a swap (a new tab, a
+  profile switch, Save) and on quit, not just the visible one, and a saved
+  query's is written again as its tab closes. `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on

@@ -3246,6 +3246,23 @@ open_objects = []
     }
 
     #[test]
+    fn the_saved_queries_are_every_query_file_and_no_scratch_buffer() {
+        // The sidebar lists this whether or not a tab is open, so a scratch
+        // file beside the queries must never read as one of them.
+        with_home(|| {
+            write_query("dev", "signups", "SELECT 2").expect("a query must write");
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            write_scratch("dev", 3, "SELECT 3").expect("tab 3 must write");
+
+            assert_eq!(saved_queries("dev"), ["daily", "signups"]);
+
+            delete_query("dev", "daily").expect("a query must delete");
+            assert_eq!(saved_queries("dev"), ["signups"]);
+            assert_eq!(read_scratch("dev", 3), Ok(Some("SELECT 3".to_string())));
+        });
+    }
+
+    #[test]
     fn deleting_one_tabs_scratch_leaves_the_others() {
         with_home(|| {
             write_scratch("dev", 0, "SELECT 0").expect("tab 0 must write");
