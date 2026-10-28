@@ -64,12 +64,10 @@ already set up on the machine.
   background past `Drop` and the watchdog, and an existing control master
   would take the forward over from a process DBDelve never held a handle to
   — either way the tunnel would outlive the connection.
-- **`accept-new` is added only where nothing already decided host-key
-  checking.** `host_keys_left_to_default` runs `ssh -G` over the same
-  arguments and adds `StrictHostKeyChecking=accept-new` only when it answers
-  `stricthostkeychecking ask` — ssh's own default when no config, alias or
-  command-line option set it. A config that sets it explicitly, to `yes` or
-  to `accept-new` itself, is left exactly as it is.
+- **An effective `ask` becomes `accept-new`.** `host_key_checking_is_ask`
+  runs `ssh -G` over the same arguments. Its output does not distinguish
+  default `ask` from explicit `ask`, so both receive the override. Other
+  values are preserved; if `ssh -G` fails, no override is added.
 - **`Tunnel::dial` re-checks the process before every use** — every fresh
   connect, every cancel's second socket (Postgres's `CancelToken`, MySQL's
   `KILL QUERY` connection), every SQL Server reconnect — with `try_wait()`

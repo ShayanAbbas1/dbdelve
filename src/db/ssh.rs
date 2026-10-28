@@ -61,6 +61,8 @@ struct Said {
     /// What a person might need, newest last: no `-v` debug output, and none
     /// of the chatter `chatter` names.
     lines: VecDeque<String>,
+    /// Must survive log truncation: ssh continues even when it cannot save a key.
+    host_key_error: Option<String>,
     /// ssh has set our forward's listener up.
     listening: bool,
     /// ... and gone on to the session, so it is bound.
@@ -88,7 +90,7 @@ impl Tunnel {
             {
                 args.splice(0..0, ["-F".to_owned(), config]);
             }
-            if host_keys_left_to_default(&args) {
+            if host_key_checking_is_ask(&args) {
                 args.splice(
                     0..0,
                     [
@@ -116,6 +118,12 @@ impl Tunnel {
 
             match wait_ready(process, &tunnel.said) {
                 Ready::Listening => return Ok(tunnel),
+                Ready::HostKeyNotSaved(message) => {
+                    return Err(plain_error(format!(
+                        "SSH tunnel through {} failed: {message}",
+                        ssh.host
+                    )));
+                }
                 Ready::Exited(status) => {
                     let _ = draining.join();
                     let said = tunnel.shown();
@@ -294,15 +302,24 @@ fn ssh_args(
         // ssh expands `%` tokens in an identity file, even one given here.
         args.extend(["-i".to_owned(), identity.replace('%', "%%")]);
     }
+    match std::env::var("DBDELVE_SSH_KNOWN_HOSTS") {
+        Ok(files) if !files.trim().is_empty() => {
+            args.extend(["-o".to_owned(), format!("UserKnownHostsFile={files}")]);
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(error) => {
+            return Err(plain_error(format!(
+                "Invalid DBDELVE_SSH_KNOWN_HOSTS: {error}"
+            )));
+        }
+    }
     args.extend(["--".to_owned(), ssh.host.clone()]);
     Ok(args)
 }
 
-/// Whether nothing the user configured decides host-key checking. Only then
-/// is trust-on-first-use added, since a command-line `-o` outranks their
-/// config. `ssh -G` evaluates the config for these arguments and exits without
-/// connecting; if it cannot, nothing is added.
-fn host_keys_left_to_default(args: &[String]) -> bool {
+/// `ssh -G` cannot distinguish a default `ask` from an explicit one, so both
+/// receive `accept-new`. If configuration evaluation fails, add no override.
+fn host_key_checking_is_ask(args: &[String]) -> bool {
     ssh_command()
         .arg("-G")
         .args(args)
@@ -319,6 +336,7 @@ fn host_keys_left_to_default(args: &[String]) -> bool {
 
 enum Ready {
     Listening,
+    HostKeyNotSaved(String),
     Exited(ExitStatus),
     TimedOut,
 }
@@ -329,13 +347,14 @@ fn wait_ready(process: &mut Child, said: &Mutex<Said>) -> Ready {
         if let Ok(Some(status)) = process.try_wait() {
             return Ready::Exited(status);
         }
-        if said
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .ready
-        {
+        let said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(message) = &said.host_key_error {
+            return Ready::HostKeyNotSaved(message.clone());
+        }
+        if said.ready {
             return Ready::Listening;
         }
+        drop(said);
         thread::sleep(Duration::from_millis(20));
     }
     Ready::TimedOut
@@ -384,6 +403,9 @@ fn drain(stderr: ChildStderr, said: Arc<Mutex<Said>>, port: u16) -> JoinHandle<(
             }
             let line = printable(&String::from_utf8_lossy(&raw));
             let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if line.starts_with("Failed to add the host to the list of known hosts (") {
+                said.host_key_error.get_or_insert_with(|| line.clone());
+            }
             if line.starts_with("debug") {
                 if line == listening {
                     said.listening = true;
@@ -713,6 +735,70 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn readiness_after(messages: &str) -> Ready {
+        let port = 40000;
+        let output = format!(
+            "{messages}\ndebug1: Local forwarding listening on 127.0.0.1 port {port}.\n{SESSION_STARTED}"
+        );
+        let mut tunnel = Tunnel {
+            local: (Ipv4Addr::LOCALHOST, port).into(),
+            host: "bastion".to_owned(),
+            said: Arc::default(),
+            process: Mutex::new(
+                watched(
+                    "sh",
+                    &[
+                        "-c".to_owned(),
+                        "printf '%s\\n' \"$1\" >&2; exec sleep 30".to_owned(),
+                        "sh".to_owned(),
+                        output,
+                    ],
+                )
+                .unwrap(),
+            ),
+        };
+        let process = tunnel.process.get_mut().unwrap();
+        let draining = drain(process.stderr.take().unwrap(), tunnel.said.clone(), port);
+        // Both the failure and readiness must have arrived before we decide.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tunnel.said.lock().unwrap().ready {
+            assert!(Instant::now() < deadline, "stderr never reached readiness");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let ready = wait_ready(process, &tunnel.said);
+        drop(tunnel);
+        draining.join().unwrap();
+        ready
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_key_write_failure_outlives_the_log_and_prevents_readiness() {
+        let message = "Failed to add the host to the list of known hosts (/app data/known_hosts).";
+        let messages = format!("{message}\n{}", "server banner\n".repeat(KEPT_LINES + 1));
+        let Ready::HostKeyNotSaved(error) = readiness_after(&messages) else {
+            panic!("a host key that was not saved did not prevent readiness");
+        };
+        assert_eq!(error, message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_hosts_and_successful_registration_still_reach_readiness() {
+        for message in [
+            "debug1: Host 'bastion' is known and matches the ED25519 host key.",
+            "Warning: Permanently added 'bastion' (ED25519) to the list of known hosts.",
+            "Failed to add the ED25519 host key for IP address '127.0.0.1' to the list of known hosts (/app data/known_hosts).",
+            "server banner",
+        ] {
+            assert!(
+                matches!(readiness_after(message), Ready::Listening),
+                "{message}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn closing_the_watchdogs_stdin_ends_what_it_runs() {
         let mut child = watched("sleep", &["30".to_owned()]).unwrap();
@@ -941,15 +1027,18 @@ mod tests {
 
     #[test]
     #[ignore = "requires an ssh executable"]
-    fn live_ssh_trust_on_first_use_is_added_only_where_nothing_configured_it() {
+    fn live_ssh_accept_new_is_added_only_when_ssh_reports_ask() {
         let config = std::env::temp_dir().join(format!("dbdelve-ssh-{}.conf", std::process::id()));
         std::fs::write(
             &config,
-            "Host strict\n    StrictHostKeyChecking yes\nHost tofu\n    StrictHostKeyChecking accept-new\n",
+            "Host strict\n    StrictHostKeyChecking yes\n\
+             Host tofu\n    StrictHostKeyChecking accept-new\n\
+             Host ask\n    StrictHostKeyChecking ask\n\
+             Host unchecked\n    StrictHostKeyChecking no\n",
         )
         .unwrap();
-        let defaults = |host: &str| {
-            host_keys_left_to_default(&[
+        let reports_ask = |host: &str| {
+            host_key_checking_is_ask(&[
                 "-F".to_owned(),
                 config.display().to_string(),
                 "--".to_owned(),
@@ -957,11 +1046,13 @@ mod tests {
             ])
         };
         let answers = [
-            defaults("unconfigured"),
-            defaults("strict"),
-            defaults("tofu"),
+            reports_ask("unconfigured"),
+            reports_ask("ask"),
+            reports_ask("strict"),
+            reports_ask("tofu"),
+            reports_ask("unchecked"),
         ];
         let _ = std::fs::remove_file(&config);
-        assert_eq!(answers, [true, false, false]);
+        assert_eq!(answers, [true, true, false, false, false]);
     }
 }
