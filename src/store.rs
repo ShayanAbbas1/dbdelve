@@ -992,6 +992,39 @@ pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     fs::remove_file(&path).map_err(|error| format!("Could not delete {}: {error}", path.display()))
 }
 
+/// Write `sql` as `name`, then drop `previous` when this is a rename.
+///
+/// Written first, then the old name dropped: a failed delete leaves two
+/// copies, which is recoverable, and the other order loses the query. `Err`
+/// is a write that failed and changed nothing; `Ok(Some)` is the old copy
+/// left behind, said once the new name already holds the text.
+pub fn save_query_as(
+    profile_id: &str,
+    previous: Option<&str>,
+    name: &str,
+    sql: &str,
+) -> Result<Option<String>, String> {
+    write_query(profile_id, name, sql)?;
+    Ok(previous
+        .filter(|previous| *previous != name)
+        .and_then(|previous| delete_query(profile_id, previous).err()))
+}
+
+/// Delete `name`, first writing `kept`, the text of the tab holding it, to
+/// that tab's scratch file so the tab carries on as an unsaved buffer. A
+/// scratch file that will not write stops the delete: the query stays where
+/// it was rather than its text going nowhere.
+pub fn delete_query_keeping(
+    profile_id: &str,
+    name: &str,
+    kept: Option<(u64, &str)>,
+) -> Result<(), String> {
+    if let Some((tab, sql)) = kept {
+        write_scratch(profile_id, tab, sql)?;
+    }
+    delete_query(profile_id, name)
+}
+
 pub fn validate_query_name(name: &str) -> Result<(), String> {
     match unsafe_component(name) {
         Some(reason) => Err(format!("Query name {reason}.")),
@@ -1541,7 +1574,7 @@ fn secure(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::db::rows;
     use crate::theme::ConnectionColor;
@@ -2125,7 +2158,7 @@ id = 0
     /// touch the disk take turns and each gets its own directory to be the
     /// whole of dbdelve's storage for the length of the test. Windows reads
     /// `APPDATA` instead, so that is pointed at the same temporary root.
-    fn with_home<T>(body: impl FnOnce() -> T) -> T {
+    pub(crate) fn with_home<T>(body: impl FnOnce() -> T) -> T {
         static LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
 
         let mut counter = LOCK.lock().unwrap_or_else(|error| error.into_inner());
@@ -3259,6 +3292,91 @@ open_objects = []
             delete_query("dev", "daily").expect("a query must delete");
             assert_eq!(saved_queries("dev"), ["signups"]);
             assert_eq!(read_scratch("dev", 3), Ok(Some("SELECT 3".to_string())));
+        });
+    }
+
+    /// Make `name`'s file unwritable and undeletable as a file, by putting
+    /// a directory where it would go.
+    fn block(profile_id: &str, file: &str) {
+        let path = query_directory(profile_id)
+            .expect("the id must be safe")
+            .join(file);
+        fs::create_dir_all(path.join("held")).expect("the blocker must be creatable");
+    }
+
+    #[test]
+    fn closing_a_saved_query_writes_its_text_and_keeps_the_file() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            // What `close_buffer` writes before the tab goes.
+            write_query("dev", "daily", "SELECT 1 -- edited").expect("the close must write");
+            assert_eq!(
+                read_query("dev", "daily"),
+                Ok(Some("SELECT 1 -- edited".to_string()))
+            );
+            assert_eq!(saved_queries("dev"), ["daily"]);
+
+            // A write that fails is an error, which keeps the tab open.
+            block("dev", "stuck.sql");
+            assert!(write_query("dev", "stuck", "SELECT 2").is_err());
+        });
+    }
+
+    #[test]
+    fn a_scratch_that_will_not_write_stops_the_delete() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            block("dev", &scratch_file(3));
+
+            assert!(delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open"))).is_err());
+            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".to_string())));
+        });
+    }
+
+    #[test]
+    fn deleting_an_open_query_hands_its_text_to_the_tab() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+
+            delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open")))
+                .expect("the delete must go through");
+
+            assert_eq!(read_query("dev", "daily"), Ok(None));
+            assert_eq!(
+                read_scratch("dev", 3),
+                Ok(Some("SELECT 1 -- open".to_string()))
+            );
+            // A query no tab holds needs nothing kept.
+            write_query("dev", "weekly", "SELECT 7").expect("a query must write");
+            delete_query_keeping("dev", "weekly", None).expect("the delete must go through");
+            assert!(saved_queries("dev").is_empty());
+        });
+    }
+
+    #[test]
+    fn a_rename_writes_the_new_name_before_dropping_the_old() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            assert_eq!(
+                save_query_as("dev", Some("daily"), "nightly", "SELECT 1"),
+                Ok(None)
+            );
+            assert_eq!(saved_queries("dev"), ["nightly"]);
+
+            // A write that fails changes nothing.
+            block("dev", "stuck.sql");
+            assert!(save_query_as("dev", Some("nightly"), "stuck", "SELECT 1").is_err());
+            assert_eq!(
+                read_query("dev", "nightly"),
+                Ok(Some("SELECT 1".to_string()))
+            );
+
+            // An old name that will not go is said, with the text already
+            // under the new one: two copies, never none.
+            block("dev", "held.sql");
+            let left = save_query_as("dev", Some("held"), "kept", "SELECT 2");
+            assert!(matches!(left, Ok(Some(_))), "{left:?}");
+            assert_eq!(read_query("dev", "kept"), Ok(Some("SELECT 2".to_string())));
         });
     }
 

@@ -12,7 +12,9 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::connection_form::ConnectionTest;
-use crate::explorer::{QUERIES_GROUP, drop_sql, saved_query, select_top_sql, truncate_sql};
+use crate::explorer::{
+    QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
+};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
 use crate::ui::Status;
@@ -1848,9 +1850,7 @@ impl Workspace {
                     let query = saved_query(entry.item().id.as_str()).map(str::to_string);
                     let group = entry.item().id.as_ref() == QUERIES_GROUP;
                     let label = entry.item().label.clone();
-                    let active = leaf.is_none()
-                        && !group
-                        && entry.depth() == 0
+                    let active = is_schema_row(entry.item().id.as_str())
                         && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
@@ -1968,7 +1968,7 @@ impl Workspace {
                     return saved_query_menu(menu, name, &menu_workspace);
                 }
                 let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
-                    if !picks_schema || entry.depth() != 0 {
+                    if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
                         return menu;
                     }
                     let workspace = menu_workspace.clone();

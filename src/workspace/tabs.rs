@@ -646,7 +646,7 @@ impl Workspace {
         // Whatever is in front, in the order it is stacked: the palette paints
         // over the stale-edit prompt, the stopped-run prompt and the run
         // prompt, which paint over the discard-close confirmation, which
-        // paints over the close confirmation, which paints over the import
+        // paints over the delete confirmation, which paints over the import
         // dialog, which paints over the apply review, which paints over the
         // surface and the settings panel beside it -- so `escape` backs out
         // of them in that order, one at a time. The palette stays first so

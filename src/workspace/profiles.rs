@@ -1812,6 +1812,17 @@ impl Workspace {
     }
 
     pub(crate) fn refresh_explorer(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, false, cx);
+    }
+
+    /// The sidebar again after only the saved queries changed. The catalog's
+    /// rows are the same rows under the same ids, so what the user folded,
+    /// opened and selected among them is put back rather than reset.
+    pub(crate) fn refresh_query_library(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, true, cx);
+    }
+
+    fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -1821,12 +1832,34 @@ impl Workspace {
             explorer.extend(build_explorer_tree(catalog, &filter));
         }
         let tree = profile.session.explorer_tree.clone();
+        let (items, selected) = match keep {
+            true => {
+                let state = tree.read(cx);
+                let roots: Vec<_> = (0..)
+                    .map_while(|ix| state.entry(ix))
+                    .filter(|entry| entry.depth() == 0)
+                    .map(|entry| entry.item().clone())
+                    .collect();
+                let selected = state.selected_item().map(|item| item.id.clone());
+                (
+                    explorer::with_folds(explorer.items, &explorer::folds(&roots)),
+                    selected,
+                )
+            }
+            false => (explorer.items, None),
+        };
 
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
             profile.session.explorer_highlights = Arc::new(explorer.highlights);
         }
-        tree.update(cx, |tree, cx| tree.set_items(explorer.items, cx));
+        tree.update(cx, |tree, cx| {
+            tree.set_items(items, cx);
+            if let Some(selected) = selected {
+                let at = tree.index_of(&selected);
+                tree.set_selected_index(at, cx);
+            }
+        });
     }
 
     pub(crate) fn activate(&mut self, index: usize, cx: &mut Context<Self>) {

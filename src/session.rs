@@ -578,7 +578,7 @@ impl Session {
         cx: &mut Context<Workspace>,
     ) -> Self {
         let explorer_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter database objects…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter queries and objects…"));
         cx.subscribe(&explorer_filter, {
             let id = id.clone();
             move |workspace, _, event: &InputEvent, cx| {
@@ -616,15 +616,7 @@ impl Session {
         .detach();
 
         let saved_queries = store::saved_queries(&id);
-        // A tab naming a query whose file has gone comes back as the unsaved
-        // buffer it now is, rather than as a tab pointing at nothing.
-        let stored_queries = stored_queries
-            .into_iter()
-            .map(|mut stored| {
-                stored.name = stored.name.filter(|name| saved_queries.contains(name));
-                stored
-            })
-            .collect::<Vec<_>>();
+        let stored_queries = unsaved_where_gone(stored_queries, &saved_queries);
         // No tab is a state a profile can be in: closing the last one leaves
         // the strip empty, and it comes back empty.
         let active = stored_queries
@@ -1077,8 +1069,7 @@ impl Tab {
 }
 
 /// A chip of the tab strip. A saved query's is keyed by its name rather than
-/// its tab, so the place a drag left it in survives the query being closed and
-/// opened again.
+/// its tab, which is what lets a rename keep the chip where it stands.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TabKey {
     Unsaved(u64),
@@ -1698,11 +1689,7 @@ impl QueryTab {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
-        let text = match &stored.name {
-            Some(name) => store::read_query(profile_id, name),
-            None => store::read_scratch(profile_id, stored.id),
-        };
-        let (sql, notice) = match text {
+        let (sql, notice) = match stored_text(profile_id, stored) {
             Ok(sql) => (sql.unwrap_or_default(), None),
             Err(message) => (String::new(), Some(message)),
         };
@@ -2206,6 +2193,31 @@ pub(crate) enum QueryState {
         mode: ExplainMode,
     },
     Failed(DbError),
+}
+
+/// The stored tabs, each naming a query whose file has gone turned into the
+/// unsaved buffer it now is, rather than a tab pointing at nothing. Its text
+/// is then its scratch file's, which a delete from DBDelve wrote first.
+fn unsaved_where_gone(
+    stored: Vec<store::StoredQueryTab>,
+    saved_queries: &[String],
+) -> Vec<store::StoredQueryTab> {
+    stored
+        .into_iter()
+        .map(|mut stored| {
+            stored.name = stored.name.filter(|name| saved_queries.contains(name));
+            stored
+        })
+        .collect()
+}
+
+/// The text a stored tab comes back with: its query's file when it names
+/// one, its own scratch file when not.
+fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> Result<Option<String>, String> {
+    match &stored.name {
+        Some(name) => store::read_query(profile_id, name),
+        None => store::read_scratch(profile_id, stored.id),
+    }
 }
 
 /// Write every one of a profile's buffers back to whichever file it came from.
@@ -3050,6 +3062,30 @@ mod tests {
             sql::is_generated_write(&statement),
             "{statement} was refused"
         );
+    }
+
+    #[test]
+    fn a_deleted_open_query_comes_back_as_an_unsaved_buffer_with_its_text() {
+        store::tests::with_home(|| {
+            store::write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            let open = store::StoredQueryTab {
+                id: 3,
+                name: Some("daily".into()),
+                active: true,
+                queued_results: 0,
+            };
+            assert_eq!(stored_text("dev", &open), Ok(Some("SELECT 1".to_string())));
+
+            store::delete_query_keeping("dev", "daily", Some((3, "SELECT 1 -- open")))
+                .expect("the delete must go through");
+
+            let restored = unsaved_where_gone(vec![open], &store::saved_queries("dev"));
+            assert_eq!(restored[0].name, None);
+            assert_eq!(
+                stored_text("dev", &restored[0]),
+                Ok(Some("SELECT 1 -- open".to_string()))
+            );
+        });
     }
 
     #[test]

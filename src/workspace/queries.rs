@@ -1238,22 +1238,19 @@ impl Workspace {
         }
 
         let sql = editor.read(cx).value().to_string();
-        if let Err(message) = store::write_query(&id, &name, &sql) {
-            self.note(message, cx);
-            return;
+        match store::save_query_as(&id, previous.as_deref(), &name, &sql) {
+            Ok(None) => {}
+            Ok(Some(message)) => self.note(message, cx),
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
         }
         let chip = match (tab, &previous) {
             (Tab::Query(_), Some(previous)) => Some(TabKey::Saved(previous.clone())),
             (Tab::Query(id), None) => Some(TabKey::Unsaved(id)),
             (Tab::Object(_), _) => None,
         };
-        // Written first, then the old name dropped: a failed delete leaves two
-        // copies, which is recoverable, and the other order loses the query.
-        if let Some(previous) = previous.filter(|previous| previous != &name)
-            && let Err(message) = store::delete_query(&id, &previous)
-        {
-            self.note(message, cx);
-        }
 
         if let Some(profile) = self.profile_mut() {
             // Before the tab takes its new name: the chip's old key is only in
@@ -1582,21 +1579,14 @@ impl Workspace {
             return;
         };
         let id = profile.id.clone();
-        let holder = profile
+        let kept = profile
             .session
             .tab_holding(&name)
-            .and_then(|tab| profile.session.query_tab(tab));
-        // Written before the file goes, so a failure leaves the query where it
-        // was rather than the text nowhere.
-        if let Some(tab) = holder {
-            let sql = tab.editor.read(cx).value().to_string();
-            if let Err(message) = store::write_scratch(&id, tab.id, &sql) {
-                self.note(message, cx);
-                return;
-            }
-        }
-        let holder = holder.map(|tab| tab.id);
-        if let Err(message) = store::delete_query(&id, &name) {
+            .and_then(|tab| profile.session.query_tab(tab))
+            .map(|tab| (tab.id, tab.editor.read(cx).value().to_string()));
+        let holder = kept.as_ref().map(|(tab, _)| *tab);
+        let kept = kept.as_ref().map(|(tab, sql)| (*tab, sql.as_str()));
+        if let Err(message) = store::delete_query_keeping(&id, &name, kept) {
             self.note(message, cx);
             return;
         }
@@ -1624,7 +1614,7 @@ impl Workspace {
         };
         let id = profile.id.clone();
         profile.session.saved_queries = store::saved_queries(&id);
-        self.refresh_explorer(&id, cx);
+        self.refresh_query_library(&id, cx);
         cx.notify();
     }
 
