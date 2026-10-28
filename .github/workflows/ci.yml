@@ -40,9 +40,11 @@ on:
 permissions:
   contents: read
 
+# Not on main: a run there cancelled by the next merge never reaches
+# rust-cache's save, and the tests job, the slowest, is the one that loses it.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   linux-lint:
