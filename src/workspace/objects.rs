@@ -114,7 +114,7 @@ impl Workspace {
         let body = match opened {
             OpenedObject::Routine { routine, .. } => ObjectBody::Routine(routine),
             OpenedObject::Structure { origin, .. } => {
-                let grid = structure_grid::new_grid(window, cx);
+                let grid = structure_grid::new_grid(engine.syntax(), window, cx);
                 if let Some(loaded) = &known {
                     let section = grid.read(cx).delegate().section();
                     structure_grid::show(&grid, loaded, section, cx);
@@ -1322,6 +1322,11 @@ impl Workspace {
                     if let Some((plan, showing)) = Explained::restored(&snapshot) {
                         query_tab.plan = Some(plan);
                         query_tab.showing_plan = showing;
+                        // A restored queue's results are copies, none of them
+                        // the slot the plan was asked of.
+                        if showing {
+                            query_tab.show_slot();
+                        }
                     }
                     query_tab.last_query = snapshot.last_query;
                 }

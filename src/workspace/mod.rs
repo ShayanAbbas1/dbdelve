@@ -695,17 +695,14 @@ impl Workspace {
         })
         .detach();
 
-        // Autosave waits out a pause in typing, so without this whatever was
-        // typed in the last moments dies with the process. Written here on
-        // the main thread, not handed to the background as autosave is: the
-        // process is going, and nothing would wait for it to finish.
+        // Finish writes synchronously: the process is going, and nothing
+        // would wait for background work to finish.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             async {}
         })
         .detach();
-        // Closing the window does not quit the application, so without this the
-        // red button is a way to lose whatever autosave has not written yet.
+        // Window release also persists when the window closes without Quit.
         cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
             .detach();
 
@@ -1528,7 +1525,7 @@ impl Render for Workspace {
             // the grid, so the count beside them still belongs to whatever ran
             // last. What the run itself is worth saying is how long the server
             // spent answering.
-            Some(QueryState::Explained { elapsed, mode }) => {
+            Some(QueryState::Explained { elapsed, mode, .. }) => {
                 Some(format!("{} · {elapsed:.1?}", mode.label()))
             }
             _ => None,

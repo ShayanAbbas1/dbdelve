@@ -13,15 +13,16 @@ use gpui::{
 use gpui_component::{
     InteractiveElementExt, POPOVER_BLUR,
     button::{Button, ButtonCustomVariant, ButtonVariants},
-    input::{Input, InputState},
+    highlighter::{HighlightTheme, SyntaxHighlighter},
+    input::{Input, InputState, Rope},
     kbd::Kbd,
 };
 
-use std::{collections::HashMap, ops::Range};
+use std::{cell::RefCell, collections::HashMap, ops::Range};
 
 use crate::{
     actions::RefreshConnection,
-    db::{Engine, RelationKind, RoutineKind},
+    db::{Engine, RelationKind, RoutineKind, Syntax},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
@@ -63,6 +64,57 @@ pub(crate) fn highlighted(
         return text;
     }
     text.with_highlights(ranges.iter().map(|range| (range.clone(), style)))
+}
+
+/// What a piece of code is to its grammar, which reads an expression on its
+/// own as a broken statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Code {
+    Statement,
+    Expression,
+}
+
+thread_local! {
+    // Building one compiles the grammar's highlight query, which is far too
+    // slow to pay for every expression on every frame it is drawn.
+    static HIGHLIGHTERS: RefCell<HashMap<&'static str, SyntaxHighlighter>> =
+        RefCell::default();
+}
+
+/// `text` highlighted as the editor would highlight it in `syntax`. An SQL
+/// expression is parsed behind a `SELECT `; what the grammar still cannot read
+/// is left unstyled, never dropped.
+pub(crate) fn code_highlights(
+    text: &str,
+    syntax: Syntax,
+    code: Code,
+    theme: &HighlightTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let (prefix, suffix) = match (syntax, code) {
+        // A bare `{` opens a block, so a document is read as the object it is.
+        (Syntax::Mongo, _) => ("(", ")"),
+        (Syntax::Sql, Code::Expression) => ("SELECT ", ""),
+        _ => ("", ""),
+    };
+    let wrapped = format!("{prefix}{text}{suffix}");
+    let grammar = syntax.highlighter();
+    HIGHLIGHTERS
+        .with_borrow_mut(|highlighters| {
+            let highlighter = highlighters
+                .entry(grammar)
+                .or_insert_with(|| SyntaxHighlighter::new(grammar));
+            highlighter.update(None, &Rope::from_str(&wrapped), None);
+            highlighter.styles(&(prefix.len()..prefix.len() + text.len()), theme)
+        })
+        .into_iter()
+        .map(|(range, style)| {
+            (
+                range.start.saturating_sub(prefix.len())..range.end.saturating_sub(prefix.len()),
+                style,
+            )
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect()
 }
 
 /// One column of icons down the sidebar, so every label starts at the same x
@@ -1081,6 +1133,69 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn code_is_highlighted_within_itself_whatever_it_holds() {
+        let syntax = HighlightTheme::default_dark();
+        for (text, grammar, code) in [
+            (
+                "((status)::text = 'paid'::text)",
+                Syntax::Sql,
+                Code::Expression,
+            ),
+            ("(o.account_id = a.id)", Syntax::Sql, Code::Expression),
+            ("a.created_at DESC", Syntax::Sql, Code::Expression),
+            ("", Syntax::Sql, Code::Expression),
+            ("é ' ( ;; \u{1F600}", Syntax::Sql, Code::Expression),
+            (
+                "CREATE INDEX a ON t (b) WHERE c",
+                Syntax::Sql,
+                Code::Statement,
+            ),
+            ("é ' ( ;; \u{1F600}", Syntax::Mongo, Code::Statement),
+            (r#"{"a":1} unique"#, Syntax::Mongo, Code::Statement),
+        ] {
+            for (range, _) in code_highlights(text, grammar, code, &syntax) {
+                assert!(range.end <= text.len(), "{text:?} {range:?}");
+                assert!(text.is_char_boundary(range.start));
+                assert!(text.is_char_boundary(range.end));
+            }
+        }
+
+        let color = |name: &str| {
+            syntax
+                .style
+                .syntax
+                .style(name)
+                .and_then(|style| style.color)
+        };
+        let styled = |text: &str, grammar, code, token: &str| {
+            code_highlights(text, grammar, code, &syntax)
+                .into_iter()
+                .find(|(range, _)| &text[range.clone()] == token)
+                .and_then(|(_, style)| style.color)
+        };
+        assert!(color("keyword").is_some());
+        assert_eq!(
+            styled(
+                "(balance > 100) AND (name = 'x')",
+                Syntax::Sql,
+                Code::Expression,
+                "AND"
+            ),
+            color("keyword")
+        );
+        // A partial filter is a document, not the block a bare `{` would open.
+        assert_eq!(
+            styled(
+                r#"{"active":true}"#,
+                Syntax::Mongo,
+                Code::Expression,
+                "true"
+            ),
+            color("boolean")
+        );
+    }
 
     #[test]
     fn a_chord_reads_as_a_cap_per_key_with_the_modifiers_in_platform_order() {

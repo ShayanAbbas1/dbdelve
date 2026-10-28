@@ -317,6 +317,11 @@ pub struct StoredGrid {
     /// written before plans were kept, which restores with none.
     #[serde(default)]
     pub plan: Option<StoredPlan>,
+    /// What the server said running the statement behind these rows -- or
+    /// behind no rows at all, which is the one reason a snapshot is written
+    /// with no columns.
+    #[serde(default)]
+    pub messages: Vec<String>,
 }
 
 /// What rebuilds a query tab's plan: the rows `explain::parse` read it from,
@@ -989,7 +994,11 @@ pub fn delete_queries(profile_id: &str) -> Result<(), String> {
 
 pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     let path = query_path(profile_id, name)?;
-    fs::remove_file(&path).map_err(|error| format!("Could not delete {}: {error}", path.display()))
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete {}: {error}", path.display())),
+    }
 }
 
 /// Write `sql` as `name`, moving the query's file there first when this
@@ -1204,6 +1213,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             data_types: grid.data_types.clone(),
             cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
             plan: grid.plan.clone(),
+            messages: grid.messages.clone(),
         };
         &capped
     } else {
@@ -3316,20 +3326,21 @@ open_objects = []
     }
 
     #[test]
-    fn closing_a_saved_query_writes_its_text_and_keeps_the_file() {
+    fn deleting_a_query_already_removed_outside_the_app_succeeds() {
         with_home(|| {
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
-            // What `close_buffer` writes before the tab goes.
-            write_query("dev", "daily", "SELECT 1 -- edited").expect("the close must write");
-            assert_eq!(
-                read_query("dev", "daily"),
-                Ok(Some("SELECT 1 -- edited".to_string()))
-            );
-            assert_eq!(saved_queries("dev"), ["daily"]);
+            fs::remove_file(query_path("dev", "daily").unwrap()).unwrap();
+            assert_eq!(delete_query("dev", "daily"), Ok(()));
+            assert_eq!(saved_queries("dev"), Vec::<String>::new());
+        });
+    }
 
-            // A write that fails is an error, which keeps the tab open.
-            block("dev", "stuck.sql");
-            assert!(write_query("dev", "stuck", "SELECT 2").is_err());
+    #[test]
+    fn deleting_an_undeletable_query_reports_the_failure() {
+        with_home(|| {
+            block("dev", "daily.sql");
+            assert!(delete_query("dev", "daily").is_err());
+            assert_eq!(saved_queries("dev"), ["daily"]);
         });
     }
 
@@ -3565,6 +3576,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -3623,6 +3635,7 @@ open_objects = []
                 data_types: vec![Some("int4".into()), None],
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -3659,6 +3672,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -3712,6 +3726,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");

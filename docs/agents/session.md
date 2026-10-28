@@ -223,6 +223,22 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   landed and `land_lane` gives the slot the last statement's result, as a
   queue run in turn leaves it. The slot streams nothing meanwhile, so the
   status bar reads the statement on screen instead (`Queue::at_once`).
+- **A run's server messages ride on `QueryState::Complete { messages }`**, so
+  they follow the state wherever it goes: into a queue's `done`, through a
+  lend and back, onto a restored tab. `QueryTab::messages` reads them
+  statement by statement (the slot's live state for the slot, `done` for the
+  rest), and the switcher offers a Messages chip once any statement said
+  something, with or without a queue.
+- **`showing_messages` is a tab flag beside `showing_plan`, not a value of
+  `Queue::showing`.** Selecting Messages leaves the selected result to return
+  to, and a no-queue run can still offer the chip. It resets when a run
+  starts, not per statement, and is read through `messages_shown`, so a flag
+  left on over a run that said nothing falls back to the result. While shown it
+  stands in for the result, so `query_insert_target` yields nothing.
+- **`write_grids` saves a column-less statement when it has messages**
+  (`StoredGrid::messages`, `serde(default)` for older snapshots), so what the
+  server said survives a restart; otherwise a statement with no columns writes
+  no snapshot.
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
   reaches `advance_queue`. Without the flag an ordinary Run, a header sort or
@@ -256,24 +272,21 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   palette, both through one dialog) removes it. Deleting a query whose tab is
   open closes that tab, its text with it; a tab holding cell edits nobody
   applied asks first, as any close does (`PendingDiscard::deleting`), and the
-  file stays until it is told. Rename… on a sidebar row turns the row into a field
+  file stays until it is told. A file already removed outside the app counts
+  as deleted, so its stale library row and open tab can still be removed.
+  Rename… on a sidebar row turns the row into a field
   (`Session::query_rename`) that renames through `store::save_query_as`,
   the tab's own path, so an open tab follows the name. A rename is one
   `fs::rename`, never a write and a delete: on a case-insensitive filesystem
   `daily` and `Daily` are one file. A name taken in any case is refused.
 - **A named buffer persists to its query file, an unnamed one to its own
-  `.scratch-{id}.sql`.** The model is autosave, with no modified state:
-  every buffer is written 500 ms after its last edit, and at most 5 s after
-  the first edit nothing has written while typing never pauses
-  (`session::autosave_delay`; `QueryTab::autosave` is the timer each edit
-  replaces and the tab's close drops). That write runs on the background
-  executor; Save, a swap, quit and a saved query's close write on the main
-  thread. Every write goes through the tab's `session::WriteGate`: it takes
-  a ticket when the text is read, and the write lands only if no later one
-  has and the buffer has not left the file since. Rename, save under a name,
-  delete and close move the buffer under the gate's lock (`retarget`), so a
-  write already out is never written to a name the buffer left. A failed
-  timed write is said once until any write succeeds.
+  `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
+  opening another query, or normal quit/window close persists the buffers.
+  Closing a saved query's tab also writes it before the tab is removed.
+  Writes are synchronous at those boundaries; typing schedules no disk
+  writes, timers or retries. There are no background buffer writes to order
+  against rename or deletion, so neither needs a per-tab write gate.
+  A crash or forced termination can lose edits since the last write.
   `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.

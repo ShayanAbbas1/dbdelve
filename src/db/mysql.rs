@@ -29,10 +29,10 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference, RowBuilder,
-    ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
-    assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, non_utf8_error,
-    plain_error, required_cell,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
+    RowBuilder, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
+    assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -145,19 +145,24 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY ORDINAL_POSITION
 ";
 
+// One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
+// `group_concat_max_len` cuts short without a word. A functional key part has
+// no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
+// MariaDB lacks. The versioned comment reads it on such a MySQL alone: MariaDB
+// skips one written for a MySQL version.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
+       NON_UNIQUE AS non_unique,
+       COLUMN_NAME AS column_name,
        CONCAT(
-           CASE WHEN NON_UNIQUE = 0 THEN 'UNIQUE INDEX' ELSE 'INDEX' END,
-           ' (',
-           GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ', '),
-           ')'
-       ) AS definition
+           COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+           COALESCE(CONCAT('(', SUB_PART, ')'), ''),
+           CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
+       ) AS key_part
 FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA = {schema}
   AND TABLE_NAME = {relation}
-GROUP BY INDEX_NAME, NON_UNIQUE
-ORDER BY INDEX_NAME
+ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
 
 // `CHECK` is deliberately absent. Its clause lives in
@@ -250,6 +255,40 @@ WHERE TABLE_SCHEMA = {schema}
   AND INDEX_NAME = 'PRIMARY'
 ORDER BY SEQ_IN_INDEX
 ";
+
+/// The key-part rows of [`STRUCTURE_INDEXES_SQL`] as one index per name. The
+/// definition names the plain columns alone, as it always has.
+fn assemble_indexes(result: &QueryResult) -> Result<Vec<Index>, DbError> {
+    let mut indexes = Vec::new();
+    // Grouped by `object_name`, the first column.
+    for parts in result.rows.chunk_by(|a, b| a.get(0) == b.get(0)) {
+        let name = required_cell(result, &parts[0], "object_name")?;
+        let unique = required_cell(result, &parts[0], "non_unique")? == "0";
+        let covered: Vec<&str> = parts
+            .iter()
+            .filter_map(|row| optional_cell(result, row, "column_name"))
+            .collect();
+        indexes.push(Index {
+            name: name.to_string(),
+            kind: match () {
+                _ if name == "PRIMARY" => IndexKind::Primary,
+                _ if unique => IndexKind::Unique,
+                _ => IndexKind::Plain,
+            },
+            columns: parts
+                .iter()
+                .map(|row| required_cell(result, row, "key_part").map(str::to_string))
+                .collect::<Result<_, _>>()?,
+            predicate: None,
+            definition: format!(
+                "{} ({})",
+                if unique { "UNIQUE INDEX" } else { "INDEX" },
+                covered.join(", ")
+            ),
+        });
+    }
+    Ok(indexes)
+}
 
 /// A `mysql://` URL, read by dbdelve rather than by the driver.
 ///
@@ -506,6 +545,11 @@ impl Connection {
         // How long the kept rows took, once there were as many as the limit.
         let mut filled = None;
         let mut past_limit = false;
+        // What the sets before the last one raised, which `SHOW WARNINGS` no
+        // longer lists. A set that returned rows is not counted: the driver
+        // has moved past its count by the time its rows are read.
+        let mut warned = 0u16;
+        let mut earlier = 0u32;
 
         let mut submit = || -> Result<(), DbError> {
             // Timed from here, not from the call: one connection serialises a
@@ -518,6 +562,8 @@ impl Connection {
                 .map_err(|error| query_error(&error))?;
 
             while let Some(mut set) = sets.iter() {
+                earlier += u32::from(warned);
+                warned = 0;
                 // The description borrows the set and iterating it needs the set
                 // mutably, so everything it says is taken first.
                 let described: Vec<ProbedColumn> = set
@@ -540,6 +586,7 @@ impl Connection {
                     // Read first: draining the set moves the driver past its
                     // OK packet, after which the count reads as zero.
                     result.rows_affected = Some(set.affected_rows());
+                    warned = set.warnings();
                     for row in &mut set {
                         row.map_err(|error| query_error(&error))?;
                     }
@@ -618,6 +665,18 @@ impl Connection {
                 Some(filled) if past_limit => filled,
                 _ => started.elapsed(),
             };
+            drop(sets);
+            if editable {
+                if earlier > 0 {
+                    result.messages.push(format!(
+                        "An earlier statement raised {earlier} warning{}, which the server no longer lists.",
+                        if earlier == 1 { "" } else { "s" }
+                    ));
+                }
+                if connection.warnings() > 0 {
+                    result.messages.extend(warnings(&mut connection));
+                }
+            }
             Ok(())
         };
 
@@ -705,7 +764,8 @@ impl Connection {
         let keys =
             self.internal_query(&structure_sql(STRUCTURE_FOREIGN_KEYS_SQL, schema, relation))?;
 
-        let mut structure = assemble_structure(columns, indexes, constraints)?;
+        let mut structure = assemble_structure(columns, QueryResult::default(), constraints)?;
+        structure.indexes = assemble_indexes(&indexes)?;
         structure.foreign_keys = assemble_foreign_keys(&keys)?;
         Ok(structure)
     }
@@ -1019,6 +1079,21 @@ fn query_error(error: &::mysql::Error) -> DbError {
     }
 }
 
+/// A failure lists nothing: the statement already succeeded, and a refused
+/// `SHOW WARNINGS` must not turn that into an error.
+///
+/// `SHOW WARNINGS` leaves `ROW_COUNT()` at -1, so a later statement that reads
+/// it sees that rather than the count of the statement that warned. The mysql
+/// client's `\W` costs the same, and the warnings are worth it.
+fn warnings(connection: &mut Conn) -> Vec<String> {
+    connection
+        .query::<(String, u32, String), _>("SHOW WARNINGS")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(level, code, message)| format!("{level} ({code}): {message}"))
+        .collect()
+}
+
 /// End the transaction a failed batch left open, and say so in the error.
 ///
 /// MySQL stops a multi-statement submission at the failing statement, so the
@@ -1071,7 +1146,7 @@ fn describe(error: &::mysql::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ColumnDefinition, ForeignKey, RelationKind, RoutineKind};
+    use crate::db::{ColumnDefinition, ForeignKey, IndexKind, RelationKind, RoutineKind};
 
     /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
     /// `dbdelve_MARIADB_URL`.
@@ -1753,7 +1828,58 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition.starts_with("PRIMARY KEY"))
         );
-        assert!(!structure.indexes.is_empty(), "the primary key is an index");
+        let mut kinds: Vec<_> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        kinds.sort_by_key(|(name, ..)| *name);
+        assert_eq!(
+            kinds,
+            [
+                ("PRIMARY", IndexKind::Primary, vec!["id".into()]),
+                ("external_id", IndexKind::Unique, vec!["external_id".into()]),
+            ]
+        );
+
+        let connection = live(engine);
+        // MariaDB has no functional key part. The second is longer than
+        // `group_concat_max_len`'s default 1024 bytes.
+        let functional = match engine {
+            Engine::MariaDb => String::new(),
+            _ => format!(
+                ", KEY by_lower ((lower(email)), id DESC), KEY by_sum ((id{}))",
+                " + 1".repeat(300)
+            ),
+        };
+        connection
+            .query(
+                &format!(
+                    "DROP TABLE IF EXISTS dbdelve_test_indexes; \
+                     CREATE TABLE dbdelve_test_indexes (id INT, email VARCHAR(80), \
+                         UNIQUE KEY by_email (email(10), id){functional})"
+                ),
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let fixture = connection.structure("dbdelve_dev", "dbdelve_test_indexes");
+        connection
+            .query("DROP TABLE dbdelve_test_indexes", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let fixture = fixture.expect("structure should load");
+        let by_email = &fixture.indexes[0];
+        assert_eq!(by_email.kind, IndexKind::Unique);
+        assert_eq!(by_email.columns, ["email(10)", "id"]);
+        assert_eq!(by_email.predicate, None);
+        if engine == Engine::MySql {
+            assert_eq!(fixture.indexes[1].columns, ["lower(`email`)", "id DESC"]);
+            assert_eq!(fixture.indexes[1].definition, "INDEX (id)");
+            let by_sum = &fixture.indexes[2].columns;
+            assert!(
+                by_sum[0].len() > 1200 && by_sum[0].ends_with("+ 1)"),
+                "{by_sum:?}"
+            );
+        }
     }
 
     fn live_a_single_table_select_is_editable_by_its_primary_key(engine: Engine) {
@@ -2010,6 +2136,72 @@ mod tests {
         assert_eq!(updated.rows_affected, Some(2));
     }
 
+    fn live_a_statements_warnings_arrive_as_messages(engine: Engine) {
+        let connection = live(engine);
+        let dropped = connection
+            .query("DROP TABLE IF EXISTS no_such_163", Fetch::default())
+            .unwrap();
+        assert_eq!(dropped.messages.len(), 1);
+        assert!(
+            dropped.messages[0].starts_with("Note (1051): Unknown table"),
+            "{:?}",
+            dropped.messages
+        );
+
+        connection
+            .query(
+                "CREATE TEMPORARY TABLE narrow_163 (a CHAR(2))",
+                Fetch::default(),
+            )
+            .unwrap();
+        let truncated = connection
+            .query(
+                "INSERT IGNORE INTO narrow_163 VALUES ('abcd')",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(truncated.rows_affected, Some(1));
+        assert_eq!(
+            truncated.messages,
+            vec!["Warning (1265): Data truncated for column 'a' at row 1".to_string()]
+        );
+
+        let selected = connection.query("SELECT 1", Fetch::default()).unwrap();
+        assert!(selected.messages.is_empty());
+
+        let cast = connection
+            .query("SELECT CAST('abc' AS SIGNED)", Fetch::default())
+            .unwrap();
+        assert_eq!(cast.messages.len(), 1, "{:?}", cast.messages);
+        assert!(cast.messages[0].starts_with("Warning (1292)"));
+    }
+
+    fn live_a_multi_statement_submission_counts_the_warnings_it_cannot_list(engine: Engine) {
+        let connection = live(engine);
+        let result = connection
+            .query(
+                "DROP TABLE IF EXISTS no_such_163; DROP TABLE IF EXISTS no_such_163_b; SELECT 1",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.messages,
+            vec![
+                "An earlier statement raised 2 warnings, which the server no longer lists."
+                    .to_string()
+            ]
+        );
+
+        let last = connection
+            .query(
+                "SELECT 1; DROP TABLE IF EXISTS no_such_163",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(last.messages.len(), 1, "{:?}", last.messages);
+        assert!(last.messages[0].starts_with("Note (1051)"));
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -2145,6 +2337,8 @@ mod tests {
         live_a_blank_database_connects_to_none,
         live_query_round_trip,
         live_a_write_reports_the_rows_it_affected,
+        live_a_statements_warnings_arrive_as_messages,
+        live_a_multi_statement_submission_counts_the_warnings_it_cannot_list,
         live_a_multi_statement_selection_keeps_one_result_shape,
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,

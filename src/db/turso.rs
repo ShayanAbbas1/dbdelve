@@ -286,6 +286,7 @@ fn query_error(error: TursoError) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::IndexKind;
 
     fn memory(setup: &str) -> Connection {
         let connection = Connection::open_at(":memory:", None, 0).expect("in-memory database");
@@ -510,7 +511,8 @@ mod tests {
         let connection = memory(
             "CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'x');
              CREATE TABLE c (id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES p (id));
-             CREATE INDEX c_p ON c (p_id);",
+             CREATE INDEX c_p ON c (p_id);
+             CREATE UNIQUE INDEX c_pair ON c (p_id, id);",
         );
         let parent = connection.structure("main", "p").unwrap();
         let columns: Vec<_> = parent
@@ -529,7 +531,22 @@ mod tests {
         let child = connection.structure("main", "c").unwrap();
         assert_eq!(child.foreign_keys.len(), 1);
         assert_eq!(child.foreign_keys[0].referenced_table, "p");
-        assert!(child.indexes.iter().any(|index| index.name == "c_p"));
+        let kinds: Vec<_> = child
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("c_p", IndexKind::Plain, vec!["p_id".to_string()]),
+                (
+                    "c_pair",
+                    IndexKind::Unique,
+                    vec!["p_id".into(), "id".into()]
+                ),
+            ]
+        );
 
         let pointing = connection.references("main", "p").unwrap();
         assert_eq!(pointing.len(), 1);

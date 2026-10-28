@@ -191,6 +191,10 @@ cbc = "=0.1.2"
 # 0.23 the other engines share. Pure Rust and still on `ring`, so no second
 # crypto library, but a second copy of the TLS stack all the same, and one
 # `tls.rs` cannot configure: tiberius builds its own rustls config.
+#
+# A bump must re-check `INFO_TOKEN_LINE` in mssql.rs: the server's `PRINT`
+# and informational messages are told from environment changes by the line of
+# tiberius's source that logs them.
 tiberius = { version = "=0.12.3", default-features = false, features = [
     "tds73",
     "rustls",
@@ -210,6 +214,12 @@ tokio = { version = "=1.53.1", default-features = false, features = [
 tokio-util = { version = "=0.7.19", default-features = false, features = ["compat"] }
 # `try_next` over tiberius's result stream. Already linked through tiberius.
 futures-util = { version = "=0.3.34", default-features = false }
+# Where tiberius puts the server's `PRINT` and informational messages: it
+# decodes them, leaves them out of the result stream and logs them, so
+# mssql.rs subscribes for the length of a submission. Pinned to the version
+# already locked, with the default features tiberius already enables, so
+# naming it adds no copy.
+tracing = "=0.1.44"
 
 # MongoDB. The official driver, async on tokio like tiberius and driven the
 # same way: each connection owns a runtime and every call is a `block_on` on

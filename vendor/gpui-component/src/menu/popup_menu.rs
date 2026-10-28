@@ -1510,6 +1510,9 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
+            // dbdelve patch: menus use chrome typography, not the editor or grid
+            // font inherited from the element that opened them.
+            .font_family(cx.theme().font_family.clone())
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()

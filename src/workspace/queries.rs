@@ -3,7 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
-use std::{ops::Range, time::Instant};
+use std::ops::Range;
 
 use gpui_component::table::TableState;
 
@@ -13,19 +13,8 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 use super::*;
 use crate::session::{
     Finished, Lane, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step, TabKey,
-    WriteGate, Wrote, autosave_delay, next_step, query_name_refusal,
+    next_step, query_name_refusal,
 };
-
-/// Do `change` with the buffer, if a tab holds one, moved off its file.
-fn retarget(
-    gate: Option<WriteGate>,
-    change: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    match gate {
-        Some(gate) => gate.retarget(change),
-        None => change(),
-    }
-}
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -341,6 +330,16 @@ impl Workspace {
         let Some(editor) = profile.session.editor(tab) else {
             return;
         };
+        // Here and not where each statement goes out, which a queue does once
+        // per statement: someone reading its messages stays on them while the
+        // rest arrive.
+        if let Tab::Query(id) = tab
+            && let Some(query) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(id))
+        {
+            query.showing_messages = false;
+        }
 
         // A selection holding more than one statement runs each of them in
         // turn, keeping every result. Anything else -- one selected statement,
@@ -916,26 +915,33 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let Some(queue) = self
+        let Some(query) = self
             .profile_mut()
             .and_then(|profile| profile.session.query_tab_mut(id))
-            .and_then(|query| query.queue.as_mut())
         else {
             return;
         };
-        // The in-flight slot is only a chip while something is in it, and a
-        // statement not yet sent has nothing to show.
-        let last = queue.done.len();
-        if index > last
-            || (index == last && !queue.awaiting)
-            || queue
-                .done
-                .get(index)
-                .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
-        {
-            return;
-        }
-        let switched = std::mem::replace(&mut queue.showing, index) != index;
+        let switched = match &mut query.queue {
+            Some(queue) => {
+                // The in-flight slot is only a chip while something is in it,
+                // and a statement not yet sent has nothing to show.
+                let last = queue.done.len();
+                if index > last
+                    || (index == last && !queue.awaiting)
+                    || queue
+                        .done
+                        .get(index)
+                        .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
+                {
+                    return;
+                }
+                std::mem::replace(&mut queue.showing, index) != index
+            }
+            // With no queue the switcher is there for the Messages chip, and
+            // the slot is the one result beside it.
+            None => false,
+        };
+        query.showing_messages = false;
         // The form was built from the rows it was opened over, which can be
         // another table's, and a review's batch is refreshed by whichever
         // result is on screen when it runs.
@@ -943,6 +949,27 @@ impl Workspace {
             profile.session.insert_form.take_if(|form| form.tab == tab);
             profile.session.drop_apply_review_of(tab);
         }
+        cx.notify();
+    }
+
+    /// Show the run's server messages in place of the result the switcher
+    /// had selected, which stays selected to come back to.
+    pub(crate) fn show_messages(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(query) = profile.session.query_tab_mut(id) else {
+            return;
+        };
+        if query.messages().is_empty() || std::mem::replace(&mut query.showing_messages, true) {
+            return;
+        }
+        // The grid and any form beside it unmount, and whichever of them held
+        // focus would take the window's only dispatch path with it.
+        profile.session.editor_needs_focus = true;
         cx.notify();
     }
 
@@ -1122,6 +1149,21 @@ impl Workspace {
             return;
         }
         tab.showing_plan = showing;
+        // Either half is asked for by name, so neither leaves Messages over it.
+        let switched = match showing {
+            true => tab.show_slot(),
+            false => {
+                tab.showing_messages = false;
+                false
+            }
+        };
+        if switched {
+            profile
+                .session
+                .insert_form
+                .take_if(|form| form.tab == Tab::Query(id));
+            profile.session.drop_apply_review_of(Tab::Query(id));
+        }
         cx.notify();
     }
 
@@ -1162,7 +1204,6 @@ impl Workspace {
         {
             return;
         }
-        // A named query is written now, rather than waiting on its autosave.
         // Only a buffer with nowhere to go has to ask for a name.
         if self.named() {
             match self.persist_buffer(cx) {
@@ -1247,13 +1288,7 @@ impl Workspace {
         }
 
         let sql = editor.read(cx).value().to_string();
-        let gate = match tab {
-            Tab::Query(tab) => profile.session.query_tab(tab).map(|tab| tab.gate.clone()),
-            Tab::Object(_) => None,
-        };
-        if let Err(message) = retarget(gate, || {
-            store::save_query_as(&id, previous.as_deref(), &name, &sql)
-        }) {
+        if let Err(message) = store::save_query_as(&id, previous.as_deref(), &name, &sql) {
             self.note(message, cx);
             return;
         }
@@ -1355,10 +1390,7 @@ impl Workspace {
         };
         if let Some(name) = &tab.open_query {
             let sql = tab.editor.read(cx).value().to_string();
-            if let Err(message) = tab
-                .gate
-                .retarget(|| store::write_query(&profile.id, name, &sql))
-            {
+            if let Err(message) = store::write_query(&profile.id, name, &sql) {
                 self.note(message, cx);
                 return;
             }
@@ -1382,14 +1414,14 @@ impl Workspace {
         };
         let in_front = (profile.session.active == Tab::Query(id))
             .then(|| profile.session.fallback(Tab::Query(id)));
-        let gate = profile.session.queries.remove(position).gate;
+        profile.session.queries.remove(position);
         profile.session.forget(Tab::Query(id));
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
             self.front_after_close(fallback, window, cx);
         }
 
-        if !saved && let Err(message) = gate.retarget(|| store::delete_scratch(&profile_id, id)) {
+        if !saved && let Err(message) = store::delete_scratch(&profile_id, id) {
             self.note(message, cx);
         }
         // The tab is gone, so its snapshot has nothing left to come back to --
@@ -1644,14 +1676,7 @@ impl Workspace {
                     .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
             },
         };
-        let gate = holder
-            .and_then(|tab| profile.session.query_tab(tab))
-            .map(|tab| tab.gate.clone());
-        let written = sql.and_then(|sql| {
-            retarget(gate, || {
-                store::save_query_as(&id, Some(&previous), &typed, &sql)
-            })
-        });
+        let written = sql.and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql));
         match written {
             Ok(()) => {}
             Err(message) => {
@@ -1708,78 +1733,6 @@ impl Workspace {
         }
     }
 
-    /// A buffer's text changed: write it to its file once typing pauses, or
-    /// a few seconds after the first edit nothing has written yet, whichever
-    /// comes first, so a crash loses at most those few seconds. Each edit
-    /// drops the timer the one before it set.
-    pub(crate) fn buffer_edited(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
-        let Some((profile_id, tab)) = self.profiles.iter_mut().find_map(|profile| {
-            let tab = profile
-                .session
-                .queries
-                .iter_mut()
-                .find(|tab| tab.editor == *editor)?;
-            Some((profile.id.clone(), tab))
-        }) else {
-            return;
-        };
-        let now = Instant::now();
-        let delay = autosave_delay(*tab.unwritten_since.get_or_insert(now), now);
-        let id = tab.id;
-        tab.autosave = Some(cx.spawn(async move |workspace, cx| {
-            cx.background_executor().timer(delay).await;
-            _ = workspace.update(cx, |workspace, cx| workspace.autosave(profile_id, id, cx));
-        }));
-    }
-
-    /// Write a buffer's text as it stands to the file it holds now, off the
-    /// main thread. The text and its place in the buffer's order are taken
-    /// here; the gate drops the write if a later one lands first or the
-    /// buffer leaves the file before it runs.
-    fn autosave(&mut self, profile_id: String, id: u64, cx: &mut Context<Self>) {
-        let Some(tab) = self
-            .profiles
-            .iter_mut()
-            .find(|profile| profile.id == profile_id)
-            .and_then(|profile| profile.session.queries.iter_mut().find(|tab| tab.id == id))
-        else {
-            return;
-        };
-        tab.unwritten_since = None;
-        let sql = tab.editor.read(cx).value().to_string();
-        let (gate, name) = (tab.gate.clone(), tab.open_query.clone());
-        let ticket = gate.ticket();
-        let write = cx.background_executor().spawn({
-            let profile_id = profile_id.clone();
-            async move {
-                gate.write(ticket, || match &name {
-                    Some(name) => store::write_query(&profile_id, name, &sql),
-                    None => store::write_scratch(&profile_id, id, &sql),
-                })
-            }
-        });
-        cx.spawn(async move |workspace, cx| {
-            let Wrote::Failed {
-                message,
-                already_said: false,
-            } = write.await
-            else {
-                return;
-            };
-            _ = workspace.update(cx, |workspace, cx| {
-                if let Some(profile) = workspace
-                    .profiles
-                    .iter_mut()
-                    .find(|profile| profile.id == profile_id)
-                {
-                    profile.session.notice = Some(message);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Raise the dialog that asks before a saved query is deleted. The one
     /// way in from the sidebar and the palette alike.
     pub(crate) fn ask_delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {
@@ -1832,10 +1785,7 @@ impl Workspace {
         };
         let id = profile.id.clone();
         let holder = profile.session.tab_holding(&name);
-        let gate = holder
-            .and_then(|tab| profile.session.query_tab(tab))
-            .map(|tab| tab.gate.clone());
-        if let Err(message) = retarget(gate, || store::delete_query(&id, &name)) {
+        if let Err(message) = store::delete_query(&id, &name) {
             self.note(message, cx);
             return;
         }
@@ -2371,11 +2321,12 @@ impl Workspace {
                             // returning its rows, so nothing here reaches the
                             // grid: it keeps whatever the last real run put in
                             // it, which is what the Data tab flips back to.
-                            Ok(result) if explain.is_some() => {
+                            Ok(mut result) if explain.is_some() => {
                                 let mode = explain.unwrap_or_default();
                                 *state = QueryState::Explained {
                                     elapsed: result.elapsed,
                                     mode,
+                                    messages: std::mem::take(&mut result.messages),
                                 };
                                 let columns: Vec<String> = result
                                     .columns
@@ -2463,6 +2414,7 @@ impl Workspace {
                                     bytes: result.bytes,
                                     elapsed: result.elapsed,
                                     rows_affected: result.rows_affected,
+                                    messages: std::mem::take(&mut result.messages),
                                 };
                                 let produced_grid = !result.columns.is_empty();
                                 // Sorted in memory as it lands, the rows move
@@ -2596,6 +2548,14 @@ impl Workspace {
                                 rows,
                             });
                             tab.showing_plan = true;
+                            // The form and review were for another result.
+                            if tab.show_slot() {
+                                profile
+                                    .session
+                                    .insert_form
+                                    .take_if(|form| form.tab == Tab::Query(query));
+                                profile.session.drop_apply_review_of(Tab::Query(query));
+                            }
                         }
                         // Nothing left to read once the batch it was showing has
                         // run. Only this tab's: another tab's is still unread.

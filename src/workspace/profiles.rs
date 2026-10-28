@@ -1048,6 +1048,7 @@ impl Workspace {
             tab.ran_from = None;
             tab.plan = None;
             tab.showing_plan = false;
+            tab.showing_messages = false;
         }
         profile.session.clear_prompts();
         profile.session.apply_review = None;
