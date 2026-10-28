@@ -2331,6 +2331,11 @@ pub struct QueryResult {
     /// told beside it: SQL Server's session, reset by a Cancel that landed
     /// after the statement had finished.
     pub notice: Option<String>,
+    /// What the server said while running the submission, in the order it said
+    /// it: SQL Server's `PRINT` and informational messages, Postgres notices,
+    /// MySQL warnings. The whole submission's, on its first result; the sets
+    /// in `rest` carry none.
+    pub messages: Vec<String>,
     /// Each cell's type, row by row, where a column's type is not every one of
     /// its cells': a MongoDB field holds whatever each document put there. The
     /// server's `$type` names (`int`, `objectId`, …), and [`MISSING`] for a

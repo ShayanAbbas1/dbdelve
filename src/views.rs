@@ -10,10 +10,13 @@
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Div,
     Entity, Focusable, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    StyledText, Window, div, prelude::FluentBuilder, px,
+    MouseButton, MouseDownEvent, ParentElement, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, StyledText, Window, div, prelude::FluentBuilder, px,
 };
-use gpui_base::actions::{SelectNextColumn, SelectPrevColumn};
+use gpui_base::{
+    SelectableText,
+    actions::{SelectNextColumn, SelectPrevColumn},
+};
 use gpui_component::{
     ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable, ThemeStyled,
     button::Button,
@@ -45,7 +48,7 @@ use crate::{
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
         CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
-        Session, StructureState, Tab, query_label, result_pane_is_expanded,
+        Said, Session, StructureState, Tab, query_label, result_pane_is_expanded,
     },
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
@@ -302,8 +305,23 @@ fn render_query_surface(
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
     let (shown_state, shown_grid) = tab.shown();
-    let bottom = match tab.showing_plan.then_some(tab.plan.as_ref()).flatten() {
-        Some(explained) => render_plan(explained, plan_copied, &scope, cx),
+    let bottom = match tab.plan_shown() {
+        // Under the same switcher as the rows, or a typed `EXPLAIN`, which has
+        // no Data to flip to, would hide what its statement raised.
+        Some(explained) => {
+            let plan = render_plan(explained, plan_copied, &scope, cx);
+            match result_switcher(tab, cx) {
+                None => plan,
+                Some(switcher) => div()
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(switcher)
+                    .child(div().flex_1().min_h_0().child(plan))
+                    .into_any_element(),
+            }
+        }
         None => render_results(
             profile.config.engine(),
             matches!(profile.state, ProfileState::Failed(_)),
@@ -1411,7 +1429,14 @@ fn render_results(
         _ => None,
     };
 
+    // The run's messages stand in for the selected result, form and inspector
+    // included: both describe rows that are not on screen.
+    let run_messages = query_tab.filter(|tab| tab.messages_shown()).map(|tab| {
+        let said = tab.messages();
+        render_messages(&said, None, "run-messages", scope, cx)
+    });
     let message = match query {
+        _ if run_messages.is_some() => run_messages,
         QueryState::Idle if query_tab.is_some() => Some(centered(
             key_hint(
                 t,
@@ -1479,11 +1504,30 @@ fn render_results(
         QueryState::Complete {
             rows,
             rows_affected,
+            messages,
             ..
-        } if *rows == 0 && !has_rows => Some(centered(quiet_line(match rows_affected {
-            Some(rows) => format!("Query completed. Server row count: {rows}."),
-            None => "Query completed.".into(),
-        }))),
+        } if *rows == 0 && !has_rows => {
+            let line = quiet_line(match rows_affected {
+                Some(rows) => format!("Query completed. Server row count: {rows}."),
+                None => "Query completed.".into(),
+            });
+            Some(match messages.is_empty() {
+                true => centered(line),
+                // Read top to bottom like the log it is, the outcome last,
+                // where it would have been printed.
+                false => render_messages(
+                    &[Said {
+                        index: 0,
+                        sql: "",
+                        messages,
+                    }],
+                    Some(line),
+                    "result-messages",
+                    scope,
+                    cx,
+                ),
+            })
+        }
         _ => None,
     };
 
@@ -1612,6 +1656,7 @@ fn render_results(
     // overlay -- rather than just the grid, so New row stays usable on an
     // empty table and Delete's refusal is visible after a failed preview.
     let panel = match form {
+        _ if query_tab.is_some_and(QueryTab::messages_shown) => None,
         Some(form) => Some((render_new_row_panel(engine, form, scope, cx), false)),
         None => render_row_inspector(results, folded, editing, row_panel, scope, cx)
             .map(|panel| (panel, folded)),
@@ -1652,62 +1697,101 @@ fn render_results(
 
 /// One chip per statement of a queue, from the moment it starts: those that
 /// have run, the one running, and those still to go, above the result the
-/// selected chip is showing.
+/// selected chip is showing. Then, once the server has said anything during
+/// the run, one for what it said.
 ///
-/// Only from the second chip: one is nothing to switch between, and an
-/// ordinary run has no queue at all.
+/// Only from the second chip: one is nothing to switch between. An ordinary
+/// run has no queue, and a chip for its one result only to stand beside its
+/// messages.
 fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let t = *theme(cx);
-    let queue = tab.queue.as_ref()?;
-    if queue.done.len() + usize::from(queue.awaiting) + queue.remaining.len() < 2 {
-        return None;
-    }
-    // The statement in flight is the tab's own slot, not one of `done`, so it
-    // is the chip one past the end. Selecting it is what following the run
-    // means; any other chip reads a result while that one keeps going.
-    let running = queue.awaiting.then(|| {
-        let label = tab
-            .ran_from
-            .as_ref()
-            .map(|(_, sql)| query_label(sql))
-            .unwrap_or_default();
-        let index = queue.done.len();
-        result_chip(
-            tab.id,
-            index,
-            &label,
-            &tab.query,
-            index == queue.showing,
-            cx,
-        )
-    });
-    let mut chips: Vec<AnyElement> = queue
-        .done
-        .iter()
-        .enumerate()
-        .map(|(index, finished)| {
-            result_chip(
+    let said = tab.messages();
+    let messages_shown = tab.showing_messages && !said.is_empty();
+    let mut chips: Vec<AnyElement> = match tab.queue.as_ref() {
+        Some(queue) => {
+            // The statement in flight is the tab's own slot, not one of
+            // `done`, so it is the chip one past the end. Selecting it is what
+            // following the run means; any other chip reads a result while
+            // that one keeps going.
+            let running = queue.awaiting.then(|| {
+                let label = tab
+                    .ran_from
+                    .as_ref()
+                    .map(|(_, sql)| query_label(sql))
+                    .unwrap_or_default();
+                let index = queue.done.len();
+                result_chip(
+                    tab.id,
+                    index,
+                    &label,
+                    &tab.query,
+                    index == queue.showing && !messages_shown,
+                    cx,
+                )
+            });
+            let mut chips: Vec<AnyElement> = queue
+                .done
+                .iter()
+                .enumerate()
+                .map(|(index, finished)| {
+                    result_chip(
+                        tab.id,
+                        index,
+                        &query_label(&finished.sql),
+                        tab.state_of(finished),
+                        index == queue.showing && !messages_shown,
+                        cx,
+                    )
+                })
+                .chain(running)
+                .collect();
+            for (offset, range) in queue.remaining.iter().enumerate() {
+                let index = queue.done.len() + usize::from(queue.awaiting) + offset;
+                let label = queue.sql.get(range.clone()).map(query_label);
+                chips.push(result_chip(
+                    tab.id,
+                    index,
+                    &label.unwrap_or_default(),
+                    &QueryState::Idle,
+                    false,
+                    cx,
+                ));
+            }
+            chips
+        }
+        None if !said.is_empty() => {
+            // A restored tab no longer knows which statement it ran.
+            let label = said
+                .first()
+                .map(|said| query_label(said.sql))
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| "Result".into());
+            vec![result_chip(
                 tab.id,
-                index,
-                &query_label(&finished.sql),
-                tab.state_of(finished),
-                index == queue.showing,
+                0,
+                &label,
+                &tab.query,
+                !messages_shown,
                 cx,
-            )
-        })
-        .chain(running)
-        .collect();
-    for (offset, range) in queue.remaining.iter().enumerate() {
-        let index = queue.done.len() + usize::from(queue.awaiting) + offset;
-        let label = queue.sql.get(range.clone()).map(query_label);
-        chips.push(result_chip(
-            tab.id,
-            index,
-            &label.unwrap_or_default(),
-            &QueryState::Idle,
-            false,
-            cx,
-        ));
+            )]
+        }
+        None => return None,
+    };
+    if !said.is_empty() {
+        let count = said.iter().map(|said| said.messages.len()).sum::<usize>();
+        let id = tab.id;
+        chips.push(
+            switcher_chip("messages-chip", messages_shown, false, t)
+                .child("Messages")
+                .child(div().text_color(t.text_faint).child(compact_count(count)))
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.show_messages(Tab::Query(id), cx);
+                }))
+                .into_any_element(),
+        );
+    }
+    if chips.len() < 2 {
+        return None;
     }
 
     Some(
@@ -1729,27 +1813,16 @@ fn result_switcher(tab: &QueryTab, cx: &mut Context<Workspace>) -> Option<AnyEle
     )
 }
 
-/// One statement of a queue, in the row-limit chips' clothes: its place in the
-/// queue, what it was, and what it came back with.
-fn result_chip(
-    id: u64,
-    index: usize,
-    label: &str,
-    state: &QueryState,
+/// A switcher chip's clothes, the row-limit chips': what the result and
+/// Messages chips share.
+fn switcher_chip(
+    id: impl Into<gpui::ElementId>,
     selected: bool,
-    cx: &mut Context<Workspace>,
-) -> AnyElement {
-    let t = *theme(cx);
-    let queued = matches!(state, QueryState::Idle);
-    let (readout, tint) = match state {
-        QueryState::Idle => (Some("queued".to_string()), t.text_faint),
-        QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
-        QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
-        QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
-        _ => (None, t.text_faint),
-    };
+    queued: bool,
+    t: Theme,
+) -> Stateful<Div> {
     div()
-        .id(("queued-result", index))
+        .id(id)
         .flex()
         .flex_shrink_0()
         .items_center()
@@ -1770,6 +1843,28 @@ fn result_chip(
                     .hover(|style| style.bg(t.element_hover))
             }
         })
+}
+
+/// One statement of a queue: its place in the queue, what it was, and what
+/// it came back with.
+fn result_chip(
+    id: u64,
+    index: usize,
+    label: &str,
+    state: &QueryState,
+    selected: bool,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let t = *theme(cx);
+    let queued = matches!(state, QueryState::Idle);
+    let (readout, tint) = match state {
+        QueryState::Idle => (Some("queued".to_string()), t.text_faint),
+        QueryState::Running { .. } => (Some("running".to_string()), t.text_muted),
+        QueryState::Complete { rows, .. } => (Some(compact_count(*rows)), t.text_faint),
+        QueryState::Failed(_) => (Some("failed".to_string()), t.danger),
+        _ => (None, t.text_faint),
+    };
+    switcher_chip(("queued-result", index), selected, queued, t)
         .child(
             div()
                 .text_color(t.text_faint)
@@ -1780,6 +1875,84 @@ fn result_chip(
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
             workspace.show_queued_result(Tab::Query(id), index, cx);
         }))
+        .into_any_element()
+}
+
+/// What the server said running a run's statements, as it said it, read top
+/// to bottom like the log it is. In the editor's face, as an error is: it
+/// quotes the server. Under a heading per statement only when more than one
+/// said something, the heading reading as that statement's chip does.
+///
+/// Each message is plain selectable text, never Markdown: a `PRINT` is the
+/// server's words and its `*` and `#` are not formatting.
+fn render_messages(
+    said: &[Said],
+    tail: Option<AnyElement>,
+    id: &'static str,
+    scope: &str,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let t = *theme(cx);
+    let (code, chrome) = (fonts(cx).editor.clone(), fonts(cx).chrome.clone());
+    let headed = said.len() > 1;
+    // The window's selection is a map of runs, so a copy across several only
+    // comes out in reading order, a line apiece, if each says where it sits.
+    let mut order: usize = 0;
+    let groups: Vec<_> = said
+        .iter()
+        .map(|said| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .when(headed, |group| {
+                    group.child(
+                        div()
+                            .flex()
+                            .gap(px(layout::SPACE_XS))
+                            .pb(px(layout::SPACE_XS))
+                            .font_family(chrome.clone())
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(t.text_muted)
+                            .child(
+                                div()
+                                    .text_color(t.text_faint)
+                                    .child(format!("{}.", said.index + 1)),
+                            )
+                            .child(query_label(said.sql)),
+                    )
+                })
+                .children(said.messages.iter().map(|message| {
+                    order += 1;
+                    div().text_color(t.text).child(
+                        SelectableText::new(("message", order), message.clone())
+                            .document_order(order as u64),
+                    )
+                }))
+        })
+        .collect();
+    div()
+        .id(id)
+        .size_full()
+        .min_h_0()
+        .overflow_y_scroll()
+        .smooth_scroll(&smooth_scoped(id, scope, cx))
+        .p(px(layout::SPACE_LG))
+        .flex()
+        .flex_col()
+        .gap(px(layout::SPACE_MD))
+        .font_family(code)
+        // Copy is `Root`'s, which reads the window's selection, and a focused
+        // buffer or grid would take the keystroke for a copy of its own
+        // first. The window's floor has no copy of its own to take it with.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|workspace, _: &MouseDownEvent, window, cx| {
+                workspace.focus.focus(window, cx)
+            }),
+        )
+        .children(groups)
+        .children(tail.map(|tail| div().font_family(chrome).child(tail)))
         .into_any_element()
 }
 
@@ -3265,14 +3438,14 @@ fn render_query_toolbar(
                 .child(preview_tab(
                     "Data",
                     icon::TABLE,
-                    !tab.showing_plan,
+                    tab.plan_shown().is_none() && !tab.messages_shown(),
                     Command::ShowPlan(false),
                     cx,
                 ))
                 .child(preview_tab(
                     "Plan",
                     icon::PLAN,
-                    tab.showing_plan,
+                    tab.plan_shown().is_some(),
                     Command::ShowPlan(true),
                     cx,
                 ))

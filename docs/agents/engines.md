@@ -212,6 +212,21 @@ Decided, and not to be re-litigated:
   batch, rolling back what it had open (`live_a_cancel_stops_the_statement_on_the_server_and_reconnects`
   proves the statement behind a `WAITFOR` never runs). The session does not
   survive, so the run reconnects and its error says what was lost.
+- **Postgres's notices are read off the connection with `poll_message`**, not
+  by awaiting it as a future: the future impl logs each notice and drops it.
+  The driver buffers them as psql prints them (severity, then `DETAIL` and
+  `HINT` lines). The buffer is cleared before the user's statement and taken
+  right after it, before the describe or edit-target queries, so those cannot
+  leak theirs in; they land in `QueryResult::messages` for typed runs only.
+- **MySQL and MariaDB warnings are `SHOW WARNINGS`, run only when the
+  connection's warning count is non-zero**, so a clean statement costs no
+  extra round trip. It runs after the row counts and edit target are read, and
+  it lists only the last statement's. A multi-statement submission therefore
+  gets one lead message counting the earlier statements' warnings, which the
+  server no longer lists. A non-final `SELECT`'s count is not exposed by the
+  driver, so its warnings are not counted. `SHOW WARNINGS` leaves
+  `ROW_COUNT()` at -1 for whatever the user runs next; that is accepted, as
+  the mysql client's `\W` accepts it, because the warnings' text is the point.
 - **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL,
   `EXPLAIN` / `ANALYZE` on MariaDB, and `EXPLAIN QUERY PLAN` on SQLite, which
   has no analyze form, so that mode is not offered there
@@ -390,6 +405,17 @@ Decided, and not to be re-litigated:
   rather than silently. A batch that returns one set after all leaves a queue
   of one result, which `advance_queue` drops, so an ordinary run is exactly
   what it always was.
+- **SQL Server's messages (`PRINT`, `RAISERROR` at severity 10 or less, a
+  `USE`'s "Changed database context") are heard, not read.** tiberius 0.12.3
+  drops INFO tokens from its stream and only logs a `tracing` event, so
+  `Session::fetching` runs the submission's own drain under a scoped
+  subscriber (`Heard`) and puts what it heard in `QueryResult::messages`. The
+  callsite is picked by `INFO_TOKEN_LINE`, because the environment-change
+  events share its target and shape; the exact `=0.12.3` pin is what keeps
+  that line right, so a tiberius bump must re-check it (the live message tests
+  catch a wrong one). Internal trips never listen, so dbdelve's own `USE` and
+  describes say nothing. Messages from a submission that fails are lost with
+  the error.
 - **SQL Server edit targets come from a describe**, as Postgres's do:
   `sys.dm_exec_describe_first_result_set` in mode 2 (a view is its own source,
   and has no key), after the statement ran, only when it returned exactly one

@@ -506,6 +506,11 @@ impl Connection {
         // How long the kept rows took, once there were as many as the limit.
         let mut filled = None;
         let mut past_limit = false;
+        // What the sets before the last one raised, which `SHOW WARNINGS` no
+        // longer lists. A set that returned rows is not counted: the driver
+        // has moved past its count by the time its rows are read.
+        let mut warned = 0u16;
+        let mut earlier = 0u32;
 
         let mut submit = || -> Result<(), DbError> {
             // Timed from here, not from the call: one connection serialises a
@@ -518,6 +523,8 @@ impl Connection {
                 .map_err(|error| query_error(&error))?;
 
             while let Some(mut set) = sets.iter() {
+                earlier += u32::from(warned);
+                warned = 0;
                 // The description borrows the set and iterating it needs the set
                 // mutably, so everything it says is taken first.
                 let described: Vec<ProbedColumn> = set
@@ -540,6 +547,7 @@ impl Connection {
                     // Read first: draining the set moves the driver past its
                     // OK packet, after which the count reads as zero.
                     result.rows_affected = Some(set.affected_rows());
+                    warned = set.warnings();
                     for row in &mut set {
                         row.map_err(|error| query_error(&error))?;
                     }
@@ -618,6 +626,18 @@ impl Connection {
                 Some(filled) if past_limit => filled,
                 _ => started.elapsed(),
             };
+            drop(sets);
+            if editable {
+                if earlier > 0 {
+                    result.messages.push(format!(
+                        "An earlier statement raised {earlier} warning{}, which the server no longer lists.",
+                        if earlier == 1 { "" } else { "s" }
+                    ));
+                }
+                if connection.warnings() > 0 {
+                    result.messages.extend(warnings(&mut connection));
+                }
+            }
             Ok(())
         };
 
@@ -1017,6 +1037,21 @@ fn query_error(error: &::mysql::Error) -> DbError {
         // point the editor at. Absent rather than guessed.
         position: None,
     }
+}
+
+/// A failure lists nothing: the statement already succeeded, and a refused
+/// `SHOW WARNINGS` must not turn that into an error.
+///
+/// `SHOW WARNINGS` leaves `ROW_COUNT()` at -1, so a later statement that reads
+/// it sees that rather than the count of the statement that warned. The mysql
+/// client's `\W` costs the same, and the warnings are worth it.
+fn warnings(connection: &mut Conn) -> Vec<String> {
+    connection
+        .query::<(String, u32, String), _>("SHOW WARNINGS")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(level, code, message)| format!("{level} ({code}): {message}"))
+        .collect()
 }
 
 /// End the transaction a failed batch left open, and say so in the error.
@@ -2010,6 +2045,72 @@ mod tests {
         assert_eq!(updated.rows_affected, Some(2));
     }
 
+    fn live_a_statements_warnings_arrive_as_messages(engine: Engine) {
+        let connection = live(engine);
+        let dropped = connection
+            .query("DROP TABLE IF EXISTS no_such_163", Fetch::default())
+            .unwrap();
+        assert_eq!(dropped.messages.len(), 1);
+        assert!(
+            dropped.messages[0].starts_with("Note (1051): Unknown table"),
+            "{:?}",
+            dropped.messages
+        );
+
+        connection
+            .query(
+                "CREATE TEMPORARY TABLE narrow_163 (a CHAR(2))",
+                Fetch::default(),
+            )
+            .unwrap();
+        let truncated = connection
+            .query(
+                "INSERT IGNORE INTO narrow_163 VALUES ('abcd')",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(truncated.rows_affected, Some(1));
+        assert_eq!(
+            truncated.messages,
+            vec!["Warning (1265): Data truncated for column 'a' at row 1".to_string()]
+        );
+
+        let selected = connection.query("SELECT 1", Fetch::default()).unwrap();
+        assert!(selected.messages.is_empty());
+
+        let cast = connection
+            .query("SELECT CAST('abc' AS SIGNED)", Fetch::default())
+            .unwrap();
+        assert_eq!(cast.messages.len(), 1, "{:?}", cast.messages);
+        assert!(cast.messages[0].starts_with("Warning (1292)"));
+    }
+
+    fn live_a_multi_statement_submission_counts_the_warnings_it_cannot_list(engine: Engine) {
+        let connection = live(engine);
+        let result = connection
+            .query(
+                "DROP TABLE IF EXISTS no_such_163; DROP TABLE IF EXISTS no_such_163_b; SELECT 1",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.messages,
+            vec![
+                "An earlier statement raised 2 warnings, which the server no longer lists."
+                    .to_string()
+            ]
+        );
+
+        let last = connection
+            .query(
+                "SELECT 1; DROP TABLE IF EXISTS no_such_163",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(last.messages.len(), 1, "{:?}", last.messages);
+        assert!(last.messages[0].starts_with("Note (1051)"));
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -2145,6 +2246,8 @@ mod tests {
         live_a_blank_database_connects_to_none,
         live_query_round_trip,
         live_a_write_reports_the_rows_it_affected,
+        live_a_statements_warnings_arrive_as_messages,
+        live_a_multi_statement_submission_counts_the_warnings_it_cannot_list,
         live_a_multi_statement_selection_keeps_one_result_shape,
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,

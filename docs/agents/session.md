@@ -223,6 +223,22 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   landed and `land_lane` gives the slot the last statement's result, as a
   queue run in turn leaves it. The slot streams nothing meanwhile, so the
   status bar reads the statement on screen instead (`Queue::at_once`).
+- **A run's server messages ride on `QueryState::Complete { messages }`**, so
+  they follow the state wherever it goes: into a queue's `done`, through a
+  lend and back, onto a restored tab. `QueryTab::messages` reads them
+  statement by statement (the slot's live state for the slot, `done` for the
+  rest), and the switcher offers a Messages chip once any statement said
+  something, with or without a queue.
+- **`showing_messages` is a tab flag beside `showing_plan`, not a value of
+  `Queue::showing`.** Selecting Messages leaves the selected result to return
+  to, and a no-queue run can still offer the chip. It resets when a run
+  starts, not per statement, and is read through `messages_shown`, so a flag
+  left on over a run that said nothing falls back to the result. While shown it
+  stands in for the result, so `query_insert_target` yields nothing.
+- **`write_grids` saves a column-less statement when it has messages**
+  (`StoredGrid::messages`, `serde(default)` for older snapshots), so what the
+  server said survives a restart; otherwise a statement with no columns writes
+  no snapshot.
 - **`Queue::awaiting` is load-bearing.** A finished queue stays on the tab so
   its results can still be switched between, and every completion on that tab
   reaches `advance_queue`. Without the flag an ordinary Run, a header sort or

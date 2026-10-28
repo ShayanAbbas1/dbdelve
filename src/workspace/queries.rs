@@ -327,6 +327,16 @@ impl Workspace {
         let Some(editor) = profile.session.editor(tab) else {
             return;
         };
+        // Here and not where each statement goes out, which a queue does once
+        // per statement: someone reading its messages stays on them while the
+        // rest arrive.
+        if let Tab::Query(id) = tab
+            && let Some(query) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.query_tab_mut(id))
+        {
+            query.showing_messages = false;
+        }
 
         // A selection holding more than one statement runs each of them in
         // turn, keeping every result. Anything else -- one selected statement,
@@ -902,26 +912,33 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let Some(queue) = self
+        let Some(query) = self
             .profile_mut()
             .and_then(|profile| profile.session.query_tab_mut(id))
-            .and_then(|query| query.queue.as_mut())
         else {
             return;
         };
-        // The in-flight slot is only a chip while something is in it, and a
-        // statement not yet sent has nothing to show.
-        let last = queue.done.len();
-        if index > last
-            || (index == last && !queue.awaiting)
-            || queue
-                .done
-                .get(index)
-                .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
-        {
-            return;
-        }
-        let switched = std::mem::replace(&mut queue.showing, index) != index;
+        let switched = match &mut query.queue {
+            Some(queue) => {
+                // The in-flight slot is only a chip while something is in it,
+                // and a statement not yet sent has nothing to show.
+                let last = queue.done.len();
+                if index > last
+                    || (index == last && !queue.awaiting)
+                    || queue
+                        .done
+                        .get(index)
+                        .is_some_and(|finished| matches!(finished.state, QueryState::Idle))
+                {
+                    return;
+                }
+                std::mem::replace(&mut queue.showing, index) != index
+            }
+            // With no queue the switcher is there for the Messages chip, and
+            // the slot is the one result beside it.
+            None => false,
+        };
+        query.showing_messages = false;
         // The form was built from the rows it was opened over, which can be
         // another table's, and a review's batch is refreshed by whichever
         // result is on screen when it runs.
@@ -929,6 +946,27 @@ impl Workspace {
             profile.session.insert_form.take_if(|form| form.tab == tab);
             profile.session.drop_apply_review_of(tab);
         }
+        cx.notify();
+    }
+
+    /// Show the run's server messages in place of the result the switcher
+    /// had selected, which stays selected to come back to.
+    pub(crate) fn show_messages(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let Tab::Query(id) = tab else {
+            return;
+        };
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(query) = profile.session.query_tab_mut(id) else {
+            return;
+        };
+        if query.messages().is_empty() || std::mem::replace(&mut query.showing_messages, true) {
+            return;
+        }
+        // The grid and any form beside it unmount, and whichever of them held
+        // focus would take the window's only dispatch path with it.
+        profile.session.editor_needs_focus = true;
         cx.notify();
     }
 
@@ -1108,6 +1146,21 @@ impl Workspace {
             return;
         }
         tab.showing_plan = showing;
+        // Either half is asked for by name, so neither leaves Messages over it.
+        let switched = match showing {
+            true => tab.show_slot(),
+            false => {
+                tab.showing_messages = false;
+                false
+            }
+        };
+        if switched {
+            profile
+                .session
+                .insert_form
+                .take_if(|form| form.tab == Tab::Query(id));
+            profile.session.drop_apply_review_of(Tab::Query(id));
+        }
         cx.notify();
     }
 
@@ -2109,11 +2162,12 @@ impl Workspace {
                             // returning its rows, so nothing here reaches the
                             // grid: it keeps whatever the last real run put in
                             // it, which is what the Data tab flips back to.
-                            Ok(result) if explain.is_some() => {
+                            Ok(mut result) if explain.is_some() => {
                                 let mode = explain.unwrap_or_default();
                                 *state = QueryState::Explained {
                                     elapsed: result.elapsed,
                                     mode,
+                                    messages: std::mem::take(&mut result.messages),
                                 };
                                 let columns: Vec<String> = result
                                     .columns
@@ -2201,6 +2255,7 @@ impl Workspace {
                                     bytes: result.bytes,
                                     elapsed: result.elapsed,
                                     rows_affected: result.rows_affected,
+                                    messages: std::mem::take(&mut result.messages),
                                 };
                                 let produced_grid = !result.columns.is_empty();
                                 // Sorted in memory as it lands, the rows move
@@ -2334,6 +2389,14 @@ impl Workspace {
                                 rows,
                             });
                             tab.showing_plan = true;
+                            // The form and review were for another result.
+                            if tab.show_slot() {
+                                profile
+                                    .session
+                                    .insert_form
+                                    .take_if(|form| form.tab == Tab::Query(query));
+                                profile.session.drop_apply_review_of(Tab::Query(query));
+                            }
                         }
                         // Nothing left to read once the batch it was showing has
                         // run. Only this tab's: another tab's is still unread.

@@ -859,7 +859,7 @@ impl Session {
     /// tab shows its plan, which stands in for those rows.
     pub(crate) fn query_insert_target(&self, cx: &App) -> Option<InsertTarget> {
         self.active_query_tab()
-            .filter(|tab| !tab.showing_plan)?
+            .filter(|tab| tab.plan_shown().is_none() && !tab.messages_shown())?
             .shown()
             .1
             .read(cx)
@@ -1283,6 +1283,11 @@ pub(crate) struct QueryTab {
     /// from `plan.is_some()`: a plan that has been read and flipped away from
     /// is still worth keeping to flip back to.
     pub(crate) showing_plan: bool,
+    /// Whether the switcher's Messages chip is selected, in place of whichever
+    /// result `queue.showing` names. A flag beside the index rather than a
+    /// value of it, so selecting Messages leaves the result to come back to,
+    /// and so a run with no queue at all can still offer it.
+    pub(crate) showing_messages: bool,
     /// The multi-statement run this tab is part way through, or `None` for an
     /// ordinary single-statement run. `query` and `results` stay what they
     /// always were -- the slot being run or shown right now -- and the
@@ -1511,6 +1516,7 @@ impl<G: Clone> Queue<G> {
                         bytes: set.bytes,
                         elapsed: set.elapsed,
                         rows_affected: set.rows_affected,
+                        messages: Vec::new(),
                     },
                     grid: grid.clone(),
                 },
@@ -1522,6 +1528,25 @@ impl<G: Clone> Queue<G> {
         }
         (extra, dropped)
     }
+}
+
+impl<G: PartialEq> Queue<G> {
+    /// Where the tab's slot sits in the strip: its entry in `done`, or one
+    /// past the end for a slot that is none of them, which `QueryTab::shown`
+    /// reads as the slot itself.
+    pub(crate) fn slot_index(&self, slot: &G) -> usize {
+        self.done
+            .iter()
+            .position(|finished| finished.grid == *slot)
+            .unwrap_or(self.done.len())
+    }
+}
+
+/// Whether the plan is what the pane shows. Messages selected over it win, as
+/// the chip the user last picked; and only over the slot's result, the one
+/// the plan was asked of, so picking another of a queue's results shows it.
+pub(crate) fn plan_in_front(showing_plan: bool, messages_shown: bool, on_slot: bool) -> bool {
+    showing_plan && !messages_shown && on_slot
 }
 
 /// `QueryTab::lend`, over the fields it touches so it is checkable without
@@ -1601,6 +1626,48 @@ fn apply_refresh<G: Clone + PartialEq>(
         }
         None => last_query.cloned().map(Refresh::Statement),
     }
+}
+
+/// One statement's share of a run's server messages.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Said<'a> {
+    /// Where its chip sits in the switcher.
+    pub(crate) index: usize,
+    pub(crate) sql: &'a str,
+    pub(crate) messages: &'a [String],
+}
+
+/// `QueryTab::messages`, over the fields it reads so it is checkable without
+/// a window: each of a queue's results, read as its chip reads it, or with no
+/// queue the slot's own, and only those the server said something during.
+fn run_messages<'a, G: PartialEq>(
+    queue: Option<&'a Queue<G>>,
+    (results, query): (&G, &'a QueryState),
+    ran: Option<&'a str>,
+) -> Vec<Said<'a>> {
+    let said: Vec<Said<'a>> = match queue {
+        Some(queue) => queue
+            .done
+            .iter()
+            .enumerate()
+            .map(|(index, finished)| Said {
+                index,
+                sql: &finished.sql,
+                messages: match finished.grid == *results {
+                    true => query.messages(),
+                    false => finished.state.messages(),
+                },
+            })
+            .collect(),
+        None => vec![Said {
+            index: 0,
+            sql: ran.unwrap_or_default(),
+            messages: query.messages(),
+        }],
+    };
+    said.into_iter()
+        .filter(|said| !said.messages.is_empty())
+        .collect()
 }
 
 const QUERY_LABEL_LIMIT: usize = 32;
@@ -1683,6 +1750,42 @@ impl QueryTab {
         }
     }
 
+    /// What the server said during this tab's run, statement by statement.
+    pub(crate) fn messages(&self) -> Vec<Said<'_>> {
+        run_messages(
+            self.queue.as_ref(),
+            (&self.results, &self.query),
+            self.ran_from.as_ref().map(|(_, sql)| sql.as_str()),
+        )
+    }
+
+    /// Whether the pane is showing the run's messages rather than a result.
+    /// Read through the messages themselves, so Messages left selected over a
+    /// run that has since said nothing falls back to its result rather than
+    /// an empty list.
+    pub(crate) fn messages_shown(&self) -> bool {
+        self.showing_messages && !self.messages().is_empty()
+    }
+
+    /// The plan, when it is what the results pane shows (`plan_in_front`).
+    pub(crate) fn plan_shown(&self) -> Option<&Explained> {
+        let on_slot = *self.shown().1 == self.results;
+        plan_in_front(self.showing_plan, self.messages_shown(), on_slot)
+            .then_some(self.plan.as_ref())
+            .flatten()
+    }
+
+    /// Bring the slot's result to the front, for a plan of it to be read.
+    /// Whether that moved the switcher off another result.
+    pub(crate) fn show_slot(&mut self) -> bool {
+        self.showing_messages = false;
+        let Some(queue) = &mut self.queue else {
+            return false;
+        };
+        let slot = queue.slot_index(&self.results);
+        std::mem::replace(&mut queue.showing, slot) != slot
+    }
+
     /// Make the queue's result at `index` the slot, for a run on its rows.
     pub(crate) fn lend(&mut self, index: usize) {
         lend_slot(
@@ -1758,6 +1861,7 @@ impl QueryTab {
             sorting: sorting.on(engine),
             row_limit,
             showing_plan: false,
+            showing_messages: false,
             row_panel_folded: false,
             row_panel_editing: false,
             row_panel_filter: Default::default(),
@@ -2177,6 +2281,7 @@ pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
         bytes: 0,
         elapsed: std::time::Duration::ZERO,
         rows_affected: None,
+        messages: grid.messages.clone(),
     }
 }
 
@@ -2220,6 +2325,11 @@ pub(crate) enum QueryState {
         bytes: usize,
         elapsed: std::time::Duration,
         rows_affected: Option<u64>,
+        /// What the server said while running it (`QueryResult::messages`).
+        /// On the state rather than the grid so it goes wherever the state
+        /// goes: into a queue's `done`, through a lend and back, and onto a
+        /// restored tab.
+        messages: Vec<String>,
     },
     /// An `EXPLAIN` came back. Its own variant rather than a `Complete` because
     /// the rows it returned are not results and never reach the grid: the grid
@@ -2229,8 +2339,22 @@ pub(crate) enum QueryState {
     Explained {
         elapsed: std::time::Duration,
         mode: ExplainMode,
+        /// As `Complete`'s: an `EXPLAIN ANALYZE` runs the statement, and
+        /// whatever it raises is said while it does.
+        messages: Vec<String>,
     },
     Failed(DbError),
+}
+
+impl QueryState {
+    pub(crate) fn messages(&self) -> &[String] {
+        match self {
+            QueryState::Complete { messages, .. } | QueryState::Explained { messages, .. } => {
+                messages
+            }
+            _ => &[],
+        }
+    }
 }
 
 /// Write every one of a profile's buffers back to whichever file it came from.
@@ -2282,7 +2406,8 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                 continue;
             }
             let grid = finished.grid.read(cx).delegate().stored();
-            if grid.columns.is_empty() {
+            let messages = tab.state_of(finished).messages();
+            if grid.columns.is_empty() && messages.is_empty() {
                 continue;
             }
             let _ = store::write_grid(
@@ -2290,6 +2415,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                 &store::queued_grid_key(tab.id, index),
                 &store::StoredGrid {
                     last_query: Some(finished.sql.clone()),
+                    messages: messages.to_vec(),
                     ..grid
                 },
             );
@@ -2301,10 +2427,12 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
             continue;
         }
         let grid = tab.results.read(cx).delegate().stored();
-        // A statement that returned no columns produced no grid to keep. A
-        // write can still return one (`RETURNING`, or any MongoDB reply), so a
-        // restored grid's `last_query` is not safe to re-run as it stands.
-        if grid.columns.is_empty() && !explained {
+        let messages = tab.query.messages();
+        // A statement that returned no columns produced no grid to keep, only
+        // whatever the server said running it. A write can still return one
+        // (`RETURNING`, or any MongoDB reply), so a restored grid's
+        // `last_query` is not safe to re-run as it stands.
+        if grid.columns.is_empty() && !explained && messages.is_empty() {
             continue;
         }
         let _ = store::write_grid(
@@ -2317,6 +2445,7 @@ pub(crate) fn write_grids(profile: &Profile, cx: &App) {
                     .plan
                     .as_ref()
                     .map(|explained| explained.stored(tab.showing_plan)),
+                messages: messages.to_vec(),
                 ..grid
             },
         );
@@ -2744,6 +2873,7 @@ mod tests {
             bytes: 1,
             elapsed: std::time::Duration::ZERO,
             rows_affected: None,
+            messages: Vec::new(),
         };
         let mut queue = Queue {
             sql: String::new(),
@@ -2790,12 +2920,135 @@ mod tests {
         assert_eq!((extra.len(), dropped), (0, 1));
     }
 
+    #[test]
+    fn a_runs_messages_stay_with_the_statements_that_said_them() {
+        let said = |messages: &[&str]| QueryState::Complete {
+            rows: 0,
+            bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: Some(0),
+            messages: messages.iter().map(|message| message.to_string()).collect(),
+        };
+        let entry = |sql: &str, start: usize, state: QueryState, grid: usize| Finished {
+            sql: sql.into(),
+            start,
+            state,
+            grid,
+        };
+        let mut queue = Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done: vec![
+                entry("CREATE TABLE t (n int)", 0, said(&["created"]), 10),
+                entry("SELECT 1", 30, said(&[]), 11),
+                // The slot's: its live state is the one read, not what was
+                // left here when it landed.
+                entry("PRINT 'done'", 60, said(&["stale"]), 12),
+            ],
+            showing: 1,
+            awaiting: false,
+            spare: vec![13],
+        };
+        // A batch's later sets carry none: the batch's are on its first.
+        queue.land_sets(1, 0, vec![QueryResult::default()]);
+        assert!(queue.done[1].state.messages().is_empty());
+
+        let slot = said(&["done", "twice"]);
+        let strings = |messages: &[&str]| -> Vec<String> {
+            messages.iter().map(|message| message.to_string()).collect()
+        };
+        let (created, done) = (strings(&["created"]), strings(&["done", "twice"]));
+        assert_eq!(
+            run_messages(Some(&queue), (&12, &slot), None),
+            [
+                Said {
+                    index: 0,
+                    sql: "CREATE TABLE t (n int)",
+                    messages: &created,
+                },
+                Said {
+                    index: 3,
+                    sql: "PRINT 'done'",
+                    messages: &done,
+                },
+            ]
+        );
+
+        // With no queue, the slot is the whole run.
+        assert_eq!(
+            run_messages::<usize>(None, (&12, &slot), Some("PRINT 'done'")),
+            [Said {
+                index: 0,
+                sql: "PRINT 'done'",
+                messages: &done,
+            }]
+        );
+        // A run that said nothing, or has not finished, offers no Messages.
+        assert!(run_messages::<usize>(None, (&12, &said(&[])), Some("SELECT 1")).is_empty());
+        let running = QueryState::Running {
+            started: std::time::Instant::now(),
+            cancelling: None,
+            cancel: CancelToken::default(),
+        };
+        assert!(run_messages::<usize>(None, (&12, &running), Some("SELECT 1")).is_empty());
+    }
+
+    #[test]
+    fn a_plan_gives_way_to_messages_and_to_another_results_chip() {
+        // Messages picked over the plan win; picking the plan's own result
+        // chip clears them and shows the plan again.
+        assert!(plan_in_front(true, false, true));
+        assert!(!plan_in_front(true, true, true));
+        // Another of a queue's results is shown as rows, plan or no plan.
+        assert!(!plan_in_front(true, false, false));
+        assert!(!plan_in_front(false, false, true));
+
+        // A typed `EXPLAIN ANALYZE` reaches the switcher with what it raised.
+        let notice = vec!["NOTICE: f() ran".to_string()];
+        let explained = QueryState::Explained {
+            elapsed: std::time::Duration::ZERO,
+            mode: ExplainMode::Analyze,
+            messages: notice.clone(),
+        };
+        assert_eq!(
+            run_messages::<usize>(None, (&0, &explained), Some("EXPLAIN ANALYZE SELECT f()")),
+            [Said {
+                index: 0,
+                sql: "EXPLAIN ANALYZE SELECT f()",
+                messages: &notice,
+            }]
+        );
+
+        // The slot is found wherever it sits in the strip, and a slot that is
+        // none of its results is the one past the end.
+        let queue = finished_queue(0);
+        assert_eq!(queue.slot_index(&12), 2);
+        assert_eq!(queue.slot_index(&99), queue.done.len());
+    }
+
+    #[test]
+    fn a_snapshot_keeps_its_messages_and_one_from_before_them_has_none() {
+        let older: store::StoredGrid =
+            serde_json::from_str(r#"{"columns": [], "rows": [], "total_rows": 0}"#)
+                .expect("an older snapshot must still decode");
+        assert!(restored_state(&older).messages().is_empty());
+
+        let said = store::StoredGrid {
+            messages: vec!["Changed database context to 'dbdelve_dev'.".into()],
+            ..older
+        };
+        let read: store::StoredGrid =
+            serde_json::from_str(&serde_json::to_string(&said).unwrap()).unwrap();
+        assert_eq!(restored_state(&read).messages(), said.messages);
+    }
+
     fn finished_queue(showing: usize) -> Queue<usize> {
         let complete = QueryState::Complete {
             rows: 1,
             bytes: 1,
             elapsed: std::time::Duration::ZERO,
             rows_affected: None,
+            messages: Vec::new(),
         };
         // A batch at 0 that answered with two sets, then a statement at 40,
         // whose grid is the slot's.
@@ -2895,6 +3148,7 @@ mod tests {
             bytes: 1,
             elapsed: std::time::Duration::ZERO,
             rows_affected: None,
+            messages: Vec::new(),
         };
         let queue = |done| Queue {
             sql: String::new(),
@@ -3158,6 +3412,7 @@ mod tests {
             bytes: 0,
             elapsed: std::time::Duration::ZERO,
             rows_affected: None,
+            messages: Vec::new(),
         };
         assert!(refreshing(Tab::Object(3), Some(&running)));
         assert!(!refreshing(Tab::Object(3), Some(&landed)));

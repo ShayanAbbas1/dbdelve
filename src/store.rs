@@ -317,6 +317,11 @@ pub struct StoredGrid {
     /// written before plans were kept, which restores with none.
     #[serde(default)]
     pub plan: Option<StoredPlan>,
+    /// What the server said running the statement behind these rows -- or
+    /// behind no rows at all, which is the one reason a snapshot is written
+    /// with no columns.
+    #[serde(default)]
+    pub messages: Vec<String>,
 }
 
 /// What rebuilds a query tab's plan: the rows `explain::parse` read it from,
@@ -1160,6 +1165,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             data_types: grid.data_types.clone(),
             cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
             plan: grid.plan.clone(),
+            messages: grid.messages.clone(),
         };
         &capped
     } else {
@@ -3422,6 +3428,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -3480,6 +3487,7 @@ open_objects = []
                 data_types: vec![Some("int4".into()), None],
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -3516,6 +3524,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -3569,6 +3578,7 @@ open_objects = []
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
                 plan: None,
+                messages: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");

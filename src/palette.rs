@@ -2692,7 +2692,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         if let Some(tab) = session.active_query_tab()
             && tab.flips_to_plan()
         {
-            items.push(match tab.showing_plan {
+            items.push(match tab.plan_shown().is_some() {
                 true => command("Show data", icon::TABLE, Command::ShowPlan(false), QUERY),
                 false => command("Show plan", icon::PLAN, Command::ShowPlan(true), QUERY),
             });

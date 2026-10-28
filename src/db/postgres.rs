@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use futures_util::{FutureExt, StreamExt, future::Fuse};
+use futures_util::{Stream, StreamExt, stream};
 use geozero::{CoordDimensions, ToWkt, wkb::Ewkb};
 use tokio::runtime::Runtime;
 use tokio_postgres::{
-    CancelToken, NoTls, SimpleQueryMessage, SimpleQueryStream, config::Host, error::SqlState,
+    AsyncMessage, CancelToken, NoTls, SimpleQueryMessage, SimpleQueryStream, config::Host,
+    error::SqlState,
 };
 
 use crate::tls;
@@ -587,7 +588,9 @@ fn quote(value: &str) -> String {
 
 type Error = tokio_postgres::Error;
 /// The driver's half of a connection, whose type differs with the TLS stream.
-type Socket = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+/// Read as a stream of its messages rather than awaited as a future: awaiting
+/// it logs each notice and drops it.
+type Socket = Pin<Box<dyn Stream<Item = Result<AsyncMessage, Error>> + Send>>;
 
 /// tokio-postgres on a current-thread runtime of its own, driven only while a
 /// call blocks on it: what the `postgres` crate does, which offers no way to
@@ -602,7 +605,10 @@ struct Client {
 
 struct Driver {
     runtime: Runtime,
-    connection: Fuse<Socket>,
+    /// `None` once the connection has ended, cleanly or with an error.
+    connection: Option<Socket>,
+    /// The server's notices, as psql prints them, in the order they came.
+    notices: Vec<String>,
 }
 
 impl Driver {
@@ -612,10 +618,25 @@ impl Driver {
     /// closed", not the server's FATAL, as it was under the `postgres` crate.
     fn block_on<T>(&mut self, future: impl Future<Output = T>) -> Result<T, Error> {
         let mut future = pin!(future);
-        let connection = &mut self.connection;
-        self.runtime.block_on(poll_fn(|cx| {
-            if let Poll::Ready(Err(error)) = connection.poll_unpin(cx) {
-                return Poll::Ready(Err(error));
+        let Self {
+            runtime,
+            connection,
+            notices,
+        } = self;
+        runtime.block_on(poll_fn(|cx| {
+            while let Some(socket) = connection {
+                match socket.poll_next_unpin(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(Some(Ok(AsyncMessage::Notice(notice)))) => {
+                        notices.push(notice_text(&notice));
+                    }
+                    Poll::Ready(Some(Ok(_))) => {}
+                    Poll::Ready(Some(Err(error))) => {
+                        *connection = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(None) => *connection = None,
+                }
             }
             future.as_mut().poll(cx).map(Ok)
         }))
@@ -624,18 +645,30 @@ impl Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
-        use futures_util::future::FusedFuture;
-        // A finished `Fuse` is pending forever, so waiting on one would sit out
-        // the whole grace period.
-        if self.connection.is_terminated() {
+        // An ended connection is pending forever, so waiting on one would sit
+        // out the whole grace period.
+        let Some(connection) = &mut self.connection else {
             return;
-        }
-        let connection = &mut self.connection;
+        };
+        let ended = async { while let Some(Ok(_)) = connection.next().await {} };
         // Built inside the runtime: a timer outside one has no clock to read.
         let _ = self
             .runtime
-            .block_on(async { tokio::time::timeout(Duration::from_secs(1), connection).await });
+            .block_on(async { tokio::time::timeout(Duration::from_secs(1), ended).await });
     }
+}
+
+/// psql's layout: the severity, then any `DETAIL` and `HINT` on lines of their
+/// own.
+fn notice_text(notice: &tokio_postgres::error::DbError) -> String {
+    let mut text = format!("{}:  {}", notice.severity(), notice.message());
+    if let Some(detail) = notice.detail() {
+        text.push_str(&format!("\nDETAIL:  {detail}"));
+    }
+    if let Some(hint) = notice.hint() {
+        text.push_str(&format!("\nHINT:  {hint}"));
+    }
+    text
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -721,10 +754,16 @@ impl Connection {
         let (client, connection) = match &connector {
             None => runtime
                 .block_on(tokio_postgres::connect(&string, NoTls))
-                .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
+                .map(|(client, mut connection)| {
+                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                    (client, Box::pin(socket) as Socket)
+                }),
             Some(connector) => runtime
                 .block_on(tokio_postgres::connect(&string, connector.clone()))
-                .map(|(client, connection)| (client, Box::pin(connection) as Socket)),
+                .map(|(client, mut connection)| {
+                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                    (client, Box::pin(socket) as Socket)
+                }),
         }
         .map_err(|error| {
             let mut failure = connect_error(&error, server);
@@ -741,7 +780,8 @@ impl Connection {
             client,
             driver: Driver {
                 runtime,
-                connection: connection.fuse(),
+                connection: Some(connection),
+                notices: Vec::new(),
             },
         };
         let row =
@@ -903,6 +943,7 @@ impl Connection {
             driver,
         } = &mut *client;
         let failed = |error: Error| query_error(&error, sql);
+        driver.notices.clear();
         let mut messages = Box::pin(
             driver
                 .block_on(inner.simple_query_raw(sql))
@@ -927,7 +968,11 @@ impl Connection {
                 .map_err(failed)??;
         }
         drop(messages);
+        let notices = std::mem::take(&mut driver.notices);
         let (mut result, commands) = assembly.finish();
+        if typed {
+            result.messages = notices;
+        }
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -2524,6 +2569,42 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_runs_notices_come_back_with_it_and_only_with_it() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let raised = connection
+            .query(
+                "DO $$ BEGIN RAISE NOTICE 'made it'; \
+                 RAISE WARNING 'careful' USING HINT = 'look'; END $$",
+                Fetch::default(),
+            )
+            .expect("the block should run");
+        assert_eq!(
+            raised.messages,
+            ["NOTICE:  made it", "WARNING:  careful\nHINT:  look"]
+        );
+
+        let dropped = connection
+            .query("DROP TABLE IF EXISTS no_such_163", Fetch::default())
+            .expect("the drop should run");
+        assert_eq!(
+            dropped.messages,
+            [r#"NOTICE:  table "no_such_163" does not exist, skipping"#]
+        );
+
+        connection
+            .query(
+                "DO $$ BEGIN RAISE NOTICE 'left behind'; RAISE EXCEPTION 'boom'; END $$",
+                Fetch::default(),
+            )
+            .expect_err("the block should fail");
+        let plain = connection
+            .query("SELECT 1", Fetch::default())
+            .expect("the select should run");
+        assert!(plain.messages.is_empty(), "{:?}", plain.messages);
     }
 
     fn live_profile() -> super::super::Connection {
