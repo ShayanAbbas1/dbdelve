@@ -768,7 +768,11 @@ fn write_response(
     // A client can send its next request as soon as Content-Length bytes
     // arrive (just the headers for an empty body), before this thread runs
     // again. A completed execution must already have released its session.
-    if !matches!(response.delivery, Delivery::Stalled(..)) || aftermath.is_some() {
+    let complete = match response.delivery {
+        Delivery::Stalled(sent, _) => !response.chunked && sent >= body.len(),
+        _ => true,
+    };
+    if complete || aftermath.is_some() {
         release_session(&mut decision.session, state);
     }
     stream.write_all(head.as_bytes())?;
@@ -1075,6 +1079,21 @@ mod tests {
         assert!(body.contains("SESSION_IS_LOCKED"), "{body}");
         first.join().unwrap();
         assert_eq!(text(post(&mock, "session_id=s1", "fast")), "y");
+    }
+
+    #[test]
+    fn a_stall_after_a_complete_body_does_not_hold_the_session() {
+        for body in ["", "done"] {
+            let mock = Mock::start();
+            mock.on_statement(
+                "complete",
+                [Response::body(body).stalled(body.len(), Duration::from_secs(10))],
+            );
+            mock.on_statement("next", [Response::body("ready")]);
+            assert_eq!(text(post(&mock, "session_id=s1", "complete")), body);
+            let (status, body) = failure_for(&mock, "session_id=s1", "next");
+            assert_eq!((status, body.as_str()), (200, "ready"));
+        }
     }
 
     fn failure_for(mock: &Mock, query: &str, statement: &str) -> (u16, String) {

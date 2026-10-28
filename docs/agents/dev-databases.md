@@ -24,8 +24,9 @@ is not healthy. The live tests are `cargo test clickhouse -- --include-ignored`.
 The ClickHouse HTTP mock releases a completed execution's session before its
 complete response becomes observable, including a zero-length body's headers.
 Releasing after socket shutdown races the client's next request and invents a
-`SESSION_IS_LOCKED`; delayed or stalled executions still hold their session
-until they finish or are stopped.
+`SESSION_IS_LOCKED`. A stall after an entire non-chunked body is complete too;
+incomplete delayed or stalled executions hold their session until they finish
+or are stopped.
 
 Snowflake has no container. Its unit tests need nothing, and neither do its
 mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses
