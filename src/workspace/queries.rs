@@ -1292,6 +1292,10 @@ impl Workspace {
             self.note(message, cx);
             return;
         }
+        let scratch_error = match tab {
+            Tab::Query(tab) => store::delete_scratch(&id, tab).err(),
+            Tab::Object(_) => None,
+        };
         let chip = match (tab, &previous) {
             (Tab::Query(_), Some(previous)) => Some(TabKey::Saved(previous.clone())),
             (Tab::Query(id), None) => Some(TabKey::Unsaved(id)),
@@ -1324,9 +1328,10 @@ impl Workspace {
                 }
             }
         }
-        if let Some(profile) = self.profile_mut() {
-            profile.session.notice = Some(format!("Saved {name}."));
-        }
+        self.note(
+            scratch_error.unwrap_or_else(|| format!("Saved {name}.")),
+            cx,
+        );
         self.remember_profiles(cx);
         cx.notify();
     }

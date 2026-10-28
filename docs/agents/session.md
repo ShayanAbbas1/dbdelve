@@ -276,9 +276,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   as deleted, so its stale library row and open tab can still be removed.
   Rename… on a sidebar row turns the row into a field
   (`Session::query_rename`) that renames through `store::save_query_as`,
-  the tab's own path, so an open tab follows the name. A rename is one
-  `fs::rename`, never a write and a delete: on a case-insensitive filesystem
-  `daily` and `Daily` are one file. A name taken in any case is refused.
+  the tab's own path, so an open tab follows the name. A rename is one native
+  atomic no-overwrite move, never a write under the new name and a delete of
+  the old one: on a case-insensitive filesystem `daily` and `Daily` are one
+  file. A name taken in any case is refused. New saves also install their
+  target without replacing an existing entry; a missed directory listing is
+  not permission to overwrite it. Staging files are private to each writer.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.
@@ -287,6 +290,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   writes, timers or retries. There are no background buffer writes to order
   against rename or deletion, so neither needs a per-tab write gate.
   A crash or forced termination can lose edits since the last write.
+  Giving an unnamed tab a query name removes that tab's old scratch only
+  after the query write succeeds. A cleanup error stays visible without
+  undoing the saved query, and a failed query write keeps the scratch.
   `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.

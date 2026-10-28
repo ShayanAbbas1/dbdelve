@@ -1004,12 +1004,12 @@ pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
 /// Write `sql` as `name`, moving the query's file there first when this
 /// renames `previous`.
 ///
-/// A rename is one `fs::rename` of the file, never a write under the new name
-/// and a delete of the old one: on a case-insensitive filesystem, `daily` and
-/// `Daily` are one file, and that delete would take the text with it. The
-/// text is written under the old name before the move, so a move that fails
-/// leaves it where it was. A name another query already has, in any case, is
-/// refused rather than written over.
+/// The text is written under the old name before a rename, so a move that
+/// fails leaves it where it was. New saves and renames install their target
+/// atomically without replacing another file: directory enumeration is only
+/// an early name-conflict check, not protection against an unseen target.
+/// The native rename also handles case-only changes when both names address
+/// the same entry, without treating case variants as interchangeable files.
 pub fn save_query_as(
     profile_id: &str,
     previous: Option<&str>,
@@ -1022,12 +1022,12 @@ pub fn save_query_as(
     {
         return Err(format!("A query named {taken} already exists."));
     }
-    match previous.filter(|previous| *previous != name) {
-        Some(previous) => {
+    match previous {
+        Some(previous) if previous != name => {
             write_query(profile_id, previous, sql)?;
             let from = query_path(profile_id, previous)?;
             let to = query_path(profile_id, name)?;
-            fs::rename(&from, &to).map_err(|error| {
+            rename_query(&from, &to).map_err(|error| {
                 format!(
                     "Could not rename {} to {}: {error}",
                     from.display(),
@@ -1035,7 +1035,8 @@ pub fn save_query_as(
                 )
             })
         }
-        None => write_query(profile_id, name, sql),
+        Some(_) => write_query(profile_id, name, sql),
+        None => write_file_with(&query_path(profile_id, name)?, sql, rename_query),
     }
 }
 
@@ -1464,26 +1465,106 @@ fn read_file(path: &Path) -> Result<Option<String>, String> {
 }
 
 pub(crate) fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+    write_file_with(path, contents, |from, to| fs::rename(from, to))
+}
+
+fn write_file_with(
+    path: &Path,
+    contents: &str,
+    install: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, contents)
-        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
-    // Set before the rename, not after: the rename is what makes this the file
-    // at `path`, so a mode applied afterward would leave it world-readable for
-    // however long the two steps are apart.
-    let written = secure(&temporary).and_then(|()| {
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("Could not replace {}: {error}", path.display()))
-    });
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+    // Each writer owns its staging file, even across application instances.
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("Could not create {}: {error}", temporary.display()))?;
+    let written = file
+        .write_all(contents.as_bytes())
+        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))
+        .and_then(|()| secure(&temporary))
+        .and_then(|()| {
+            drop(file);
+            install(&temporary, path)
+                .map_err(|error| format!("Could not replace {}: {error}", path.display()))
+        });
     if written.is_err() {
         // Nothing reads a leftover temporary, and every failed write would
         // otherwise leave one behind for good.
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// The filesystem, not a preceding existence check, decides whether the
+/// destination is free or is the source entry under different casing.
+fn rename_query(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both paths are valid NUL-terminated strings for this call.
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+        let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both paths are NUL-terminated; omitting REPLACE_EXISTING
+        // makes the move refuse an occupied destination.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "An atomic no-overwrite query rename is unavailable on this platform.",
+        ))
+    }
 }
 
 /// Where the theme files a user drops in, and the themes imported from other
@@ -3379,6 +3460,65 @@ open_objects = []
 
             assert_eq!(saved_queries("dev"), ["Daily"]);
             assert_eq!(read_query("dev", "Daily"), Ok(Some("SELECT 1".to_string())));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_or_renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").unwrap();
+            write_query("dev", "other", "SELECT 2").unwrap();
+            let directory = query_directory("dev").unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o300)).unwrap();
+            let hidden = fs::read_dir(&directory).is_err();
+            let saved = save_query_as("dev", None, "daily", "SELECT 9");
+            let renamed = save_query_as("dev", Some("other"), "daily", "SELECT 3");
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(saved.is_err());
+            assert!(renamed.is_err());
+            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".into())));
+            if hidden {
+                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 3".into())));
+            }
+        });
+    }
+
+    #[test]
+    fn racing_new_query_writes_install_only_one_complete_buffer() {
+        with_home(|| {
+            let path = query_path("dev", "daily").unwrap();
+            let ready = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let writers: Vec<_> = ["SELECT 1", "SELECT 2"]
+                    .into_iter()
+                    .map(|sql| {
+                        let path = &path;
+                        let ready = &ready;
+                        scope.spawn(move || {
+                            let result = write_file_with(path, sql, |from, to| {
+                                ready.wait();
+                                rename_query(from, to)
+                            });
+                            (sql, result)
+                        })
+                    })
+                    .collect();
+                writers
+                    .into_iter()
+                    .map(|writer| writer.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let winners: Vec<_> = results
+                .iter()
+                .filter(|(_, result)| result.is_ok())
+                .collect();
+            assert_eq!(winners.len(), 1);
+            assert_eq!(fs::read_to_string(&path).unwrap(), winners[0].0);
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         });
     }
 
