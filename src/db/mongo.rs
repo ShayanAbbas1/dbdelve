@@ -1538,15 +1538,22 @@ fn index(listed: &Document) -> Index {
             .get_document("key")
             .map(|key| {
                 key.iter()
-                    .map(
-                        |(field, order)| match order.clone().into_relaxed_extjson() {
+                    .flat_map(|(field, order)| match field.as_str() {
+                        // A text index's key is the server's `_fts`/`_ftsx`
+                        // pair; the fields it covers are only in `weights`.
+                        "_fts" => listed
+                            .get_document("weights")
+                            .map(|weights| weights.keys().map(|f| format!("{f} text")).collect())
+                            .unwrap_or_default(),
+                        "_ftsx" => Vec::new(),
+                        _ => vec![match order.clone().into_relaxed_extjson() {
                             serde_json::Value::Number(order) if order.as_f64() == Some(1.0) => {
                                 field.clone()
                             }
                             serde_json::Value::String(kind) => format!("{field} {kind}"),
                             order => format!("{field} {order}"),
-                        },
-                    )
+                        }],
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -3096,17 +3103,23 @@ mod tests {
         assert_eq!(primary.kind, IndexKind::Primary);
         assert_eq!(primary.columns, ["_id"]);
         let unique = index(&doc! {
-            "key": { "email": 1, "created": -1, "title": "text" },
+            "key": { "email": 1, "created": -1, "at": "2dsphere" },
             "name": "e",
             "unique": true,
             "partialFilterExpression": { "active": true },
         });
         assert_eq!(unique.kind, IndexKind::Unique);
-        assert_eq!(unique.columns, ["email", "created -1", "title text"]);
+        assert_eq!(unique.columns, ["email", "created -1", "at 2dsphere"]);
         assert_eq!(unique.predicate.as_deref(), Some(r#"{"active":true}"#));
         let plain = index(&doc! { "key": { "a": 1.0 }, "name": "a_1" });
         assert_eq!((plain.kind, plain.predicate), (IndexKind::Plain, None));
         assert_eq!(plain.columns, ["a"]);
+        let text = index(&doc! {
+            "key": { "tenant": 1, "_fts": "text", "_ftsx": 1 },
+            "name": "tenant_1_title_text_body_text",
+            "weights": { "body": 1, "title": 10 },
+        });
+        assert_eq!(text.columns, ["tenant", "body text", "title text"]);
     }
 
     #[test]
