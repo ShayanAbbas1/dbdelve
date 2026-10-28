@@ -10,6 +10,10 @@ trait (an anchored menu whose open state the library owns, which is the answer
 to the "GPUI drops view state" hazard under "Animation hazards" below rather than a dropdown of ours),
 `Root` dialog layers, resizable panels, `Spinner`, and the completion popup.
 
+Popup menus use the component theme's chrome font, even when opened from an
+editor or grid. The vendored `PopupMenu` resets the inherited family at its root
+so labels and submenus do not pick up the triggering surface's monospace font.
+
 **Completion is the library's.** `CompletionProvider` is the trait and the
 editor's `lsp.completion_provider` is a public field. No language server is
 involved: `lsp_types` is the vocabulary and nothing starts a process. The editor
