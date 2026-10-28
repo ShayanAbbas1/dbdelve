@@ -1043,50 +1043,78 @@ pub(crate) fn query_name_refusal(
     if let Err(message) = store::validate_query_name(name) {
         return Some(message);
     }
-    (keeping != Some(name) && saved_queries.iter().any(|saved| saved == name))
-        .then(|| format!("A query named {name} already exists."))
+    // Any case: on a filesystem that ignores it, a query that differs only
+    // by case is the same file, and saving over it would replace it.
+    saved_queries
+        .iter()
+        .find(|saved| Some(saved.as_str()) != keeping && store::same_query_name(saved, name))
+        .map(|saved| format!("A query named {saved} already exists."))
 }
 
 /// Whether a saved query's buffer still reads as its file does, as far as
 /// this buffer knows: what it last read from the file or wrote to it, kept
 /// as a length and a digest rather than a second copy of the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DiskState {
-    /// `None` for an unsaved buffer, which has no file to differ from.
-    file: Option<(usize, u64)>,
-    modified: bool,
+pub(crate) enum DiskState {
+    /// An unsaved buffer, which has no file to differ from.
+    #[default]
+    Unsaved,
+    /// A saved query whose file could not be read, so nothing says the buffer
+    /// matches it: modified until a write puts the buffer there.
+    Unknown,
+    /// What the file holds, and whether the buffer has moved off it.
+    Known {
+        len: usize,
+        hash: u64,
+        modified: bool,
+    },
 }
 
 impl DiskState {
     /// The file holds `text`, which is also what the buffer holds.
     pub(crate) fn holding(text: &str) -> Self {
-        Self {
-            file: Some((text.len(), digest(text))),
+        Self::Known {
+            len: text.len(),
+            hash: digest([text]),
             modified: false,
         }
     }
 
-    /// The buffer now holds `len` bytes, read out by `text` only when the
-    /// length alone cannot tell: most keystrokes change it.
-    pub(crate) fn edited(self, len: usize, text: impl FnOnce() -> String) -> Self {
-        let Some((on_disk, hash)) = self.file else {
-            return self;
-        };
-        Self {
-            modified: len != on_disk || digest(&text()) != hash,
-            ..self
+    /// The buffer now holds `len` bytes, whose pieces `chunks` reads out
+    /// only when the length alone cannot tell: most keystrokes change it.
+    pub(crate) fn edited<'a, I>(self, len: usize, chunks: impl FnOnce() -> I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        match self {
+            Self::Known {
+                len: on_disk, hash, ..
+            } => Self::Known {
+                len: on_disk,
+                hash,
+                modified: len != on_disk || digest(chunks()) != hash,
+            },
+            other => other,
         }
     }
 
     pub(crate) fn modified(self) -> bool {
-        self.modified
+        match self {
+            Self::Unsaved => false,
+            Self::Unknown => true,
+            Self::Known { modified, .. } => modified,
+        }
     }
 }
 
-fn digest(text: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
+/// One digest for a text however it is split into pieces, so a rope's chunks
+/// hash as the string they make up.
+fn digest<'a>(chunks: impl IntoIterator<Item = &'a str>) -> u64 {
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
+    for chunk in chunks {
+        hasher.write(chunk.as_bytes());
+    }
     hasher.finish()
 }
 
@@ -1780,9 +1808,10 @@ impl QueryTab {
         });
         // From the editor rather than the file: it normalises what it is
         // given, and a buffer is compared with what it holds, not the bytes.
-        let disk = match stored.name.is_some() && read {
-            true => DiskState::holding(&editor.read(cx).value()),
-            false => DiskState::default(),
+        let disk = match (&stored.name, read) {
+            (Some(_), true) => DiskState::holding(&editor.read(cx).value()),
+            (Some(_), false) => DiskState::Unknown,
+            (None, _) => DiskState::Unsaved,
         };
         cx.subscribe(&editor, |workspace, editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -3181,9 +3210,12 @@ mod tests {
         });
     }
 
+    fn typed(state: DiskState, text: &str) -> DiskState {
+        state.edited(text.len(), || [text])
+    }
+
     #[test]
     fn a_buffer_is_modified_until_it_reads_as_its_file_again() {
-        let typed = |state: DiskState, text: &str| state.edited(text.len(), || text.to_string());
         let loaded = DiskState::holding("SELECT 1");
         assert!(!loaded.modified());
 
@@ -3198,15 +3230,35 @@ mod tests {
     }
 
     #[test]
+    fn a_text_split_into_chunks_reads_as_the_whole_of_it() {
+        let state = DiskState::holding("SELECT 1 FROM t");
+        let split = state.edited(15, || ["SEL", "ECT 1 F", "ROM t"]);
+        assert!(!split.modified());
+    }
+
+    #[test]
     fn an_unsaved_buffer_is_never_modified_and_reads_nothing_to_say_so() {
-        let state = DiskState::default().edited(3, || unreachable!("no file to compare with"));
+        let state = DiskState::Unsaved.edited(3, || -> [&str; 0] {
+            unreachable!("no file to compare with")
+        });
         assert!(!state.modified());
     }
 
     #[test]
+    fn a_file_that_could_not_be_read_is_modified_until_written() {
+        // Nothing says the buffer matches a file it never saw, so no edit
+        // makes it clean; only the write that puts the buffer there does.
+        let unread = DiskState::Unknown;
+        assert!(unread.modified());
+        assert!(typed(unread, "").modified());
+        assert!(!DiskState::holding("").modified());
+    }
+
+    #[test]
     fn a_length_that_changed_is_modified_without_reading_the_text() {
-        let state =
-            DiskState::holding("SELECT 1").edited(20, || unreachable!("the length already says"));
+        let state = DiskState::holding("SELECT 1").edited(20, || -> [&str; 0] {
+            unreachable!("the length already says")
+        });
         assert!(state.modified());
     }
 
@@ -3220,6 +3272,12 @@ mod tests {
             Some("A query named weekly already exists.")
         );
         assert!(query_name_refusal("weekly", None, &saved).is_some());
+        // A name another query has in another case is that query's file.
+        assert_eq!(
+            query_name_refusal("WEEKLY", Some("daily"), &saved).as_deref(),
+            Some("A query named weekly already exists.")
+        );
+        assert_eq!(query_name_refusal("Daily", Some("daily"), &saved), None);
         assert!(query_name_refusal(".hidden", None, &saved).is_some());
         assert!(query_name_refusal("  ", None, &saved).is_some());
     }

@@ -992,22 +992,48 @@ pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     fs::remove_file(&path).map_err(|error| format!("Could not delete {}: {error}", path.display()))
 }
 
-/// Write `sql` as `name`, then drop `previous` when this is a rename.
+/// Write `sql` as `name`, moving the query's file there first when this
+/// renames `previous`.
 ///
-/// Written first, then the old name dropped: a failed delete leaves two
-/// copies, which is recoverable, and the other order loses the query. `Err`
-/// is a write that failed and changed nothing; `Ok(Some)` is the old copy
-/// left behind, said once the new name already holds the text.
+/// A rename is one `fs::rename` of the file, never a write under the new name
+/// and a delete of the old one: on a case-insensitive filesystem, `daily` and
+/// `Daily` are one file, and that delete would take the text with it. The
+/// text is written under the old name before the move, so a move that fails
+/// leaves it where it was. A name another query already has, in any case, is
+/// refused rather than written over.
 pub fn save_query_as(
     profile_id: &str,
     previous: Option<&str>,
     name: &str,
     sql: &str,
-) -> Result<Option<String>, String> {
-    write_query(profile_id, name, sql)?;
-    Ok(previous
-        .filter(|previous| *previous != name)
-        .and_then(|previous| delete_query(profile_id, previous).err()))
+) -> Result<(), String> {
+    if let Some(taken) = saved_queries(profile_id)
+        .into_iter()
+        .find(|taken| Some(taken.as_str()) != previous && same_query_name(taken, name))
+    {
+        return Err(format!("A query named {taken} already exists."));
+    }
+    match previous.filter(|previous| *previous != name) {
+        Some(previous) => {
+            write_query(profile_id, previous, sql)?;
+            let from = query_path(profile_id, previous)?;
+            let to = query_path(profile_id, name)?;
+            fs::rename(&from, &to).map_err(|error| {
+                format!(
+                    "Could not rename {} to {}: {error}",
+                    from.display(),
+                    to.display()
+                )
+            })
+        }
+        None => write_query(profile_id, name, sql),
+    }
+}
+
+/// Whether two query names would name one file on a filesystem that ignores
+/// case, which macOS's and Windows's do by default.
+pub fn same_query_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 
 /// Delete `name`, first writing `kept`, the text of the tab holding it, to
@@ -3354,29 +3380,57 @@ open_objects = []
     }
 
     #[test]
-    fn a_rename_writes_the_new_name_before_dropping_the_old() {
+    fn a_rename_moves_the_file_and_a_failed_one_changes_nothing() {
         with_home(|| {
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
             assert_eq!(
-                save_query_as("dev", Some("daily"), "nightly", "SELECT 1"),
-                Ok(None)
+                save_query_as("dev", Some("daily"), "nightly", "SELECT 1 -- edited"),
+                Ok(())
             );
             assert_eq!(saved_queries("dev"), ["nightly"]);
-
-            // A write that fails changes nothing.
-            block("dev", "stuck.sql");
-            assert!(save_query_as("dev", Some("nightly"), "stuck", "SELECT 1").is_err());
             assert_eq!(
                 read_query("dev", "nightly"),
-                Ok(Some("SELECT 1".to_string()))
+                Ok(Some("SELECT 1 -- edited".to_string()))
             );
 
-            // An old name that will not go is said, with the text already
-            // under the new one: two copies, never none.
+            // An old name that will not take the text stops the rename.
             block("dev", "held.sql");
-            let left = save_query_as("dev", Some("held"), "kept", "SELECT 2");
-            assert!(matches!(left, Ok(Some(_))), "{left:?}");
-            assert_eq!(read_query("dev", "kept"), Ok(Some("SELECT 2".to_string())));
+            assert!(save_query_as("dev", Some("held"), "kept", "SELECT 2").is_err());
+            assert_eq!(read_query("dev", "kept"), Ok(None));
+        });
+    }
+
+    #[test]
+    fn a_rename_that_only_changes_case_keeps_the_text() {
+        // On a case-insensitive filesystem the two names are one file: a
+        // write under the new name and a delete of the old one deletes both.
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+
+            assert_eq!(
+                save_query_as("dev", Some("daily"), "Daily", "SELECT 1"),
+                Ok(())
+            );
+
+            assert_eq!(saved_queries("dev"), ["Daily"]);
+            assert_eq!(read_query("dev", "Daily"), Ok(Some("SELECT 1".to_string())));
+        });
+    }
+
+    #[test]
+    fn a_name_another_query_has_in_another_case_is_refused() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            write_query("dev", "weekly", "SELECT 7").expect("a query must write");
+
+            assert!(save_query_as("dev", Some("daily"), "WEEKLY", "SELECT 1").is_err());
+            assert!(save_query_as("dev", None, "Weekly", "SELECT 9").is_err());
+
+            assert_eq!(
+                read_query("dev", "weekly"),
+                Ok(Some("SELECT 7".to_string()))
+            );
+            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".to_string())));
         });
     }
 

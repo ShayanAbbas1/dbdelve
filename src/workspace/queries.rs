@@ -1237,13 +1237,9 @@ impl Workspace {
         }
 
         let sql = editor.read(cx).value().to_string();
-        match store::save_query_as(&id, previous.as_deref(), &name, &sql) {
-            Ok(None) => {}
-            Ok(Some(message)) => self.note(message, cx),
-            Err(message) => {
-                self.note(message, cx);
-                return;
-            }
+        if let Err(message) = store::save_query_as(&id, previous.as_deref(), &name, &sql) {
+            self.note(message, cx);
+            return;
         }
         let chip = match (tab, &previous) {
             (Tab::Query(_), Some(previous)) => Some(TabKey::Saved(previous.clone())),
@@ -1626,10 +1622,9 @@ impl Workspace {
                     .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
             },
         };
-        let written = sql.and_then(|sql| {
-            store::save_query_as(&id, Some(&previous), &typed, &sql).map(|left| (sql, left))
-        });
-        let (sql, left) = match written {
+        let written = sql
+            .and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql).map(|()| sql));
+        let sql = match written {
             Ok(written) => written,
             Err(message) => {
                 if let Some(rename) = self
@@ -1653,8 +1648,7 @@ impl Workspace {
                     tab.disk.set(DiskState::holding(&sql));
                 }
             }
-            profile.session.notice =
-                Some(left.unwrap_or_else(|| format!("Renamed {previous} to {typed}.")));
+            profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
         }
         self.end_query_rename(cx);
         self.reload_saved_queries(cx);
@@ -1699,8 +1693,8 @@ impl Workspace {
             return;
         };
         let was = tab.disk.get();
-        let state = editor.read(cx);
-        let now = was.edited(state.text().len(), || state.value().to_string());
+        let text = editor.read(cx).text();
+        let now = was.edited(text.len(), || text.chunks());
         if now != was {
             tab.disk.set(now);
             cx.notify();
@@ -1745,7 +1739,7 @@ impl Workspace {
                     .rekey(&TabKey::Saved(name.clone()), TabKey::Unsaved(holder));
                 if let Some(tab) = profile.session.query_tab_mut(holder) {
                     tab.open_query = None;
-                    tab.disk.set(DiskState::default());
+                    tab.disk.set(DiskState::Unsaved);
                 }
             }
         }
