@@ -334,6 +334,15 @@ Decided, and not to be re-litigated:
 - **`CHECK` constraints are absent** from the Structure tab on MySQL and SQLite.
   SQLite keeps them only in the `CREATE TABLE` text; MySQL's
   `information_schema.CHECK_CONSTRAINTS` only exists from 8.0.16.
+- **An index's kind, key and partial condition come from the catalog, never
+  from parsing its definition** (`db::Index`). A key crosses `assemble_structure`
+  joined by `chr(31)`, since `, ` splits `coalesce(a, b)`. Where a catalog falls
+  short: SQLite names no expression key and keeps a partial condition only in
+  the `CREATE INDEX` text, so both are read from it; MySQL's `EXPRESSION`
+  (8.0.13+) is read inside a `/*!80013 */` comment, which MariaDB, lacking the
+  column, skips; DuckDB keeps no key order; ClickHouse's keys are split at
+  top-level commas and are all plain; MongoDB's key reads `email`, `created -1`,
+  `title text`, and its `partialFilterExpression` is the condition.
 - **MySQL verifies certificates against `webpki-roots`**, not the platform
   trust store the Postgres path reads. It fails loudly, which `AGENTS.md` hard rule 6 permits.
 - **SQL Server identifiers are double-quoted, not bracketed.** The grammar

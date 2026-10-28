@@ -108,7 +108,7 @@ source: src/sql_snapshots.rs
 [postgres] skips_duplicates_into no key => |true|
 [postgres] skips_duplicates_into primary key constraint => |true|
 [postgres] skips_duplicates_into unique constraint => |true|
-[postgres] skips_duplicates_into lower-case unique index => |true|
+[postgres] skips_duplicates_into unique index => |true|
 [postgres] unquote_identifier "a""b" => |a"b|
 [postgres] unquote_identifier `a``b` => |`a``b`|
 [postgres] unquote_identifier a => |a|
@@ -263,7 +263,7 @@ source: src/sql_snapshots.rs
 [mysql] skips_duplicates_into no key => |true|
 [mysql] skips_duplicates_into primary key constraint => |true|
 [mysql] skips_duplicates_into unique constraint => |true|
-[mysql] skips_duplicates_into lower-case unique index => |true|
+[mysql] skips_duplicates_into unique index => |true|
 [mysql] unquote_identifier "a""b" => |"a""b"|
 [mysql] unquote_identifier `a``b` => |a`b|
 [mysql] unquote_identifier a => |a|
@@ -418,7 +418,7 @@ source: src/sql_snapshots.rs
 [mariadb] skips_duplicates_into no key => |true|
 [mariadb] skips_duplicates_into primary key constraint => |true|
 [mariadb] skips_duplicates_into unique constraint => |true|
-[mariadb] skips_duplicates_into lower-case unique index => |true|
+[mariadb] skips_duplicates_into unique index => |true|
 [mariadb] unquote_identifier "a""b" => |"a""b"|
 [mariadb] unquote_identifier `a``b` => |a`b|
 [mariadb] unquote_identifier a => |a|
@@ -573,7 +573,7 @@ source: src/sql_snapshots.rs
 [sqlite] skips_duplicates_into no key => |true|
 [sqlite] skips_duplicates_into primary key constraint => |true|
 [sqlite] skips_duplicates_into unique constraint => |true|
-[sqlite] skips_duplicates_into lower-case unique index => |true|
+[sqlite] skips_duplicates_into unique index => |true|
 [sqlite] unquote_identifier "a""b" => |a"b|
 [sqlite] unquote_identifier `a``b` => |`a``b`|
 [sqlite] unquote_identifier a => |a|
@@ -728,7 +728,7 @@ source: src/sql_snapshots.rs
 [turso] skips_duplicates_into no key => |true|
 [turso] skips_duplicates_into primary key constraint => |true|
 [turso] skips_duplicates_into unique constraint => |true|
-[turso] skips_duplicates_into lower-case unique index => |true|
+[turso] skips_duplicates_into unique index => |true|
 [turso] unquote_identifier "a""b" => |a"b|
 [turso] unquote_identifier `a``b` => |`a``b`|
 [turso] unquote_identifier a => |a|
@@ -883,7 +883,7 @@ source: src/sql_snapshots.rs
 [duckdb] skips_duplicates_into no key => |false|
 [duckdb] skips_duplicates_into primary key constraint => |true|
 [duckdb] skips_duplicates_into unique constraint => |true|
-[duckdb] skips_duplicates_into lower-case unique index => |true|
+[duckdb] skips_duplicates_into unique index => |true|
 [duckdb] unquote_identifier "a""b" => |a"b|
 [duckdb] unquote_identifier `a``b` => |`a``b`|
 [duckdb] unquote_identifier a => |a|
@@ -1038,7 +1038,7 @@ source: src/sql_snapshots.rs
 [snowflake] skips_duplicates_into no key => |false|
 [snowflake] skips_duplicates_into primary key constraint => |false|
 [snowflake] skips_duplicates_into unique constraint => |false|
-[snowflake] skips_duplicates_into lower-case unique index => |false|
+[snowflake] skips_duplicates_into unique index => |false|
 [snowflake] unquote_identifier "a""b" => |a"b|
 [snowflake] unquote_identifier `a``b` => |`a``b`|
 [snowflake] unquote_identifier a => |a|
@@ -1193,7 +1193,7 @@ source: src/sql_snapshots.rs
 [clickhouse] skips_duplicates_into no key => |false|
 [clickhouse] skips_duplicates_into primary key constraint => |false|
 [clickhouse] skips_duplicates_into unique constraint => |false|
-[clickhouse] skips_duplicates_into lower-case unique index => |false|
+[clickhouse] skips_duplicates_into unique index => |false|
 [clickhouse] unquote_identifier "a""b" => |"a""b"|
 [clickhouse] unquote_identifier `a``b` => |a`b|
 [clickhouse] unquote_identifier a => |a|
@@ -1348,7 +1348,7 @@ source: src/sql_snapshots.rs
 [mssql] skips_duplicates_into no key => |false|
 [mssql] skips_duplicates_into primary key constraint => |false|
 [mssql] skips_duplicates_into unique constraint => |false|
-[mssql] skips_duplicates_into lower-case unique index => |false|
+[mssql] skips_duplicates_into unique index => |false|
 [mssql] unquote_identifier "a""b" => |a"b|
 [mssql] unquote_identifier `a``b` => |`a``b`|
 [mssql] unquote_identifier a => |a|
@@ -1503,7 +1503,7 @@ source: src/sql_snapshots.rs
 [mongodb] skips_duplicates_into no key => |false|
 [mongodb] skips_duplicates_into primary key constraint => |false|
 [mongodb] skips_duplicates_into unique constraint => |false|
-[mongodb] skips_duplicates_into lower-case unique index => |false|
+[mongodb] skips_duplicates_into unique index => |false|
 [mongodb] unquote_identifier "a""b" => |"a""b"|
 [mongodb] unquote_identifier `a``b` => |`a``b`|
 [mongodb] unquote_identifier a => |a|
@@ -1658,7 +1658,7 @@ source: src/sql_snapshots.rs
 [redis] skips_duplicates_into no key => |false|
 [redis] skips_duplicates_into primary key constraint => |false|
 [redis] skips_duplicates_into unique constraint => |false|
-[redis] skips_duplicates_into lower-case unique index => |false|
+[redis] skips_duplicates_into unique index => |false|
 [redis] unquote_identifier "a""b" => |"a""b"|
 [redis] unquote_identifier `a``b` => |`a``b`|
 [redis] unquote_identifier a => |a|

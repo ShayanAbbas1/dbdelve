@@ -469,12 +469,10 @@ impl Engine {
                 structure.constraints.iter().any(|constraint| {
                     constraint.definition.starts_with("PRIMARY KEY (")
                         || constraint.definition.starts_with("UNIQUE (")
-                }) || structure.indexes.iter().any(|index| {
-                    index
-                        .definition
-                        .get(..20)
-                        .is_some_and(|start| start.eq_ignore_ascii_case("CREATE UNIQUE INDEX "))
-                })
+                }) || structure
+                    .indexes
+                    .iter()
+                    .any(|index| index.kind != IndexKind::Plain)
             }
             SkipDuplicates::OnConflictDoNothing {
                 needs_unique_key: false,
@@ -2208,7 +2206,7 @@ impl Catalog {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Structure {
     pub columns: Vec<ColumnDefinition>,
-    pub indexes: Vec<NamedDefinition>,
+    pub indexes: Vec<Index>,
     pub constraints: Vec<NamedDefinition>,
     pub foreign_keys: Vec<ForeignKey>,
     /// The single-column foreign keys of other relations that point at this one.
@@ -2265,13 +2263,35 @@ pub struct ColumnDefinition {
     pub default: Option<String>,
 }
 
-/// An index or a constraint, as the name plus the server's own rendering of it.
-/// Postgres already prints both as readable DDL, so parsing them into fields
-/// would only lose information.
+/// A constraint, as the name plus the server's own rendering of it. Postgres
+/// already prints one as readable DDL, so parsing it into fields would only
+/// lose information.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedDefinition {
     pub name: String,
     pub definition: String,
+}
+
+/// An index as fields read from the catalog it was rendered from, beside the
+/// server's own rendering, which is what DDL is written from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Index {
+    pub name: String,
+    pub kind: IndexKind,
+    /// The key, one column or expression per entry in order, each as the
+    /// server renders it: `lower(email)`, `created_at DESC`, `name(10)`.
+    /// Included columns are not key, and show only in the definition.
+    pub columns: Vec<String>,
+    /// A partial index's condition, without its `WHERE`.
+    pub predicate: Option<String>,
+    pub definition: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexKind {
+    Primary,
+    Unique,
+    Plain,
 }
 
 /// One column of one relation, and the column it references. Enough to write a
@@ -2833,16 +2853,29 @@ pub(super) fn assemble_structure(
         });
     }
 
-    for (result, into) in [
-        (&indexes, &mut structure.indexes),
-        (&constraints, &mut structure.constraints),
-    ] {
-        for row in &result.rows {
-            into.push(NamedDefinition {
-                name: required_cell(result, row, "object_name")?.to_string(),
-                definition: required_cell(result, row, "definition")?.to_string(),
-            });
-        }
+    for row in &indexes.rows {
+        structure.indexes.push(Index {
+            name: required_cell(&indexes, row, "object_name")?.to_string(),
+            kind: match required_cell(&indexes, row, "index_kind")? {
+                "primary" => IndexKind::Primary,
+                "unique" => IndexKind::Unique,
+                "plain" => IndexKind::Plain,
+                value => return Err(unexpected_catalog_value("index kind", value)),
+            },
+            // Split on the unit separator rather than `, `, which an
+            // expression such as `coalesce(a, b)` holds.
+            columns: optional_cell(&indexes, row, "index_columns")
+                .map(|columns| columns.split('\u{1f}').map(str::to_string).collect())
+                .unwrap_or_default(),
+            predicate: optional_cell(&indexes, row, "index_predicate").map(str::to_string),
+            definition: required_cell(&indexes, row, "definition")?.to_string(),
+        });
+    }
+    for row in &constraints.rows {
+        structure.constraints.push(NamedDefinition {
+            name: required_cell(&constraints, row, "object_name")?.to_string(),
+            definition: required_cell(&constraints, row, "definition")?.to_string(),
+        });
     }
 
     Ok(structure)
@@ -2860,7 +2893,7 @@ pub(super) fn create_table(
     head: &str,
     structure: &Structure,
     tail: &str,
-    index: impl Fn(&NamedDefinition) -> String,
+    index: impl Fn(&Index) -> String,
 ) -> String {
     let columns = structure.columns.iter().map(|column| {
         let name = engine.quote_identifier(&column.name);
@@ -4330,8 +4363,29 @@ mod tests {
             ],
         );
         let indexes = result(
-            &["object_name", "definition"],
-            &[&[Some("accounts_pkey"), Some("CREATE UNIQUE INDEX …")]],
+            &[
+                "object_name",
+                "index_kind",
+                "index_columns",
+                "index_predicate",
+                "definition",
+            ],
+            &[
+                &[
+                    Some("accounts_pkey"),
+                    Some("primary"),
+                    Some("id"),
+                    None,
+                    Some("CREATE UNIQUE INDEX …"),
+                ],
+                &[
+                    Some("accounts_label"),
+                    Some("plain"),
+                    Some("coalesce(label, id::text)\u{1f}id DESC"),
+                    Some("label IS NOT NULL"),
+                    Some("CREATE INDEX …"),
+                ],
+            ],
         );
         let constraints = result(
             &["object_name", "definition"],
@@ -4357,7 +4411,25 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(structure.indexes[0].name, "accounts_pkey");
+        assert_eq!(
+            structure.indexes,
+            vec![
+                Index {
+                    name: "accounts_pkey".into(),
+                    kind: IndexKind::Primary,
+                    columns: vec!["id".into()],
+                    predicate: None,
+                    definition: "CREATE UNIQUE INDEX …".into(),
+                },
+                Index {
+                    name: "accounts_label".into(),
+                    kind: IndexKind::Plain,
+                    columns: vec!["coalesce(label, id::text)".into(), "id DESC".into()],
+                    predicate: Some("label IS NOT NULL".into()),
+                    definition: "CREATE INDEX …".into(),
+                },
+            ]
+        );
         assert_eq!(structure.constraints[0].definition, "PRIMARY KEY (id)");
     }
 
@@ -4611,7 +4683,15 @@ mod tests {
                 column("note", "nvarchar(40)", true, Some("(N'x')")),
                 column("twice", "int", true, Some("AS ([id]*(2))")),
             ],
-            indexes: vec![named("pk", "CLUSTERED INDEX (id)"), named("by_note", "x")],
+            indexes: [("pk", IndexKind::Primary), ("by_note", IndexKind::Plain)]
+                .map(|(name, kind)| Index {
+                    name: name.into(),
+                    kind,
+                    columns: Vec::new(),
+                    predicate: None,
+                    definition: String::new(),
+                })
+                .to_vec(),
             constraints: vec![
                 named("pk", "PRIMARY KEY (id)"),
                 named("by_note", "CHECK (note <> N'')"),

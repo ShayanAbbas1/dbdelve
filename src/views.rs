@@ -54,8 +54,9 @@ use crate::{
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Control, Tone, button, button_label, compact_count, group_thousands, icon_button, key_hint,
-        keycap_text, kind_color, object_icon, reconnect_button, row_icon, section_label,
+        Code, Control, Tone, button, button_label, code_highlights, compact_count, group_thousands,
+        icon_button, key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
+        section_label,
     },
     workspace::error_in_buffer,
 };
@@ -687,7 +688,7 @@ fn plan_detail(
         highlights.push((value_start..line.len(), tint(t.danger)));
     } else if explain::is_expression(key) {
         highlights.extend(
-            sql_highlights(value, syntax)
+            code_highlights(value, db::Syntax::Sql, Code::Expression, syntax)
                 .into_iter()
                 .map(|(range, style)| (shifted(range), style)),
         );
@@ -700,38 +701,6 @@ fn plan_detail(
     }
     highlights.retain(|(range, _)| !range.is_empty());
     StyledText::new(line).with_highlights(highlights)
-}
-
-thread_local! {
-    // Building one compiles the grammar's highlight query, which is far too
-    // slow to pay for every qualifier on every frame the plan redraws.
-    static SQL_HIGHLIGHTER: std::cell::RefCell<SyntaxHighlighter> =
-        std::cell::RefCell::new(SyntaxHighlighter::new("sql"));
-}
-
-/// An expression from a plan, highlighted as the editor would. It is parsed
-/// behind a `SELECT ` so the grammar reads an expression rather than a broken
-/// statement; what it still cannot read is left unstyled, never dropped.
-fn sql_highlights(
-    expression: &str,
-    syntax: &HighlightTheme,
-) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-    const PREFIX: &str = "SELECT ";
-    let text = format!("{PREFIX}{expression}");
-    SQL_HIGHLIGHTER
-        .with_borrow_mut(|highlighter| {
-            highlighter.update(None, &Rope::from_str(&text), None);
-            highlighter.styles(&(PREFIX.len()..text.len()), syntax)
-        })
-        .into_iter()
-        .map(|(range, style)| {
-            (
-                range.start.saturating_sub(PREFIX.len())..range.end.saturating_sub(PREFIX.len()),
-                style,
-            )
-        })
-        .filter(|(range, _)| !range.is_empty())
-        .collect()
 }
 
 /// A statement on one line, for the header strip that says what was explained.
@@ -3647,41 +3616,4 @@ fn choice_chip(
             apply(workspace, window, cx);
         }))
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_plan_expression_is_highlighted_within_itself_whatever_it_holds() {
-        let syntax = HighlightTheme::default_dark();
-        for expression in [
-            "((status)::text = 'paid'::text)",
-            "(o.account_id = a.id)",
-            "a.created_at DESC",
-            "",
-            "é ' ( ;; \u{1F600}",
-        ] {
-            for (range, _) in sql_highlights(expression, &syntax) {
-                assert!(range.end <= expression.len(), "{expression:?} {range:?}");
-                assert!(expression.is_char_boundary(range.start));
-                assert!(expression.is_char_boundary(range.end));
-            }
-        }
-
-        let expression = "(balance > 100) AND (name = 'x')";
-        let keyword = syntax
-            .style
-            .syntax
-            .style("keyword")
-            .and_then(|style| style.color);
-        assert!(keyword.is_some());
-        assert!(
-            sql_highlights(expression, &syntax)
-                .iter()
-                .any(|(range, style)| &expression[range.clone()] == "AND"
-                    && style.color == keyword)
-        );
-    }
 }

@@ -867,14 +867,23 @@ impl Session {
             .insert_target()
     }
 
-    /// Every buffer highlighted and prompted for `syntax`, once an edit has
-    /// moved the profile to an engine written in another language.
+    /// Every buffer and structure grid highlighted (and every buffer prompted)
+    /// for `syntax`, once an edit has moved the profile to an engine written in
+    /// another language.
     pub(crate) fn set_syntax(&self, syntax: Syntax, window: &mut Window, cx: &mut App) {
         for tab in &self.queries {
             tab.editor.update(cx, |editor, cx| {
                 editor.set_highlighter(syntax.highlighter(), cx);
                 editor.set_placeholder(syntax.placeholder(), window, cx);
             });
+        }
+        for tab in &self.objects {
+            if let ObjectBody::Structure { grid, .. } = &tab.body {
+                grid.update(cx, |table, cx| {
+                    table.delegate_mut().set_syntax(syntax);
+                    cx.notify();
+                });
+            }
         }
     }
 

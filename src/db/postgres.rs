@@ -225,9 +225,31 @@ WHERE namespace.nspname = {schema}
 ORDER BY attribute.attnum
 ";
 
+// A key column's own rendering leaves out its order, which `indoption` holds:
+// bit 1 for DESC, bit 2 for NULLS FIRST, each spelled only where it is not the
+// default for the direction. Columns past `indnkeyatts` are INCLUDE columns.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT
     index_class.relname AS object_name,
+    CASE
+        WHEN index_entry.indisprimary THEN 'primary'
+        WHEN index_entry.indisunique THEN 'unique'
+        ELSE 'plain'
+    END AS index_kind,
+    (
+        SELECT string_agg(
+            pg_catalog.pg_get_indexdef(index_entry.indexrelid, key, true)
+                || CASE index_entry.indoption[key - 1] & 3
+                    WHEN 1 THEN ' DESC NULLS LAST'
+                    WHEN 2 THEN ' NULLS FIRST'
+                    WHEN 3 THEN ' DESC'
+                    ELSE ''
+                END,
+            chr(31) ORDER BY key
+        )
+        FROM generate_series(1, index_entry.indnkeyatts) AS key
+    ) AS index_columns,
+    pg_catalog.pg_get_expr(index_entry.indpred, index_entry.indrelid, true) AS index_predicate,
     pg_catalog.pg_get_indexdef(index_entry.indexrelid) AS definition
 FROM pg_catalog.pg_index AS index_entry
 JOIN pg_catalog.pg_class AS index_class
@@ -1785,7 +1807,7 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKey, RelationKind, RoutineKind, SslMode, result, rows};
+    use crate::db::{ForeignKey, IndexKind, RelationKind, RoutineKind, SslMode, result, rows};
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -3604,8 +3626,8 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through PG*"]
     fn live_structure_round_trip() {
-        let structure = Connection::open(&live_config())
-            .expect("connection should open")
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let structure = connection
             .structure("public", "accounts")
             .expect("structure should load");
 
@@ -3638,7 +3660,45 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition.starts_with("PRIMARY KEY"))
         );
-        assert!(!structure.indexes.is_empty(), "the primary key is an index");
+        let kinds: Vec<_> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "accounts_external_id_key",
+                    IndexKind::Unique,
+                    vec!["external_id".into()]
+                ),
+                ("accounts_pkey", IndexKind::Primary, vec!["id".into()]),
+            ]
+        );
+
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_indexes; \
+                 CREATE TABLE dbdelve_test_indexes (id bigint, email text, note text); \
+                 CREATE INDEX dbdelve_test_indexes_partial \
+                     ON dbdelve_test_indexes (lower(email), id DESC) INCLUDE (note) \
+                     WHERE coalesce(note, 'a, b') <> ''",
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let fixture = connection.structure("public", "dbdelve_test_indexes");
+        connection
+            .query("DROP TABLE dbdelve_test_indexes", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let index = &fixture.expect("structure should load").indexes[0];
+        assert_eq!(index.kind, IndexKind::Plain);
+        assert_eq!(index.columns, ["lower(email)", "id DESC"]);
+        assert_eq!(
+            index.predicate.as_deref(),
+            Some("COALESCE(note, 'a, b'::text) <> ''::text")
+        );
+        assert!(index.definition.contains("INCLUDE (note)"), "{index:?}");
     }
 
     #[test]

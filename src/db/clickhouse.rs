@@ -129,23 +129,25 @@ WHERE database = {schema} AND table = {relation}
 ORDER BY position";
 
 /// What the table is stored by, then each skip index. A view and a dictionary
-/// have none of these keys and so give no row.
+/// have none of these keys and so give no row. Each key comes as one
+/// expression list, split by `structure`.
 const STRUCTURE_INDEXES_SQL: &str = "
-SELECT object_name, definition FROM (
-    SELECT 0 AS position, 'sorting key' AS object_name,
+SELECT object_name, 'plain' AS index_kind, index_columns, definition FROM (
+    SELECT 0 AS position, 'sorting key' AS object_name, sorting_key AS index_columns,
         concat('ORDER BY (', sorting_key, ')') AS definition
     FROM system.tables
     WHERE database = {schema} AND name = {relation} AND sorting_key != ''
     UNION ALL
-    SELECT 1, 'partition key', concat('PARTITION BY ', partition_key)
+    SELECT 1, 'partition key', partition_key, concat('PARTITION BY ', partition_key)
     FROM system.tables
     WHERE database = {schema} AND name = {relation} AND partition_key != ''
     UNION ALL
-    SELECT 2, 'sampling key', concat('SAMPLE BY ', sampling_key)
+    SELECT 2, 'sampling key', sampling_key, concat('SAMPLE BY ', sampling_key)
     FROM system.tables
     WHERE database = {schema} AND name = {relation} AND sampling_key != ''
     UNION ALL
-    SELECT 3, name, concat(expr, ' TYPE ', type_full, ' GRANULARITY ', toString(granularity))
+    SELECT 3, name, expr,
+        concat(expr, ' TYPE ', type_full, ' GRANULARITY ', toString(granularity))
     FROM system.data_skipping_indices
     WHERE database = {schema} AND table = {relation}
 )
@@ -715,6 +717,13 @@ impl Connection {
         let constraints =
             self.internal_query(&structure_sql(STRUCTURE_CONSTRAINTS_SQL, schema, relation))?;
         let mut structure = assemble_structure(columns, indexes, constraints)?;
+        for index in &mut structure.indexes {
+            index.columns = index
+                .columns
+                .iter()
+                .flat_map(|key| key_expressions(key))
+                .collect();
+        }
         for constraint in &mut structure.constraints {
             if let Some(columns) = constraint
                 .definition
@@ -1296,6 +1305,32 @@ fn preview_of(sql: &str) -> Option<(String, String)> {
         ([schema, table], [Projected::Every]) => Some((schema.clone(), table.clone())),
         _ => None,
     }
+}
+
+/// `a, toDate(b)` as its two expressions. A comma inside brackets, a string
+/// or a quoted name splits nothing. Not TSV's `first_top_level_comma`, which
+/// reads a type, where only `'` quotes.
+fn key_expressions(key: &str) -> Vec<String> {
+    let (mut depth, mut quote, mut escaped, mut start) = (0usize, None, false, 0);
+    let mut expressions = Vec::new();
+    for (at, c) in key.char_indices() {
+        match (quote, c) {
+            _ if escaped => escaped = false,
+            (Some(_), '\\') => escaped = true,
+            (Some(close), _) if c == close => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '`' | '"') => quote = Some(c),
+            (None, '(' | '[') => depth += 1,
+            (None, ')' | ']') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                expressions.push(key[start..at].trim().to_string());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    expressions.push(key[start..].trim().to_string());
+    expressions
 }
 
 /// The columns of a key the server printed as SQL: `system.tables` gives
@@ -3649,7 +3684,7 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
-    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, is_cancel};
+    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, IndexKind, is_cancel};
     use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
     use crate::export::{RowsAs, render_rows_as};
     use crate::filter::{Operator, filter_predicate};
@@ -4710,6 +4745,26 @@ mod live {
             Some("PARTITION BY toYYYYMM(occurred_at)")
         );
         assert_eq!(named("sampling key"), None);
+        let keys: Vec<_> = events
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (
+                    "sorting key",
+                    IndexKind::Plain,
+                    vec!["account_id".into(), "occurred_at".into()]
+                ),
+                (
+                    "partition key",
+                    IndexKind::Plain,
+                    vec!["toYYYYMM(occurred_at)".into()]
+                ),
+            ]
+        );
         assert_eq!(events.row_key(), ["account_id", "occurred_at"]);
         let kind = events.columns.iter().find(|c| c.name == "kind").unwrap();
         assert_eq!(kind.data_type, "LowCardinality(String)");
@@ -4774,17 +4829,27 @@ mod live {
         assert!(!Engine::ClickHouse.generates(&default("plain")));
         assert!(!Engine::ClickHouse.generates(&default("id")));
 
-        let definitions: Vec<(&str, &str)> = structure
+        let definitions: Vec<(&str, &str, Vec<String>)> = structure
             .indexes
             .iter()
-            .map(|index| (index.name.as_str(), index.definition.as_str()))
+            .map(|index| {
+                (
+                    index.name.as_str(),
+                    index.definition.as_str(),
+                    index.columns.clone(),
+                )
+            })
             .collect();
         assert_eq!(
             definitions,
             [
-                ("sorting key", "ORDER BY (id, toDate(ts))"),
-                ("sampling key", "SAMPLE BY id"),
-                ("by_ts", "ts TYPE minmax GRANULARITY 2"),
+                (
+                    "sorting key",
+                    "ORDER BY (id, toDate(ts))",
+                    vec!["id".into(), "toDate(ts)".into()]
+                ),
+                ("sampling key", "SAMPLE BY id", vec!["id".into()]),
+                ("by_ts", "ts TYPE minmax GRANULARITY 2", vec!["ts".into()]),
             ]
         );
         assert!(structure.row_key().is_empty());
@@ -4917,6 +4982,19 @@ mod live {
         assert_eq!(columns("a, toDate(ts)"), None);
         assert_eq!(columns("a + b"), None);
         assert_eq!(columns("`open"), None);
+    }
+
+    #[test]
+    fn a_key_is_split_into_its_expressions_at_top_level_commas() {
+        assert_eq!(
+            key_expressions("a, concat('x, y', b), tuple(c, d)"),
+            ["a", "concat('x, y', b)", "tuple(c, d)"]
+        );
+        assert_eq!(key_expressions("toYYYYMM(ts)"), ["toYYYYMM(ts)"]);
+        assert_eq!(
+            key_expressions(r#"`a,b`, c, "d(", `e\`,f`, [1, 2]"#),
+            ["`a,b`", "c", r#""d(""#, "`e\\`,f`", "[1, 2]"]
+        );
     }
 
     #[test]

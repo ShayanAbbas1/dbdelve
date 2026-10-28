@@ -29,10 +29,10 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference, RowBuilder,
-    ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog, assemble_databases,
-    assemble_foreign_keys, assemble_references, assemble_sizes, assemble_structure, non_utf8_error,
-    plain_error, required_cell,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
+    RowBuilder, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
+    assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -145,19 +145,24 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY ORDINAL_POSITION
 ";
 
+// One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
+// `group_concat_max_len` cuts short without a word. A functional key part has
+// no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
+// MariaDB lacks. The versioned comment reads it on such a MySQL alone: MariaDB
+// skips one written for a MySQL version.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
+       NON_UNIQUE AS non_unique,
+       COLUMN_NAME AS column_name,
        CONCAT(
-           CASE WHEN NON_UNIQUE = 0 THEN 'UNIQUE INDEX' ELSE 'INDEX' END,
-           ' (',
-           GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ', '),
-           ')'
-       ) AS definition
+           COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+           COALESCE(CONCAT('(', SUB_PART, ')'), ''),
+           CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
+       ) AS key_part
 FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA = {schema}
   AND TABLE_NAME = {relation}
-GROUP BY INDEX_NAME, NON_UNIQUE
-ORDER BY INDEX_NAME
+ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
 
 // `CHECK` is deliberately absent. Its clause lives in
@@ -250,6 +255,40 @@ WHERE TABLE_SCHEMA = {schema}
   AND INDEX_NAME = 'PRIMARY'
 ORDER BY SEQ_IN_INDEX
 ";
+
+/// The key-part rows of [`STRUCTURE_INDEXES_SQL`] as one index per name. The
+/// definition names the plain columns alone, as it always has.
+fn assemble_indexes(result: &QueryResult) -> Result<Vec<Index>, DbError> {
+    let mut indexes = Vec::new();
+    // Grouped by `object_name`, the first column.
+    for parts in result.rows.chunk_by(|a, b| a.get(0) == b.get(0)) {
+        let name = required_cell(result, &parts[0], "object_name")?;
+        let unique = required_cell(result, &parts[0], "non_unique")? == "0";
+        let covered: Vec<&str> = parts
+            .iter()
+            .filter_map(|row| optional_cell(result, row, "column_name"))
+            .collect();
+        indexes.push(Index {
+            name: name.to_string(),
+            kind: match () {
+                _ if name == "PRIMARY" => IndexKind::Primary,
+                _ if unique => IndexKind::Unique,
+                _ => IndexKind::Plain,
+            },
+            columns: parts
+                .iter()
+                .map(|row| required_cell(result, row, "key_part").map(str::to_string))
+                .collect::<Result<_, _>>()?,
+            predicate: None,
+            definition: format!(
+                "{} ({})",
+                if unique { "UNIQUE INDEX" } else { "INDEX" },
+                covered.join(", ")
+            ),
+        });
+    }
+    Ok(indexes)
+}
 
 /// A `mysql://` URL, read by dbdelve rather than by the driver.
 ///
@@ -725,7 +764,8 @@ impl Connection {
         let keys =
             self.internal_query(&structure_sql(STRUCTURE_FOREIGN_KEYS_SQL, schema, relation))?;
 
-        let mut structure = assemble_structure(columns, indexes, constraints)?;
+        let mut structure = assemble_structure(columns, QueryResult::default(), constraints)?;
+        structure.indexes = assemble_indexes(&indexes)?;
         structure.foreign_keys = assemble_foreign_keys(&keys)?;
         Ok(structure)
     }
@@ -1106,7 +1146,7 @@ fn describe(error: &::mysql::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ColumnDefinition, ForeignKey, RelationKind, RoutineKind};
+    use crate::db::{ColumnDefinition, ForeignKey, IndexKind, RelationKind, RoutineKind};
 
     /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
     /// `dbdelve_MARIADB_URL`.
@@ -1788,7 +1828,58 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition.starts_with("PRIMARY KEY"))
         );
-        assert!(!structure.indexes.is_empty(), "the primary key is an index");
+        let mut kinds: Vec<_> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        kinds.sort_by_key(|(name, ..)| *name);
+        assert_eq!(
+            kinds,
+            [
+                ("PRIMARY", IndexKind::Primary, vec!["id".into()]),
+                ("external_id", IndexKind::Unique, vec!["external_id".into()]),
+            ]
+        );
+
+        let connection = live(engine);
+        // MariaDB has no functional key part. The second is longer than
+        // `group_concat_max_len`'s default 1024 bytes.
+        let functional = match engine {
+            Engine::MariaDb => String::new(),
+            _ => format!(
+                ", KEY by_lower ((lower(email)), id DESC), KEY by_sum ((id{}))",
+                " + 1".repeat(300)
+            ),
+        };
+        connection
+            .query(
+                &format!(
+                    "DROP TABLE IF EXISTS dbdelve_test_indexes; \
+                     CREATE TABLE dbdelve_test_indexes (id INT, email VARCHAR(80), \
+                         UNIQUE KEY by_email (email(10), id){functional})"
+                ),
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let fixture = connection.structure("dbdelve_dev", "dbdelve_test_indexes");
+        connection
+            .query("DROP TABLE dbdelve_test_indexes", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let fixture = fixture.expect("structure should load");
+        let by_email = &fixture.indexes[0];
+        assert_eq!(by_email.kind, IndexKind::Unique);
+        assert_eq!(by_email.columns, ["email(10)", "id"]);
+        assert_eq!(by_email.predicate, None);
+        if engine == Engine::MySql {
+            assert_eq!(fixture.indexes[1].columns, ["lower(`email`)", "id DESC"]);
+            assert_eq!(fixture.indexes[1].definition, "INDEX (id)");
+            let by_sum = &fixture.indexes[2].columns;
+            assert!(
+                by_sum[0].len() > 1200 && by_sum[0].ends_with("+ 1)"),
+                "{by_sum:?}"
+            );
+        }
     }
 
     fn live_a_single_table_select_is_editable_by_its_primary_key(engine: Engine) {

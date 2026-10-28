@@ -41,9 +41,9 @@ use tokio::sync::oneshot;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, MISSING,
-    NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema, ServerConfig, Sizes,
-    SslMode, Statistics, Stopped, Structure, plain_error,
+    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, Index,
+    IndexKind, MISSING, NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema,
+    ServerConfig, Sizes, SslMode, Statistics, Stopped, Structure, plain_error,
 };
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
@@ -1305,10 +1305,7 @@ impl Connection {
             structure.indexes = self
                 .indexes(&database, relation)?
                 .iter()
-                .map(|index| NamedDefinition {
-                    name: index.get_str("name").unwrap_or_default().to_string(),
-                    definition: index_definition(index),
-                })
+                .map(index)
                 .collect();
             structure.constraints.push(NamedDefinition {
                 name: "_id_".into(),
@@ -1525,6 +1522,47 @@ pub(super) fn type_alias(value: &Bson) -> &'static str {
         Bson::MaxKey => "maxKey",
         Bson::MinKey => "minKey",
         Bson::DbPointer(_) => "dbPointer",
+    }
+}
+
+/// A `listIndexes` entry. `_id`'s is the primary key every collection has.
+fn index(listed: &Document) -> Index {
+    let name = listed.get_str("name").unwrap_or_default().to_string();
+    Index {
+        kind: match () {
+            _ if name == "_id_" => IndexKind::Primary,
+            _ if listed.get_bool("unique") == Ok(true) => IndexKind::Unique,
+            _ => IndexKind::Plain,
+        },
+        columns: listed
+            .get_document("key")
+            .map(|key| {
+                key.iter()
+                    .flat_map(|(field, order)| match field.as_str() {
+                        // A text index's key is the server's `_fts`/`_ftsx`
+                        // pair; the fields it covers are only in `weights`.
+                        "_fts" => listed
+                            .get_document("weights")
+                            .map(|weights| weights.keys().map(|f| format!("{f} text")).collect())
+                            .unwrap_or_default(),
+                        "_ftsx" => Vec::new(),
+                        _ => vec![match order.clone().into_relaxed_extjson() {
+                            serde_json::Value::Number(order) if order.as_f64() == Some(1.0) => {
+                                field.clone()
+                            }
+                            serde_json::Value::String(kind) => format!("{field} {kind}"),
+                            order => format!("{field} {order}"),
+                        }],
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        predicate: listed
+            .get_document("partialFilterExpression")
+            .ok()
+            .map(relaxed_json),
+        definition: index_definition(listed),
+        name,
     }
 }
 
@@ -3060,6 +3098,31 @@ mod tests {
     }
 
     #[test]
+    fn an_index_reads_as_its_kind_key_and_partial_filter() {
+        let primary = index(&doc! { "v": 2, "key": { "_id": 1 }, "name": "_id_" });
+        assert_eq!(primary.kind, IndexKind::Primary);
+        assert_eq!(primary.columns, ["_id"]);
+        let unique = index(&doc! {
+            "key": { "email": 1, "created": -1, "at": "2dsphere" },
+            "name": "e",
+            "unique": true,
+            "partialFilterExpression": { "active": true },
+        });
+        assert_eq!(unique.kind, IndexKind::Unique);
+        assert_eq!(unique.columns, ["email", "created -1", "at 2dsphere"]);
+        assert_eq!(unique.predicate.as_deref(), Some(r#"{"active":true}"#));
+        let plain = index(&doc! { "key": { "a": 1.0 }, "name": "a_1" });
+        assert_eq!((plain.kind, plain.predicate), (IndexKind::Plain, None));
+        assert_eq!(plain.columns, ["a"]);
+        let text = index(&doc! {
+            "key": { "tenant": 1, "_fts": "text", "_ftsx": 1 },
+            "name": "tenant_1_title_text_body_text",
+            "weights": { "body": 1, "title": 10 },
+        });
+        assert_eq!(text.columns, ["tenant", "body text", "title text"]);
+    }
+
+    #[test]
     fn an_index_reads_as_its_key_and_what_changes_it() {
         assert_eq!(
             index_definition(&doc! { "v": 2, "key": { "_id": 1 }, "name": "_id_" }),
@@ -4398,6 +4461,33 @@ mod tests {
         };
         assert_eq!(index("_id_"), Some(r#"{"_id":1}"#));
         assert_eq!(index("external_id_1"), Some(r#"{"external_id":1} unique"#));
+        let kinds: Vec<_> = accounts
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("_id_", IndexKind::Primary, vec!["_id".into()]),
+                (
+                    "external_id_1",
+                    IndexKind::Unique,
+                    vec!["external_id".into()]
+                ),
+            ]
+        );
+        let events = connection
+            .structure("dbdelve_dev", "events")
+            .expect("structure should load");
+        assert!(
+            events
+                .indexes
+                .iter()
+                .any(|index| index.columns == ["account_id", "occurred_at -1"]),
+            "{:?}",
+            events.indexes
+        );
 
         let mixed = connection
             .structure("dbdelve_dev", "mixed_shapes")
