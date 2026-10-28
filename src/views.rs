@@ -302,8 +302,23 @@ fn render_query_surface(
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
     let (shown_state, shown_grid) = tab.shown();
-    let bottom = match tab.showing_plan.then_some(tab.plan.as_ref()).flatten() {
-        Some(explained) => render_plan(explained, plan_copied, &scope, cx),
+    let bottom = match tab.plan_shown() {
+        // Under the same switcher as the rows, or a typed `EXPLAIN`, which has
+        // no Data to flip to, would hide what its statement raised.
+        Some(explained) => {
+            let plan = render_plan(explained, plan_copied, &scope, cx);
+            match result_switcher(tab, cx) {
+                None => plan,
+                Some(switcher) => div()
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(switcher)
+                    .child(div().flex_1().min_h_0().child(plan))
+                    .into_any_element(),
+            }
+        }
         None => render_results(
             profile.config.engine(),
             matches!(profile.state, ProfileState::Failed(_)),
@@ -3403,14 +3418,14 @@ fn render_query_toolbar(
                 .child(preview_tab(
                     "Data",
                     icon::TABLE,
-                    !tab.showing_plan,
+                    tab.plan_shown().is_none() && !tab.messages_shown(),
                     Command::ShowPlan(false),
                     cx,
                 ))
                 .child(preview_tab(
                     "Plan",
                     icon::PLAN,
-                    tab.showing_plan,
+                    tab.plan_shown().is_some(),
                     Command::ShowPlan(true),
                     cx,
                 ))

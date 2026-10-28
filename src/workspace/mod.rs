@@ -1510,7 +1510,7 @@ impl Render for Workspace {
             // the grid, so the count beside them still belongs to whatever ran
             // last. What the run itself is worth saying is how long the server
             // spent answering.
-            Some(QueryState::Explained { elapsed, mode }) => {
+            Some(QueryState::Explained { elapsed, mode, .. }) => {
                 Some(format!("{} · {elapsed:.1?}", mode.label()))
             }
             _ => None,

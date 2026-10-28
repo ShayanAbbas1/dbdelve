@@ -1039,6 +1039,21 @@ fn query_error(error: &::mysql::Error) -> DbError {
     }
 }
 
+/// A failure lists nothing: the statement already succeeded, and a refused
+/// `SHOW WARNINGS` must not turn that into an error.
+///
+/// `SHOW WARNINGS` leaves `ROW_COUNT()` at -1, so a later statement that reads
+/// it sees that rather than the count of the statement that warned. The mysql
+/// client's `\W` costs the same, and the warnings are worth it.
+fn warnings(connection: &mut Conn) -> Vec<String> {
+    connection
+        .query::<(String, u32, String), _>("SHOW WARNINGS")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(level, code, message)| format!("{level} ({code}): {message}"))
+        .collect()
+}
+
 /// End the transaction a failed batch left open, and say so in the error.
 ///
 /// MySQL stops a multi-statement submission at the failing statement, so the
@@ -1052,17 +1067,6 @@ fn query_error(error: &::mysql::Error) -> DbError {
 /// asked: the driver keeps the server's `SERVER_STATUS_IN_TRANS` flag private,
 /// so the submitted text is what there is to read, and it is the text dbdelve
 /// wrote or the user can see.
-/// A failure lists nothing: the statement already succeeded, and a refused
-/// `SHOW WARNINGS` must not turn that into an error.
-fn warnings(connection: &mut Conn) -> Vec<String> {
-    connection
-        .query::<(String, u32, String), _>("SHOW WARNINGS")
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(level, code, message)| format!("{level} ({code}): {message}"))
-        .collect()
-}
-
 fn rolled_back(connection: &mut Conn, sql: &str, error: DbError) -> DbError {
     let Some(start) = Engine::MySql.transaction_start() else {
         return error;

@@ -224,7 +224,9 @@ Decided, and not to be re-litigated:
   it lists only the last statement's. A multi-statement submission therefore
   gets one lead message counting the earlier statements' warnings, which the
   server no longer lists. A non-final `SELECT`'s count is not exposed by the
-  driver, so its warnings are not counted.
+  driver, so its warnings are not counted. `SHOW WARNINGS` leaves
+  `ROW_COUNT()` at -1 for whatever the user runs next; that is accepted, as
+  the mysql client's `\W` accepts it, because the warnings' text is the point.
 - **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL,
   `EXPLAIN` / `ANALYZE` on MariaDB, and `EXPLAIN QUERY PLAN` on SQLite, which
   has no analyze form, so that mode is not offered there

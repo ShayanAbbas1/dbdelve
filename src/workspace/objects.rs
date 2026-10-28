@@ -1322,6 +1322,11 @@ impl Workspace {
                     if let Some((plan, showing)) = Explained::restored(&snapshot) {
                         query_tab.plan = Some(plan);
                         query_tab.showing_plan = showing;
+                        // A restored queue's results are copies, none of them
+                        // the slot the plan was asked of.
+                        if showing {
+                            query_tab.show_slot();
+                        }
                     }
                     query_tab.last_query = snapshot.last_query;
                 }

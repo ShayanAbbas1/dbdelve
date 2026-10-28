@@ -1146,6 +1146,21 @@ impl Workspace {
             return;
         }
         tab.showing_plan = showing;
+        // Either half is asked for by name, so neither leaves Messages over it.
+        let switched = match showing {
+            true => tab.show_slot(),
+            false => {
+                tab.showing_messages = false;
+                false
+            }
+        };
+        if switched {
+            profile
+                .session
+                .insert_form
+                .take_if(|form| form.tab == Tab::Query(id));
+            profile.session.drop_apply_review_of(Tab::Query(id));
+        }
         cx.notify();
     }
 
@@ -2147,11 +2162,12 @@ impl Workspace {
                             // returning its rows, so nothing here reaches the
                             // grid: it keeps whatever the last real run put in
                             // it, which is what the Data tab flips back to.
-                            Ok(result) if explain.is_some() => {
+                            Ok(mut result) if explain.is_some() => {
                                 let mode = explain.unwrap_or_default();
                                 *state = QueryState::Explained {
                                     elapsed: result.elapsed,
                                     mode,
+                                    messages: std::mem::take(&mut result.messages),
                                 };
                                 let columns: Vec<String> = result
                                     .columns
@@ -2373,6 +2389,14 @@ impl Workspace {
                                 rows,
                             });
                             tab.showing_plan = true;
+                            // The form and review were for another result.
+                            if tab.show_slot() {
+                                profile
+                                    .session
+                                    .insert_form
+                                    .take_if(|form| form.tab == Tab::Query(query));
+                                profile.session.drop_apply_review_of(Tab::Query(query));
+                            }
                         }
                         // Nothing left to read once the batch it was showing has
                         // run. Only this tab's: another tab's is still unread.

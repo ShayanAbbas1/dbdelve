@@ -859,7 +859,7 @@ impl Session {
     /// tab shows its plan, which stands in for those rows.
     pub(crate) fn query_insert_target(&self, cx: &App) -> Option<InsertTarget> {
         self.active_query_tab()
-            .filter(|tab| !tab.showing_plan && !tab.messages_shown())?
+            .filter(|tab| tab.plan_shown().is_none() && !tab.messages_shown())?
             .shown()
             .1
             .read(cx)
@@ -1530,6 +1530,25 @@ impl<G: Clone> Queue<G> {
     }
 }
 
+impl<G: PartialEq> Queue<G> {
+    /// Where the tab's slot sits in the strip: its entry in `done`, or one
+    /// past the end for a slot that is none of them, which `QueryTab::shown`
+    /// reads as the slot itself.
+    pub(crate) fn slot_index(&self, slot: &G) -> usize {
+        self.done
+            .iter()
+            .position(|finished| finished.grid == *slot)
+            .unwrap_or(self.done.len())
+    }
+}
+
+/// Whether the plan is what the pane shows. Messages selected over it win, as
+/// the chip the user last picked; and only over the slot's result, the one
+/// the plan was asked of, so picking another of a queue's results shows it.
+pub(crate) fn plan_in_front(showing_plan: bool, messages_shown: bool, on_slot: bool) -> bool {
+    showing_plan && !messages_shown && on_slot
+}
+
 /// `QueryTab::lend`, over the fields it touches so it is checkable without
 /// a window. A result already in the slot is not lent again, and an existing
 /// loan is kept, since a second would set the borrowed result aside as the
@@ -1746,6 +1765,25 @@ impl QueryTab {
     /// an empty list.
     pub(crate) fn messages_shown(&self) -> bool {
         self.showing_messages && !self.messages().is_empty()
+    }
+
+    /// The plan, when it is what the results pane shows (`plan_in_front`).
+    pub(crate) fn plan_shown(&self) -> Option<&Explained> {
+        let on_slot = *self.shown().1 == self.results;
+        plan_in_front(self.showing_plan, self.messages_shown(), on_slot)
+            .then_some(self.plan.as_ref())
+            .flatten()
+    }
+
+    /// Bring the slot's result to the front, for a plan of it to be read.
+    /// Whether that moved the switcher off another result.
+    pub(crate) fn show_slot(&mut self) -> bool {
+        self.showing_messages = false;
+        let Some(queue) = &mut self.queue else {
+            return false;
+        };
+        let slot = queue.slot_index(&self.results);
+        std::mem::replace(&mut queue.showing, slot) != slot
     }
 
     /// Make the queue's result at `index` the slot, for a run on its rows.
@@ -2301,6 +2339,9 @@ pub(crate) enum QueryState {
     Explained {
         elapsed: std::time::Duration,
         mode: ExplainMode,
+        /// As `Complete`'s: an `EXPLAIN ANALYZE` runs the statement, and
+        /// whatever it raises is said while it does.
+        messages: Vec<String>,
     },
     Failed(DbError),
 }
@@ -2308,7 +2349,9 @@ pub(crate) enum QueryState {
 impl QueryState {
     pub(crate) fn messages(&self) -> &[String] {
         match self {
-            QueryState::Complete { messages, .. } => messages,
+            QueryState::Complete { messages, .. } | QueryState::Explained { messages, .. } => {
+                messages
+            }
             _ => &[],
         }
     }
@@ -2948,6 +2991,39 @@ mod tests {
             cancel: CancelToken::default(),
         };
         assert!(run_messages::<usize>(None, (&12, &running), Some("SELECT 1")).is_empty());
+    }
+
+    #[test]
+    fn a_plan_gives_way_to_messages_and_to_another_results_chip() {
+        // Messages picked over the plan win; picking the plan's own result
+        // chip clears them and shows the plan again.
+        assert!(plan_in_front(true, false, true));
+        assert!(!plan_in_front(true, true, true));
+        // Another of a queue's results is shown as rows, plan or no plan.
+        assert!(!plan_in_front(true, false, false));
+        assert!(!plan_in_front(false, false, true));
+
+        // A typed `EXPLAIN ANALYZE` reaches the switcher with what it raised.
+        let notice = vec!["NOTICE: f() ran".to_string()];
+        let explained = QueryState::Explained {
+            elapsed: std::time::Duration::ZERO,
+            mode: ExplainMode::Analyze,
+            messages: notice.clone(),
+        };
+        assert_eq!(
+            run_messages::<usize>(None, (&0, &explained), Some("EXPLAIN ANALYZE SELECT f()")),
+            [Said {
+                index: 0,
+                sql: "EXPLAIN ANALYZE SELECT f()",
+                messages: &notice,
+            }]
+        );
+
+        // The slot is found wherever it sits in the strip, and a slot that is
+        // none of its results is the one past the end.
+        let queue = finished_queue(0);
+        assert_eq!(queue.slot_index(&12), 2);
+        assert_eq!(queue.slot_index(&99), queue.done.len());
     }
 
     #[test]
