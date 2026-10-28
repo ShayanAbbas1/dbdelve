@@ -42,6 +42,20 @@ use super::{
     assemble_references, assemble_structure, plain_error, required_cell, terminated,
 };
 
+// Workaround for duckdb-rs#920, fixed upstream by #923 but unreleased past
+// 1.20000.0: the bundled build links its extension autoregister archive after
+// the libduckdb-sys rlib, so GNU ld (aarch64 Linux) has already passed the
+// archive that defines `duckdb_register_static_extensions` when the reference
+// shows up. Referencing it here, ahead of the rlib, pulls the loader in. Drop
+// this once a release carries #923.
+#[used]
+static STATIC_EXTENSION_LOADER: unsafe extern "C" fn() -> std::ffi::c_int = {
+    unsafe extern "C" {
+        fn duckdb_register_static_extensions() -> std::ffi::c_int;
+    }
+    duckdb_register_static_extensions
+};
+
 /// What an empty path means: a database held in memory, gone when the
 /// connection closes. The files it reads stay where they are.
 pub const IN_MEMORY: &str = ":memory:";
