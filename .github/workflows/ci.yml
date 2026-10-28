@@ -46,9 +46,9 @@ permissions:
 # `[profile.dev.package."*"]`, so every job writes that override into a
 # .cargo/config.toml above the checkout (macOS runners have no ~/.cargo); Cargo
 # reads config from parent directories, and it takes precedence over the
-# manifest. rust-cache keys on
-# CARGO_* variables but not on that file: change the override and the variable
-# below together, or main keeps restoring caches built the old way.
+# manifest. rust-cache keys on CARGO_* variables but not on that file: change
+# the override and the variable below together, or main keeps restoring caches
+# built the old way.
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
 
