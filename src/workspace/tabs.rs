@@ -794,6 +794,7 @@ impl Workspace {
                 tab,
                 deleting: None,
             });
+            profile.session.dialog_needs_focus = true;
         }
         cx.notify();
     }
@@ -875,6 +876,7 @@ impl Workspace {
             Some(name) => self.delete_saved_query_now(name, window, cx),
             None => self.close_now(discard.tab, window, cx),
         }
+        self.refocus_front();
     }
 
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {
@@ -883,6 +885,7 @@ impl Workspace {
             .and_then(|profile| profile.session.pending_discard.take())
             .is_some();
         if cancelled {
+            self.refocus_front();
             cx.notify();
         }
         cancelled
@@ -894,6 +897,7 @@ impl Workspace {
             .and_then(|profile| profile.session.pending_delete.take())
             .is_some();
         if cancelled {
+            self.refocus_front();
             cx.notify();
         }
         cancelled

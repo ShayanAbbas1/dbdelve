@@ -3,7 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, time::Instant};
 
 use gpui_component::table::TableState;
 
@@ -13,11 +13,19 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 use super::*;
 use crate::session::{
     Finished, Lane, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step, TabKey,
-    autosave_notice, next_step, query_name_refusal,
+    WriteGate, Wrote, autosave_delay, next_step, query_name_refusal,
 };
 
-/// How long typing has to pause before a buffer is written to its file.
-const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
+/// Do `change` with the buffer, if a tab holds one, moved off its file.
+fn retarget(
+    gate: Option<WriteGate>,
+    change: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match gate {
+        Some(gate) => gate.retarget(change),
+        None => change(),
+    }
+}
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -1154,9 +1162,8 @@ impl Workspace {
         {
             return;
         }
-        // A named query is written now, as it is on every swap and on quit,
-        // and its modified dot clears with it. Only a buffer with nowhere to
-        // go has to ask for a name.
+        // A named query is written now, rather than waiting on its autosave.
+        // Only a buffer with nowhere to go has to ask for a name.
         if self.named() {
             match self.persist_buffer(cx) {
                 Ok(()) => self.note("Saved query.".into(), cx),
@@ -1240,7 +1247,13 @@ impl Workspace {
         }
 
         let sql = editor.read(cx).value().to_string();
-        if let Err(message) = store::save_query_as(&id, previous.as_deref(), &name, &sql) {
+        let gate = match tab {
+            Tab::Query(tab) => profile.session.query_tab(tab).map(|tab| tab.gate.clone()),
+            Tab::Object(_) => None,
+        };
+        if let Err(message) = retarget(gate, || {
+            store::save_query_as(&id, previous.as_deref(), &name, &sql)
+        }) {
             self.note(message, cx);
             return;
         }
@@ -1342,7 +1355,10 @@ impl Workspace {
         };
         if let Some(name) = &tab.open_query {
             let sql = tab.editor.read(cx).value().to_string();
-            if let Err(message) = store::write_query(&profile.id, name, &sql) {
+            if let Err(message) = tab
+                .gate
+                .retarget(|| store::write_query(&profile.id, name, &sql))
+            {
                 self.note(message, cx);
                 return;
             }
@@ -1366,14 +1382,14 @@ impl Workspace {
         };
         let in_front = (profile.session.active == Tab::Query(id))
             .then(|| profile.session.fallback(Tab::Query(id)));
-        profile.session.queries.remove(position);
+        let gate = profile.session.queries.remove(position).gate;
         profile.session.forget(Tab::Query(id));
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
             self.front_after_close(fallback, window, cx);
         }
 
-        if !saved && let Err(message) = store::delete_scratch(&profile_id, id) {
+        if !saved && let Err(message) = gate.retarget(|| store::delete_scratch(&profile_id, id)) {
             self.note(message, cx);
         }
         // The tab is gone, so its snapshot has nothing left to come back to --
@@ -1628,7 +1644,14 @@ impl Workspace {
                     .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
             },
         };
-        let written = sql.and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql));
+        let gate = holder
+            .and_then(|tab| profile.session.query_tab(tab))
+            .map(|tab| tab.gate.clone());
+        let written = sql.and_then(|sql| {
+            retarget(gate, || {
+                store::save_query_as(&id, Some(&previous), &typed, &sql)
+            })
+        });
         match written {
             Ok(()) => {}
             Err(message) => {
@@ -1685,9 +1708,10 @@ impl Workspace {
         }
     }
 
-    /// A buffer's text changed: write it to its file once typing pauses, so
-    /// a crash loses at most that pause. Each edit drops the write the one
-    /// before it scheduled.
+    /// A buffer's text changed: write it to its file once typing pauses, or
+    /// a few seconds after the first edit nothing has written yet, whichever
+    /// comes first, so a crash loses at most those few seconds. Each edit
+    /// drops the timer the one before it set.
     pub(crate) fn buffer_edited(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
         let Some((profile_id, tab)) = self.profiles.iter_mut().find_map(|profile| {
             let tab = profile
@@ -1699,50 +1723,61 @@ impl Workspace {
         }) else {
             return;
         };
-        let (id, name) = (tab.id, tab.open_query.clone());
+        let now = Instant::now();
+        let delay = autosave_delay(*tab.unwritten_since.get_or_insert(now), now);
+        let id = tab.id;
         tab.autosave = Some(cx.spawn(async move |workspace, cx| {
-            cx.background_executor().timer(AUTOSAVE_DELAY).await;
-            _ = workspace.update(cx, |workspace, cx| {
-                workspace.autosave(&profile_id, id, name, cx);
-            });
+            cx.background_executor().timer(delay).await;
+            _ = workspace.update(cx, |workspace, cx| workspace.autosave(profile_id, id, cx));
         }));
     }
 
-    /// The write `buffer_edited` scheduled, to the file it was scheduled for.
-    /// A tab renamed, saved under a name or turned unsaved since then holds a
-    /// different file now, which its rename or save already wrote, and the
-    /// old name must not be written back into existence.
-    fn autosave(
-        &mut self,
-        profile_id: &str,
-        id: u64,
-        scheduled: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(profile) = self
+    /// Write a buffer's text as it stands to the file it holds now, off the
+    /// main thread. The text and its place in the buffer's order are taken
+    /// here; the gate drops the write if a later one lands first or the
+    /// buffer leaves the file before it runs.
+    fn autosave(&mut self, profile_id: String, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self
             .profiles
             .iter_mut()
             .find(|profile| profile.id == profile_id)
+            .and_then(|profile| profile.session.queries.iter_mut().find(|tab| tab.id == id))
         else {
             return;
         };
-        let Some(tab) = profile
-            .session
-            .queries
-            .iter_mut()
-            .find(|tab| tab.id == id && tab.open_query == scheduled)
-        else {
-            return;
-        };
+        tab.unwritten_since = None;
         let sql = tab.editor.read(cx).value().to_string();
-        let written = match &scheduled {
-            Some(name) => store::write_query(profile_id, name, &sql),
-            None => store::write_scratch(profile_id, id, &sql),
-        };
-        if let Some(message) = autosave_notice(&mut tab.autosave_failing, written) {
-            profile.session.notice = Some(message);
-            cx.notify();
-        }
+        let (gate, name) = (tab.gate.clone(), tab.open_query.clone());
+        let ticket = gate.ticket();
+        let write = cx.background_executor().spawn({
+            let profile_id = profile_id.clone();
+            async move {
+                gate.write(ticket, || match &name {
+                    Some(name) => store::write_query(&profile_id, name, &sql),
+                    None => store::write_scratch(&profile_id, id, &sql),
+                })
+            }
+        });
+        cx.spawn(async move |workspace, cx| {
+            let Wrote::Failed {
+                message,
+                already_said: false,
+            } = write.await
+            else {
+                return;
+            };
+            _ = workspace.update(cx, |workspace, cx| {
+                if let Some(profile) = workspace
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.session.notice = Some(message);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Raise the dialog that asks before a saved query is deleted. The one
@@ -1752,6 +1787,7 @@ impl Workspace {
             return;
         };
         profile.session.pending_delete = Some(name);
+        profile.session.dialog_needs_focus = true;
         cx.notify();
     }
 
@@ -1775,11 +1811,13 @@ impl Workspace {
                     tab,
                     deleting: Some(name),
                 });
+                profile.session.dialog_needs_focus = true;
             }
             cx.notify();
             return;
         }
         self.delete_saved_query_now(name, window, cx);
+        self.refocus_front();
     }
 
     /// The delete itself, once nothing is left to ask.
@@ -1794,7 +1832,10 @@ impl Workspace {
         };
         let id = profile.id.clone();
         let holder = profile.session.tab_holding(&name);
-        if let Err(message) = store::delete_query(&id, &name) {
+        let gate = holder
+            .and_then(|tab| profile.session.query_tab(tab))
+            .map(|tab| tab.gate.clone());
+        if let Err(message) = retarget(gate, || store::delete_query(&id, &name)) {
             self.note(message, cx);
             return;
         }

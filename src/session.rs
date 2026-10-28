@@ -9,7 +9,14 @@
 //! These were plain types at the crate root. They moved out whole; nothing
 //! changed but their visibility.
 
-use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use gpui::{App, AppContext, Context, Entity, Window};
 use gpui_component::{
@@ -291,6 +298,11 @@ pub(crate) struct Session {
     pub(crate) naming: bool,
     /// The saved query the delete dialog is asking about.
     pub(crate) pending_delete: Option<String>,
+    /// A dialog just went up over the workspace: the window takes the
+    /// keyboard on the next frame, from a buffer behind it that would take
+    /// keys nobody can see, or from the button that raised it, which may be
+    /// gone with the dialog it sat in.
+    pub(crate) dialog_needs_focus: bool,
     /// The sidebar row a saved query is being renamed in.
     pub(crate) query_rename: Option<QueryRename>,
     /// The same hazard as `save_name_needs_focus`, for the row's field.
@@ -664,6 +676,7 @@ impl Session {
             page_shown: 0,
             naming: false,
             pending_delete: None,
+            dialog_needs_focus: false,
             query_rename: None,
             query_rename_needs_focus: false,
             pending_discard: None,
@@ -1015,6 +1028,7 @@ impl Session {
         self.query_rename = None;
         self.query_rename_needs_focus = false;
         self.pending_discard = None;
+        self.dialog_needs_focus = false;
         self.naming = false;
         self.save_name_needs_focus = false;
         // A stopped statement must not survive a tab or profile switch and get
@@ -1058,19 +1072,129 @@ pub(crate) struct PendingDiscard {
     pub(crate) deleting: Option<String>,
 }
 
-/// What an autosave's result puts on the status bar: a failure once, and not
-/// again on every keystroke after it until a write goes through.
-pub(crate) fn autosave_notice(failing: &mut bool, written: Result<(), String>) -> Option<String> {
-    match written {
-        Ok(()) => {
-            *failing = false;
-            None
+/// How long typing has to pause before a buffer is written to its file.
+pub(crate) const AUTOSAVE_PAUSE: Duration = Duration::from_millis(500);
+/// The longest an edit waits to be written while typing never pauses for
+/// `AUTOSAVE_PAUSE`.
+pub(crate) const AUTOSAVE_AT_MOST: Duration = Duration::from_secs(5);
+
+/// How long the write an edit schedules waits: a pause, but never past
+/// `AUTOSAVE_AT_MOST` after the first edit nothing has written yet.
+pub(crate) fn autosave_delay(unwritten_since: Instant, now: Instant) -> Duration {
+    AUTOSAVE_PAUSE.min((unwritten_since + AUTOSAVE_AT_MOST).saturating_duration_since(now))
+}
+
+/// The order of one buffer's writes to its file, shared with the threads
+/// that make them.
+///
+/// Every write takes a ticket on the foreground, in the order the text was
+/// read, and lands only if no later ticket has landed and the buffer still
+/// writes to the file it was taken for. A rename, a save under a name, a
+/// delete and a close move the buffer off its file (`retarget`), under the
+/// same lock a write holds, so a write already out waits for neither and is
+/// never written to a name the buffer has left.
+#[derive(Clone, Default)]
+pub(crate) struct WriteGate(Arc<Mutex<GateState>>);
+
+#[derive(Default)]
+struct GateState {
+    /// Bumped each time the buffer leaves the file it wrote to.
+    generation: u64,
+    issued: u64,
+    landed: u64,
+    /// Whether the last write failed, so a failure is said once until a
+    /// write goes through.
+    failing: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ticket {
+    generation: u64,
+    seq: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Wrote {
+    Done,
+    /// A later write landed first, or the buffer has left this file.
+    Skipped,
+    Failed {
+        message: String,
+        /// The failure before it went unanswered by a success, and was said.
+        already_said: bool,
+    },
+}
+
+impl Wrote {
+    /// As a write the user asked for reports it: every failure, every time.
+    pub(crate) fn into_result(self) -> Result<(), String> {
+        match self {
+            Wrote::Failed { message, .. } => Err(message),
+            Wrote::Done | Wrote::Skipped => Ok(()),
         }
-        Err(_) if *failing => None,
-        Err(message) => {
-            *failing = true;
-            Some(message)
+    }
+}
+
+impl WriteGate {
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn ticket(&self) -> Ticket {
+        let mut state = self.state();
+        state.issued += 1;
+        Ticket {
+            generation: state.generation,
+            seq: state.issued,
         }
+    }
+
+    pub(crate) fn write(
+        &self,
+        ticket: Ticket,
+        write: impl FnOnce() -> Result<(), String>,
+    ) -> Wrote {
+        let mut state = self.state();
+        if ticket.generation != state.generation || ticket.seq <= state.landed {
+            return Wrote::Skipped;
+        }
+        state.landed = ticket.seq;
+        match write() {
+            Ok(()) => {
+                state.failing = false;
+                Wrote::Done
+            }
+            Err(message) => Wrote::Failed {
+                message,
+                already_said: std::mem::replace(&mut state.failing, true),
+            },
+        }
+    }
+
+    /// Write now, from the foreground, as the newest write there is.
+    pub(crate) fn write_now(
+        &self,
+        write: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.write(self.ticket(), write).into_result()
+    }
+
+    /// Move the buffer off the file it writes to, doing `change` while no
+    /// write can land. Every ticket taken before it is spent, and a change
+    /// that wrote the buffer counts as a write that went through.
+    pub(crate) fn retarget(
+        &self,
+        change: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut state = self.state();
+        state.generation += 1;
+        let changed = change();
+        if changed.is_ok() {
+            state.failing = false;
+        }
+        changed
     }
 }
 
@@ -1276,13 +1400,14 @@ pub(crate) struct QueryTab {
     /// It is also which file the buffer persists to: a name means the query
     /// file, no name means this tab's own scratch file.
     pub(crate) open_query: Option<String>,
-    /// The write of this buffer to its file that waits out a pause in
-    /// typing. Replaced on each edit, which drops the one before it, and
-    /// dropped with the tab, which cancels it.
+    /// The timer for this buffer's next write to its file. Replaced on each
+    /// edit, which drops the one before it, and dropped with the tab.
     pub(crate) autosave: Option<gpui::Task<()>>,
-    /// Whether the last autosave failed, so the next failure is not said
-    /// again on every keystroke.
-    pub(crate) autosave_failing: bool,
+    /// When the first edit no write has taken yet was made, which bounds how
+    /// long typing without a pause can put the write off.
+    pub(crate) unwritten_since: Option<Instant>,
+    /// Every write of this buffer to its file goes through here.
+    pub(crate) gate: WriteGate,
     /// The statement behind this tab's grid.
     ///
     /// Held rather than derived from the buffer, unlike the sort path, and a
@@ -1779,7 +1904,8 @@ impl QueryTab {
             query: QueryState::Idle,
             open_query: stored.name.clone(),
             autosave: None,
-            autosave_failing: false,
+            unwritten_since: None,
+            gate: WriteGate::default(),
             last_query: None,
             sent_from: None,
             ran_from: None,
@@ -2305,8 +2431,12 @@ pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
     for tab in &profile.session.queries {
         let sql = tab.editor.read(cx).value().to_string();
         let written = match &tab.open_query {
-            Some(name) => store::write_query(&profile.id, name, &sql),
-            None => store::write_scratch(&profile.id, tab.id, &sql),
+            Some(name) => tab
+                .gate
+                .write_now(|| store::write_query(&profile.id, name, &sql)),
+            None => tab
+                .gate
+                .write_now(|| store::write_scratch(&profile.id, tab.id, &sql)),
         };
         if let Err(message) = written {
             failure = failure.or(Some(message));
@@ -3158,18 +3288,85 @@ mod tests {
         });
     }
 
-    #[test]
-    fn an_autosave_failure_is_said_once_until_a_write_goes_through() {
-        let mut failing = false;
-        let failed = || Err("Could not write daily.sql".to_string());
+    fn failed() -> Result<(), String> {
+        Err("Could not write daily.sql".to_string())
+    }
 
+    #[test]
+    fn a_failure_is_said_once_until_any_write_goes_through() {
+        let gate = WriteGate::default();
+        let said = |wrote: Wrote| {
+            matches!(
+                wrote,
+                Wrote::Failed {
+                    already_said: false,
+                    ..
+                }
+            )
+        };
+
+        assert!(said(gate.write(gate.ticket(), failed)));
+        assert!(!said(gate.write(gate.ticket(), failed)));
+        // A Save, or a swap's write, that goes through counts too.
+        assert_eq!(gate.write_now(|| Ok(())), Ok(()));
+        assert!(said(gate.write(gate.ticket(), failed)));
+        // So does a rename that wrote the buffer.
+        assert_eq!(gate.retarget(|| Ok(())), Ok(()));
+        assert!(said(gate.write(gate.ticket(), failed)));
+        // A write the user asked for reports every failure.
+        assert!(gate.write_now(failed).is_err());
+    }
+
+    #[test]
+    fn an_older_write_never_lands_after_a_newer_one() {
+        let gate = WriteGate::default();
+        let older = gate.ticket();
+        let newer = gate.ticket();
+
+        assert_eq!(gate.write(newer, || Ok(())), Wrote::Done);
         assert_eq!(
-            autosave_notice(&mut failing, failed()).as_deref(),
-            Some("Could not write daily.sql")
+            gate.write(older, || unreachable!("an older text over a newer one")),
+            Wrote::Skipped
         );
-        assert_eq!(autosave_notice(&mut failing, failed()), None);
-        assert_eq!(autosave_notice(&mut failing, Ok(())), None);
-        assert!(autosave_notice(&mut failing, failed()).is_some());
+        // Nor after a write made on the foreground since it was taken.
+        let pending = gate.ticket();
+        assert_eq!(gate.write_now(|| Ok(())), Ok(()));
+        assert_eq!(
+            gate.write(pending, || unreachable!("behind a swap's write")),
+            Wrote::Skipped
+        );
+    }
+
+    #[test]
+    fn a_write_taken_before_the_buffer_left_its_file_is_dropped() {
+        // A rename, a delete or a close in between: the write would bring the
+        // old name back into existence.
+        let gate = WriteGate::default();
+        let before = gate.ticket();
+        assert_eq!(gate.retarget(|| Ok(())), Ok(()));
+        assert_eq!(
+            gate.write(before, || unreachable!("written to a file the buffer left")),
+            Wrote::Skipped
+        );
+        assert_eq!(gate.write(gate.ticket(), || Ok(())), Wrote::Done);
+    }
+
+    #[test]
+    fn typing_without_a_pause_is_written_at_least_every_few_seconds() {
+        let start = Instant::now();
+        assert_eq!(autosave_delay(start, start), AUTOSAVE_PAUSE);
+        assert_eq!(
+            autosave_delay(start, start + Duration::from_millis(4_800)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            autosave_delay(start, start + AUTOSAVE_AT_MOST),
+            Duration::ZERO
+        );
+        assert_eq!(
+            autosave_delay(start, start + Duration::from_secs(9)),
+            Duration::ZERO
+        );
     }
 
     #[test]

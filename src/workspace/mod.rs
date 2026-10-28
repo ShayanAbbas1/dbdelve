@@ -695,16 +695,17 @@ impl Workspace {
         })
         .detach();
 
-        // Buffers are otherwise written only when one is swapped for another,
-        // so without this everything typed since the last swap dies with the
-        // process -- which is the one moment a person expects it to be kept.
+        // Autosave waits out a pause in typing, so without this whatever was
+        // typed in the last moments dies with the process. Written here on
+        // the main thread, not handed to the background as autosave is: the
+        // process is going, and nothing would wait for it to finish.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             async {}
         })
         .detach();
         // Closing the window does not quit the application, so without this the
-        // red button is a way to lose everything typed since the last swap.
+        // red button is a way to lose whatever autosave has not written yet.
         cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
             .detach();
 
@@ -1240,6 +1241,13 @@ impl Render for Workspace {
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
+        }
+        // After the tab's own focus, which closing the palette asks for in
+        // the same frame a row of it raises the delete dialog.
+        if let Some(profile) = self.profile_mut()
+            && std::mem::take(&mut profile.session.dialog_needs_focus)
+        {
+            self.focus.focus(window, cx);
         }
         // After the tab's own focus, which a context menu closing over the
         // sidebar can ask for in the same frame the row's field opens.

@@ -263,13 +263,18 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `daily` and `Daily` are one file. A name taken in any case is refused.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** The model is autosave, with no modified state:
-  every buffer is written 500 ms after its last edit (`QueryTab::autosave`,
-  a timer task each edit replaces and the tab's close drops), on a swap (a
-  new tab, a profile switch, Save) and on quit, and a saved query's again as
-  its tab closes. The timed write re-checks that the tab still holds the file
-  it was scheduled for, so a rename or save in between never writes the old
-  name back into existence; a failure is said once until a write succeeds
-  (`session::autosave_notice`). `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
+  every buffer is written 500 ms after its last edit, and at most 5 s after
+  the first edit nothing has written while typing never pauses
+  (`session::autosave_delay`; `QueryTab::autosave` is the timer each edit
+  replaces and the tab's close drops). That write runs on the background
+  executor; Save, a swap, quit and a saved query's close write on the main
+  thread. Every write goes through the tab's `session::WriteGate`: it takes
+  a ticket when the text is read, and the write lands only if no later one
+  has and the buffer has not left the file since. Rename, save under a name,
+  delete and close move the buffer under the gate's lock (`retarget`), so a
+  write already out is never written to a name the buffer left. A failed
+  timed write is said once until any write succeeds.
+  `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on
