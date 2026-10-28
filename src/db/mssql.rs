@@ -29,6 +29,8 @@ use tiberius::{
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use tracing::instrument::WithSubscriber;
+use tracing::span;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
@@ -503,10 +505,11 @@ impl Session {
     /// One round trip, under the statement timeout. `None` once a trip has
     /// lost the session, which `Connection::run` answers by reconnecting.
     fn trip(&mut self, sql: &str) -> Option<Result<Collected, tiberius::error::Error>> {
-        self.fetching(sql, Fetch::default())
+        self.fetching(sql, Fetch::default(), false)
     }
 
-    /// [`Self::trip`], keeping what `fetch` asks for of the rows.
+    /// [`Self::trip`], keeping what `fetch` asks for of the rows, and with
+    /// what the server said while it ran when `listening`.
     ///
     /// The timeout stops applying once a set's kept rows reach the limit, and
     /// applies again when the next set begins. What comes between is rows read
@@ -523,15 +526,23 @@ impl Session {
         &mut self,
         sql: &str,
         fetch: Fetch,
+        listening: bool,
     ) -> Option<Result<Collected, tiberius::error::Error>> {
         if self.lost.is_some() {
             return None;
         }
         let (runtime, client, seconds) = (&self.runtime, &mut self.client, self.timeout);
+        let heard = listening.then(|| Arc::new(Heard::default()));
         let outcome = guarded(|| {
             runtime.block_on(async {
                 let past_limit = std::cell::Cell::new(false);
-                let collect = collect(client, sql, fetch, &past_limit);
+                let collect = async {
+                    let drain = collect(client, sql, fetch, &past_limit);
+                    match &heard {
+                        Some(heard) => drain.with_subscriber(Arc::clone(heard)).await,
+                        None => drain.await,
+                    }
+                };
                 match seconds {
                     0 => Ok(collect.await),
                     seconds => {
@@ -550,7 +561,12 @@ impl Session {
             })
         });
         match outcome {
-            Ok(Ok(result)) => Some(result),
+            Ok(Ok(mut result)) => {
+                if let (Ok(collected), Some(heard)) = (&mut result, heard) {
+                    collected.result.messages = heard.take();
+                }
+                Some(result)
+            }
             Ok(Err(_)) => {
                 self.lost = Some(Lost::TimedOut);
                 None
@@ -559,6 +575,86 @@ impl Session {
                 self.lost = Some(Lost::Panicked(error.message));
                 None
             }
+        }
+    }
+}
+
+/// The line tiberius 0.12.3 logs an INFO token on, in `get_info`. Its
+/// environment changes ("Begin transaction", "Changed database from …") are
+/// logged at the same level from the same module, and only the line tells them
+/// apart; the exact pin on tiberius is what keeps this the right one.
+const INFO_TOKEN_LINE: u32 = 194;
+
+/// What the server said beside a submission's results: `PRINT`, a `RAISERROR`
+/// of severity 10 or less, a `USE`'s "Changed database context". tiberius
+/// decodes these INFO tokens and leaves them out of the result stream, logging
+/// each as a `tracing` event and nothing else, so they are heard there, by a
+/// subscriber over the one future that drains the submission.
+#[derive(Default)]
+struct Heard(Mutex<Vec<String>>);
+
+impl Heard {
+    fn take(&self) -> Vec<String> {
+        let mut heard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut heard)
+    }
+}
+
+fn is_info_token(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.is_event()
+        && *metadata.level() == tracing::Level::INFO
+        && metadata.target() == "tiberius::tds::stream::token"
+        && metadata.line() == Some(INFO_TOKEN_LINE)
+}
+
+impl tracing::Subscriber for Heard {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        is_info_token(metadata)
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::INFO)
+    }
+
+    fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+        span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        // A callsite every live subscriber is always interested in skips
+        // `enabled`, so the check is made again here.
+        if !is_info_token(event.metadata()) {
+            return;
+        }
+        let mut message = Message(None);
+        event.record(&mut message);
+        if let Some(text) = message.0 {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(text);
+        }
+    }
+
+    fn enter(&self, _: &span::Id) {}
+
+    fn exit(&self, _: &span::Id) {}
+}
+
+/// An event's `message` field, the text its format string made.
+struct Message(Option<String>);
+
+impl tracing::field::Visit for Message {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = Some(format!("{value:?}"));
         }
     }
 }
@@ -918,7 +1014,7 @@ impl Connection {
         // profile's queries, and time spent waiting behind the catalog load is
         // not time the server spent on this statement.
         let started = Instant::now();
-        let outcome = session.fetching(&submitted, fetch)?;
+        let outcome = session.fetching(&submitted, fetch, origin != Origin::Internal)?;
         let elapsed = started.elapsed();
         if origin == Origin::User
             && let Some(set) = sets_rowcount(sql)
@@ -4109,6 +4205,71 @@ mod tests {
             )
             .expect_err("the second set outlasts the timeout");
         assert!(error.message.contains("1-second"), "{}", error.message);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_print_and_informational_messages_come_back_in_order_without_transaction_changes() {
+        let result = live()
+            .query(
+                "CREATE TABLE #t163 (id int); PRINT 'made it'; BEGIN TRAN; \
+                 INSERT #t163 VALUES (1); ROLLBACK; SELECT 1 AS a; PRINT 'after select'; \
+                 RAISERROR('sev ten', 10, 1);",
+                Fetch::default(),
+            )
+            .expect("the batch should succeed");
+
+        assert_eq!(first(&result), vec![Some("1")]);
+        assert_eq!(result.messages, vec!["made it", "after select", "sev ten"]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_use_that_returns_reports_each_change_of_database() {
+        let database = live_config().database;
+        let result = live()
+            .query(
+                &format!("USE master; SELECT DB_NAME() AS here; USE [{database}]"),
+                Fetch::default(),
+            )
+            .expect("a batch that ends where it began is not moved back");
+
+        assert_eq!(first(&result), vec![Some("master")]);
+        assert_eq!(
+            result.messages,
+            vec![
+                "Changed database context to 'master'.".to_string(),
+                format!("Changed database context to '{database}'."),
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_only_the_submission_itself_carries_messages() {
+        let connection = live();
+        let plain = connection.query("SELECT 1 AS a", Fetch::default()).unwrap();
+        assert!(plain.messages.is_empty(), "{:?}", plain.messages);
+
+        let sets = connection
+            .query(
+                "PRINT 'one'; SELECT 1 AS a; PRINT 'two'; SELECT 2 AS b",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(sets.messages, vec!["one", "two"]);
+        assert!(sets.rest.iter().all(|set| set.messages.is_empty()));
+
+        // The `USE` that moves the session back is dbdelve's, and its change
+        // of database is nobody's message.
+        connection
+            .query("USE master", Fetch::default())
+            .expect_err("leaving the profile's database is reported");
+        let after = connection.query("SELECT 1 AS a", Fetch::default()).unwrap();
+        assert!(after.messages.is_empty(), "{:?}", after.messages);
+
+        let internal = connection.internal_query("PRINT 'internal'").unwrap();
+        assert!(internal.messages.is_empty(), "{:?}", internal.messages);
     }
 
     #[test]
