@@ -43,8 +43,10 @@ permissions:
 # Cargo.toml compiles dependencies at opt-level 3 so the dev app keeps its frame
 # rate; CI draws no frames, and those optimized, debuginfo-laden builds are most
 # of a cold run's hour and of each job's cache. No environment variable reaches
-# `[profile.dev.package."*"]`, so every job writes that override into Cargo's
-# home config, which takes precedence over the manifest. rust-cache keys on
+# `[profile.dev.package."*"]`, so every job writes that override into a
+# .cargo/config.toml above the checkout (macOS runners have no ~/.cargo); Cargo
+# reads config from parent directories, and it takes precedence over the
+# manifest. rust-cache keys on
 # CARGO_* variables but not on that file: change the override and the variable
 # below together, or main keeps restoring caches built the old way.
 env:
@@ -66,7 +68,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       - run: |
           # The runner image ships Microsoft's apt repository, which we install
@@ -110,7 +112,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       # Started before the apt step so the databases boot while it runs.
       - run: docker compose up -d
@@ -154,7 +156,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -167,7 +169,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       - run: cargo build
 
@@ -180,7 +182,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -200,7 +202,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ~/.cargo/config.toml
+      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
         shell: bash
       - run: cargo build
       - run: cargo test
