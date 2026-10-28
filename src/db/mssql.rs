@@ -187,15 +187,13 @@ SELECT
         -- A nonclustered columnstore index has no key either; what it has is
         -- the columns it stores, read the same way an INCLUDE list is.
         WHEN 6 THEN CONCAT(
-            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (',
-            REPLACE(included.list, NCHAR(31), N', '), N')'
+            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (', included.list, N')'
         )
         ELSE CONCAT(
             CASE WHEN i.is_unique = 1 THEN N'UNIQUE ' ELSE N'' END,
-            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (',
-            REPLACE(keyed.list, NCHAR(31), N', '), N')',
+            i.type_desc COLLATE DATABASE_DEFAULT, N' INDEX (', keyed.list, N')',
             CASE WHEN included.list IS NULL THEN N''
-                ELSE CONCAT(N' INCLUDE (', REPLACE(included.list, NCHAR(31), N', '), N')') END,
+                ELSE CONCAT(N' INCLUDE (', included.list, N')') END,
             CASE WHEN i.has_filter = 1
                 THEN CONCAT(N' WHERE ', i.filter_definition COLLATE DATABASE_DEFAULT)
                 ELSE N'' END
@@ -206,22 +204,29 @@ SELECT
         WHEN i.is_unique = 1 THEN N'unique'
         ELSE N'plain'
     END AS index_kind,
-    CASE i.type WHEN 6 THEN included.list ELSE keyed.list END AS index_columns,
+    CASE i.type WHEN 6 THEN included.separated ELSE keyed.separated END AS index_columns,
     i.filter_definition AS index_predicate
 FROM sys.indexes AS i
 OUTER APPLY (
     SELECT STRING_AGG(
         CAST({column} COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
             AS nvarchar(max)),
+        N', '
+    ) WITHIN GROUP (ORDER BY ic.key_ordinal) AS list,
+    STRING_AGG(
+        CAST({column} COLLATE DATABASE_DEFAULT + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+            AS nvarchar(max)),
         NCHAR(31)
-    ) WITHIN GROUP (ORDER BY ic.key_ordinal) AS list
+    ) WITHIN GROUP (ORDER BY ic.key_ordinal) AS separated
     FROM sys.index_columns AS ic
     JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
 ) AS keyed
 OUTER APPLY (
-    SELECT STRING_AGG(CAST({column} COLLATE DATABASE_DEFAULT AS nvarchar(max)), NCHAR(31))
-        WITHIN GROUP (ORDER BY ic.index_column_id) AS list
+    SELECT STRING_AGG(CAST({column} COLLATE DATABASE_DEFAULT AS nvarchar(max)), N', ')
+        WITHIN GROUP (ORDER BY ic.index_column_id) AS list,
+    STRING_AGG(CAST({column} COLLATE DATABASE_DEFAULT AS nvarchar(max)), NCHAR(31))
+        WITHIN GROUP (ORDER BY ic.index_column_id) AS separated
     FROM sys.index_columns AS ic
     JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
     WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
