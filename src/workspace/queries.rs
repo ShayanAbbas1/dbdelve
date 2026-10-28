@@ -11,7 +11,10 @@ use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
 use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
-use crate::session::{Finished, Lane, PendingRun, Queue, Resume, Step, TabKey, next_step};
+use crate::session::{
+    Finished, Lane, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step, TabKey,
+    next_step, query_name_refusal,
+};
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -1201,9 +1204,7 @@ impl Workspace {
         {
             return;
         }
-        // A named query is written on every swap and on quit, so calling this
-        // on one is a confirmation rather than a decision. Only a buffer with
-        // nowhere to go has to ask for a name.
+        // Only a buffer with nowhere to go has to ask for a name.
         if self.named() {
             match self.persist_buffer(cx) {
                 Ok(()) => self.note("Saved query.".into(), cx),
@@ -1264,10 +1265,6 @@ impl Workspace {
             .value()
             .trim()
             .to_string();
-        if let Err(message) = store::validate_query_name(&name) {
-            self.note(message, cx);
-            return;
-        }
         let id = profile.id.clone();
         let tab = profile.session.active;
         let Some(editor) = profile.session.editor(tab) else {
@@ -1283,40 +1280,37 @@ impl Workspace {
                 .and_then(|tab| tab.open_query.clone()),
             Tab::Object(_) => None,
         };
-        if previous.as_deref() != Some(name.as_str())
-            && profile.session.saved_queries.contains(&name)
+        if let Some(message) =
+            query_name_refusal(&name, previous.as_deref(), &profile.session.saved_queries)
         {
-            self.note(format!("A query named {name} already exists."), cx);
+            self.note(message, cx);
             return;
         }
 
         let sql = editor.read(cx).value().to_string();
-        if let Err(message) = store::write_query(&id, &name, &sql) {
+        if let Err(message) = store::save_query_as(&id, previous.as_deref(), &name, &sql) {
             self.note(message, cx);
             return;
         }
+        let scratch_error = match tab {
+            Tab::Query(tab) => store::delete_scratch(&id, tab).err(),
+            Tab::Object(_) => None,
+        };
         let chip = match (tab, &previous) {
             (Tab::Query(_), Some(previous)) => Some(TabKey::Saved(previous.clone())),
             (Tab::Query(id), None) => Some(TabKey::Unsaved(id)),
             (Tab::Object(_), _) => None,
         };
-        // Written first, then the old name dropped: a failed delete leaves two
-        // copies, which is recoverable, and the other order loses the query.
-        if let Some(previous) = previous.filter(|previous| previous != &name)
-            && let Err(message) = store::delete_query(&id, &previous)
-        {
-            self.note(message, cx);
-        }
 
         if let Some(profile) = self.profile_mut() {
-            // Before the list it reads moves: the chip's old key is only in the
-            // strip until then.
+            // Before the tab takes its new name: the chip's old key is only in
+            // the strip until then.
             if let Some(from) = chip {
                 profile.session.rekey(&from, TabKey::Saved(name.clone()));
             }
-            profile.session.saved_queries = store::saved_queries(&id);
             profile.session.naming = false;
         }
+        self.reload_saved_queries(cx);
         // Naming a relation's buffer is how it stops being a relation's buffer:
         // it leaves the object world entirely and becomes a saved query, which
         // is the only place a name means anything.
@@ -1334,9 +1328,10 @@ impl Workspace {
                 }
             }
         }
-        if let Some(profile) = self.profile_mut() {
-            profile.session.notice = Some(format!("Saved {name}."));
-        }
+        self.note(
+            scratch_error.unwrap_or_else(|| format!("Saved {name}.")),
+            cx,
+        );
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -1387,16 +1382,37 @@ impl Workspace {
         self.activate_tab(Tab::Query(id), window, cx);
     }
 
-    /// Close an unsaved buffer. Its scratch file goes with it: an unnamed
-    /// buffer is its text, and closing one is discarding both.
+    /// Close a query tab. An unsaved buffer's scratch file goes with it: an
+    /// unnamed buffer is its text, and closing one is discarding both. A saved
+    /// query's text is written to its file first and the file stays, so the
+    /// query is still in the sidebar; a write that fails keeps the tab open.
     pub(crate) fn close_buffer(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(tab) = profile.session.query_tab(id) else {
+            return;
+        };
+        if let Some(name) = &tab.open_query {
+            let sql = tab.editor.read(cx).value().to_string();
+            if let Err(message) = store::write_query(&profile.id, name, &sql) {
+                self.note(message, cx);
+                return;
+            }
+        }
+        self.remove_query_tab(id, window, cx);
+    }
+
+    /// Take a query tab out of the strip, its text written or not: closing
+    /// writes it first, deleting its query does not.
+    fn remove_query_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let position = profile.session.queries.iter().position(|tab| tab.id == id);
-        let Some(position) = position else {
+        let Some(position) = profile.session.queries.iter().position(|tab| tab.id == id) else {
             return;
         };
+        let saved = profile.session.queries[position].open_query.is_some();
         self.stop_run(Tab::Query(id), cx);
         let Some(profile) = self.profile_mut() else {
             return;
@@ -1410,7 +1426,7 @@ impl Workspace {
             self.front_after_close(fallback, window, cx);
         }
 
-        if let Err(message) = store::delete_scratch(&profile_id, id) {
+        if !saved && let Err(message) = store::delete_scratch(&profile_id, id) {
             self.note(message, cx);
         }
         // The tab is gone, so its snapshot has nothing left to come back to --
@@ -1449,9 +1465,8 @@ impl Workspace {
         match store::read_query(&profile_id, &name) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                profile.session.saved_queries = store::saved_queries(&profile_id);
                 profile.session.notice = Some(format!("{name} no longer exists."));
-                cx.notify();
+                self.reload_saved_queries(cx);
                 return;
             }
             Err(message) => {
@@ -1469,7 +1484,7 @@ impl Workspace {
             &profile_id,
             &store::StoredQueryTab {
                 id,
-                name: Some(name),
+                name: Some(name.clone()),
                 active: true,
                 queued_results: 0,
             },
@@ -1484,6 +1499,7 @@ impl Workspace {
         };
         profile.session.queries.push(tab);
         profile.session.notice = notice;
+        profile.session.place_last(TabKey::Saved(name));
         self.install_completions(&profile_id, cx);
         self.activate_tab(Tab::Query(id), window, cx);
     }
@@ -1581,10 +1597,162 @@ impl Workspace {
         }
     }
 
-    /// The chip's own delete: the first click arms it and the second one means
-    /// it. Quieter than the dialog `cmd+w` raises, because the trash icon is
-    /// already an unambiguous ask and the tab it belongs to is right there.
-    pub(crate) fn arm_delete_saved_query(
+    /// Turn a saved query's sidebar row into a field holding its name, all
+    /// of it selected. `enter` renames, and `escape` or a click elsewhere
+    /// leaves it as it was.
+    pub(crate) fn start_query_rename(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("Query name");
+            input.set_value(name.clone(), window, cx);
+            input
+        });
+        cx.subscribe_in(
+            &input,
+            window,
+            |workspace, input, event: &InputEvent, _, cx| {
+                let Some(rename) = workspace
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_rename.as_mut())
+                    .filter(|rename| rename.input == *input)
+                else {
+                    return;
+                };
+                match event {
+                    InputEvent::PressEnter { .. } => workspace.commit_query_rename(cx),
+                    InputEvent::Change => {
+                        if rename.error.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::Blur => {
+                        workspace.drop_query_rename();
+                        cx.notify();
+                    }
+                    InputEvent::Focus => {}
+                }
+            },
+        )
+        .detach();
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.session.query_rename = Some(QueryRename {
+            name,
+            input,
+            error: None,
+        });
+        profile.session.query_rename_needs_focus = true;
+        cx.notify();
+    }
+
+    /// Rename the query the sidebar's field is over to what it holds, through
+    /// the same checks and store call as the tab's own rename, so a tab
+    /// holding it follows the new name.
+    pub(crate) fn commit_query_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(rename) = profile.session.query_rename.as_ref() else {
+            return;
+        };
+        let (previous, typed) = (
+            rename.name.clone(),
+            rename.input.read(cx).value().trim().to_string(),
+        );
+        if typed == previous {
+            self.end_query_rename(cx);
+            return;
+        }
+        let id = profile.id.clone();
+        let holder = profile.session.tab_holding(&previous);
+        let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
+        // An open tab's text is the query's, written or not: renaming it is
+        // what the tab's own rename would write.
+        let sql = match refused {
+            Some(message) => Err(message),
+            None => match holder.and_then(|tab| profile.session.query_tab(tab)) {
+                Some(tab) => Ok(tab.editor.read(cx).value().to_string()),
+                None => store::read_query(&id, &previous)
+                    .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
+            },
+        };
+        let written = sql.and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql));
+        match written {
+            Ok(()) => {}
+            Err(message) => {
+                if let Some(rename) = self
+                    .profile_mut()
+                    .and_then(|profile| profile.session.query_rename.as_mut())
+                {
+                    rename.error = Some(message);
+                }
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(profile) = self.profile_mut() {
+            if let Some(holder) = holder {
+                profile.session.rekey(
+                    &TabKey::Saved(previous.clone()),
+                    TabKey::Saved(typed.clone()),
+                );
+                if let Some(tab) = profile.session.query_tab_mut(holder) {
+                    tab.open_query = Some(typed.clone());
+                }
+            }
+            profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
+        }
+        self.end_query_rename(cx);
+        self.reload_saved_queries(cx);
+        self.remember_profiles(cx);
+    }
+
+    /// `escape` over the sidebar's rename field: the name stays as it was.
+    pub(crate) fn cancel_query_rename(&mut self, cx: &mut Context<Self>) -> bool {
+        let renaming = self
+            .profile()
+            .is_some_and(|profile| profile.session.query_rename.is_some());
+        if renaming {
+            self.end_query_rename(cx);
+        }
+        renaming
+    }
+
+    /// Put the field away while it holds focus, and hand the keyboard back:
+    /// an unmounted field keeps the window's focus, and every binding with it.
+    fn end_query_rename(&mut self, cx: &mut Context<Self>) {
+        self.drop_query_rename();
+        self.refocus_front();
+        cx.notify();
+    }
+
+    fn drop_query_rename(&mut self) {
+        if let Some(profile) = self.profile_mut() {
+            profile.session.query_rename = None;
+            profile.session.query_rename_needs_focus = false;
+        }
+    }
+
+    /// Raise the dialog that asks before a saved query is deleted. The one
+    /// way in from the sidebar and the palette alike.
+    pub(crate) fn ask_delete_saved_query(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.session.pending_delete = Some(name);
+        profile.session.dialog_needs_focus = true;
+        cx.notify();
+    }
+
+    /// Delete a saved query's file, and close the tab holding it: the query
+    /// is gone, and its text with it. A tab with cell edits nobody applied
+    /// asks first, as any close does, and the file stays until it is told.
+    pub(crate) fn delete_saved_query(
         &mut self,
         name: String,
         window: &mut Window,
@@ -1593,15 +1761,25 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        if profile.session.pending_delete.as_deref() != Some(&name) {
-            profile.session.pending_delete = Some(name);
+        profile.session.pending_delete = None;
+        let holder = profile.session.tab_holding(&name).map(Tab::Query);
+        if let Some(tab) = holder.filter(|tab| self.has_unapplied_edits(*tab, cx)) {
+            if let Some(profile) = self.profile_mut() {
+                profile.session.pending_discard = Some(PendingDiscard {
+                    tab,
+                    deleting: Some(name),
+                });
+                profile.session.dialog_needs_focus = true;
+            }
             cx.notify();
             return;
         }
-        self.delete_saved_query(name, window, cx);
+        self.delete_saved_query_now(name, window, cx);
+        self.refocus_front();
     }
 
-    pub(crate) fn delete_saved_query(
+    /// The delete itself, once nothing is left to ask.
+    pub(crate) fn delete_saved_query_now(
         &mut self,
         name: String,
         window: &mut Window,
@@ -1611,44 +1789,30 @@ impl Workspace {
             return;
         };
         let id = profile.id.clone();
-        // Read before the delete, because afterwards nothing on the session
-        // still points at the file and only this says which tab did.
-        let was_open = profile.session.tab_holding(&name);
-        let in_front = was_open
-            .map(Tab::Query)
-            .filter(|open| profile.session.active == *open)
-            .map(|open| profile.session.fallback(open));
+        let holder = profile.session.tab_holding(&name);
         if let Err(message) = store::delete_query(&id, &name) {
             self.note(message, cx);
             return;
         }
-        // Here, once the file is gone, and not when `cmd+w` asked: answering
-        // Cancel to that leaves the tab, and its statement, running.
-        if let Some(open) = was_open {
-            self.stop_run(Tab::Query(open), cx);
+        if let Some(holder) = holder {
+            self.remove_query_tab(holder, window, cx);
         }
         if let Some(profile) = self.profile_mut() {
-            profile.session.saved_queries = store::saved_queries(&id);
-            profile.session.pending_delete = None;
-            profile.session.pending_close = None;
             profile.session.notice = Some(format!("Deleted {name}."));
-
-            // The tab goes with the file. Its text was the query, and the query
-            // is what was deleted -- keeping it in an untitled buffer would
-            // leave `cmd+w` looking like it had done nothing.
-            if let Some(open) = was_open {
-                profile.session.queries.retain(|tab| tab.id != open);
-                profile.session.forget(Tab::Query(open));
-                // With the tab, as in `close_buffer`: a snapshot with no
-                // tab left to come back to is rows the next buffer to be
-                // handed this id would show as its own.
-                let _ = store::remove_grid(&id, &store::query_grid_key(open));
-            }
         }
-        if let Some(fallback) = in_front {
-            self.front_after_close(fallback, window, cx);
-        }
+        self.reload_saved_queries(cx);
         self.remember_profiles(cx);
+    }
+
+    /// Read the profile in front's query files again, for a list that changed
+    /// on disk, and redraw the sidebar that lists them.
+    pub(crate) fn reload_saved_queries(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let id = profile.id.clone();
+        profile.session.saved_queries = store::saved_queries(&id);
+        self.refresh_query_library(&id, cx);
         cx.notify();
     }
 

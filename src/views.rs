@@ -47,16 +47,15 @@ use crate::{
     result_grid::{NewValue, ResultGrid},
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
-        CloseTarget, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
-        Said, Session, StructureState, Tab, query_label, result_pane_is_expanded,
+        Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
+        Session, StructureState, Tab, query_label, result_pane_is_expanded,
     },
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, button_label, code_highlights, compact_count, group_thousands,
-        icon_button, key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
-        section_label,
+        Code, Control, Tone, button, code_highlights, compact_count, group_thousands, icon_button,
+        key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
 };
@@ -2963,18 +2962,16 @@ fn render_tab_strip(
             .child(name)
     };
 
-    // Middle-click closes the tab, as it does in every browser and editor. It
-    // goes through `ask_before_close` rather than the chip's own button so the
-    // gesture means what `cmd+w` means -- a saved query is still asked about
-    // rather than deleted by a stray wheel press.
-    let close_on_middle_click = |chip: Stateful<Div>, target: CloseTarget| {
+    // Middle-click closes the tab, as it does in every browser and editor,
+    // through the same guard on unapplied edits as `cmd+w`.
+    let close_on_middle_click = |chip: Stateful<Div>, target: Tab| {
         let workspace = workspace.clone();
         chip.on_aux_click(move |event, window, cx| {
             if !event.is_middle_click() {
                 return;
             }
             _ = workspace.update(cx, |workspace, cx| {
-                workspace.ask_before_close(target.clone(), window, cx);
+                workspace.ask_before_close(target, window, cx);
             });
         })
     };
@@ -3065,7 +3062,7 @@ fn render_tab_strip(
                                 // this just closed, in the same click.
                                 cx.stop_propagation();
                                 _ = close_workspace.update(cx, |workspace, cx| {
-                                    workspace.ask_before_close(CloseTarget::Buffer(id), window, cx);
+                                    workspace.ask_before_close(Tab::Query(id), window, cx);
                                 });
                             }),
                         ),
@@ -3077,7 +3074,7 @@ fn render_tab_strip(
                 })
                 .map(|chip| {
                     draggable(
-                        close_on_middle_click(chip, CloseTarget::Buffer(id)),
+                        close_on_middle_click(chip, Tab::Query(id)),
                         TabKey::Unsaved(id),
                     )
                 })
@@ -3085,93 +3082,60 @@ fn render_tab_strip(
         })
         .collect::<Vec<_>>();
 
-    tabs.extend(
-        session
-            .saved_queries
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                let open_name = name.clone();
-                let delete_name = name.clone();
-                let middle_name = name.clone();
-                let open_workspace = workspace.clone();
-                let delete_workspace = workspace.clone();
-                let pending = session.pending_delete.as_deref() == Some(name);
-                let active = session
-                    .tab_holding(name)
-                    .is_some_and(|id| session.active == Tab::Query(id));
-                chip(active)
-                    .id(("saved-query", index))
-                    .group(format!("query-tab-{index}"))
-                    .px(px(layout::SPACE_SM))
-                    .child(row_icon(t, icon::SAVED_QUERY))
-                    .child(name_label(name.clone()))
-                    .child(
-                        // Revealed by its own tab, so the strip reads as names
-                        // rather than a row of delete buttons.
-                        div()
-                            .when(!pending, |delete| {
-                                delete
-                                    .opacity(0.)
-                                    .group_hover(format!("query-tab-{index}"), |style| {
-                                        style.opacity(1.)
-                                    })
-                            })
-                            .child(
-                                // Armed, it says the word and takes the danger
-                                // fill: the icon alone asks, the red confirms.
-                                icon_button(
-                                    ("delete-query", index),
-                                    icon::DELETE,
-                                    if pending { Tone::Danger } else { Tone::Quiet },
-                                    Control::Inline,
-                                    t,
-                                )
-                                .when(pending, |armed| {
-                                    armed.w_auto().px(px(layout::SPACE_XS)).child(button_label(
-                                        "Delete?",
-                                        Tone::Danger,
-                                        Control::Inline,
-                                        t,
-                                    ))
-                                })
-                                .tooltip("Delete query")
-                                .on_click(move |_, window, cx| {
-                                    // Or the chip underneath opens the query in
-                                    // the same click, and the confirmation this
-                                    // arms is cleared before it can be seen.
-                                    cx.stop_propagation();
-                                    _ = delete_workspace.update(cx, |workspace, cx| {
-                                        workspace.arm_delete_saved_query(
-                                            delete_name.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }),
-                            ),
+    // A saved query's chip closes like any other: the file stays, and the
+    // sidebar's Queries group is where it is opened again or deleted.
+    tabs.extend(session.queries.iter().filter_map(|tab| {
+        let name = tab.open_query.clone()?;
+        let id = tab.id;
+        let group = format!("saved-query-tab-{id}");
+        let open_workspace = workspace.clone();
+        let close_workspace = workspace.clone();
+        Some(
+            chip(session.active == Tab::Query(id))
+                .id(("saved-query-tab", id as usize))
+                .group(group.clone())
+                .px(px(layout::SPACE_SM))
+                .child(row_icon(t, icon::SAVED_QUERY))
+                .child(name_label(name.clone()))
+                .child(
+                    div()
+                        .opacity(0.)
+                        .group_hover(group, |style| style.opacity(1.))
+                        .child(
+                            icon_button(
+                                ("close-saved-query", id as usize),
+                                icon::CLOSE,
+                                Tone::Quiet,
+                                Control::Inline,
+                                t,
+                            )
+                            .tooltip("Close tab")
+                            .on_click(move |_, window, cx| {
+                                // Or the chip underneath activates the tab
+                                // this just closed, in the same click.
+                                cx.stop_propagation();
+                                _ = close_workspace.update(cx, |workspace, cx| {
+                                    workspace.ask_before_close(Tab::Query(id), window, cx);
+                                });
+                            }),
+                        ),
+                )
+                .on_click(move |_, window, cx| {
+                    _ = open_workspace.update(cx, |workspace, cx| {
+                        workspace.activate_tab(Tab::Query(id), window, cx);
+                    });
+                })
+                .map(|chip| {
+                    draggable(
+                        close_on_middle_click(chip, Tab::Query(id)),
+                        TabKey::Saved(name),
                     )
-                    .on_click(move |_, window, cx| {
-                        _ = open_workspace.update(cx, |workspace, cx| {
-                            workspace.open_saved_query(open_name.clone(), window, cx);
-                        });
-                    })
-                    .map(|chip| {
-                        draggable(
-                            close_on_middle_click(
-                                chip,
-                                CloseTarget::SavedQuery(middle_name.clone()),
-                            ),
-                            TabKey::Saved(name.clone()),
-                        )
-                    })
-                    .into_any_element()
-            }),
-    );
+                })
+                .into_any_element(),
+        )
+    }));
 
     // Opened objects sit after the queries, in the order they were opened.
-    // Closing one is not destructive, so it gets a plain × rather than the
-    // saved queries' confirmed delete.
     tabs.extend(session.objects.iter().map(|object| {
         let id = object.id;
         let group = format!("object-tab-{id}");
@@ -3223,7 +3187,7 @@ fn render_tab_strip(
                             // this just closed, in the same click.
                             cx.stop_propagation();
                             _ = close_workspace.update(cx, |workspace, cx| {
-                                workspace.ask_before_close(CloseTarget::Object(id), window, cx);
+                                workspace.ask_before_close(Tab::Object(id), window, cx);
                             });
                         }),
                     ),
@@ -3235,7 +3199,7 @@ fn render_tab_strip(
             })
             .map(|chip| {
                 draggable(
-                    close_on_middle_click(chip, CloseTarget::Object(id)),
+                    close_on_middle_click(chip, Tab::Object(id)),
                     TabKey::Object(id),
                 )
             })
@@ -3244,15 +3208,9 @@ fn render_tab_strip(
 
     // Left to right as the user dragged them; a chip they have not placed yet
     // follows the placed ones.
-    let default_keys = session
-        .queries
-        .iter()
-        .filter(|tab| tab.open_query.is_none())
-        .map(|tab| TabKey::Unsaved(tab.id))
-        .chain(session.saved_queries.iter().cloned().map(TabKey::Saved))
-        .chain(session.objects.iter().map(|tab| TabKey::Object(tab.id)));
+    let default_keys = session.default_chips();
     let order = session.strip_order();
-    let mut placed: Vec<(TabKey, AnyElement)> = default_keys.zip(tabs).collect();
+    let mut placed: Vec<(TabKey, AnyElement)> = default_keys.into_iter().zip(tabs).collect();
     placed.sort_by_key(|(key, _)| order.iter().position(|placed| placed == key));
     let tabs: Vec<AnyElement> = placed.into_iter().map(|(_, chip)| chip).collect();
 

@@ -263,10 +263,37 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   on one empty buffer instead. `active` may
   then name a tab that is gone, which every lookup by id already answers with
   `None`, and focus falls back to the window so the bindings that open a tab
-  still work. Deleting the saved query in a tab closes that tab.
+  still work.
+- **Closing a tab never deletes a saved query.** The strip holds open tabs
+  only; every query file a profile has is listed in the sidebar's Queries
+  group and the palette, open or not (`Session::saved_queries`). Closing a
+  saved query's tab writes its text to its file and keeps the file; only an
+  explicit Delete (the sidebar row's menu, or "Delete saved query…" in the
+  palette, both through one dialog) removes it. Deleting a query whose tab is
+  open closes that tab, its text with it; a tab holding cell edits nobody
+  applied asks first, as any close does (`PendingDiscard::deleting`), and the
+  file stays until it is told. A file already removed outside the app counts
+  as deleted, so its stale library row and open tab can still be removed.
+  Rename… on a sidebar row turns the row into a field
+  (`Session::query_rename`) that renames through `store::save_query_as`,
+  the tab's own path, so an open tab follows the name. A rename is one native
+  atomic no-overwrite move, never a write under the new name and a delete of
+  the old one: on a case-insensitive filesystem `daily` and `Daily` are one
+  file. A name taken in any case is refused. New saves also install their
+  target without replacing an existing entry; a missed directory listing is
+  not permission to overwrite it. Staging files are private to each writer.
 - **A named buffer persists to its query file, an unnamed one to its own
-  `.scratch-{id}.sql`.** Every buffer is written on quit, not just the visible
-  one. `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
+  `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
+  opening another query, or normal quit/window close persists the buffers.
+  Closing a saved query's tab also writes it before the tab is removed.
+  Writes are synchronous at those boundaries; typing schedules no disk
+  writes, timers or retries. There are no background buffer writes to order
+  against rename or deletion, so neither needs a per-tab write gate.
+  A crash or forced termination can lose edits since the last write.
+  Giving an unnamed tab a query name removes that tab's old scratch only
+  after the query write succeeds. A cleanup error stays visible without
+  undoing the saved query, and a failed query write keeps the scratch.
+  `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
 - **Grids are snapshotted to disk and restored on relaunch.** The first edit on

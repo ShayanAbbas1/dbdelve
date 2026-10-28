@@ -149,6 +149,7 @@ impl Workspace {
         if let Some(message) = notice {
             session.notice = Some(message);
         }
+        let id = stored.id.clone();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -184,6 +185,8 @@ impl Workspace {
             left_database: false,
             session,
         });
+        // The saved queries are listed before anything has connected.
+        self.refresh_explorer(&id, cx);
     }
 
     // Eight, because a connection is eight things and a struct holding them for
@@ -1096,6 +1099,7 @@ impl Workspace {
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
         let set = on_own_thread(move || applying.apply_schema());
+        self.refresh_explorer(&id, cx);
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let result = set.await;
@@ -1446,6 +1450,9 @@ impl Workspace {
         let id = profile.id.clone();
         let mut config = profile.config.clone();
         let mode = profile.mode;
+        // The sidebar draws the tree whenever there are saved queries, so the
+        // old catalog's rows have to leave it with the catalog.
+        self.refresh_explorer(&id, cx);
         cx.notify();
 
         let connection_task = cx.background_executor().spawn({
@@ -1542,6 +1549,7 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            self.refresh_explorer(id, cx);
             self.catalog_landed(id, cx);
             return;
         };
@@ -1805,21 +1813,54 @@ impl Workspace {
     }
 
     pub(crate) fn refresh_explorer(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, false, cx);
+    }
+
+    /// The sidebar again after only the saved queries changed. The catalog's
+    /// rows are the same rows under the same ids, so what the user folded,
+    /// opened and selected among them is put back rather than reset.
+    pub(crate) fn refresh_query_library(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, true, cx);
+    }
+
+    fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
         let filter = profile.session.explorer_filter.read(cx).value();
-        let explorer = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
-            _ => explorer::ExplorerTree::default(),
-        };
+        let mut explorer = explorer::queries(&profile.session.saved_queries, &filter);
+        if let CatalogState::Loaded(catalog, _) = &profile.catalog {
+            explorer.extend(build_explorer_tree(catalog, &filter));
+        }
         let tree = profile.session.explorer_tree.clone();
+        let (items, selected) = match keep {
+            true => {
+                let state = tree.read(cx);
+                let roots: Vec<_> = (0..)
+                    .map_while(|ix| state.entry(ix))
+                    .filter(|entry| entry.depth() == 0)
+                    .map(|entry| entry.item().clone())
+                    .collect();
+                let selected = state.selected_item().map(|item| item.id.clone());
+                (
+                    explorer::with_folds(explorer.items, &explorer::folds(&roots)),
+                    selected,
+                )
+            }
+            false => (explorer.items, None),
+        };
 
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
             profile.session.explorer_highlights = Arc::new(explorer.highlights);
         }
-        tree.update(cx, |tree, cx| tree.set_items(explorer.items, cx));
+        tree.update(cx, |tree, cx| {
+            tree.set_items(items, cx);
+            if let Some(selected) = selected {
+                let at = tree.index_of(&selected);
+                tree.set_selected_index(at, cx);
+            }
+        });
     }
 
     pub(crate) fn activate(&mut self, index: usize, cx: &mut Context<Self>) {

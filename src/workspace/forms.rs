@@ -7,15 +7,17 @@ use std::time::Duration;
 
 use gpui::{Animation, AnimationExt, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::menu::PopupMenuItem;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::connection_form::ConnectionTest;
-use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
+use crate::explorer::{
+    QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
+};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
-use crate::ui::Status;
+use crate::ui::{Status, raised_card};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -1000,10 +1002,13 @@ impl Workspace {
         )
     }
 
-    /// What `cmd+w` asks before it takes a saved query with the tab.
-    pub(crate) fn render_close_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What Delete asks before a saved query's file goes, since nothing
+    /// brings it back.
+    pub(crate) fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
-        let name = self.profile()?.session.pending_close.clone()?;
+        let session = &self.profile()?.session;
+        let name = session.pending_delete.clone()?;
+        let open = session.tab_holding(&name).is_some();
         let cancel_workspace = cx.entity().downgrade();
         let delete_workspace = cancel_workspace.clone();
         let deleted = name.clone();
@@ -1018,17 +1023,19 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close query"))
+                        .child(section_label(t, "Delete query"))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                // The whole point of the dialog: a saved query
-                                // is listed while its file exists, so closing
-                                // its tab and deleting it are one act.
-                                .child(format!(
-                                    "{name} is a saved query. Closing its tab deletes it."
-                                )),
+                                .child(if open {
+                                    format!(
+                                        "Delete {name}? Its tab is closed too. This cannot \
+                                         be undone."
+                                    )
+                                } else {
+                                    format!("Delete {name}? This cannot be undone.")
+                                }),
                         )
                         .child(
                             div()
@@ -1037,7 +1044,7 @@ impl Workspace {
                                 .gap(px(layout::SPACE_SM))
                                 .child(
                                     button(
-                                        "cancel-close-tab",
+                                        "cancel-delete-query",
                                         "Cancel",
                                         Tone::Quiet,
                                         Control::Standard,
@@ -1046,14 +1053,14 @@ impl Workspace {
                                     .on_click(
                                         move |_, _, cx| {
                                             _ = cancel_workspace.update(cx, |workspace, cx| {
-                                                workspace.cancel_close_tab(cx);
+                                                workspace.cancel_delete_query(cx);
                                             });
                                         },
                                     ),
                                 )
                                 .child(
                                     button(
-                                        "confirm-close-tab",
+                                        "confirm-delete-query",
                                         "Delete",
                                         Tone::Danger,
                                         Control::Standard,
@@ -1822,216 +1829,261 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
-        let content = match &profile.catalog {
-            CatalogState::Loading => div()
-                .p(px(layout::SPACE_MD))
-                .text_color(t.text_muted)
-                .child("Loading database objects…")
-                .into_any_element(),
-            CatalogState::Failed(message) => div()
-                .p(px(layout::SPACE_MD))
-                .text_color(t.danger)
-                .child(message.clone())
-                .into_any_element(),
-            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => div()
-                .p(px(layout::SPACE_MD))
-                .text_color(t.text_muted)
-                .child("No database objects found.")
-                .into_any_element(),
-            CatalogState::Loaded(..) => {
-                render_tree(
-                    &profile.session.explorer_tree,
-                    move |index, entry, _, _, cx| {
-                        let t = *theme(cx);
-                        let leaf = leaves.get(entry.item().id.as_str()).copied();
-                        let label = entry.item().label.clone();
-                        let active = leaf.is_none()
-                            && entry.depth() == 0
-                            && active_schema.as_ref() == Some(&label);
-                        let matched = highlights
-                            .get(entry.item().id.as_str())
-                            .map_or(&[][..], Vec::as_slice);
-                        // Three ranks, three weights: a schema owns the column, a
-                        // category only labels the run of objects under it, and the
-                        // objects themselves are what the eye is actually hunting for.
-                        let (label, row) = match (leaf, entry.depth()) {
-                            (Some(_), _) => (
-                                highlighted(label, matched, t),
-                                ListItem::new(index).text_color(t.text),
-                            ),
-                            (None, 0) => (
-                                highlighted(label, matched, t),
-                                ListItem::new(index)
-                                    .text_color(t.text)
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            ),
-                            (None, _) => (
-                                StyledText::new(label.to_uppercase()),
-                                ListItem::new(index)
-                                    .text_color(t.text_faint)
-                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                    .font_weight(FontWeight::MEDIUM),
-                            ),
-                        };
-                        // A folder shows which way it is facing; an object shows what
-                        // kind of object it is. Both occupy the same slot, so the
-                        // labels line up down the column either way.
-                        let row_icon_path = match leaf {
-                            Some(leaf) => object_icon(leaf.kind),
-                            None if entry.is_expanded() => icon::CHEVRON_DOWN,
-                            None => icon::CHEVRON_RIGHT,
-                        };
-                        let row = row
-                            .mx(px(layout::SPACE_XS))
-                            .rounded(px(layout::RADIUS_CONTROL))
-                            // `ListItem` sizes its text in `rems`, which tracks
-                            // the library's 16 rather than dbdelve's body size.
-                            .text_size(px(layout::chrome(layout::TEXT_MD)))
-                            .pl(px(
-                                layout::SPACE_SM + entry.depth() as f32 * layout::SPACE_MD
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(layout::SPACE_SM))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(row_icon(t, row_icon_path))
-                                    .child(
+        let open_queries: HashSet<String> = profile
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| tab.open_query.clone())
+            .collect();
+        let renaming = profile.session.query_rename.as_ref().map(|rename| {
+            (
+                rename.name.clone(),
+                rename.input.clone(),
+                rename.error.clone(),
+            )
+        });
+        let message = match &profile.catalog {
+            CatalogState::Loading => Some(("Loading database objects…".to_string(), t.text_muted)),
+            CatalogState::Failed(message) => Some((message.clone(), t.danger)),
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => {
+                Some(("No database objects found.".to_string(), t.text_muted))
+            }
+            CatalogState::Loaded(..) => None,
+        };
+        // Drawn while the catalog is away too, so a connection that is down or
+        // still loading has its saved queries within reach.
+        let tree = (message.is_none() || !profile.session.saved_queries.is_empty()).then(|| {
+            render_tree(
+                &profile.session.explorer_tree,
+                move |index, entry, _, _, cx| {
+                    let t = *theme(cx);
+                    let leaf = leaves.get(entry.item().id.as_str()).copied();
+                    let query = saved_query(entry.item().id.as_str()).map(str::to_string);
+                    let group = entry.item().id.as_ref() == QUERIES_GROUP;
+                    let label = entry.item().label.clone();
+                    let active = is_schema_row(entry.item().id.as_str())
+                        && active_schema.as_ref() == Some(&label);
+                    let open = query
+                        .as_ref()
+                        .is_some_and(|name| open_queries.contains(name));
+                    let rename = renaming
+                        .as_ref()
+                        .filter(|(name, ..)| query.as_ref() == Some(name));
+                    let matched = highlights
+                        .get(entry.item().id.as_str())
+                        .map_or(&[][..], Vec::as_slice);
+                    // Three ranks, three weights: a schema owns the column, a
+                    // category only labels the run of objects under it, and the
+                    // objects themselves are what the eye is actually hunting for.
+                    let (label, row) = match (leaf, entry.depth()) {
+                        (Some(_), _) => (
+                            highlighted(label, matched, t),
+                            ListItem::new(index).text_color(t.text),
+                        ),
+                        _ if query.is_some() => (
+                            highlighted(label, matched, t),
+                            ListItem::new(index).text_color(t.text),
+                        ),
+                        (None, 0) if !group => (
+                            highlighted(label, matched, t),
+                            ListItem::new(index)
+                                .text_color(t.text)
+                                .font_weight(FontWeight::SEMIBOLD),
+                        ),
+                        (None, _) => (
+                            StyledText::new(label.to_uppercase()),
+                            ListItem::new(index)
+                                .text_color(t.text_faint)
+                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                .font_weight(FontWeight::MEDIUM),
+                        ),
+                    };
+                    // A folder shows which way it is facing; an object shows what
+                    // kind of object it is. Both occupy the same slot, so the
+                    // labels line up down the column either way.
+                    let row_icon_path = match leaf {
+                        Some(leaf) => object_icon(leaf.kind),
+                        None if query.is_some() => icon::SAVED_QUERY,
+                        None if entry.is_expanded() => icon::CHEVRON_DOWN,
+                        None => icon::CHEVRON_RIGHT,
+                    };
+                    let row = row
+                        .mx(px(layout::SPACE_XS))
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        // `ListItem` sizes its text in `rems`, which tracks
+                        // the library's 16 rather than dbdelve's body size.
+                        .text_size(px(layout::chrome(layout::TEXT_MD)))
+                        .pl(px(
+                            layout::SPACE_SM + entry.depth() as f32 * layout::SPACE_MD
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_SM))
+                                .min_w_0()
+                                .flex_1()
+                                .child(row_icon(t, row_icon_path))
+                                .child(match rename {
+                                    Some((_, input, error)) => {
+                                        rename_field(label, input, error.clone(), t)
+                                    }
+                                    None => div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(label),
+                                })
+                                .when(rename.is_none() && (active || open), |row| {
+                                    row.child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
+                                            .flex_none()
                                             .whitespace_nowrap()
-                                            .child(label),
+                                            .text_color(t.text_faint)
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .child(if open { "open" } else { "active" }),
                                     )
-                                    .when(active, |row| {
-                                        row.child(
-                                            div()
-                                                .flex_none()
-                                                .whitespace_nowrap()
-                                                .text_color(t.text_faint)
-                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                                .font_weight(FontWeight::NORMAL)
-                                                .child("active"),
-                                        )
-                                    })
-                                    .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
-                                        row.child(
-                                            div()
-                                                .flex_none()
-                                                .whitespace_nowrap()
-                                                .text_color(t.text_faint)
-                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                                .child(human_bytes(size)),
-                                        )
-                                    }),
-                            );
-                        let Some(leaf) = leaf else {
-                            return row;
-                        };
-                        let workspace = workspace.clone();
-                        // Every opened object gets a tab that stays until it is
-                        // closed, so a second click on the same row is the same
-                        // gesture as the first.
-                        row.on_click(move |_, window, cx| {
-                            _ = workspace.update(cx, |workspace, cx| {
-                                workspace.open_explorer_target(leaf.target, window, cx);
-                            });
-                        })
-                    },
-                )
-                .context_menu(move |_, entry, menu, _, cx| {
-                    let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
-                        if !picks_schema || entry.depth() != 0 {
-                            return menu;
-                        }
-                        let workspace = menu_workspace.clone();
-                        let schema = entry.item().label.to_string();
-                        return menu.item(
-                            PopupMenuItem::new("Set as Active Schema")
-                                .checked(menu_schema.as_ref() == Some(&entry.item().label))
-                                .on_click(move |_, _, cx| {
-                                    let schema = schema.clone();
-                                    _ = workspace.update(cx, |workspace, cx| {
-                                        workspace.set_schema(schema, cx);
-                                    });
+                                })
+                                .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .text_color(t.text_faint)
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                            .child(human_bytes(size)),
+                                    )
                                 }),
                         );
-                    };
-                    let Some(workspace) = menu_workspace.upgrade() else {
-                        return menu;
-                    };
-                    let workspace = workspace.read(cx);
-                    let Some((schema, relation, kind)) = workspace.relation_at(leaf.target) else {
-                        return menu;
-                    };
-                    let engine = workspace.engine();
-                    let copy = |label: &'static str, text: String| {
-                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                        })
-                    };
-                    let ddl_workspace = menu_workspace.clone();
-                    let ddl_names = (schema.clone(), relation.clone());
-                    let open = |label: &'static str, structure: bool| {
-                        let workspace = menu_workspace.clone();
-                        let (schema, relation) = (schema.clone(), relation.clone());
-                        PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                            let (schema, relation) = (schema.clone(), relation.clone());
+                    // A click inside the field is the field's.
+                    if rename.is_some() {
+                        return row;
+                    }
+                    if let Some(name) = query {
+                        let workspace = workspace.clone();
+                        return row.on_click(move |_, window, cx| {
                             _ = workspace.update(cx, |workspace, cx| {
-                                workspace.open_relation_view(
-                                    schema, relation, kind, structure, window, cx,
-                                );
+                                workspace.open_saved_query(name.clone(), window, cx);
                             });
-                        })
-                    };
-                    let import_workspace = menu_workspace.clone();
-                    let import_names = (schema.clone(), relation.clone());
-                    let mut menu = menu
-                        .item(open("Open Data", false))
-                        .item(open("Open Structure", true));
-                    if engine.takes_imports(kind) {
-                        menu = menu.item(PopupMenuItem::new("Import Rows…").on_click(
-                            move |_, window, cx| {
-                                let (schema, relation) = import_names.clone();
-                                _ = import_workspace.update(cx, |workspace, cx| {
-                                    workspace.import_rows_into(schema, relation, window, cx);
-                                });
-                            },
-                        ));
-                    }
-                    let menu = menu
-                        .separator()
-                        .when(engine.copies_ddl(), |menu| {
-                            menu.item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
-                                let (schema, relation) = ddl_names.clone();
-                                _ = ddl_workspace.update(cx, |workspace, cx| {
-                                    workspace.copy_ddl(schema, relation, kind, cx);
-                                });
-                            }))
-                        })
-                        .when_some(select_top_sql(engine, &schema, &relation), |menu, sql| {
-                            menu.item(copy("Copy SELECT (Top 100)", sql))
-                        })
-                        .separator()
-                        .when_some(drop_sql(engine, &schema, &relation, kind), |menu, sql| {
-                            menu.item(copy("Copy DROP", sql))
                         });
-                    if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
-                        menu.item(copy(
-                            "Copy TRUNCATE",
-                            truncate_sql(engine, &schema, &relation),
-                        ))
-                    } else {
-                        menu
                     }
-                })
-                .into_any_element()
-            }
-        };
+                    let Some(leaf) = leaf else {
+                        return row;
+                    };
+                    let workspace = workspace.clone();
+                    // Every opened object gets a tab that stays until it is
+                    // closed, so a second click on the same row is the same
+                    // gesture as the first.
+                    row.on_click(move |_, window, cx| {
+                        _ = workspace.update(cx, |workspace, cx| {
+                            workspace.open_explorer_target(leaf.target, window, cx);
+                        });
+                    })
+                },
+            )
+            .context_menu(move |_, entry, menu, _, cx| {
+                if let Some(name) = saved_query(entry.item().id.as_str()) {
+                    return saved_query_menu(menu, name, &menu_workspace);
+                }
+                let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
+                    if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
+                        return menu;
+                    }
+                    let workspace = menu_workspace.clone();
+                    let schema = entry.item().label.to_string();
+                    return menu.item(
+                        PopupMenuItem::new("Set as Active Schema")
+                            .checked(menu_schema.as_ref() == Some(&entry.item().label))
+                            .on_click(move |_, _, cx| {
+                                let schema = schema.clone();
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.set_schema(schema, cx);
+                                });
+                            }),
+                    );
+                };
+                let Some(workspace) = menu_workspace.upgrade() else {
+                    return menu;
+                };
+                let workspace = workspace.read(cx);
+                let Some((schema, relation, kind)) = workspace.relation_at(leaf.target) else {
+                    return menu;
+                };
+                let engine = workspace.engine();
+                let copy = |label: &'static str, text: String| {
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    })
+                };
+                let ddl_workspace = menu_workspace.clone();
+                let ddl_names = (schema.clone(), relation.clone());
+                let open = |label: &'static str, structure: bool| {
+                    let workspace = menu_workspace.clone();
+                    let (schema, relation) = (schema.clone(), relation.clone());
+                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let (schema, relation) = (schema.clone(), relation.clone());
+                        _ = workspace.update(cx, |workspace, cx| {
+                            workspace
+                                .open_relation_view(schema, relation, kind, structure, window, cx);
+                        });
+                    })
+                };
+                let import_workspace = menu_workspace.clone();
+                let import_names = (schema.clone(), relation.clone());
+                let mut menu = menu
+                    .item(open("Open Data", false))
+                    .item(open("Open Structure", true));
+                if engine.takes_imports(kind) {
+                    menu = menu.item(PopupMenuItem::new("Import Rows…").on_click(
+                        move |_, window, cx| {
+                            let (schema, relation) = import_names.clone();
+                            _ = import_workspace.update(cx, |workspace, cx| {
+                                workspace.import_rows_into(schema, relation, window, cx);
+                            });
+                        },
+                    ));
+                }
+                let menu = menu
+                    .separator()
+                    .when(engine.copies_ddl(), |menu| {
+                        menu.item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
+                            let (schema, relation) = ddl_names.clone();
+                            _ = ddl_workspace.update(cx, |workspace, cx| {
+                                workspace.copy_ddl(schema, relation, kind, cx);
+                            });
+                        }))
+                    })
+                    .when_some(select_top_sql(engine, &schema, &relation), |menu, sql| {
+                        menu.item(copy("Copy SELECT (Top 100)", sql))
+                    })
+                    .separator()
+                    .when_some(drop_sql(engine, &schema, &relation, kind), |menu, sql| {
+                        menu.item(copy("Copy DROP", sql))
+                    });
+                if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
+                    menu.item(copy(
+                        "Copy TRUNCATE",
+                        truncate_sql(engine, &schema, &relation),
+                    ))
+                } else {
+                    menu
+                }
+            })
+        });
+        let content = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(message.map(|(message, color)| {
+                div()
+                    .p(px(layout::SPACE_MD))
+                    .text_color(color)
+                    .child(message)
+            }))
+            .children(tree.map(|tree| div().flex_1().min_h_0().child(tree)));
 
         div()
             .size_full()
@@ -2069,6 +2121,105 @@ impl Workspace {
             )
             .child(div().flex_1().min_h_0().child(content))
     }
+}
+
+/// What a saved query's row offers on a right click: what its tab offers, for
+/// a query that may have no tab open.
+fn saved_query_menu(
+    menu: PopupMenu,
+    name: &str,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    let action =
+        |label: &'static str,
+         act: fn(&mut Workspace, String, &mut Window, &mut Context<Workspace>)| {
+            let workspace = workspace.clone();
+            let name = name.to_string();
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                _ = workspace.update(cx, |workspace, cx| act(workspace, name.clone(), window, cx));
+            })
+        };
+    menu.item(action("Open", |workspace, name, window, cx| {
+        workspace.open_saved_query(name, window, cx)
+    }))
+    .item(action("Rename…", |workspace, name, window, cx| {
+        workspace.start_query_rename(name, window, cx)
+    }))
+    .separator()
+    .item(action("Delete…", |workspace, name, _, cx| {
+        workspace.ask_delete_saved_query(name, cx)
+    }))
+}
+
+/// A saved query's name as a field, laid over the label it replaces. The
+/// label stays, unseen, to hold the row's height: the tree's rows are all as
+/// tall as its first, and a field taller than a label would push nothing but
+/// spill over its neighbours. A refusal floats under the field for the same
+/// reason.
+fn rename_field(
+    label: StyledText,
+    input: &Entity<InputState>,
+    error: Option<String>,
+    t: Theme,
+) -> gpui::Div {
+    let field = div()
+        .relative()
+        .w_full()
+        .h(px(layout::chrome(layout::CONTROL_HEIGHT_INLINE)))
+        .flex()
+        .items_center()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .border_1()
+        .border_color(if error.is_some() { t.danger } else { t.accent })
+        .bg(t.bg)
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .h_full()
+                .px(px(layout::SPACE_XS))
+                .py_0()
+                .text_size(px(layout::chrome(layout::TEXT_MD))),
+        )
+        .children(error.map(|message| {
+            div()
+                .absolute()
+                .top_full()
+                .left_0()
+                .mt(px(2.))
+                .child(gpui::deferred(
+                    gpui::anchored()
+                        .snap_to_window_with_margin(px(layout::SPACE_SM))
+                        .child(raised_card(
+                            div()
+                                .max_w(px(layout::SIDEBAR_DEFAULT_WIDTH))
+                                .px(px(layout::SPACE_SM))
+                                .py(px(layout::SPACE_XS))
+                                .rounded(px(layout::RADIUS_CONTROL))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.danger)
+                                .child(message),
+                            t,
+                        )),
+                ))
+        }));
+    div()
+        .flex_1()
+        .min_w_0()
+        .relative()
+        .child(div().invisible().whitespace_nowrap().child(label))
+        .child(
+            // Out by the field's own inset, so the name does not move as the
+            // row turns into it.
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-(layout::SPACE_XS + 1.)))
+                .right_0()
+                .flex()
+                .items_center()
+                .child(field),
+        )
 }
 
 fn note(t: Theme, text: &'static str) -> AnyElement {

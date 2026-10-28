@@ -21,6 +21,12 @@ its target, a dictionary, the `analytics` database, the `edit_*` tables
 healthcheck counts the two rows of `type_gallery`, so a half-seeded container
 is not healthy. The live tests are `cargo test clickhouse -- --include-ignored`.
 
+The ClickHouse HTTP mock releases a completed execution's session before its
+complete response becomes observable, including a zero-length body's headers.
+Releasing after socket shutdown races the client's next request and invents a
+`SESSION_IS_LOCKED`; delayed or stalled executions still hold their session
+until they finish or are stopped.
+
 Snowflake has no container. Its unit tests need nothing, and neither do its
 mock tests: `snowflake/mock.rs` is a loopback HTTP server replaying responses
 recorded from a real account (`dev/snowflake/fixtures`), with scripted

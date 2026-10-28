@@ -35,6 +35,57 @@ const ROUTINE_CATEGORIES: [(RoutineKind, &str); 2] = [
     (RoutineKind::Procedure, "Procedures"),
 ];
 
+/// The id of the sidebar's Queries group, the profile's saved queries listed
+/// above its schemas.
+pub const QUERIES_GROUP: &str = "queries";
+
+/// What a saved query's row id starts with. Its name follows: query names are
+/// file names, so no other row's id can take this shape.
+const QUERY_ROW: &str = "query:";
+
+/// Whether a row is a schema's own: the only row "Set as Active Schema"
+/// means anything on. Asked by id, since a schema's label can be anything,
+/// "Queries" included.
+pub fn is_schema_row(id: &str) -> bool {
+    id.starts_with(SCHEMA_ROW)
+}
+
+const SCHEMA_ROW: &str = "schema-";
+
+/// Whether each folder in `items` is open, by row id, to put back on a
+/// rebuild with [`with_folds`].
+pub fn folds(items: &[TreeItem]) -> HashMap<String, bool> {
+    let mut folds = HashMap::new();
+    let mut stack: Vec<&TreeItem> = items.iter().collect();
+    while let Some(item) = stack.pop() {
+        if item.is_folder() {
+            folds.insert(item.id.to_string(), item.is_expanded());
+        }
+        stack.extend(&item.children);
+    }
+    folds
+}
+
+/// `items` with every folder `folds` names opened or closed as it says. A
+/// row it does not name keeps the state it was built with.
+pub fn with_folds(items: Vec<TreeItem>, folds: &HashMap<String, bool>) -> Vec<TreeItem> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            item.children = with_folds(std::mem::take(&mut item.children), folds);
+            match folds.get(item.id.as_ref()) {
+                Some(&expanded) => item.expanded(expanded),
+                None => item,
+            }
+        })
+        .collect()
+}
+
+/// The saved query a row stands for, by its row id.
+pub fn saved_query(id: &str) -> Option<&str> {
+    id.strip_prefix(QUERY_ROW)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -73,6 +124,15 @@ pub struct ExplorerTree {
     /// The characters of each row's own name the filter matched, by row id.
     /// A row kept only because its schema or parent matched has none.
     pub highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+impl ExplorerTree {
+    /// `other`'s rows after this one's.
+    pub fn extend(&mut self, other: ExplorerTree) {
+        self.items.extend(other.items);
+        self.leaves.extend(other.leaves);
+        self.highlights.extend(other.highlights);
+    }
 }
 
 /// One filter pass over the catalog: the query parsed once, and what the rows
@@ -131,7 +191,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let id = format!("schema-{schema_index}");
+            let id = format!("{SCHEMA_ROW}{schema_index}");
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
@@ -215,6 +275,35 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     ExplorerTree {
         items,
         leaves: builder.leaves,
+        highlights: builder.highlights,
+    }
+}
+
+/// The Queries group, holding every saved query whose name the filter keeps,
+/// or no row at all when it keeps none. Only the names are matched: a filter
+/// that matched the group's own label would keep every query for typing `q`.
+pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
+    let mut builder = Builder::new(filter);
+    let children: Vec<TreeItem> = names
+        .iter()
+        .filter_map(|name| {
+            let id = format!("{QUERY_ROW}{name}");
+            builder
+                .name_matches(&id, name)
+                .then(|| TreeItem::new(id, name.clone()))
+        })
+        .collect();
+    let items = match children.is_empty() {
+        true => Vec::new(),
+        false => vec![
+            TreeItem::new(QUERIES_GROUP, "Queries")
+                .expanded(true)
+                .children(children),
+        ],
+    };
+    ExplorerTree {
+        items,
+        leaves: HashMap::new(),
         highlights: builder.highlights,
     }
 }
@@ -753,6 +842,125 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "analytics");
         assert_eq!(items[0].children[0].children[0].label, "events");
+    }
+
+    #[test]
+    fn every_saved_query_is_listed_under_its_group_and_a_filter_narrows_them() {
+        let names = ["daily revenue".to_string(), "signups".to_string()];
+
+        let all = queries(&names, "");
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(all.items[0].id.as_ref(), QUERIES_GROUP);
+        let rows: Vec<_> = all.items[0]
+            .children
+            .iter()
+            .map(|row| (saved_query(&row.id), row.label.as_ref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("daily revenue"), "daily revenue"),
+                (Some("signups"), "signups")
+            ]
+        );
+
+        let narrowed = queries(&names, "rev");
+        assert_eq!(narrowed.items[0].children.len(), 1);
+        assert_eq!(
+            marked(&narrowed, "query:daily revenue", "daily revenue").as_deref(),
+            Some("rev")
+        );
+
+        // No query, or none the filter keeps, is no group rather than an
+        // empty one.
+        assert!(queries(&names, "zzz").items.is_empty());
+        assert!(queries(&[], "").items.is_empty());
+    }
+
+    #[test]
+    fn no_catalog_rows_id_reads_as_a_saved_query() {
+        let explorer = tree(&catalog(), "");
+        let mut ids = Vec::new();
+        let mut stack: Vec<&TreeItem> = explorer.items.iter().collect();
+        while let Some(item) = stack.pop() {
+            ids.push(item.id.to_string());
+            stack.extend(item.children.iter());
+        }
+        assert!(!ids.is_empty());
+        assert!(
+            ids.iter()
+                .all(|id| saved_query(id).is_none() && id != QUERIES_GROUP)
+        );
+    }
+
+    #[test]
+    fn only_a_schemas_row_is_offered_as_the_active_schema() {
+        // A schema named like the group is still a schema, and the group is
+        // never one: picking it would set and save a schema called Queries.
+        let names = ["daily".to_string()];
+        let mut explorer = queries(&names, "");
+        explorer.extend(tree(&catalog(), ""));
+        let roots: Vec<_> = explorer
+            .items
+            .iter()
+            .map(|item| (item.id.as_ref(), is_schema_row(&item.id)))
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                (QUERIES_GROUP, false),
+                ("schema-0", true),
+                ("schema-1", true)
+            ]
+        );
+        let group = &explorer.items[0];
+        assert!(!is_schema_row(&group.children[0].id));
+        assert!(!is_schema_row(&explorer.items[1].children[0].id));
+    }
+
+    #[test]
+    fn a_change_to_the_saved_queries_keeps_what_was_folded_and_opened() {
+        let build = |names: &[String]| {
+            let mut explorer = queries(names, "");
+            explorer.extend(tree(&partitioned_catalog(), ""));
+            explorer.items
+        };
+        let before = build(&["daily".to_string()]);
+        let schema = before
+            .iter()
+            .find(|item| is_schema_row(&item.id))
+            .expect("a schema row");
+        let category = &schema.children[0];
+        let parent = schema
+            .children
+            .iter()
+            .flat_map(|category| &category.children)
+            .find(|relation| relation.is_folder())
+            .expect("a partitioned table");
+        // The schema and a category folded, a partitioned table opened: the
+        // opposite of how each is built. A clone shares its row's state, as
+        // the tree's own entries do, so folding one folds the row.
+        assert!(schema.is_expanded() && category.is_expanded() && !parent.is_expanded());
+        let (schema_id, category_id, parent_id) = (
+            schema.id.to_string(),
+            category.id.to_string(),
+            parent.id.to_string(),
+        );
+        let _ = schema.clone().expanded(false);
+        let _ = category.clone().expanded(false);
+        let _ = parent.clone().expanded(true);
+
+        let after = with_folds(
+            build(&["daily".to_string(), "signups".to_string()]),
+            &folds(&before),
+        );
+        let state = folds(&after);
+        assert_eq!(state.get(&schema_id), Some(&false));
+        assert_eq!(state.get(&category_id), Some(&false));
+        assert_eq!(state.get(&parent_id), Some(&true));
+        // The group's new query is there, and the group is open as it was.
+        assert_eq!(after[0].children.len(), 2);
+        assert_eq!(state.get(QUERIES_GROUP), Some(&true));
     }
 
     fn marked(explorer: &ExplorerTree, id: &str, label: &str) -> Option<String> {

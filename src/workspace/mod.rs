@@ -695,16 +695,14 @@ impl Workspace {
         })
         .detach();
 
-        // Buffers are otherwise written only when one is swapped for another,
-        // so without this everything typed since the last swap dies with the
-        // process -- which is the one moment a person expects it to be kept.
+        // Finish writes synchronously: the process is going, and nothing
+        // would wait for background work to finish.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             async {}
         })
         .detach();
-        // Closing the window does not quit the application, so without this the
-        // red button is a way to lose everything typed since the last swap.
+        // Window release also persists when the window closes without Quit.
         cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
             .detach();
 
@@ -1240,6 +1238,23 @@ impl Render for Workspace {
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
+        }
+        // After the tab's own focus, which closing the palette asks for in
+        // the same frame a row of it raises the delete dialog.
+        if let Some(profile) = self.profile_mut()
+            && std::mem::take(&mut profile.session.dialog_needs_focus)
+        {
+            self.focus.focus(window, cx);
+        }
+        // After the tab's own focus, which a context menu closing over the
+        // sidebar can ask for in the same frame the row's field opens.
+        if let Some(profile) = self.profile_mut()
+            && std::mem::take(&mut profile.session.query_rename_needs_focus)
+            && let Some(rename) = &profile.session.query_rename
+        {
+            let input = rename.input.clone();
+            input.focus_handle(cx).focus(window, cx);
+            input.update(cx, |input, cx| input.select_all(window, cx));
         }
         if std::mem::take(&mut self.settings_search_needs_focus) && self.settings_open {
             self.settings_search.focus_handle(cx).focus(window, cx);
@@ -2105,7 +2120,7 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.render_apply_review(cx))
             .children(self.render_import_rows(window, cx))
-            .children(self.render_close_confirmation(cx))
+            .children(self.render_delete_confirmation(cx))
             .children(self.render_discard_confirmation(cx))
             .children(self.render_pending_run(cx))
             .children(self.render_queue_failure(cx))

@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
 
 /// How tall an Edit mode input grows before it scrolls instead.
@@ -646,7 +647,7 @@ impl Workspace {
         // Whatever is in front, in the order it is stacked: the palette paints
         // over the stale-edit prompt, the stopped-run prompt and the run
         // prompt, which paint over the discard-close confirmation, which
-        // paints over the close confirmation, which paints over the import
+        // paints over the delete confirmation, which paints over the import
         // dialog, which paints over the apply review, which paints over the
         // surface and the settings panel beside it -- so `escape` backs out
         // of them in that order, one at a time. The palette stays first so
@@ -669,7 +670,10 @@ impl Workspace {
         if self.cancel_discard_close(cx) {
             return;
         }
-        if self.cancel_close_tab(cx) {
+        if self.cancel_delete_query(cx) {
+            return;
+        }
+        if self.cancel_query_rename(cx) {
             return;
         }
         if self.close_import(cx) {
@@ -750,13 +754,8 @@ impl Workspace {
         }
     }
 
-    /// `cmd+w` on whatever surface is in front.
-    ///
-    /// An object tab closes: it is a view onto something the database still
-    /// holds, and reopening it costs a click. A saved query is a file, and
-    /// closing its tab is deleting that file — the strip has no room for a
-    /// query that exists but is not listed — so that one asks first. The
-    /// scratch buffer has no closed state at all and is left alone.
+    /// `cmd+w` on whatever surface is in front. Closing never deletes a saved
+    /// query: the sidebar still lists it, and only its own Delete removes it.
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // The palette is over the tab and holds the keyboard: a stroke that
         // reached here through it would close a tab nobody was looking at.
@@ -770,8 +769,8 @@ impl Workspace {
         if session.active_query_tab().is_none() && session.active_object().is_none() {
             return;
         }
-        let target = close_target(session.active, session.open_query());
-        self.ask_before_close(target, window, cx);
+        let tab = session.active;
+        self.ask_before_close(tab, window, cx);
     }
 
     /// Close a tab, asking first if it holds cell edits nobody has applied.
@@ -782,46 +781,38 @@ impl Workspace {
     /// none.
     pub(crate) fn ask_before_close(
         &mut self,
-        target: CloseTarget,
+        tab: Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let unapplied = self.profile().is_some_and(|profile| {
-            target
-                .tab(&profile.session)
-                .and_then(|tab| profile.session.results(tab))
-                .is_some_and(|results| results.read(cx).delegate().has_pending())
-        });
-        if !unapplied {
-            self.close_now(target, window, cx);
+        if !self.has_unapplied_edits(tab, cx) {
+            self.close_now(tab, window, cx);
             return;
         }
         if let Some(profile) = self.profile_mut() {
-            profile.session.pending_discard = Some(target);
+            profile.session.pending_discard = Some(PendingDiscard {
+                tab,
+                deleting: None,
+            });
+            profile.session.dialog_needs_focus = true;
         }
         cx.notify();
     }
 
-    /// Carry out a close that has been decided on. A saved query asks its own
-    /// question from here: closing its tab deletes its file.
-    ///
-    /// Nothing is stopped here: each close stops its tab's statement as the
-    /// tab goes, and a saved query's goes only once its delete is confirmed.
-    pub(crate) fn close_now(
-        &mut self,
-        target: CloseTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match target {
-            CloseTarget::Object(id) => self.close_object(id, window, cx),
-            CloseTarget::Buffer(id) => self.close_buffer(id, window, cx),
-            CloseTarget::SavedQuery(name) => {
-                if let Some(profile) = self.profile_mut() {
-                    profile.session.pending_close = Some(name);
-                }
-                cx.notify();
-            }
+    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .results(tab)
+                .is_some_and(|results| results.read(cx).delegate().has_pending())
+        })
+    }
+
+    /// Carry out a close that has been decided on.
+    pub(crate) fn close_now(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        match tab {
+            Tab::Object(id) => self.close_object(id, window, cx),
+            Tab::Query(id) => self.close_buffer(id, window, cx),
         }
     }
 
@@ -875,13 +866,17 @@ impl Workspace {
 
     /// Close the tab the discard prompt was raised over, edits and all.
     pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self
+        let Some(discard) = self
             .profile_mut()
             .and_then(|profile| profile.session.pending_discard.take())
         else {
             return;
         };
-        self.close_now(target, window, cx);
+        match discard.deleting {
+            Some(name) => self.delete_saved_query_now(name, window, cx),
+            None => self.close_now(discard.tab, window, cx),
+        }
+        self.refocus_front();
     }
 
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {
@@ -890,17 +885,19 @@ impl Workspace {
             .and_then(|profile| profile.session.pending_discard.take())
             .is_some();
         if cancelled {
+            self.refocus_front();
             cx.notify();
         }
         cancelled
     }
 
-    pub(crate) fn cancel_close_tab(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn cancel_delete_query(&mut self, cx: &mut Context<Self>) -> bool {
         let cancelled = self
             .profile_mut()
-            .and_then(|profile| profile.session.pending_close.take())
+            .and_then(|profile| profile.session.pending_delete.take())
             .is_some();
         if cancelled {
+            self.refocus_front();
             cx.notify();
         }
         cancelled

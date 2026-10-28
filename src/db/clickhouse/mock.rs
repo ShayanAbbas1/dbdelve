@@ -453,7 +453,7 @@ impl Mock {
 struct Decision {
     response: Response,
     tag: Option<String>,
-    /// Held while the response is written; the session is free after.
+    /// Held until execution ends, before a complete response is observable.
     session: Option<String>,
     query_id: Option<String>,
 }
@@ -609,19 +609,23 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     let Some(request) = read_request(&stream, state) else {
         return;
     };
-    let decision = {
+    let mut decision = {
         let mut state = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.requests.push(request.clone());
         decide(&request, &mut state)
     };
-    let _ = write_response(stream, &decision, state);
-    if let Some(session) = &decision.session {
+    let _ = write_response(stream, &mut decision, state);
+    release_session(&mut decision.session, state);
+}
+
+fn release_session(session: &mut Option<String>, state: &Mutex<State>) {
+    if let Some(session) = session.take() {
         let mut state = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(held) = state.sessions.get_mut(session) {
+        if let Some(held) = state.sessions.get_mut(&session) {
             *held = false;
         }
     }
@@ -717,7 +721,7 @@ fn late_exception(message: &str, tag: Option<&str>) -> Vec<u8> {
 
 fn write_response(
     mut stream: TcpStream,
-    decision: &Decision,
+    decision: &mut Decision,
     state: &Mutex<State>,
 ) -> std::io::Result<()> {
     let response = &decision.response;
@@ -725,6 +729,7 @@ fn write_response(
     let tag = decision.tag.as_deref();
     let mut aftermath = None;
     if let Delivery::Dropped = response.delivery {
+        release_session(&mut decision.session, state);
         return stream.shutdown(Shutdown::Both);
     }
     if let Delivery::Delayed(pause) = response.delivery {
@@ -760,6 +765,12 @@ fn write_response(
         false => head.push_str(&format!("Content-Length: {}\r\n", body.len())),
     }
     head.push_str("\r\n");
+    // A client can send its next request as soon as Content-Length bytes
+    // arrive (just the headers for an empty body), before this thread runs
+    // again. A completed execution must already have released its session.
+    if !matches!(response.delivery, Delivery::Stalled(..)) || aftermath.is_some() {
+        release_session(&mut decision.session, state);
+    }
     stream.write_all(head.as_bytes())?;
 
     let write = |stream: &mut TcpStream, bytes: &[u8]| -> std::io::Result<()> {
@@ -798,8 +809,10 @@ fn write_response(
             write(&mut stream, &body[..sent.min(body.len())])?;
             stream.flush()?;
             if let Some(aftermath) = wait(pause, response, query_id, state) {
+                release_session(&mut decision.session, state);
                 return end_killed(stream, aftermath, tag, write, finish);
             }
+            release_session(&mut decision.session, state);
             stream.shutdown(Shutdown::Both)
         }
     }
