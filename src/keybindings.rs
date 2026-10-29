@@ -25,8 +25,8 @@ use gpui::{KeyBinding, Keystroke};
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
-        CommandPalette, CopyCell, CopyResults, CopyRow, CycleMode, DeleteRow, DiscardEdits,
-        EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
+        CommandPalette, ConfirmDialog, CopyCell, CopyResults, CopyRow, CycleMode, DeleteRow,
+        DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
         ImportConnections, ImportRows, NewConnection, NewProject, NewQuery, NewRow, NextEdit,
         NextPage, NextProfile, NextTab, OpenSettings, PaletteNext, PaletteNextScope,
         PalettePrevious, PalettePreviousScope, PaletteRowActions, PaletteScopeLeft,
@@ -166,6 +166,7 @@ registry! {
     // Run Query's chord, which reaches the form first and finds nothing to
     // run there: see `INERT_IN`.
     ("submit_connection", "Connect or Save Connection", Some("ConnectionForm"), ["secondary-enter"], SubmitConnection),
+    ("confirm_dialog", "Confirm Dialog", Some("Dialog"), ["enter"], ConfirmDialog),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("toggle_row_edit", "Toggle Row Panel Edit Mode", None, ["secondary-shift-e"], ToggleRowEdit),

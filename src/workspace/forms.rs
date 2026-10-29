@@ -6,18 +6,20 @@
 use std::time::Duration;
 
 use gpui::{Animation, AnimationExt, PathPromptOptions, StyledText, ease_out_quint};
+use gpui_component::ActiveTheme;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 use super::welcome::{self, Part, Pose};
 use super::*;
+use crate::actions::ConfirmDialog;
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{
     QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
 };
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
-use crate::ui::{Status, raised_card};
+use crate::ui::{Status, code_lines, raised_card};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -719,6 +721,98 @@ impl Workspace {
 
     /// Where an import's connections go, asked before any is added: a new
     /// project named for the client by default, one already made, or none.
+    /// The dialogs, under a focus of their own that the one going up takes
+    /// from whatever held the keyboard: left in the editor or the grid behind
+    /// it, `enter` went on editing what the dialog covers.
+    pub(crate) fn dialog_layer(
+        &self,
+        dialogs: impl IntoIterator<Item = Option<AnyElement>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialogs: Vec<AnyElement> = dialogs.into_iter().flatten().collect();
+        if dialogs.is_empty() {
+            // The last one closing unmounts the keyboard with it. Handed back
+            // only after the frame, and only if nothing took it during it:
+            // Edit anyway puts it in the cell input the grid opens as it draws.
+            if self.dialog_focus.contains_focused(window, cx) {
+                let stranded = window.focused(cx);
+                cx.on_next_frame(window, move |workspace, window, cx| {
+                    if window.focused(cx) == stranded {
+                        match workspace.form.as_mut() {
+                            Some(form) => form.needs_focus = Some(form.lead_field()),
+                            None => workspace.refocus_front(),
+                        }
+                        cx.notify();
+                    }
+                });
+            }
+            return None;
+        }
+        // The palette is stacked over the dialogs and holds the keyboard
+        // itself. A field inside a dialog keeps it.
+        if self.palette.is_none() && !self.dialog_focus.contains_focused(window, cx) {
+            self.dialog_focus.focus(window, cx);
+        }
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .track_focus(&self.dialog_focus)
+                .key_context("Dialog")
+                .on_action(cx.listener(Self::confirm_dialog))
+                .children(dialogs)
+                .into_any_element(),
+        )
+    }
+
+    /// `enter` presses the primary button of the dialog in front, taken in
+    /// the order `show_editor` backs out of them. Never one that destroys
+    /// something, and never the import's, a form with more than one answer:
+    /// those take a click.
+    pub(crate) fn confirm_dialog(
+        &mut self,
+        _: &ConfirmDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_import.is_some() {
+            self.confirm_import(window, cx);
+            return;
+        }
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let session = &profile.session;
+        let stale = session
+            .stale_edit
+            .as_ref()
+            .map(|stale| stale.resume.is_some());
+        let stop = session
+            .pending_run
+            .as_ref()
+            .and_then(|pending| sql::gate(&pending.verdict, profile.mode, &profile.confirmed));
+        let held = session.pending_discard.is_some()
+            || session.pending_delete.is_some()
+            || session.import_rows.is_some();
+        let review = session.apply_review_covers(session.active)
+            && !matches!(session.active_query(), Some(QueryState::Running { .. }));
+        if let Some(editing) = stale {
+            match editing {
+                true => self.edit_stale_anyway(window, cx),
+                false => self.refresh_stale(window, cx),
+            }
+        } else if self.render_queue_failure(cx).is_some() {
+            self.continue_queue(cx);
+        } else if let Some(stop) = stop {
+            if matches!(stop, Stop::Upgrade(_)) {
+                self.approve_pending_run(cx);
+            }
+        } else if review && !held {
+            self.run_apply_review(cx);
+        }
+    }
+
     pub(crate) fn render_import_choice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let pending = self.pending_import.as_ref()?;
@@ -1098,7 +1192,12 @@ impl Workspace {
         let stop = sql::gate(&pending.verdict, profile.mode, &profile.confirmed)?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
-        let sql = pending.resume.as_ref().map(|resume| resume.sql.clone());
+        let syntax = profile.config.engine().syntax();
+        let sql = pending
+            .resume
+            .as_ref()
+            .map(|resume| code_lines(&resume.sql, syntax, &cx.theme().highlight_theme));
+        let code = fonts(cx).editor.clone();
         let dont_ask = pending.dont_ask;
 
         let (title, message, confirm, tone) = match stop {
@@ -1182,9 +1281,10 @@ impl Workspace {
                                 .p(px(layout::SPACE_SM))
                                 .rounded(px(layout::RADIUS_CONTROL))
                                 .bg(t.surface)
+                                .font_family(code)
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text)
-                                .child(sql)
+                                .children(sql.into_iter().map(|line| div().child(line)))
                         }))
                         // Never for `Unreadable`: silencing it would cover
                         // every future typo along with it, on the strength of
@@ -1366,7 +1466,15 @@ impl Workspace {
         let refresh_sql = profile
             .session
             .active_query_tab()
-            .and_then(|tab| tab.last_query.clone());
+            .and_then(|tab| tab.last_query.as_deref())
+            .map(|sql| {
+                code_lines(
+                    sql,
+                    profile.config.engine().syntax(),
+                    &cx.theme().highlight_theme,
+                )
+            });
+        let code = fonts(cx).editor.clone();
 
         let cancel = cx.entity().downgrade();
         let refresh = cancel.clone();
@@ -1423,9 +1531,10 @@ impl Workspace {
                                         .p(px(layout::SPACE_SM))
                                         .rounded(px(layout::RADIUS_CONTROL))
                                         .bg(t.surface)
+                                        .font_family(code)
                                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .text_color(t.text)
-                                        .child(sql),
+                                        .children(sql.into_iter().map(|line| div().child(line))),
                                 )
                         }))
                         .children(editing.then(|| {
@@ -1530,7 +1639,11 @@ impl Workspace {
             profile.session.active_query(),
             Some(QueryState::Running { .. })
         );
-        let lines: Vec<String> = review.sql.lines().map(str::to_string).collect();
+        let lines = code_lines(
+            &review.sql,
+            profile.config.engine().syntax(),
+            &cx.theme().highlight_theme,
+        );
         let cancel_workspace = cx.entity().downgrade();
         let run_workspace = cancel_workspace.clone();
 
@@ -1553,8 +1666,6 @@ impl Workspace {
                                 .smooth_scroll(&smooth_scoped("apply-review-sql", &scope, cx))
                                 .font_family(code)
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                // Line by line: a single child carrying newlines
-                                // is one run of text to the layout.
                                 .children(lines.into_iter().map(|line| div().child(line))),
                         )
                         .children((!review.notes.is_empty()).then(|| {

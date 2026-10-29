@@ -151,6 +151,7 @@ actions!(
         FormatQuery,
         ToggleComment,
         ShowEditor,
+        ConfirmDialog,
         SelectTheme,
         SelectDatabase,
         SaveQuery,

@@ -289,6 +289,7 @@ fn keyboard_group(context: Option<&'static str>) -> &'static str {
         Some("DataTable") => "Results grid",
         Some("Editor > Input") => "Editor",
         Some("ConnectionForm") => "Connection form",
+        Some("Dialog") => "Dialogs",
         Some(other) => other,
     }
 }
@@ -1127,7 +1128,8 @@ mod tests {
                 "Palette",
                 "Results grid",
                 "Editor",
-                "Connection form"
+                "Connection form",
+                "Dialogs"
             ]
         );
     }

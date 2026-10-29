@@ -330,6 +330,9 @@ pub(crate) struct Workspace {
     /// The window's own focus, for the moments when nothing inside it can hold
     /// any. See [`Focus::Window`].
     pub(crate) focus: FocusHandle,
+    /// The dialogs' own, so `enter` answers the one in front instead of
+    /// editing the buffer or the grid it covers.
+    pub(crate) dialog_focus: FocusHandle,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -460,6 +463,7 @@ impl Workspace {
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
+            dialog_focus: cx.focus_handle(),
             newer_release: None,
         };
 
@@ -1239,13 +1243,6 @@ impl Render for Workspace {
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
-        // After the tab's own focus, which closing the palette asks for in
-        // the same frame a row of it raises the delete dialog.
-        if let Some(profile) = self.profile_mut()
-            && std::mem::take(&mut profile.session.dialog_needs_focus)
-        {
-            self.focus.focus(window, cx);
-        }
         // After the tab's own focus, which a context menu closing over the
         // sidebar can ask for in the same frame the row's field opens.
         if let Some(profile) = self.profile_mut()
@@ -1311,7 +1308,7 @@ impl Render for Workspace {
                         .min_h_0()
                         .child(self.render_connection_form(window, cx)),
                 )
-                .children(self.render_import_choice(cx))
+                .children(self.dialog_layer([self.render_import_choice(cx)], window, cx))
                 .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
@@ -1338,7 +1335,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
-                .children(self.render_import_choice(cx))
+                .children(self.dialog_layer([self.render_import_choice(cx)], window, cx))
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
@@ -2118,14 +2115,20 @@ impl Render for Workspace {
                 ],
             ))
             .child(self.beside_settings(main_pane, cx))
-            .children(self.render_apply_review(cx))
-            .children(self.render_import_rows(window, cx))
-            .children(self.render_delete_confirmation(cx))
-            .children(self.render_discard_confirmation(cx))
-            .children(self.render_pending_run(cx))
-            .children(self.render_queue_failure(cx))
-            .children(self.render_stale_edit(cx))
-            .children(self.render_import_choice(cx))
+            .children(self.dialog_layer(
+                [
+                    self.render_apply_review(cx),
+                    self.render_import_rows(window, cx),
+                    self.render_delete_confirmation(cx),
+                    self.render_discard_confirmation(cx),
+                    self.render_pending_run(cx),
+                    self.render_queue_failure(cx),
+                    self.render_stale_edit(cx),
+                    self.render_import_choice(cx),
+                ],
+                window,
+                cx,
+            ))
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
