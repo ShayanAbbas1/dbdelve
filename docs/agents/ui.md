@@ -25,6 +25,8 @@ DBDelve adds Tab acceptance through `views::completion_target`, attached to the
 query buffer and each filter value so the action always names the editor with
 focus, not the tab's runnable buffer. The binding uses `Input && mode == editor`:
 `Editor > Input` depends on the query surface's wrapper and misses raw filters.
+Both contexts apply in a query buffer, so shortcut conflict detection must
+recognize their overlap when completion or Toggle Line Comment is rebound.
 After offering the menu its synthetic Enter, stop propagation, because the
 menu propagates and would otherwise let the same Tab indent as well. With no
 suggestion to accept, dispatch `IndentInline`; never submit a filter.
