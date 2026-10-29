@@ -1,0 +1,13 @@
+# CI's profile, chosen there with NEXTEST_PROFILE; plain `cargo test` and
+# nextest's default profile are unchanged.
+[profile.ci]
+# Every failure in a step, as `cargo test` reports them, not just the first.
+fail-fast = false
+
+# The live tests share a runner with seven database containers, and a few race
+# a server's own timers (SQL Server's WAITFOR, a Mongo cancel). A test that
+# passes on a retry is reported as FLAKY, so a flake stays visible without
+# failing the run. Nothing else is retried: a unit test that flakes is a bug.
+[[profile.ci.overrides]]
+filter = "test(/live_/)"
+retries = 2

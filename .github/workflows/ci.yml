@@ -14,6 +14,7 @@ on:
       - "assets/windows/**"
       - "compose.yaml"
       - "dev/**"
+      - ".config/nextest.toml"
       - ".github/workflows/ci.yml"
   push:
     branches: [main]
@@ -26,6 +27,7 @@ on:
       - "assets/windows/**"
       - "compose.yaml"
       - "dev/**"
+      - ".config/nextest.toml"
       - ".github/workflows/ci.yml"
 
 # Only main saves: the repository gets 10 GB of cache, and every job on every
@@ -70,6 +72,7 @@ jobs:
     # Not 22.04: its sqlite3 (3.37) predates unhex(), which the dev seed uses.
     runs-on: ubuntu-24.04
     env:
+      NEXTEST_PROFILE: ci
       PGHOST: 127.0.0.1
       PGPORT: "55432"
       PGDATABASE: dbdelve_dev
@@ -107,6 +110,12 @@ jobs:
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev sqlite3 \
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
+      # Before rust-cache, which saves only the binaries that appear after it
+      # runs: the prebuilt download is quicker than carrying it in the cache.
+      - name: install nextest
+        uses: taiki-e/install-action@v2.88.0
+        with:
+          tool: cargo-nextest@0.9.150
       - &rust-cache
         name: rust cache
         uses: Swatinem/rust-cache@v2
@@ -123,23 +132,33 @@ jobs:
           sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
           dev/ssh/setup.sh
           docker compose up -d --wait
-      # CI has no Snowflake account, and the live Snowflake tests panic
-      # without one; the mock tests cover the same ground offline.
+      # nextest for the retries .config/nextest.toml gives the live tests. Its
+      # test() matches any part of a name, as cargo test's filters do. CI has
+      # no Snowflake account, and the live Snowflake tests panic without one;
+      # the mock tests cover the same ground offline.
       - name: test
-        run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --skip reads_run_at_once --skip conformance
+        run: >-
+          cargo nextest run --run-ignored all -E 'not (test(snowflake::tests::live_)
+          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance))'
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
       # like SQLite misses the margin by chance, so they run alone.
       - name: timing tests
-        run: cargo test reads_run_at_once -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --test-threads=1
+        run: >-
+          cargo nextest run --run-ignored all --test-threads 1 -E 'test(reads_run_at_once)
+          - test(snowflake::tests::live_) - test(turso::tests::live_)'
       # Own step: each DuckDB subject seeds a 1M-row table, which would add
       # contention to the timing assertions above.
       - name: conformance
-        run: cargo test live_conformance -- --include-ignored --skip turso::tests::live_ --test-threads=4
+        run: >-
+          cargo nextest run --run-ignored all --test-threads 4
+          -E 'test(live_conformance) - test(turso::tests::live_)'
       # The one live Snowflake test that needs no account: it is what proves
       # the TLS provider is linked at run time.
       - name: snowflake tls
-        run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
+        run: >-
+          cargo nextest run --run-ignored only
+          -E 'test(snowflake::tests::live_an_account_that_does_not_exist)'
       # The pixel tests check the vendored renderers, so a PR runs them only
       # when it changes vendor/; a push to main always does, which catches
       # anything else that moves their output, a dependency bump among them. A
