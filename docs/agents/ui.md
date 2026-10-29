@@ -21,6 +21,14 @@ draws the menu itself, so a provider is the whole integration, and `up`, `down`,
 `enter` and `escape` are already routed to the menu when it is open. Do not
 hand-roll a popup beside it.
 
+DBDelve adds Tab acceptance through `views::completion_target`, attached to the
+query buffer and each filter value so the action always names the editor with
+focus, not the tab's runnable buffer. The binding uses `Input && mode == editor`:
+`Editor > Input` depends on the query surface's wrapper and misses raw filters.
+After offering the menu its synthetic Enter, stop propagation, because the
+menu propagates and would otherwise let the same Tab indent as well. With no
+suggestion to accept, dispatch `IndentInline`; never submit a filter.
+
 The library binds `escape` scoped to the input; DBDelve's `show_editor` binding
 is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards" in `AGENTS.md`).
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has

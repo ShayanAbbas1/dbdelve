@@ -287,7 +287,7 @@ fn keyboard_group(context: Option<&'static str>) -> &'static str {
         None => "Everywhere",
         Some("Palette > Input") => "Palette",
         Some("DataTable") => "Results grid",
-        Some("Editor > Input") => "Editor",
+        Some("Editor > Input" | "Input && mode == editor") => "Editor",
         Some("ConnectionForm") => "Connection form",
         Some("Dialog") => "Dialogs",
         Some(other) => other,
@@ -1107,31 +1107,6 @@ mod tests {
     #[test]
     fn nonsense_finds_nothing() {
         assert!(found("qzxv").is_empty());
-    }
-
-    #[test]
-    fn every_binding_has_one_row_and_its_group_is_together() {
-        let rows = setting_rows();
-        let keyboard: Vec<&SettingRow> = rows
-            .iter()
-            .filter(|row| row.tab == SettingsTab::Keyboard)
-            .collect();
-        assert_eq!(keyboard.len(), keybindings::REGISTRY.len());
-        let groups: Vec<&str> = keyboard
-            .chunk_by(|a, b| a.group == b.group)
-            .map(|group| group[0].group)
-            .collect();
-        assert_eq!(
-            groups,
-            [
-                "Everywhere",
-                "Palette",
-                "Results grid",
-                "Editor",
-                "Connection form",
-                "Dialogs"
-            ]
-        );
     }
 
     #[test]

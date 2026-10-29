@@ -722,38 +722,6 @@ impl Workspace {
         cx.propagate();
     }
 
-    /// `tab` takes the highlighted suggestion, and indents when there is none
-    /// to take.
-    pub(crate) fn accept_completion(
-        &mut self,
-        _: &AcceptCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = self
-            .profile()
-            .and_then(|profile| profile.session.editor(profile.session.active))
-        else {
-            return;
-        };
-        // Through the mode trait: gpui-base 0.8 keeps the inherent method
-        // `pub(crate)`, and this is the only public way to offer the menu an action.
-        let accepted = editor.update(cx, |editor, cx| {
-            EditorMode::handle_context_menu_action(
-                editor,
-                Box::new(Enter {
-                    secondary: false,
-                    shift: false,
-                }),
-                window,
-                cx,
-            )
-        });
-        if !accepted {
-            window.dispatch_action(Box::new(IndentInline), cx);
-        }
-    }
-
     /// `cmd+w` on whatever surface is in front. Closing never deletes a saved
     /// query: the sidebar still lists it, and only its own Delete removes it.
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {

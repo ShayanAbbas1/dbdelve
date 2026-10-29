@@ -161,7 +161,7 @@ registry! {
     // this unreachable there. Clearing a cell with the delete key is the
     // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
-    ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
+    ("accept_completion", "Accept Completion", Some("Input && mode == editor"), ["tab"], AcceptCompletion),
     ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
     // Run Query's chord, which reaches the form first and finds nothing to
     // run there: see `INERT_IN`.
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(
             conflict(
                 "enter",
-                Some("Editor > Input"),
+                Some("Input && mode == editor"),
                 "accept_completion",
                 &overrides
             ),

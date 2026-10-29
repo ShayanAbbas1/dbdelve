@@ -21,7 +21,10 @@ use gpui_component::{
     ActiveTheme, Disableable, ElementExt, FocusableExt, IconName, RopeExt, Sizable, ThemeStyled,
     button::Button,
     highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::{self, Editor, EditorState, Input, InputState, Rope, Textarea, TextareaState},
+    input::{
+        self, Editor, EditorMode, EditorState, Input, InputModeKind, InputState, Rope, Textarea,
+        TextareaState,
+    },
     menu::DropdownMenu,
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
@@ -31,10 +34,11 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery, FormatQuery, LimitTarget,
-        NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery,
-        SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit,
-        SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        AcceptCompletion, AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery,
+        FormatQuery, LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery,
+        SaveQuery, SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw,
+        SetQueryLimit, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
+        ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -188,6 +192,30 @@ pub fn render_main_content(
         .into_any_element()
 }
 
+fn completion_target(editor: &Entity<EditorState>) -> Div {
+    let editor = editor.clone();
+    div().on_action(move |_: &AcceptCompletion, window, cx| {
+        // Use the focused surface's editor, not the tab's runnable query buffer.
+        let accepted = editor.update(cx, |editor, cx| {
+            EditorMode::handle_context_menu_action(
+                editor,
+                Box::new(input::Enter {
+                    secondary: false,
+                    shift: false,
+                }),
+                window,
+                cx,
+            )
+        });
+        // The menu propagates its synthetic Enter; do not let that also run
+        // the library's fallback Tab binding after accepting a completion.
+        cx.stop_propagation();
+        if !accepted {
+            window.dispatch_action(Box::new(input::IndentInline), cx);
+        }
+    })
+}
+
 /// The editor over the rows it produces. Every runnable surface is this:
 /// the query buffer and an opened relation differ in where their SQL came
 /// from, not in what they are.
@@ -205,7 +233,7 @@ fn render_editor_surface(
 
     // The editor is the prompt, one tone behind its results -- and one step
     // more transparent, since it is also one step further from the data.
-    let buffer = div()
+    let buffer = completion_target(editor)
         .key_context("Editor")
         .flex_1()
         .min_h_0()
@@ -1009,7 +1037,7 @@ impl RenderOnce for FilterValue {
         // the text, so a line as tall as the space inside the border centres.
         let height = window.rem_size() * 1.5;
         let editor = self.editor.clone();
-        div()
+        completion_target(&self.editor)
             .relative()
             .flex_1()
             .min_w_0()
@@ -3574,4 +3602,109 @@ fn choice_chip(
             apply(workspace, window, cx);
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, collections::HashMap, rc::Rc};
+
+    use gpui::{Render, TestAppContext};
+    use lsp_types::CompletionItem;
+
+    use super::*;
+
+    struct CompletionEditors {
+        query: Entity<EditorState>,
+        filters: [Entity<EditorState>; 2],
+    }
+
+    impl Render for CompletionEditors {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    completion_target(&self.query)
+                        .key_context("Editor")
+                        .child(Editor::new(&self.query)),
+                )
+                .children(self.filters.iter().map(|editor| FilterValue {
+                    editor: editor.clone(),
+                    raw: true,
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn tab_completes_the_focused_raw_filter_without_applying_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::theme::Fonts::default());
+            cx.bind_keys(crate::keybindings::build_bindings(&HashMap::new()));
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let query = cx.new(|cx| EditorState::new(window, cx).default_value("cust"));
+            let filters = ["untouched", "cust"].map(|value| {
+                cx.new(|cx| {
+                    EditorState::new(window, cx)
+                        .default_value(value)
+                        .tab_size(gpui_base::input::TabSize {
+                            tab_size: 4,
+                            hard_tabs: true,
+                        })
+                        .submit_on_enter(true)
+                })
+            });
+            CompletionEditors { query, filters }
+        });
+        let (query, filters) =
+            view.read_with(cx, |view, _| (view.query.clone(), view.filters.clone()));
+        let applied = Rc::new(Cell::new(false));
+        let _subscription = cx.update(|_, cx| {
+            let applied = applied.clone();
+            cx.subscribe(&filters[1], move |_, event: &input::InputEvent, _| {
+                if matches!(event, input::InputEvent::PressEnter { .. }) {
+                    applied.set(true);
+                }
+            })
+        });
+
+        for (editor, navigation, expected) in [
+            (&filters[1], "down tab", "customer_email"),
+            (&query, "tab", "customer_name"),
+        ] {
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(4..4, cx);
+                    editor.focus(window, cx);
+                    editor.present_completion_items(
+                        0,
+                        "cust",
+                        ["customer_name", "customer_email"]
+                            .map(|label| CompletionItem {
+                                label: label.into(),
+                                ..Default::default()
+                            })
+                            .into(),
+                        cx,
+                    );
+                });
+                window.draw(cx).clear(cx);
+            });
+            cx.simulate_keystrokes(navigation);
+            cx.read(|cx| {
+                assert_eq!(editor.read(cx).value(), expected);
+                assert_eq!(filters[0].read(cx).value(), "untouched");
+                assert!(!applied.get(), "Tab must not submit the filter");
+            });
+        }
+        cx.read(|cx| assert_eq!(filters[1].read(cx).value(), "customer_email"));
+        cx.update(|window, cx| filters[1].focus_handle(cx).focus(window, cx));
+        cx.simulate_keystrokes("tab");
+        cx.read(|cx| {
+            assert_eq!(filters[1].read(cx).value(), "customer_email\t");
+            assert!(!applied.get(), "Indenting must not submit the filter");
+        });
+    }
 }
