@@ -1,28 +1,90 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use gpui_component::tree::TreeItem;
 
-use crate::db::{Catalog, Engine, Relation, RelationKind, Routine, RoutineKind, Schema};
-use crate::mql;
+use crate::db::{
+    Catalog, Engine, EngineSpec, ForeignTable, MaterializedViewDrop, RelationKind, Routine,
+    RoutineKind, Schema, SelectTop, Syntax, Truncate,
+};
+use crate::fuzzy::{Fuzzy, Query};
+use crate::{mql, redis_cmd};
 
-/// The row counts a preview can be asked for, and the one it opens with. Every
-/// result set is capped (spec §4.3); this is the part of the cap the user gets
-/// to move, and the grid shows which one is in effect.
+/// The row counts a preview can be asked for besides none at all, and the one
+/// it opens with. The grid shows which one is in effect.
 pub const ROW_LIMITS: [usize; 4] = [100, 1_000, 10_000, 100_000];
 pub const PREVIEW_ROW_LIMIT: usize = ROW_LIMITS[1];
 
-const RELATION_CATEGORIES: [(RelationKind, &str); 5] = [
+/// The most rows a limit may ask for: a relation's preview writes it into its
+/// `LIMIT`, and Postgres reads that as a `bigint`.
+pub const MAX_ROW_LIMIT: usize = i64::MAX as usize;
+
+const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
     (RelationKind::Table, "Tables"),
     (RelationKind::PartitionedTable, "Partitioned Tables"),
     (RelationKind::View, "Views"),
     (RelationKind::MaterializedView, "Materialized Views"),
     (RelationKind::ForeignTable, "Foreign Tables"),
+    (RelationKind::Dictionary, "Dictionaries"),
 ];
 
 const ROUTINE_CATEGORIES: [(RoutineKind, &str); 2] = [
     (RoutineKind::Function, "Functions"),
     (RoutineKind::Procedure, "Procedures"),
 ];
+
+/// The id of the sidebar's Queries group, the profile's saved queries listed
+/// above its schemas.
+pub const QUERIES_GROUP: &str = "queries";
+
+/// What a saved query's row id starts with. Its name follows: query names are
+/// file names, so no other row's id can take this shape.
+const QUERY_ROW: &str = "query:";
+
+/// Whether a row is a schema's own: the only row "Set as Active Schema"
+/// means anything on. Asked by id, since a schema's label can be anything,
+/// "Queries" included.
+pub fn is_schema_row(id: &str) -> bool {
+    id.starts_with(SCHEMA_ROW)
+}
+
+const SCHEMA_ROW: &str = "schema-";
+
+/// Whether each folder in `items` is open, by row id, to put back on a
+/// rebuild with [`with_folds`].
+pub fn folds(items: &[TreeItem]) -> HashMap<String, bool> {
+    let mut folds = HashMap::new();
+    let mut stack: Vec<&TreeItem> = items.iter().collect();
+    while let Some(item) = stack.pop() {
+        if item.is_folder() {
+            folds.insert(item.id.to_string(), item.is_expanded());
+        }
+        stack.extend(&item.children);
+    }
+    folds
+}
+
+/// `items` with every folder `folds` names opened or closed as it says. A
+/// row it does not name keeps the state it was built with.
+pub fn with_folds(items: Vec<TreeItem>, folds: &HashMap<String, bool>) -> Vec<TreeItem> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            item.children = with_folds(std::mem::take(&mut item.children), folds);
+            match folds.get(item.id.as_ref()) {
+                Some(&expanded) => item.expanded(expanded),
+                None => item,
+            }
+        })
+        .collect()
+}
+
+/// The saved query a row stands for, by its row id.
+pub fn saved_query(id: &str) -> Option<&str> {
+    id.strip_prefix(QUERY_ROW)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
@@ -55,20 +117,82 @@ pub struct ExplorerLeaf {
     pub size: Option<u64>,
 }
 
+#[derive(Default)]
 pub struct ExplorerTree {
     pub items: Vec<TreeItem>,
     pub leaves: HashMap<String, ExplorerLeaf>,
+    /// The characters of each row's own name the filter matched, by row id.
+    /// A row kept only because its schema or parent matched has none.
+    pub highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+impl ExplorerTree {
+    /// `other`'s rows after this one's.
+    pub fn extend(&mut self, other: ExplorerTree) {
+        self.items.extend(other.items);
+        self.leaves.extend(other.leaves);
+        self.highlights.extend(other.highlights);
+    }
+}
+
+/// One filter pass over the catalog: the query parsed once, and what the rows
+/// it keeps record as they are built.
+struct Builder {
+    query: Query,
+    fuzzy: Fuzzy,
+    lowercase: String,
+    leaves: HashMap<String, ExplorerLeaf>,
+    highlights: HashMap<String, Vec<Range<usize>>>,
+}
+
+impl Builder {
+    fn new(filter: &str) -> Self {
+        Self {
+            query: Query::new(filter),
+            fuzzy: Fuzzy::new(),
+            lowercase: filter.trim().to_lowercase(),
+            leaves: HashMap::new(),
+            highlights: HashMap::new(),
+        }
+    }
+
+    /// Whether the row `id`'s own name matches, noting which characters did.
+    fn name_matches(&mut self, id: &str, name: &str) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        if !self.fuzzy.matches(&self.query, name) {
+            return false;
+        }
+        let ranges = self.fuzzy.highlights(&self.query, name);
+        if !ranges.is_empty() {
+            self.highlights.insert(id.to_string(), ranges);
+        }
+        true
+    }
+
+    // Substring, not fuzzy: these are searched for a word like `bigint` or
+    // `plpgsql`, and as a subsequence a type signature matches nearly anything.
+    fn signature_matches(&self, routine: &Routine) -> bool {
+        [
+            &routine.identity_arguments,
+            &routine.result_type,
+            &routine.language,
+        ]
+        .into_iter()
+        .any(|field| field.to_lowercase().contains(&self.lowercase))
+    }
 }
 
 pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
-    let filter = filter.trim().to_lowercase();
-    let mut leaves = HashMap::new();
+    let mut builder = Builder::new(filter);
 
     let items = catalog
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let schema_matches = matches_filter(&schema.name, &filter);
+            let id = format!("{SCHEMA_ROW}{schema_index}");
+            let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
             let partitions = partitions_by_parent(schema);
@@ -86,12 +210,11 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     })
                     .filter_map(|(relation_index, _)| {
                         relation_item(
-                            &mut leaves,
+                            &mut builder,
                             schema,
                             schema_index,
                             relation_index,
                             &partitions,
-                            &filter,
                             schema_matches,
                         )
                     })
@@ -107,13 +230,14 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .routines
                     .iter()
                     .enumerate()
-                    .filter(|(_, routine)| {
-                        routine.kind == kind
-                            && (schema_matches || routine_matches(routine, &filter))
-                    })
-                    .map(|(routine_index, routine)| {
+                    .filter(|(_, routine)| routine.kind == kind)
+                    .filter_map(|(routine_index, routine)| {
                         let id = format!("routine-{schema_index}-{routine_index}");
-                        leaves.insert(
+                        let name_matches = builder.name_matches(&id, &routine.name);
+                        if !(schema_matches || name_matches || builder.signature_matches(routine)) {
+                            return None;
+                        }
+                        builder.leaves.insert(
                             id.clone(),
                             ExplorerLeaf {
                                 target: ExplorerTarget::Routine {
@@ -124,10 +248,10 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                                 size: None,
                             },
                         );
-                        TreeItem::new(
+                        Some(TreeItem::new(
                             id,
                             format!("{}({})", routine.name, routine.identity_arguments),
-                        )
+                        ))
                     })
                     .collect::<Vec<_>>();
 
@@ -141,14 +265,47 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
             }
 
             Some(
-                TreeItem::new(format!("schema-{schema_index}"), schema.name.clone())
+                TreeItem::new(id, schema.name.clone())
                     .expanded(true)
                     .children(groups),
             )
         })
         .collect();
 
-    ExplorerTree { items, leaves }
+    ExplorerTree {
+        items,
+        leaves: builder.leaves,
+        highlights: builder.highlights,
+    }
+}
+
+/// The Queries group, holding every saved query whose name the filter keeps,
+/// or no row at all when it keeps none. Only the names are matched: a filter
+/// that matched the group's own label would keep every query for typing `q`.
+pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
+    let mut builder = Builder::new(filter);
+    let children: Vec<TreeItem> = names
+        .iter()
+        .filter_map(|name| {
+            let id = format!("{QUERY_ROW}{name}");
+            builder
+                .name_matches(&id, name)
+                .then(|| TreeItem::new(id, name.clone()))
+        })
+        .collect();
+    let items = match children.is_empty() {
+        true => Vec::new(),
+        false => vec![
+            TreeItem::new(QUERIES_GROUP, "Queries")
+                .expanded(true)
+                .children(children),
+        ],
+    };
+    ExplorerTree {
+        items,
+        leaves: HashMap::new(),
+        highlights: builder.highlights,
+    }
 }
 
 /// Every schema's partitions, by the name of the relation they hang under.
@@ -185,31 +342,23 @@ fn partitions_by_parent(schema: &Schema) -> HashMap<&str, Vec<usize>> {
 /// parent whose name the filter matched — which is what makes a filter on a
 /// partitioned table keep all of its partitions.
 fn relation_item(
-    leaves: &mut HashMap<String, ExplorerLeaf>,
+    builder: &mut Builder,
     schema: &Schema,
     schema_index: usize,
     relation_index: usize,
     partitions: &HashMap<&str, Vec<usize>>,
-    filter: &str,
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let matched = inherited || relation_matches(relation, filter);
+    let id = format!("relation-{schema_index}-{relation_index}");
+    let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
         .get(relation.name.as_str())
         .into_iter()
         .flatten()
         .filter_map(|&index| {
-            relation_item(
-                leaves,
-                schema,
-                schema_index,
-                index,
-                partitions,
-                filter,
-                matched,
-            )
+            relation_item(builder, schema, schema_index, index, partitions, matched)
         })
         .collect();
 
@@ -217,8 +366,7 @@ fn relation_item(
         return None;
     }
 
-    let id = format!("relation-{schema_index}-{relation_index}");
-    leaves.insert(
+    builder.leaves.insert(
         id.clone(),
         ExplorerLeaf {
             target: ExplorerTarget::Relation {
@@ -251,19 +399,32 @@ pub fn preview_sql(
     schema: &str,
     relation: &str,
     filter: &str,
-    limit: usize,
+    limit: Option<usize>,
     offset: usize,
 ) -> String {
-    match engine {
-        Engine::MongoDb => return mql::browse::find_preview(relation, filter, limit, offset),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Sql => sql_preview(engine.spec(), schema, relation, filter, limit, offset),
+        Syntax::Mongo => mql::browse::find_preview(relation, filter, limit, offset),
+        // No limit or offset to write: see `Engine::pages`.
+        Syntax::Redis => redis_cmd::browse::preview(filter),
     }
-    let mut sql = format!("SELECT *{}", from_where(engine, schema, relation, filter));
+}
+
+pub(crate) fn sql_preview(
+    spec: &EngineSpec,
+    schema: &str,
+    relation: &str,
+    filter: &str,
+    limit: Option<usize>,
+    offset: usize,
+) -> String {
+    let mut sql = format!(
+        "SELECT *{}",
+        from_where(&spec.qualified(schema, relation), filter)
+    );
+    let Some(limit) = limit else {
+        return sql;
+    };
     sql.push_str(&format!(" LIMIT {limit}"));
     // `OFFSET` after `LIMIT`: the one order all three engines accept, and the
     // one the statement grammar reads -- it nests `offset` inside the `limit`
@@ -276,42 +437,79 @@ pub fn preview_sql(
     sql
 }
 
-pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> String {
-    match engine {
-        Engine::SqlServer => format!(
-            "SELECT TOP 100 * FROM {}",
-            engine.qualified(schema, relation)
-        ),
-        Engine::MongoDb => mql::browse::find_preview(relation, "", 100, 0),
-        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
-            preview_sql(engine, schema, relation, "", 100, 0)
+/// `None` where no command reads a hundred rows: a Redis `SCAN` has no limit.
+pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> Option<String> {
+    Some(match engine.syntax() {
+        Syntax::Sql => {
+            let spec = engine.spec();
+            match spec.sql.select_top {
+                SelectTop::Limit => sql_preview(spec, schema, relation, "", Some(100), 0),
+                SelectTop::Top => {
+                    format!("SELECT TOP 100 * FROM {}", spec.qualified(schema, relation))
+                }
+            }
         }
-    }
+        Syntax::Mongo => mql::browse::find_preview(relation, "", Some(100), 0),
+        Syntax::Redis => return None,
+    })
 }
 
-pub fn drop_sql(engine: Engine, schema: &str, relation: &str, kind: RelationKind) -> String {
-    let keyword = match (engine, kind) {
-        (Engine::MongoDb, _) => return format!("{}.drop()", mql::browse::handle(relation)),
-        (_, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
-        (_, RelationKind::View) => "VIEW",
-        (_, RelationKind::MaterializedView) => "MATERIALIZED VIEW",
-        (Engine::Snowflake, RelationKind::ForeignTable) => "EXTERNAL TABLE",
-        (_, RelationKind::ForeignTable) => "FOREIGN TABLE",
+/// `None` where the relation cannot be dropped apart from its database: a
+/// Redis keyspace is the database's own.
+pub fn drop_sql(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    kind: RelationKind,
+) -> Option<String> {
+    let keyword = match (engine.syntax(), kind) {
+        (Syntax::Mongo, _) => return Some(format!("{}.drop()", mql::browse::handle(relation))),
+        (Syntax::Redis, _) => return None,
+        (Syntax::Sql, RelationKind::Table | RelationKind::PartitionedTable) => "TABLE",
+        (Syntax::Sql, RelationKind::View) => "VIEW",
+        (Syntax::Sql, RelationKind::Dictionary) => "DICTIONARY",
+        (Syntax::Sql, RelationKind::MaterializedView) => {
+            match engine.spec().sql.materialized_view {
+                MaterializedViewDrop::MaterializedView => "MATERIALIZED VIEW",
+                MaterializedViewDrop::View => "VIEW",
+            }
+        }
+        (Syntax::Sql, RelationKind::ForeignTable) => match engine.spec().sql.foreign_table {
+            ForeignTable::Foreign => "FOREIGN TABLE",
+            ForeignTable::External => "EXTERNAL TABLE",
+            ForeignTable::Table => "TABLE",
+        },
     };
-    format!("DROP {keyword} {};", engine.qualified(schema, relation))
+    Some(format!(
+        "DROP {keyword} {};",
+        engine.qualified(schema, relation)
+    ))
 }
 
 pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     let qualified = engine.qualified(schema, relation);
-    match engine {
-        Engine::MongoDb => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
-        // SQLite has no TRUNCATE.
-        Engine::Sqlite => format!("DELETE FROM {qualified};"),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Snowflake
-        | Engine::SqlServer => format!("TRUNCATE TABLE {qualified};"),
+    match engine.syntax() {
+        Syntax::Sql => match engine.spec().sql.truncate {
+            Truncate::Truncate => format!("TRUNCATE TABLE {qualified};"),
+            Truncate::DeleteFrom => format!("DELETE FROM {qualified};"),
+        },
+        Syntax::Mongo => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
+        Syntax::Redis => "FLUSHDB".into(),
+    }
+}
+
+/// The command a preview's row opens with, as a result of its own
+/// ([`Engine::opened_column`]), read off the row's cells by column name: a
+/// Redis key's first `rows` entries, by the read its type takes. `None` where
+/// rows open nothing, and for a type with no read.
+pub fn open_row_sql<'a>(
+    engine: Engine,
+    rows: usize,
+    cell: impl Fn(&str) -> Option<&'a str>,
+) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Redis => redis_cmd::browse::read(cell("key")?, cell("type")?, rows),
+        Syntax::Sql | Syntax::Mongo => None,
     }
 }
 
@@ -320,26 +518,25 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
 pub fn probe_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
     format!(
         "SELECT 1{} LIMIT 1",
-        from_where(engine, schema, relation, filter)
+        from_where(&engine.qualified(schema, relation), filter)
     )
 }
 
 /// The size of what `preview_sql` would page through, for the status bar's
 /// Count. Never run unasked: on a large table it is a full scan.
 pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
-    match engine {
-        Engine::MongoDb => return mql::browse::count_documents(relation, filter),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Sql => sql_count(engine.spec(), schema, relation, filter),
+        Syntax::Mongo => mql::browse::count_documents(relation, filter),
+        Syntax::Redis => redis_cmd::browse::count(filter),
     }
+}
+
+pub(crate) fn sql_count(spec: &EngineSpec, schema: &str, relation: &str, filter: &str) -> String {
     format!(
         "SELECT {}{}",
-        engine.count_all(),
-        from_where(engine, schema, relation, filter)
+        spec.sql.count_all.aggregate(),
+        from_where(&spec.qualified(schema, relation), filter)
     )
 }
 
@@ -347,28 +544,13 @@ pub fn count_sql(engine: Engine, schema: &str, relation: &str, filter: &str) -> 
 /// place that knows where the clause goes. `sql::with_order_by` anchors on the
 /// `limit` node, so the sort still lands after the filter without knowing a
 /// filter exists.
-fn from_where(engine: Engine, schema: &str, relation: &str, filter: &str) -> String {
-    let mut sql = format!(" FROM {}", engine.qualified(schema, relation));
+fn from_where(qualified: &str, filter: &str) -> String {
+    let mut sql = format!(" FROM {qualified}");
     let filter = filter.trim();
     if !filter.is_empty() {
         sql.push_str(&format!(" WHERE {filter}"));
     }
     sql
-}
-
-fn relation_matches(relation: &Relation, filter: &str) -> bool {
-    matches_filter(&relation.name, filter)
-}
-
-fn routine_matches(routine: &Routine, filter: &str) -> bool {
-    matches_filter(&routine.name, filter)
-        || matches_filter(&routine.identity_arguments, filter)
-        || matches_filter(&routine.result_type, filter)
-        || matches_filter(&routine.language, filter)
-}
-
-fn matches_filter(value: &str, filter: &str) -> bool {
-    filter.is_empty() || value.to_lowercase().contains(filter)
 }
 
 #[cfg(test)]
@@ -408,6 +590,15 @@ mod tests {
                 );
             }
         }
+
+        let keys = count_sql(Engine::Redis, "db0", "keys", "");
+        assert_eq!(keys, "DBSIZE");
+        assert!(crate::sql::is_generated_select(Engine::Redis, &keys));
+        let verdict = crate::sql::classify(Engine::Redis, &keys);
+        assert!(crate::sql::gate(&verdict, crate::sql::Mode::ReadOnly, &[]).is_none());
+        // `DBSIZE` counts every key, so a filtered count is refused, not wrong.
+        let filtered = count_sql(Engine::Redis, "db0", "keys", "MATCH user:*");
+        assert!(!crate::sql::is_generated_select(Engine::Redis, &filtered));
     }
 
     #[test]
@@ -654,6 +845,189 @@ mod tests {
     }
 
     #[test]
+    fn every_saved_query_is_listed_under_its_group_and_a_filter_narrows_them() {
+        let names = ["daily revenue".to_string(), "signups".to_string()];
+
+        let all = queries(&names, "");
+        assert_eq!(all.items.len(), 1);
+        assert_eq!(all.items[0].id.as_ref(), QUERIES_GROUP);
+        let rows: Vec<_> = all.items[0]
+            .children
+            .iter()
+            .map(|row| (saved_query(&row.id), row.label.as_ref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("daily revenue"), "daily revenue"),
+                (Some("signups"), "signups")
+            ]
+        );
+
+        let narrowed = queries(&names, "rev");
+        assert_eq!(narrowed.items[0].children.len(), 1);
+        assert_eq!(
+            marked(&narrowed, "query:daily revenue", "daily revenue").as_deref(),
+            Some("rev")
+        );
+
+        // No query, or none the filter keeps, is no group rather than an
+        // empty one.
+        assert!(queries(&names, "zzz").items.is_empty());
+        assert!(queries(&[], "").items.is_empty());
+    }
+
+    #[test]
+    fn no_catalog_rows_id_reads_as_a_saved_query() {
+        let explorer = tree(&catalog(), "");
+        let mut ids = Vec::new();
+        let mut stack: Vec<&TreeItem> = explorer.items.iter().collect();
+        while let Some(item) = stack.pop() {
+            ids.push(item.id.to_string());
+            stack.extend(item.children.iter());
+        }
+        assert!(!ids.is_empty());
+        assert!(
+            ids.iter()
+                .all(|id| saved_query(id).is_none() && id != QUERIES_GROUP)
+        );
+    }
+
+    #[test]
+    fn only_a_schemas_row_is_offered_as_the_active_schema() {
+        // A schema named like the group is still a schema, and the group is
+        // never one: picking it would set and save a schema called Queries.
+        let names = ["daily".to_string()];
+        let mut explorer = queries(&names, "");
+        explorer.extend(tree(&catalog(), ""));
+        let roots: Vec<_> = explorer
+            .items
+            .iter()
+            .map(|item| (item.id.as_ref(), is_schema_row(&item.id)))
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                (QUERIES_GROUP, false),
+                ("schema-0", true),
+                ("schema-1", true)
+            ]
+        );
+        let group = &explorer.items[0];
+        assert!(!is_schema_row(&group.children[0].id));
+        assert!(!is_schema_row(&explorer.items[1].children[0].id));
+    }
+
+    #[test]
+    fn a_change_to_the_saved_queries_keeps_what_was_folded_and_opened() {
+        let build = |names: &[String]| {
+            let mut explorer = queries(names, "");
+            explorer.extend(tree(&partitioned_catalog(), ""));
+            explorer.items
+        };
+        let before = build(&["daily".to_string()]);
+        let schema = before
+            .iter()
+            .find(|item| is_schema_row(&item.id))
+            .expect("a schema row");
+        let category = &schema.children[0];
+        let parent = schema
+            .children
+            .iter()
+            .flat_map(|category| &category.children)
+            .find(|relation| relation.is_folder())
+            .expect("a partitioned table");
+        // The schema and a category folded, a partitioned table opened: the
+        // opposite of how each is built. A clone shares its row's state, as
+        // the tree's own entries do, so folding one folds the row.
+        assert!(schema.is_expanded() && category.is_expanded() && !parent.is_expanded());
+        let (schema_id, category_id, parent_id) = (
+            schema.id.to_string(),
+            category.id.to_string(),
+            parent.id.to_string(),
+        );
+        let _ = schema.clone().expanded(false);
+        let _ = category.clone().expanded(false);
+        let _ = parent.clone().expanded(true);
+
+        let after = with_folds(
+            build(&["daily".to_string(), "signups".to_string()]),
+            &folds(&before),
+        );
+        let state = folds(&after);
+        assert_eq!(state.get(&schema_id), Some(&false));
+        assert_eq!(state.get(&category_id), Some(&false));
+        assert_eq!(state.get(&parent_id), Some(&true));
+        // The group's new query is there, and the group is open as it was.
+        assert_eq!(after[0].children.len(), 2);
+        assert_eq!(state.get(QUERIES_GROUP), Some(&true));
+    }
+
+    fn marked(explorer: &ExplorerTree, id: &str, label: &str) -> Option<String> {
+        let ranges = explorer.highlights.get(id)?;
+        Some(ranges.iter().map(|range| &label[range.clone()]).collect())
+    }
+
+    #[test]
+    fn a_subsequence_of_a_name_finds_it_and_marks_the_letters_it_matched() {
+        let explorer = tree(&catalog(), "acct");
+        let categories = &explorer.items[0].children;
+
+        assert_eq!(explorer.items.len(), 1);
+        assert_eq!(categories[0].children[0].label, "accounts");
+        assert_eq!(
+            marked(&explorer, "relation-1-1", "accounts").as_deref(),
+            Some("acct")
+        );
+        // A routine's row reads `name(args)`, and only the name was matched.
+        let label = "account_name(account_id bigint)";
+        assert_eq!(categories[2].children[0].label, label);
+        assert_eq!(
+            marked(&explorer, "routine-1-1", label).as_deref(),
+            Some("acct")
+        );
+        assert!(
+            explorer.highlights["routine-1-1"]
+                .iter()
+                .all(|range| range.end <= "account_name".len())
+        );
+    }
+
+    #[test]
+    fn a_routine_signature_matches_as_a_substring_and_is_not_marked() {
+        let by_argument = tree(&catalog(), "BIGINT");
+        assert_eq!(
+            by_argument.items[0].children[0].children[0].label,
+            "account_name(account_id bigint)"
+        );
+        assert!(by_argument.highlights.is_empty());
+
+        let by_language = tree(&catalog(), "plpgsql");
+        assert_eq!(
+            by_language.items[0].children[0].children[0].label,
+            "reindex()"
+        );
+
+        // A subsequence of `account_id bigint`, which no name holds.
+        assert!(tree(&catalog(), "acbt").items.is_empty());
+    }
+
+    #[test]
+    fn only_a_row_whose_own_name_matched_is_marked() {
+        let explorer = tree(&catalog(), "analytics");
+
+        assert_eq!(
+            marked(&explorer, "schema-0", "analytics").as_deref(),
+            Some("analytics")
+        );
+        // Kept because its schema matched, not because of its name.
+        assert!(explorer.leaves.contains_key("relation-0-0"));
+        assert!(!explorer.highlights.contains_key("relation-0-0"));
+
+        assert!(tree(&catalog(), "").highlights.is_empty());
+    }
+
+    #[test]
     fn tree_targets_use_catalog_indices_not_database_names() {
         let explorer = tree(&catalog(), "account_name");
 
@@ -689,33 +1063,57 @@ mod tests {
     #[test]
     fn copied_statements_are_spelled_for_the_engine() {
         assert_eq!(
-            select_top_sql(Engine::SqlServer, "dbo", "t"),
+            select_top_sql(Engine::SqlServer, "dbo", "t").unwrap(),
             r#"SELECT TOP 100 * FROM "dbo"."t""#
         );
         assert_eq!(
-            select_top_sql(Engine::MySql, "db", "t"),
+            select_top_sql(Engine::MySql, "db", "t").unwrap(),
             "SELECT * FROM `db`.`t` LIMIT 100"
         );
         assert_eq!(
-            drop_sql(Engine::Postgres, "public", "v", RelationKind::View),
+            drop_sql(Engine::Postgres, "public", "v", RelationKind::View).unwrap(),
             r#"DROP VIEW "public"."v";"#
         );
         assert_eq!(
-            drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable),
+            drop_sql(Engine::Snowflake, "S", "e", RelationKind::ForeignTable).unwrap(),
             r#"DROP EXTERNAL TABLE "S"."e";"#
+        );
+        assert_eq!(
+            drop_sql(Engine::ClickHouse, "db", "d", RelationKind::Dictionary).unwrap(),
+            "DROP DICTIONARY `db`.`d`;"
         );
         assert_eq!(
             truncate_sql(Engine::Sqlite, "main", "t"),
             r#"DELETE FROM "main"."t";"#
         );
         assert_eq!(
-            drop_sql(Engine::MongoDb, "db", "c", RelationKind::Table),
+            drop_sql(Engine::MongoDb, "db", "c", RelationKind::Table).unwrap(),
             r#"db.getCollection("c").drop()"#
         );
         assert_eq!(
             truncate_sql(Engine::MongoDb, "db", "c"),
             r#"db.getCollection("c").deleteMany({})"#
         );
+    }
+
+    #[test]
+    fn a_redis_row_opens_its_key_and_no_other_engines_row_opens_anything() {
+        let row = |column: &str| match column {
+            "key" => Some("queue:emails"),
+            "type" => Some("list"),
+            _ => None,
+        };
+        for engine in Engine::ALL {
+            let opened = open_row_sql(engine, PREVIEW_ROW_LIMIT, row);
+            assert_eq!(opened.is_some(), engine.opened_column().is_some());
+        }
+        assert_eq!(
+            open_row_sql(Engine::Redis, PREVIEW_ROW_LIMIT, row).as_deref(),
+            Some("LRANGE queue:emails 0 999")
+        );
+        let read = open_row_sql(Engine::Redis, PREVIEW_ROW_LIMIT, row).unwrap();
+        let verdict = crate::sql::classify(Engine::Redis, &read);
+        assert!(crate::sql::gate(&verdict, crate::sql::Mode::ReadOnly, &[]).is_none());
     }
 
     #[test]
@@ -726,7 +1124,7 @@ mod tests {
                 r#"odd"schema"#,
                 r#"table"name"#,
                 "",
-                PREVIEW_ROW_LIMIT,
+                Some(PREVIEW_ROW_LIMIT),
                 0
             ),
             r#"SELECT * FROM "odd""schema"."table""name" LIMIT 1000"#
@@ -734,9 +1132,30 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_with_no_limit_asks_for_every_row() {
+        for engine in Engine::ALL {
+            let sql = preview_sql(engine, "public", "accounts", "", None, 0);
+            assert!(!sql.contains("LIMIT") && !sql.contains("limit("), "{sql}");
+            assert!(crate::sql::is_generated_select(engine, &sql), "{sql}");
+            assert_eq!(
+                crate::sql::paged(engine, &sql, &["id".into()]).as_deref(),
+                Some(sql.as_str()),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_paged_preview_carries_its_offset_after_the_limit() {
         assert_eq!(
-            preview_sql(Engine::Postgres, "public", "accounts", "", 1_000, 2_000),
+            preview_sql(
+                Engine::Postgres,
+                "public",
+                "accounts",
+                "",
+                Some(1_000),
+                2_000
+            ),
             r#"SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 2000"#
         );
     }
@@ -752,7 +1171,7 @@ mod tests {
                 "public",
                 "accounts",
                 r#""state" = 'ok'"#,
-                100,
+                Some(100),
                 0
             ),
             r#"SELECT * FROM "public"."accounts" WHERE "state" = 'ok' LIMIT 100"#
@@ -763,7 +1182,7 @@ mod tests {
                 "dbdelve_dev",
                 "accounts",
                 "`state` = 'ok'",
-                100,
+                Some(100),
                 200
             ),
             "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100 OFFSET 200"
@@ -774,7 +1193,7 @@ mod tests {
                 "main",
                 "accounts",
                 r#""state" = 'ok'"#,
-                1_000,
+                Some(1_000),
                 0
             ),
             r#"SELECT * FROM "main"."accounts" WHERE "state" = 'ok' LIMIT 1000"#
@@ -789,17 +1208,17 @@ mod tests {
         for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
             let qualified = engine.qualified("public", "accounts");
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "", 1_000, 0),
+                preview_sql(engine, "public", "accounts", "", Some(1_000), 0),
                 format!("SELECT * FROM {qualified} LIMIT 1000")
             );
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "", 1_000, 2_000),
+                preview_sql(engine, "public", "accounts", "", Some(1_000), 2_000),
                 format!("SELECT * FROM {qualified} LIMIT 1000 OFFSET 2000")
             );
             // Whitespace is not a filter: an input the user emptied by hand
             // must not write `WHERE   ` into the statement.
             assert_eq!(
-                preview_sql(engine, "public", "accounts", "   ", 1_000, 0),
+                preview_sql(engine, "public", "accounts", "   ", Some(1_000), 0),
                 format!("SELECT * FROM {qualified} LIMIT 1000")
             );
         }

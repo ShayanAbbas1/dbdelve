@@ -3,7 +3,12 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use std::rc::Rc;
+
+use gpui_component::input::{CompletionProvider, EditorState};
+
 use super::*;
+use crate::filter::shape_value;
 
 impl Workspace {
     /// Run a relation's statement again. The rows are a snapshot, and this is
@@ -13,14 +18,15 @@ impl Workspace {
     /// opened: a column added or a key declared since then stayed invisible
     /// until the tab was closed and reopened. It is what decides which cells
     /// can be edited and which can be followed, so rows read fresh against a
-    /// stale one are not a fresh answer.
+    /// stale one are not a fresh answer. A structure tab holds nothing else,
+    /// so the structure is all it refreshes.
     pub(crate) fn refresh_relation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.clear_notice();
         if let Some((schema, relation)) = self
             .profile()
             .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == id))
             // A routine has no structure to ask for.
-            .filter(|tab| matches!(tab.body, ObjectBody::Relation { .. }))
+            .filter(|tab| !matches!(tab.body, ObjectBody::Routine(_)))
             .map(|tab| (tab.schema.clone(), tab.name.clone()))
         {
             self.load_structure(id, schema, relation, cx);
@@ -53,11 +59,8 @@ impl Workspace {
         }
     }
 
-    /// Ask a relation's preview for a different number of rows.
-    ///
-    /// The cap is the point of the row limit, so this moves it rather than
-    /// removing it: a `SELECT` with no limit at all is what the query tab is
-    /// for, where the statement is the user's and its cost is theirs to judge.
+    /// Ask a relation's preview for a different number of rows, or for all of
+    /// them.
     pub(crate) fn set_row_limit(
         &mut self,
         action: &SetRowLimit,
@@ -104,7 +107,7 @@ impl Workspace {
                     };
                     Some(derived_filter(engine, &filter_bars(filters), columns))
                 }
-                ObjectBody::Routine(_) => None,
+                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
             }
         }) else {
             return;
@@ -122,7 +125,7 @@ impl Workspace {
     pub(crate) fn submit_filter(
         &mut self,
         id: u64,
-        input: &Entity<InputState>,
+        input: &Entity<EditorState>,
         cx: &mut Context<Self>,
     ) {
         let value = input.read(cx).value().to_string();
@@ -136,7 +139,7 @@ impl Workspace {
     }
 
     /// Add a bar to the active preview, ready to be filled in. Nothing runs
-    /// yet: a bar with no column and no value narrows nothing.
+    /// yet: a bar with no value narrows nothing.
     pub(crate) fn add_filter(
         &mut self,
         _: &AddFilter,
@@ -171,7 +174,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Point a bar at a column and ask again.
+    /// Point a bar at a column and ask again. A value it held for another
+    /// column stays; SQL it held as a raw bar goes, since as a value to
+    /// compare against it would only be quoted into a predicate nobody meant.
     pub(crate) fn set_filter_column(
         &mut self,
         action: &SetFilterColumn,
@@ -181,26 +186,34 @@ impl Workspace {
         let Some(id) = self.active_object_id() else {
             return;
         };
+        let engine = self.engine();
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
         filter.column = Some(action.column.clone());
-        filter.raw = false;
+        let was_raw = std::mem::replace(&mut filter.raw, false);
+        if was_raw {
+            filter.applied.clear();
+        }
+        // One the new column does not take would leave the bar narrowing
+        // nothing under an operator the dropdown no longer lists.
+        if !filter.operator.offered(engine, filter.column.as_deref()) {
+            filter.operator = Operator::default();
+        }
         let (operator, input) = (filter.operator, filter.value.clone());
         input.update(cx, |input, cx| {
-            input.set_placeholder(
-                value_placeholder(self.engine(), false, operator),
-                window,
-                cx,
-            );
+            if was_raw {
+                input.set_value("", window, cx);
+            }
+            shape_value(input, engine, false, operator, None, window, cx);
         });
         self.apply_filter(id, cx);
         cx.notify();
     }
 
-    /// Turn a bar into a raw one. The value it already holds stays: it is the
-    /// only thing the two shapes have in common, and dropping it would lose
-    /// what was typed to a dropdown.
+    /// Turn a bar into a raw one. The value it already holds stays in the box:
+    /// it is the only thing the two shapes have in common, and dropping it
+    /// would lose what was typed to a dropdown.
     pub(crate) fn set_filter_raw(
         &mut self,
         action: &SetFilterRaw,
@@ -210,6 +223,8 @@ impl Workspace {
         let Some(id) = self.active_object_id() else {
             return;
         };
+        let engine = self.engine();
+        let completions = self.filter_completions(id);
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
@@ -219,8 +234,12 @@ impl Workspace {
         filter.applied.clear();
         let input = filter.value.clone();
         input.update(cx, |input, cx| {
-            input.set_placeholder(
-                value_placeholder(self.engine(), true, Operator::default()),
+            shape_value(
+                input,
+                engine,
+                true,
+                Operator::default(),
+                completions,
                 window,
                 cx,
             );
@@ -329,19 +348,30 @@ impl Workspace {
             Some(ObjectBody::Relation { next_join, .. }) => *next_join,
             _ => return,
         };
+        // Raw, so what is typed first runs on Enter: a bar waiting on a column
+        // ignores its value, and nothing on screen says why.
         let row = filter_row(
             self.engine(),
             id,
             FilterBar {
                 conjunction,
+                raw: true,
                 ..FilterBar::default()
             },
+            self.filter_completions(id),
             window,
             cx,
         );
         if let Some(filters) = self.filter_rows_mut(id) {
             filters.push(row);
         }
+    }
+
+    /// What a raw bar on object tab `id` of the active profile completes from.
+    fn filter_completions(&self, id: u64) -> Option<Rc<dyn CompletionProvider>> {
+        let session = &self.profile()?.session;
+        let tab = session.objects.iter().find(|tab| tab.id == id)?;
+        session.filter_completions(self.engine(), &tab.schema, &tab.name)
     }
 
     pub(crate) fn active_object_id(&self) -> Option<u64> {
@@ -364,7 +394,7 @@ impl Workspace {
     pub(crate) fn filter_rows_mut(&mut self, id: u64) -> Option<&mut Vec<FilterRow>> {
         match self.object_body_mut(id)? {
             ObjectBody::Relation { filters, .. } => Some(filters),
-            ObjectBody::Routine(_) => None,
+            ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
         }
     }
 

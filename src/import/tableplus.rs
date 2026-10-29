@@ -356,6 +356,11 @@ fn target(driver: &str) -> Result<Target, String> {
         "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb, MARIADB_TLS)),
         "mongo" | "mongodb" => Ok(Target::Server(mongo, MONGO_TLS)),
         "sqlite" => Ok(Target::File),
+        // Only the first entry of its dropdown is known, as for SQL Server.
+        "clickhouse" => Ok(Target::Server(
+            ConnectionConfig::ClickHouse,
+            &[SslMode::Prefer],
+        )),
         "snowflake" => Err("DBDelve's Snowflake signs in with a key file only".into()),
         // Only the first entry of its dropdown is known, so any other comes in
         // as verify-full rather than as something it may be stronger than.
@@ -888,10 +893,8 @@ mod tests {
             Err("DBDelve's Snowflake signs in with a key file only".into())
         );
         assert_eq!(engine("Oracle"), Err("Oracle isn't supported".into()));
-        assert_eq!(
-            engine("ClickHouse"),
-            Err("ClickHouse isn't supported".into())
-        );
+        assert_eq!(engine("ClickHouse"), Ok(Engine::ClickHouse));
+        assert_eq!(engine("Vertica"), Err("Vertica isn't supported".into()));
     }
 
     #[test]
@@ -1038,6 +1041,38 @@ mod tests {
         }
         let off = imported("PostgreSQL", json!({ "ServerAddress": "bastion" })).unwrap();
         assert_eq!((server(&off).ssh.clone(), off.notes), (None, vec![]));
+    }
+
+    #[test]
+    fn a_clickhouse_row_keeps_its_port_login_and_first_tls_entry() {
+        for port in ["8123", "8443"] {
+            let imported = imported("ClickHouse", json!({ "DatabasePort": port })).unwrap();
+            assert_eq!(
+                imported.config,
+                ConnectionConfig::ClickHouse(ServerConfig {
+                    host: "db.example.com".into(),
+                    port: port.parse().ok(),
+                    database: "app".into(),
+                    user: "alice@example.com".into(),
+                    ..ServerConfig::default()
+                })
+            );
+            assert!(imported.notes.is_empty());
+        }
+        let blank = imported("clickhouse", json!({})).unwrap();
+        assert_eq!(server(&blank).port, None);
+        let unknown = imported("ClickHouse", json!({ "tLSMode": 1 })).unwrap();
+        assert_eq!(server(&unknown).sslmode, SslMode::VerifyFull);
+        assert_eq!(
+            unknown.notes,
+            ["SSL mode 1 isn't one DBDelve has, so it was set to verify-full"]
+        );
+    }
+
+    #[test]
+    fn a_row_that_is_not_clickhouse_stays_with_its_own_engine() {
+        let postgres = imported("PostgreSQL", json!({ "DatabasePort": "8123" })).unwrap();
+        assert_eq!(postgres.config.engine(), Engine::Postgres);
     }
 
     #[test]

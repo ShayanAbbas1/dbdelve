@@ -1,0 +1,1 @@
+Code: 395. DB::Exception: boom: while executing 'FUNCTION throwIf(1_UInt8 :: 1, 'boom'_String :: 2) -> throwIf(1_UInt8, 'boom'_String) UInt8 : 3'. (FUNCTION_THROW_IF_VALUE_IS_NON_ZERO) (version 26.8.35.10 (official build))

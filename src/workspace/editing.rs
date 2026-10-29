@@ -4,69 +4,89 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::session::{StaleEdit, StaleResume, refreshing};
+use crate::session::{ReviewSlot, StaleEdit, StaleResume, refreshing};
 
 impl Workspace {
-    /// Open the "New row" form over the preview in front, one field per column
+    /// Open the "Insert" form over the preview in front, one field per column
     /// of the relation's loaded structure (spec §4).
     ///
     /// Requires a schema and a table and not a primary key, which is why this
     /// is offered on relations the grid refuses to edit.
     pub(crate) fn new_row(&mut self, _: &NewRow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_covers() {
+            return;
+        }
         // Does not route through `editable`: an insert has no existing row to
-        // check a column of, so the mode is asked outright.
+        // check a column of, so the mode is asked outright -- but not on a
+        // structure tab, which has no row to add and only needs pointing back.
+        if self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .is_some_and(|tab| matches!(tab.body, ObjectBody::Structure { .. }))
+        {
+            self.note("Switch to Data to add a row.".into(), cx);
+            return;
+        }
         if !self.require(Mode::ReadWrite, cx) {
             return;
         }
         self.clear_notice();
+        let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
         };
-        let Tab::Object(id) = profile.session.active else {
-            return;
-        };
+        let active = profile.session.active;
         // A form already open for this tab is focused rather than reset, so
         // pressing New row (or its shortcut) again does not silently wipe a
         // half-filled row.
         if let Some(form) = &profile.session.insert_form
-            && form.tab == Tab::Object(id)
+            && form.tab == active
         {
             if let Some(field) = form.fields.first() {
                 field.input.focus_handle(cx).focus(window, cx);
             }
             return;
         }
-        let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
-            return;
+        let (schema, table, columns) = match active {
+            Tab::Object(id) => {
+                let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
+                    return;
+                };
+                let structure = match &tab.body {
+                    ObjectBody::Relation { structure, .. } => structure,
+                    ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
+                };
+                if !tab.takes_inserts(engine) {
+                    self.note("This view takes no inserts.".into(), cx);
+                    return;
+                }
+                // The columns are the form: without them there is nothing to
+                // draw, and guessing at them would be inventing a table.
+                let StructureState::Loaded(structure) = structure else {
+                    self.note(
+                        "DBDelve has not read this relation's columns yet.".into(),
+                        cx,
+                    );
+                    return;
+                };
+                let columns: Vec<(String, String)> = structure
+                    .columns
+                    .iter()
+                    .filter(|column| !engine.new_row_omits(&column.name))
+                    .map(|column| (column.name.clone(), column.data_type.clone()))
+                    .collect();
+                (tab.schema.clone(), tab.name.clone(), columns)
+            }
+            // The grid's own columns, where its rows are written back to: one
+            // table, which is never so for a join or a computed result.
+            Tab::Query(_) => {
+                let Some(target) = profile.session.query_insert_target(cx) else {
+                    self.note("These rows take no new row.".into(), cx);
+                    return;
+                };
+                target
+            }
         };
-        let ObjectBody::Relation { structure, .. } = &tab.body else {
-            return;
-        };
-        if !tab.takes_inserts(self.engine()) {
-            self.note("This view takes no inserts.".into(), cx);
-            return;
-        }
-        // The columns are the form: without them there is nothing to draw, and
-        // guessing at them would be inventing a table. Checked before
-        // `show_structure` flips the tab, so a refused New row leaves
-        // Structure showing rather than switching to Data for nothing.
-        let StructureState::Loaded(structure) = structure else {
-            self.note(
-                "DBDelve has not read this relation's columns yet.".into(),
-                cx,
-            );
-            return;
-        };
-        let (schema, table) = (tab.schema.clone(), tab.name.clone());
-        let columns: Vec<(String, String)> = structure
-            .columns
-            .iter()
-            .map(|column| (column.name.clone(), column.data_type.clone()))
-            .collect();
-        // From the structure view the form belongs to the data, so it goes
-        // back there first -- now that every refusal above is past.
-        self.show_structure(false, cx);
-
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
             let input = cx.new(|cx| InputState::new(window, cx));
@@ -89,7 +109,7 @@ impl Workspace {
 
         if let Some(profile) = self.profile_mut() {
             profile.session.insert_form = Some(InsertForm {
-                tab: Tab::Object(id),
+                tab: active,
                 schema,
                 table,
                 fields,
@@ -119,7 +139,7 @@ impl Workspace {
 
     /// Generate the `INSERT` and show it. **Nothing runs here** — Run in the
     /// review panel is the ask (`AGENTS.md` rule 1).
-    pub(crate) fn confirm_new_row(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
         let engine = self.engine();
         let Some(profile) = self.profile() else {
@@ -164,12 +184,16 @@ impl Workspace {
             );
             return;
         }
+        if !self.review_slot_free(tab, false, window, cx) {
+            return;
+        }
 
         if let Some(profile) = self.profile_mut() {
             profile.session.insert_form = None;
             profile.session.apply_review = Some(ApplyReview {
                 tab,
-                title: "New row",
+                title: "Insert",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -242,7 +266,11 @@ impl Workspace {
             return;
         };
         let can_turn = match forward {
-            true => matches!(query, QueryState::Complete { rows, .. } if *rows >= *limit),
+            true if !self.engine().pages() => false,
+            true => matches!(
+                query,
+                QueryState::Complete { rows, .. } if limit.is_some_and(|limit| *rows >= limit)
+            ),
             false => *offset > 0,
         };
         if !can_turn {
@@ -251,9 +279,12 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
+                let Some(limit) = *limit else {
+                    return false;
+                };
                 match forward {
-                    true => *offset += *limit,
-                    false => *offset = offset.saturating_sub(*limit),
+                    true => *offset += limit,
+                    false => *offset = offset.saturating_sub(limit),
                 }
                 true
             },
@@ -281,7 +312,7 @@ impl Workspace {
             return;
         };
         let typed = input.read(cx).value().trim().to_string();
-        if typed.is_empty() {
+        if typed.is_empty() || !self.engine().pages() {
             return;
         }
         let Some(page) = typed_page(&typed) else {
@@ -291,7 +322,10 @@ impl Workspace {
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
-                *offset = page * *limit;
+                let Some(limit) = *limit else {
+                    return false;
+                };
+                *offset = page * limit;
                 true
             },
             cx,
@@ -315,7 +349,9 @@ impl Workspace {
             .session
             .active_object()
             .and_then(|tab| match &tab.body {
-                ObjectBody::Relation { limit, offset, .. } => Some(offset / limit + 1),
+                ObjectBody::Relation { limit, offset, .. } => {
+                    Some(limit.map_or(1, |limit| offset / limit + 1))
+                }
                 _ => None,
             });
         let Some(page) = page else {
@@ -355,7 +391,20 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        // Asked of the tab, not the grid on screen, which can be a finished
+        // result of a queue whose next statement is still running. A sort
+        // that runs SQL would be refused by that run after it had already
+        // rewritten the buffer, and rows still arriving would be ordered only
+        // in part.
         let tab = profile.session.active;
+        if profile.session.running(tab) {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
+            return;
+        }
         if profile
             .session
             .sorting(tab)
@@ -393,7 +442,7 @@ impl Workspace {
         let order = sort_columns(engine, keys, &columns);
         results.update(cx, |table, cx| {
             table.delegate_mut().sort_in_memory(order);
-            // The inspector reads the library's selected row, and that index
+            // The inspector reads the selected row, and that index
             // now names whichever row the sort moved there.
             table.clear_selection(cx);
             cx.notify();
@@ -417,14 +466,9 @@ impl Workspace {
             return;
         };
         let tab = profile.session.active;
-        // On a queue the two differ. Into memory, what gets sorted is the
-        // result in front; into the server, the keys are spliced into the
-        // statement behind the tab's own slot, so they must name its columns.
-        let source = match client {
-            true => profile.session.active_results(),
-            false => profile.session.results(tab),
-        };
-        let Some(results) = source.cloned() else {
+        // Either way the result in front: `reorder_query` splices into the
+        // statement behind it.
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
         let (order, shown) = {
@@ -495,8 +539,8 @@ impl Workspace {
         let engine = self.engine();
         let Some(results) = self
             .profile()
-            .and_then(|profile| profile.session.active_query_tab())
-            .map(|tab| tab.results.clone())
+            .and_then(|profile| profile.session.active_results())
+            .cloned()
         else {
             return;
         };
@@ -527,9 +571,62 @@ impl Workspace {
         };
         let tab_id = tab.id;
         let editor = tab.editor.clone();
-        let Some(last_query) = tab.last_query.clone() else {
-            return false;
+        let (in_turn, mode) = (profile.in_turn(), profile.mode);
+        // A header click refuses this itself; the sorting chips come here
+        // without asking.
+        let running = profile.session.running(Tab::Query(tab_id));
+        // On a queue, the result the switcher shows. Only the last of them is
+        // the tab's slot, which `last_query` describes.
+        let queued = tab.queue.as_ref().and_then(|queue| {
+            let finished = queue.done.get(queue.showing)?;
+            (finished.grid != tab.results).then(|| (queue.showing, finished.sql.clone()))
+        });
+        // An earlier result reruns as a lane, which only a queue with nothing
+        // left to send can take: one still out, or parked on a failure,
+        // would land its own results around it.
+        let unfinished = tab
+            .queue
+            .as_ref()
+            .is_some_and(|queue| !queue.remaining.is_empty() || queue.awaiting || queue.at_once());
+        // A lane finds its result by where its statement starts, which a
+        // batch's further sets share with its first.
+        let unreachable = tab.queue.as_ref().is_some_and(|queue| {
+            queue
+                .done
+                .get(queue.showing)
+                .is_some_and(|finished| queue.lane(finished.start) != Some(queue.showing))
+        });
+        let (queued, last_query) = match queued {
+            Some((index, sql)) => (Some(index), sql),
+            None => match tab.last_query.clone() {
+                Some(sql) => (None, sql),
+                None => return false,
+            },
         };
+        if running {
+            self.note(
+                "A statement is still running on this tab. Sort once it finishes, or cancel it."
+                    .into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unfinished {
+            self.note(
+                "Sort this result once the rest of the run has finished.".into(),
+                cx,
+            );
+            return false;
+        }
+        if queued.is_some() && unreachable {
+            self.note(
+                "These rows are one of several sets a batch returned, and cannot be sorted on \
+                 their own."
+                    .into(),
+                cx,
+            );
+            return false;
+        }
         // A sort re-runs the statement behind the grid, and one that writes
         // would write again.
         if !sql::rerunnable(engine, &last_query) {
@@ -547,7 +644,9 @@ impl Workspace {
         };
         // The grid's own statement, not whatever the cursor is on: that may be
         // another statement entirely, and one that never ran.
-        let Some(range) = Buffer::for_engine(engine, &text).find(&text, cursor, &last_query) else {
+        let Some(range) =
+            Buffer::for_engine(engine, &text).find(engine, &text, cursor, &last_query)
+        else {
             self.note(
                 "The statement behind these rows is no longer in the editor.".into(),
                 cx,
@@ -574,12 +673,37 @@ impl Workspace {
             );
             return false;
         };
+        // An earlier result reruns on a connection of its own, as the queue's
+        // reads did when they ran at once.
+        if queued.is_some() {
+            let refusal = match in_turn {
+                Some(_) => Some(
+                    "Only the last result can be sorted by the server while this connection \
+                     has a transaction open or changed session settings. Use Client sorting \
+                     for this one.",
+                ),
+                None if !session::runs_at_once(engine, mode, &[&sorted]) => Some(
+                    "Only the last result can be sorted by the server unless its statement \
+                     is a plain read. Use Client sorting for this one.",
+                ),
+                None => None,
+            };
+            if let Some(refusal) = refusal {
+                self.note(refusal.into(), cx);
+                return false;
+            }
+        }
 
-        let mut replaced = text.clone();
-        replaced.replace_range(range, &sorted);
-        editor.update(cx, |editor, cx| editor.set_value(replaced, window, cx));
-        self.execute_sql(sorted, Tab::Query(tab_id), cx);
-        true
+        editor.update(cx, |editor, cx| {
+            queries::replace_range(editor, range, &sorted, window, cx);
+        });
+        match queued {
+            Some(index) => self.rerun_queued(Tab::Query(tab_id), index, sorted, cx),
+            None => {
+                self.execute_sql(sorted, Tab::Query(tab_id), cx);
+                true
+            }
+        }
     }
 
     /// `Enter` on the active cell opens an input on it. Everything after this
@@ -592,7 +716,7 @@ impl Workspace {
         // A batch already on screen was generated from the pending set as it
         // stood. Another edit behind the modal would leave the statement the
         // user is reading describing something other than what the grid holds.
-        if profile.session.apply_review.is_some() {
+        if !profile.session.may_stage_into(profile.session.active) {
             return;
         }
         let Some(results) = profile.session.active_results().cloned() else {
@@ -629,11 +753,12 @@ impl Workspace {
         // and one it can has this column alone refused.
         // A snapshot written before edit targets were kept has none, so it
         // would read as untraceable too.
-        let (traced, snapshot) = {
+        let (traced, snapshot, reason) = {
             let grid = results.read(cx).delegate();
             (
-                (0..grid.columns().len()).any(|col| grid.editable(row, col)),
+                grid.row_editable(row),
                 grid.captured().is_some(),
+                grid.read_only_reason().map(str::to_string),
             )
         };
         // Checked before the snapshot: running a write again is not the way
@@ -648,19 +773,21 @@ impl Workspace {
                     .is_some_and(|statement| !sql::rerunnable(engine, statement))
             });
         self.note(
-            match (traced, wrote, snapshot) {
-                (true, _, _) => "This column cannot be edited.".into(),
-                (false, true, _) => {
+            match (traced, reason, wrote, snapshot) {
+                (true, _, _, _) => "This column cannot be edited.".into(),
+                // The engine's own word on why, where it gave one.
+                (false, Some(reason), _, _) => reason,
+                (false, None, true, _) => {
                     "These rows came from a statement that writes. Fetch them with a query that only reads to edit them.".into()
                 }
-                (false, false, true) => match tab {
+                (false, None, false, true) => match tab {
                     Tab::Query(_) => {
                         "These rows are from an earlier session. Run the query again to edit them."
                             .into()
                     }
                     _ => "These rows are from an earlier session. Refresh them to edit.".into(),
                 },
-                (false, false, false) => {
+                (false, None, false, false) => {
                     "dbdelve cannot tell which table these rows come from.".into()
                 }
             },
@@ -695,45 +822,194 @@ impl Workspace {
         self.stage_value(NewValue::Default, window, cx);
     }
 
-    /// The one body behind all three, so the mode prompt and the refusal cannot
-    /// drift between them.
+    /// The grid's own gestures stage on the active cell.
     fn stage_value(&mut self, value: NewValue, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile() else {
+        let Some(cell) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .and_then(|results| results.read(cx).delegate().active())
+        else {
             return;
+        };
+        self.stage_and_refocus(cell, value, window, cx);
+    }
+
+    fn stage_and_refocus(
+        &mut self,
+        (row, col): (usize, usize),
+        value: NewValue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.stage_cell(row, col, value, cx)
+            && let Some(results) = self
+                .profile()
+                .and_then(|profile| profile.session.active_results())
+        {
+            // The input this just closed had focus, and a window with nothing
+            // focused has no dispatch path at all.
+            results.focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    /// The one body behind every staged value, from the grid and the row
+    /// panel alike, so the gates, the mode prompt and the refusal cannot drift
+    /// between them. `true` once the value is staged.
+    pub(crate) fn stage_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        value: NewValue,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(profile) = self.profile() else {
+            return false;
         };
         // The gate `edit_cell` holds, for its reason: a batch already on screen
         // was generated from the pending set as it stood.
-        if profile.session.apply_review.is_some() {
-            return;
+        if !profile.session.may_stage_into(profile.session.active) {
+            return false;
         }
         let Some(results) = profile.session.active_results().cloned() else {
-            return;
-        };
-        let Some((row, col)) = results.read(cx).delegate().active() else {
-            return;
+            return false;
         };
         if results.read(cx).delegate().editable(row, col)
-            && !self.confirm_stale(StaleResume::Stage(value.clone()), cx)
+            && !self.confirm_stale(StaleResume::Stage((row, col), value.clone()), cx)
         {
-            return;
+            return false;
         }
         if results.update(cx, |table, cx| {
             let staged = table.delegate_mut().stage(row, col, value);
             cx.notify();
             staged
         }) {
-            // The input this just closed had focus, and a window with nothing
-            // focused has no dispatch path at all.
-            results.focus_handle(cx).focus(window, cx);
-            return;
+            return true;
         }
         // Asked after the attempt rather than before it, so staging a value the
         // cell already holds -- which changes nothing -- does not ask a
         // Read-only connection to raise its mode for it.
-        if !self.require(Mode::ReadWrite, cx) {
+        if self.require(Mode::ReadWrite, cx) {
+            self.note("This column cannot be edited.".into(), cx);
+        }
+        false
+    }
+
+    /// Stage what a row panel input holds, if it is not what it was filled
+    /// with: focus passing through an input is not an edit, and an input on a
+    /// NULL holds the empty string, which committing would write.
+    pub(crate) fn commit_row_input(
+        &mut self,
+        input: &Entity<gpui_component::input::TextareaState>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(inputs) = &self.row_panel.inputs else {
+            return;
+        };
+        let Some((col, seed)) = inputs.fields.iter().enumerate().find_map(|(col, field)| {
+            let field = field.as_ref().filter(|field| field.input == *input)?;
+            Some((col, field.seed.clone()))
+        }) else {
+            return;
+        };
+        let (grid, row, rows) = (inputs.grid.clone(), inputs.row, inputs.rows);
+        let owner = (inputs.profile.clone(), inputs.tab);
+        let text = input.read(cx).value();
+        // Rows replaced or reordered since: another record is at `row` now,
+        // and the text goes the way the grid's own open input does.
+        if text == seed || grid.read(cx).delegate().rows_id() != rows {
             return;
         }
-        self.note("This column cannot be edited.".into(), cx);
+        let in_front = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            == Some(&grid);
+        let value = NewValue::Value(text.clone());
+        let staged = match in_front {
+            true => self.stage_cell(row, col, value, cx),
+            false => self.stage_behind(&grid, owner, row, col, value, cx),
+        };
+        if staged
+            && let Some(field) = self
+                .row_panel
+                .inputs
+                .as_mut()
+                .and_then(|inputs| inputs.fields.get_mut(col)?.as_mut())
+        {
+            field.seed = text;
+        }
+    }
+
+    /// Stage typed text on a grid no longer in front, which is where a blur
+    /// from switching tabs lands. `stage_cell`'s gates read the tab in front,
+    /// so this asks the grid's own profile and tab, and the grid itself, and
+    /// leaves text that would need the stale-rows prompt unstaged rather than
+    /// raise it over another tab.
+    fn stage_behind(
+        &mut self,
+        grid: &Entity<gpui_component::table::TableState<ResultGrid>>,
+        (profile, tab): (String, Tab),
+        row: usize,
+        col: usize,
+        value: NewValue,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let may_stage = self
+            .profiles
+            .iter()
+            .find(|found| found.id == profile)
+            .is_some_and(|found| found.session.may_stage_into(tab));
+        let staged = may_stage
+            && grid.update(cx, |table, cx| {
+                let staged =
+                    !table.delegate().unconfirmed() && table.delegate_mut().stage(row, col, value);
+                cx.notify();
+                staged
+            });
+        if !staged {
+            self.note(
+                "A value typed in the row panel was not staged before switching tabs.".into(),
+                cx,
+            );
+        }
+        staged
+    }
+
+    /// A row panel chip. The input beside it is refilled even while it has
+    /// the keyboard -- a button does not take focus -- since otherwise its
+    /// old text would be staged back over the chip's value on the next blur.
+    pub(crate) fn stage_row_field(
+        &mut self,
+        row: usize,
+        col: usize,
+        value: NewValue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.stage_cell(row, col, value, cx) {
+            return false;
+        }
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .cloned()
+        else {
+            return true;
+        };
+        let seed =
+            gpui::SharedString::from(results.read(cx).delegate().edit_seed(row, col).to_string());
+        if let Some(field) = self
+            .row_panel
+            .inputs
+            .as_mut()
+            .filter(|inputs| inputs.name(&results, row, cx))
+            .and_then(|inputs| inputs.fields.get_mut(col)?.as_mut())
+        {
+            field
+                .input
+                .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
+            field.seed = seed;
+        }
+        true
     }
 
     /// Whether an edit may go ahead on the grid in front: not while its rows are
@@ -839,7 +1115,19 @@ impl Workspace {
         }
         match resume {
             StaleResume::Open => self.edit_cell(&EditCell, window, cx),
-            StaleResume::Stage(value) => self.stage_value(value, window, cx),
+            // Back to the panel input the value came from, if it did, so
+            // stepping through the row carries on from there.
+            StaleResume::Stage(cell, value) => match self.row_input(cell, cx) {
+                // Through the chips' path, which refills the input: a chip's
+                // value resumed here would otherwise leave typed text in it to
+                // be staged back over the value on the next blur.
+                Some(input) => {
+                    if self.stage_row_field(cell.0, cell.1, value, window, cx) {
+                        input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }
+                None => self.stage_and_refocus(cell, value, window, cx),
+            },
             StaleResume::Delete => self.delete_row(&DeleteRow, window, cx),
         }
         cx.notify();
@@ -847,14 +1135,20 @@ impl Workspace {
 
     /// The grid's own commit was refused by the mode. It has nowhere to say so
     /// and no way to offer the one thing that answers it, so the input stays
-    /// open behind this prompt and `enter` again commits what was typed.
+    /// open behind this prompt, and raising the mode commits what was typed.
     pub(crate) fn request_write_mode(
         &mut self,
         _: &RequestWriteMode,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.require(Mode::ReadWrite, cx);
+        if !self.require(Mode::ReadWrite, cx)
+            && let Some(pending) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.pending_run.as_mut())
+        {
+            pending.commit_cell = true;
+        }
     }
 
     /// Generate the one-row `DELETE` and show it. **Nothing runs here** — Run in
@@ -863,22 +1157,31 @@ impl Workspace {
     /// Deliberately not on a keybinding, for the reason [`Workspace::apply_edits`]
     /// is not: a destructive write one fat finger from a navigation key is a
     /// write nobody asked for. The palette row is how it is reached.
-    pub(crate) fn delete_row(&mut self, _: &DeleteRow, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn delete_row(
+        &mut self,
+        _: &DeleteRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Does not route through `editable`: `row_key` answers "can this row be
-        // named" and is true regardless of mode, so the mode is asked outright.
+        // named" and is true regardless of mode or engine, so both are asked
+        // outright.
+        let engine = self.engine();
+        if !engine.edits_rows() {
+            self.note(format!("{} rows are read-only here.", engine.label()), cx);
+            return;
+        }
         if !self.require(Mode::ReadWrite, cx) {
             return;
         }
         self.clear_notice();
-        let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
         };
-        // A statement already generated is the one the user is reading; another
-        // behind it would leave that panel describing something else.
-        if profile.session.apply_review.is_some() {
+        if profile.session.import_rows.is_some() {
             return;
         }
+        let tab = profile.session.active;
         // Scoped to the active tab's own form: one left open on another tab
         // (or a closed one, cleared at close) must not block this one.
         if profile
@@ -892,9 +1195,10 @@ impl Workspace {
         }
         // Browsing surfaces only. A query tab's grid is a view of the user's own
         // statement, and a delete there would be dbdelve writing into a buffer to
-        // destroy rows.
-        let tab = profile.session.active;
-        if !matches!(tab, Tab::Object(_)) {
+        // destroy rows -- bar an engine that takes them there
+        // (`Engine::edits_query_rows`), where the delete is reviewed as a
+        // relation's is and the buffer is left be.
+        if !matches!(tab, Tab::Object(_)) && !engine.edits_query_rows() {
             self.note(
                 "Deleting a row is offered on a table's rows, not on a query's results.".into(),
                 cx,
@@ -905,17 +1209,21 @@ impl Workspace {
             return;
         };
         let grid = results.read(cx);
+        let unnameable = grid.delegate().read_only_reason().map_or_else(
+            || {
+                "dbdelve cannot name this row by its primary key, so it will not delete it."
+                    .to_string()
+            },
+            str::to_string,
+        );
         let key = grid.delegate().active().and_then(|(row, _)| {
             Some((
                 grid.delegate().row_key(row)?,
                 grid.delegate().row_types(row),
             ))
         });
-        let Some(((schema, table, keys), types)) = key else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let Some(((schema, table, keys, null_keys), types)) = key else {
+            self.note(unnameable, cx);
             return;
         };
         if !self.confirm_stale(StaleResume::Delete, cx) {
@@ -926,11 +1234,11 @@ impl Workspace {
             .iter()
             .map(|(column, value)| (column.as_str(), value.as_str()))
             .collect();
-        let Some(statement) = sql::delete_row(engine, &schema, &table, &borrowed, &types) else {
-            self.note(
-                "dbdelve cannot name this row by its primary key, so it will not delete it.".into(),
-                cx,
-            );
+        let nulls: Vec<&str> = null_keys.iter().map(String::as_str).collect();
+        let Some(statement) =
+            sql::delete_row_matching(engine, &schema, &table, &borrowed, &nulls, &types)
+        else {
+            self.note(unnameable, cx);
             return;
         };
         // Both halves of the admission, before anything is shown: the gate every
@@ -938,7 +1246,11 @@ impl Workspace {
         // cannot give alone — that the predicate is this row's key and not some
         // other set of columns. Failing either is dbdelve disagreeing with itself,
         // a bug in dbdelve rather than a user error, so it is said and not run.
-        let columns: Vec<&str> = borrowed.iter().map(|&(column, _)| column).collect();
+        let columns: Vec<&str> = borrowed
+            .iter()
+            .map(|&(column, _)| column)
+            .chain(nulls.iter().copied())
+            .collect();
         if !sql::is_generated_write_on(engine, &statement)
             || !sql::delete_matches_key_on(engine, &statement, &columns)
         {
@@ -950,11 +1262,15 @@ impl Workspace {
             );
             return;
         }
+        if !self.review_slot_free(tab, false, window, cx) {
+            return;
+        }
 
         if let Some(profile) = self.profile_mut() {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Delete row",
+                notes: engine.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -1033,7 +1349,7 @@ impl Workspace {
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
     pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("copying", cx) {
+        if !self.has_results(cx) || self.refuse_capped("copying", cx) {
             return;
         }
         let Some(results) = self
@@ -1051,12 +1367,19 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         // A copy changes nothing on screen, and a whole result set is too much
         // to take on trust. Unlike a refusal, the confirmation goes by itself.
-        let message = format!(
-            "Copied {} {} as {}.",
-            group_thousands(rows as u64),
-            if rows == 1 { "row" } else { "rows" },
-            format.extension().to_uppercase()
+        self.confirm(
+            format!(
+                "Copied {} {} as {}.",
+                group_thousands(rows as u64),
+                if rows == 1 { "row" } else { "rows" },
+                format.extension().to_uppercase()
+            ),
+            cx,
         );
+    }
+
+    /// A notice that goes by itself: see `clear_notice_later`.
+    pub(crate) fn confirm(&mut self, message: String, cx: &mut Context<Self>) {
         self.note(message.clone(), cx);
         if let Some(profile) = self.profile() {
             let (id, generation) = (profile.id.clone(), profile.generation);
@@ -1092,32 +1415,78 @@ impl Workspace {
     }
 
     /// A restored snapshot holds at most `GRID_ROW_CAP` rows of a larger
-    /// result. Writing those out is quietly short of what the status bar says
-    /// the tab is showing, so this says how to get the rest instead.
-    fn refuse_capped_snapshot(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+    /// result, and a run at most the row limit. Writing those out is quietly
+    /// short of what the status bar says the tab is showing, so this says how
+    /// to get the rest instead.
+    fn refuse_capped(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
+        let streaming = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some());
+        if streaming {
+            self.note(
+                format!(
+                    "Rows are still arriving. Wait for the statement to finish before {doing}."
+                ),
+                cx,
+            );
+            return true;
+        }
+        let stopped = self.profile().and_then(|profile| {
+            let grid = profile.session.active_results()?.read(cx).delegate();
+            Some((grid.result().rows.len(), grid.result().stopped?))
+        });
+        if let Some((showing, stopped)) = stopped {
+            let showing = group_thousands(showing as u64);
+            self.note(
+                match stopped {
+                    db::Stopped::AtLimit => format!(
+                        "This tab is showing the first {showing} rows, the row limit. Raise it \
+                         and run the statement again before {doing}."
+                    ),
+                    db::Stopped::Cancelled => format!(
+                        "This tab is showing the {showing} rows that arrived before the \
+                         statement was cancelled. Run it again before {doing}."
+                    ),
+                },
+                cx,
+            );
+            return true;
+        }
         let capped = self.profile().and_then(|profile| {
             let grid = profile.session.active_results()?.read(cx).delegate();
             let showing = grid.result().rows.len();
-            (showing < grid.total_rows()).then(|| (showing, grid.total_rows()))
+            (showing < grid.total_rows())
+                .then(|| (showing, grid.total_rows(), grid.captured().is_some()))
         });
-        let Some((showing, total)) = capped else {
+        let Some((showing, total, snapshot)) = capped else {
             return false;
         };
+        let (showing, total) = (
+            group_thousands(showing as u64),
+            group_thousands(total as u64),
+        );
         self.note(
-            format!(
-                "This tab is showing {} of {} rows from a snapshot. Refresh it before {doing}.",
-                group_thousands(showing as u64),
-                group_thousands(total as u64)
-            ),
+            match snapshot {
+                true => format!(
+                    "This tab is showing {showing} of {total} rows from a snapshot. Refresh it \
+                     before {doing}."
+                ),
+                false => format!(
+                    "This tab is showing {showing} of {total} rows, the row limit. Raise it \
+                     and run the statement again before {doing}."
+                ),
+            },
             cx,
         );
         true
     }
 
-    /// One field of the row panel, taken from the fetched cell rather than the
-    /// re-indented, clipped text the panel paints. The field's button shows a
-    /// tick for a moment after, since a copy otherwise changes nothing on
-    /// screen.
+    /// One field of the row panel, taken from the cell's whole value -- its
+    /// staged one, where it has an edit pending, as the panel shows -- rather
+    /// than the re-indented, clipped text the panel paints. The field's button
+    /// shows a tick for a moment after, since a copy otherwise changes nothing
+    /// on screen.
     pub(crate) fn copy_row_field(&mut self, row_ix: usize, col_ix: usize, cx: &mut Context<Self>) {
         let Some(results) = self
             .profile()
@@ -1125,14 +1494,11 @@ impl Workspace {
         else {
             return;
         };
-        let Some(value) = results
+        let value = results
             .read(cx)
             .delegate()
-            .cell(row_ix, col_ix)
-            .map(str::to_string)
-        else {
-            return;
-        };
+            .edit_seed(row_ix, col_ix)
+            .to_string();
         cx.write_to_clipboard(ClipboardItem::new_string(value));
 
         let copied = Some((row_ix, col_ix));
@@ -1192,7 +1558,7 @@ impl Workspace {
     /// read it off. Pending edits are not written either: this is the result set
     /// the server returned, and applying them is a separate, visible act.
     pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if self.refuse_capped_snapshot("exporting", cx) {
+        if !self.has_results(cx) || self.refuse_capped("exporting", cx) {
             return;
         }
         let Some(profile) = self.profile() else {
@@ -1281,7 +1647,8 @@ impl Workspace {
     }
 
     /// Turn the grid's pending edits into SQL and put it where the user can read
-    /// it: the query tab's buffer, or a relation tab's modal.
+    /// it: the query tab's buffer, or the review modal on a relation tab and on
+    /// a query tab whose engine reviews them (`Engine::reviews_query_edits`).
     ///
     /// Binds to `cmd+s` -- a deliberate departure from `cmd+enter` ("run the
     /// statement under the cursor"), which stays unrelated so neither
@@ -1292,6 +1659,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_covers() {
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };
@@ -1299,6 +1669,7 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
+        let own_review = profile.session.apply_review_covers(tab);
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
@@ -1321,13 +1692,20 @@ impl Workspace {
             return;
         }
 
+        let notes = self.engine().review_notes(&batch);
         match tab {
-            Tab::Query(_) => self.apply_in_buffer(batch, window, cx),
-            Tab::Object(_) => {
+            Tab::Query(_) if !self.engine().reviews_query_edits() => {
+                if !own_review {
+                    self.apply_in_buffer(batch, window, cx);
+                }
+            }
+            _ if !self.review_slot_free(tab, true, window, cx) => {}
+            _ => {
                 if let Some(profile) = self.profile_mut() {
                     profile.session.apply_review = Some(ApplyReview {
                         tab,
                         title: "Apply edits",
+                        notes,
                         sql: batch,
                     });
                     cx.notify();
@@ -1355,7 +1733,7 @@ impl Workspace {
             return;
         };
         let (id, editor) = (tab.id, tab.editor.clone());
-        let Some(select) = tab.last_query.clone() else {
+        let Some(refresh) = tab.apply_refresh() else {
             self.note(
                 "dbdelve does not know which statement produced these rows.".into(),
                 cx,
@@ -1364,16 +1742,11 @@ impl Workspace {
         };
 
         let text = editor.read(cx).value().to_string();
-        let appended = appended_statement(&text, &batch);
-        editor.update(cx, |editor, cx| editor.set_value(appended, window, cx));
-        self.execute_and_then(
-            batch,
-            Tab::Query(id),
-            Some(Refresh::Statement(select)),
-            false,
-            None,
-            cx,
-        );
+        let appended = appended_statement(self.engine(), &text, &batch);
+        editor.update(cx, |editor, cx| {
+            queries::rewrite(editor, &appended, window, cx)
+        });
+        self.execute_and_then(batch, Tab::Query(id), Some(refresh), false, None, cx);
     }
 
     /// Run the batch a relation tab is showing. The modal stays up until it
@@ -1386,26 +1759,85 @@ impl Workspace {
             return;
         };
         let (tab, sql) = (review.tab, review.sql.clone());
-        let Tab::Object(id) = tab else {
-            return;
-        };
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
-        self.execute_and_then(sql, tab, Some(Refresh::Relation(id)), false, None, cx);
+        let refresh = match tab {
+            Tab::Object(id) => Refresh::Relation(id),
+            Tab::Query(id) => match profile
+                .session
+                .query_tab(id)
+                .and_then(QueryTab::apply_refresh)
+            {
+                Some(refresh) => refresh,
+                None => {
+                    self.note(
+                        "dbdelve does not know which statement produced these rows.".into(),
+                        cx,
+                    );
+                    return;
+                }
+            },
+        };
+        self.execute_and_then(sql, tab, Some(refresh), false, None, cx);
     }
 
     /// Put the batch away, leaving the edits pending: reading a statement and
     /// deciding not to run it is not the same as throwing the edits out, which
     /// is what Discard is for.
+    ///
+    /// Scoped to the active tab, the only one it is drawn over, as
+    /// `close_new_row` is: one left on another tab must not eat the `escape`
+    /// meant for what this tab has in front.
     pub(crate) fn close_apply_review(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(profile) = self.profile_mut() else {
             return false;
         };
+        if !profile.session.apply_review_covers(profile.session.active) {
+            return false;
+        }
         let closed = profile.session.apply_review.take().is_some();
         if closed {
             cx.notify();
         }
         closed
+    }
+
+    /// Whether a review written from `from` may be put in front of the user.
+    ///
+    /// Refused while any review is open, another tab's included: the session
+    /// holds one, and a second would overwrite the first's statement unseen.
+    /// Another tab's is brought forward, so what is in the way is on screen.
+    /// `from`'s own is replaced only when `replaces_own`, the new statement
+    /// then being its newer one.
+    ///
+    /// Asked last, once the creator has nothing left of its own to refuse:
+    /// a creator that would have refused anyway must not move the user.
+    fn review_slot_free(
+        &mut self,
+        from: Tab,
+        replaces_own: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(profile) = self.profile_mut() else {
+            return false;
+        };
+        match profile.session.review_slot(from, replaces_own) {
+            ReviewSlot::Free | ReviewSlot::Replace => true,
+            ReviewSlot::Stale => {
+                profile.session.apply_review = None;
+                true
+            }
+            ReviewSlot::Refuse => false,
+            ReviewSlot::JumpTo(holder) => {
+                self.activate_tab(holder, window, cx);
+                self.note(
+                    "Run or close this statement before starting another.".into(),
+                    cx,
+                );
+                false
+            }
+        }
     }
 
     /// Back to exactly the rows the server sent.
@@ -1415,10 +1847,10 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(results) = self
-            .profile()
-            .and_then(|profile| profile.session.active_results().cloned())
-        else {
+        let Some((tab, results)) = self.profile().and_then(|profile| {
+            let results = profile.session.active_results()?.clone();
+            Some((profile.session.active, results))
+        }) else {
             return;
         };
         results.update(cx, |table, cx| {
@@ -1426,7 +1858,7 @@ impl Workspace {
             table.refresh(cx);
         });
         if let Some(profile) = self.profile_mut() {
-            profile.session.apply_review = None;
+            profile.session.drop_apply_review_of(tab);
         }
         cx.notify();
     }

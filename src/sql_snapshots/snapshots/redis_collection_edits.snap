@@ -1,0 +1,150 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[redis] hash add
+  |WATCH k|
+  |ECHO "{\\"a\\":\\"1\\",\\"b\\":\\"2\\",\\"c\\":\\"3\\"}"|
+  |HSCAN k 0 COUNT 100|
+  |MULTI|
+  |HSET k d 4|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash change
+  |WATCH k|
+  |ECHO "{\\"a\\":\\"1\\",\\"b\\":\\"2\\",\\"c\\":\\"3\\"}"|
+  |HSCAN k 0 COUNT 100|
+  |MULTI|
+  |HSET k b two|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash remove
+  |WATCH k|
+  |ECHO "{\\"a\\":\\"1\\",\\"b\\":\\"2\\",\\"c\\":\\"3\\"}"|
+  |HSCAN k 0 COUNT 100|
+  |MULTI|
+  |HDEL k c|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash all three
+  |WATCH k|
+  |ECHO "{\\"a\\":\\"1\\",\\"b\\":\\"2\\",\\"c\\":\\"3\\"}"|
+  |HSCAN k 0 COUNT 100|
+  |MULTI|
+  |HSET k b two|
+  |HSET k d "4 4"|
+  |HDEL k c|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] list append
+  error: |The list has 4 items here and 3 were read: open the key to add or remove items.|
+
+[redis] list change
+  |WATCH k|
+  |ECHO "[\\"a\\",\\"b\\",\\"c\\"]"|
+  |LRANGE k 0 100|
+  |MULTI|
+  |LSET k 1 B|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] list remove
+  error: |The list has 2 items here and 3 were read: open the key to add or remove items.|
+
+[redis] list reorder
+  |WATCH k|
+  |ECHO "[\\"a\\",\\"b\\",\\"c\\"]"|
+  |LRANGE k 0 100|
+  |MULTI|
+  |LSET k 0 c|
+  |LSET k 2 a|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] set add
+  |WATCH k|
+  |ECHO "[\\"x\\",\\"y\\"]"|
+  |SSCAN k 0 COUNT 100|
+  |MULTI|
+  |SADD k z|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] set remove
+  |WATCH k|
+  |ECHO "[\\"x\\",\\"y\\"]"|
+  |SSCAN k 0 COUNT 100|
+  |MULTI|
+  |SREM k y|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset add
+  |WATCH k|
+  |ECHO "{\\"a\\":1,\\"b\\":2.5,\\"c\\":3}"|
+  |ZSCAN k 0 COUNT 100|
+  |MULTI|
+  |ZADD k NX -0.5 d|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset rescore
+  |WATCH k|
+  |ECHO "{\\"a\\":1,\\"b\\":2.5,\\"c\\":3}"|
+  |ZSCAN k 0 COUNT 100|
+  |MULTI|
+  |ZADD k XX CH 7 b|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] zset remove
+  |WATCH k|
+  |ECHO "{\\"a\\":1,\\"b\\":2.5,\\"c\\":3}"|
+  |ZSCAN k 0 COUNT 100|
+  |MULTI|
+  |ZREM k c|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[redis] hash no change
+  error: |The edits change nothing.|
+
+[redis] hash not json
+  error: |This is not JSON: EOF while parsing an object at line 1 column 1.|
+
+[redis] hash wrong shape
+  error: |A hash is a JSON object of field to value.|
+
+[redis] list wrong shape
+  error: |A list is a JSON array of its items.|
+
+[redis] hash empty
+  error: |Redis holds no empty collection: delete the row to delete the key.|
+
+[redis] list empty
+  error: |Redis holds no empty collection: delete the row to delete the key.|
+
+[redis] hash duplicate field
+  error: |A name can be given only once, and a is twice.|
+
+[redis] zset duplicate member
+  error: |A name can be given only once, and a is twice.|
+
+[redis] set duplicate member
+  error: |A set holds each member once, and x is twice.|
+
+[redis] hash numeric value
+  error: |a must be a JSON string, and 1 is not one.|
+
+[redis] zset string score
+  error: |a's score must be a number, not "1".|
+
+[redis] null value
+  error: |value cannot be NULL: Redis has no NULL to store.|
+
+[redis] held missing
+  error: |This row's value is not known.|

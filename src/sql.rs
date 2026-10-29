@@ -13,24 +13,32 @@
 //! grammar puts the node boundary, and it is what we want, since Postgres does
 //! not need a trailing semicolon on a statement sent over the wire.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, Expr, Query, SetExpr,
-    Statement, UtilityOption,
+    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
+    Delete, Expr, Insert, Merge, Query, SetExpr, SqlOption, Statement, TableObject, Update,
+    UtilityOption,
 };
 use sqlparser::dialect::{
-    Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
+    PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::db::Engine;
+use crate::db::{
+    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
+    Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit, Syntax, TypedExplain,
+    UnreadableFloor, UpdateSpelling,
+};
+use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
@@ -57,17 +65,14 @@ impl Buffer {
     /// A MongoDB buffer is mongosh statements, not SQL, and `mql` reads its
     /// boundaries: a newline ends a statement there unless a `.` continues it.
     pub fn for_engine(engine: Engine, sql: &str) -> Self {
-        let statements = match engine {
-            Engine::SqlServer => batches(sql)
+        let statements = match engine.syntax() {
+            Syntax::Sql if batches_on(engine) => batches(sql)
                 .into_iter()
                 .flat_map(|batch| tsql_statements(sql, batch))
                 .collect(),
-            Engine::MongoDb => crate::mql::statements(sql),
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::Sqlite
-            | Engine::Snowflake => statements_in(sql),
+            Syntax::Sql => statements_in(sql),
+            Syntax::Mongo => crate::mql::statements(sql),
+            Syntax::Redis => crate::redis_cmd::statements(sql),
         };
 
         Self { statements }
@@ -82,7 +87,21 @@ impl Buffer {
     /// Where `statement` stands in `sql`, the buffer this was parsed from: the
     /// statement under `cursor` if it is that one, else the first that is.
     /// `None` once it has been edited away.
-    pub fn find(&self, sql: &str, cursor: usize, statement: &str) -> Option<Range<usize>> {
+    ///
+    /// A selection is sent verbatim, so `statement` can carry what the
+    /// buffer's ranges leave out, like its closing `;`. It is cut the way the
+    /// buffer is before the two are compared.
+    pub fn find(
+        &self,
+        engine: Engine,
+        sql: &str,
+        cursor: usize,
+        statement: &str,
+    ) -> Option<Range<usize>> {
+        let statement = match Buffer::for_engine(engine, statement).statements() {
+            [only] => &statement[only.clone()],
+            _ => statement,
+        };
         let is_it = |range: &Range<usize>| sql[range.clone()].trim() == statement.trim();
         self.statement_at(cursor)
             .filter(is_it)
@@ -136,14 +155,9 @@ pub(crate) fn queued_statements(
     sql: &str,
     selection: Option<Range<usize>>,
 ) -> Vec<Range<usize>> {
-    let units = match engine {
-        Engine::SqlServer => queued_batches(sql),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::MongoDb => Buffer::for_engine(engine, sql).statements().to_vec(),
+    let units = match batches_on(engine) {
+        true => queued_batches(sql),
+        false => Buffer::for_engine(engine, sql).statements().to_vec(),
     };
     let Some(selection) = selection.filter(|sel| !sel.is_empty()) else {
         return units;
@@ -163,14 +177,9 @@ pub(crate) fn queued_statements(
 /// procedure call, a loop or a trigger can return more sets than the batch has
 /// statements, and there is no reading that off the text.
 pub(crate) fn expected_sets(engine: Engine, sql: &str) -> usize {
-    match engine {
-        Engine::SqlServer => tsql_statements(sql, 0..sql.len()).len().max(1),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::MongoDb => 1,
+    match batches_on(engine) {
+        true => tsql_statements(sql, 0..sql.len()).len().max(1),
+        false => 1,
     }
 }
 
@@ -182,6 +191,37 @@ fn queued_batches(sql: &str) -> Vec<Range<usize>> {
         .into_iter()
         .filter(|batch| !tsql_statements(sql, batch.clone()).is_empty())
         .filter_map(|batch| trim_range(sql, batch))
+        .collect()
+}
+
+/// A SQL Server selection's batches cut into their statements, so a run of
+/// reads can send each at once on a connection of its own as every other
+/// engine does. Only when every batch is plain reads (`plain_read`) naming no
+/// `@variable` and no `#temp` table, which is what a batch scopes: nothing in
+/// one needs another statement beside it. Like `queued_statements`, only the
+/// statements `selection` touches. Empty for anything else, and on every other
+/// engine, whose units are statements already.
+pub(crate) fn split_reads(
+    engine: Engine,
+    sql: &str,
+    batches: &[Range<usize>],
+    selection: Range<usize>,
+) -> Vec<Range<usize>> {
+    let reads_alone = |batch: &str| {
+        plain_read(engine, batch)
+            && !tsql_scan(batch).0.iter().any(|word| {
+                let word = &batch[word.clone()];
+                word.starts_with('#') || word.starts_with('@') && !word.starts_with("@@")
+            })
+    };
+    if !batches_on(engine) || !batches.iter().all(|batch| reads_alone(&sql[batch.clone()])) {
+        return Vec::new();
+    }
+    batches
+        .iter()
+        .flat_map(|batch| tsql_statements(sql, batch.clone()))
+        .filter_map(|statement| trim_range(sql, statement))
+        .filter(|range| range.start < selection.end && selection.start < range.end)
         .collect()
 }
 
@@ -216,14 +256,11 @@ impl SortKey {
 /// that could carry one and does not; `None` is a statement dbdelve cannot read
 /// well enough to say without guessing.
 pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::order_by(statement),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::order_by(statement),
+        // A reply's order is the command's own; nothing sorts it.
+        Syntax::Redis => return None,
+        Syntax::Sql => {}
     }
     let sql = statement;
     let tree = parse(sql)?;
@@ -268,14 +305,10 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
 /// guessed at, because the alternative is handing the server a statement the
 /// user did not write and cannot read.
 pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Option<String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::with_order_by(statement, keys),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::with_order_by(statement, keys),
+        Syntax::Redis => return None,
+        Syntax::Sql => {}
     }
     let sql = statement;
     let tree = parse(sql)?;
@@ -294,7 +327,7 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
     // Replacing the existing clause, rather than adding a second one, is what
     // makes a repeated click a change of sort instead of an accumulation.
     if let Some(existing) = child_of_kind(&anchor, "order_by") {
-        return Some(splice(sql, existing.byte_range(), &clause));
+        return Some(splice(sql, &tree, existing.byte_range(), &clause));
     }
 
     if clause.is_empty() {
@@ -305,10 +338,19 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
         .map(|limit| limit.byte_range().start)
         .unwrap_or(anchor.byte_range().end);
 
-    Some(splice(sql, insert_at..insert_at, &clause))
+    Some(splice(sql, &tree, insert_at..insert_at, &clause))
 }
 
-/// A generated preview's page, spelled the way `engine` reads one.
+/// [`sql_paged`] for `engine`. A MongoDB or Redis preview comes back as it
+/// is.
+pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_paged(engine.spec(), statement, key),
+        Syntax::Mongo | Syntax::Redis => Some(statement.to_string()),
+    }
+}
+
+/// A generated preview's page, spelled the way `spec` reads one.
 ///
 /// Every engine but SQL Server takes the `LIMIT … OFFSET …` a preview is
 /// generated with. T-SQL has no `LIMIT`, and the grammar the gates parse with
@@ -320,16 +362,37 @@ pub fn with_order_by(engine: Engine, statement: &str, keys: &[SortKey]) -> Optio
 /// columns that tell its rows apart: without a total order the server may hand
 /// the same row to two pages and none to another. The key follows a
 /// `(SELECT NULL)` that orders nothing, which is how [`unpaged`] tells it from
-/// a sort the user asked for, and is all there is when no key is known.
+/// a sort the user asked for, and is all there is when no key is known. A
+/// preview with no limit is one page already, and comes back as it is.
 ///
-/// `None` for a statement with no limit this can read, which is not a preview.
-pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> {
-    if engine != Engine::SqlServer {
+/// `None` for a statement this cannot read, or whose limit it cannot.
+pub(crate) fn sql_paged(spec: &EngineSpec, statement: &str, key: &[String]) -> Option<String> {
+    if spec.sql.paging == Paging::LimitOffset {
         return Some(statement.to_string());
     }
     let tree = parse(statement)?;
     let anchor = clause_anchor(&tree, statement)?;
-    let limit = child_of_kind(&anchor, "limit")?;
+    let Some(limit) = child_of_kind(&anchor, "limit") else {
+        return Some(statement.to_string());
+    };
+    if spec.sql.paging == Paging::LimitOffsetByKey {
+        // Without a key (none declared, or an expression such as `toDate(ts)`)
+        // the page stays unordered: there is nothing honest to order it by.
+        if child_of_kind(&anchor, "order_by").is_some() || key.is_empty() {
+            return Some(statement.to_string());
+        }
+        let order = key
+            .iter()
+            .map(|column| spec.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(splice(
+            statement,
+            &tree,
+            limit.byte_range(),
+            &format!("ORDER BY {order} {}", &statement[limit.byte_range()]),
+        ));
+    }
     let number = |node: tree_sitter::Node| -> Option<usize> {
         statement
             .get(child_of_kind(&node, "literal")?.byte_range())?
@@ -346,13 +409,14 @@ pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> 
         None => {
             key.iter()
                 .fold("ORDER BY (SELECT NULL)".to_string(), |order, column| {
-                    format!("{order}, {}", engine.quote_identifier(column))
+                    format!("{order}, {}", spec.quote_identifier(column))
                 })
                 + " "
         }
     };
     Some(splice(
         statement,
+        &tree,
         limit.byte_range(),
         &format!("{order}OFFSET {offset} ROWS FETCH NEXT {rows} ROWS ONLY"),
     ))
@@ -380,28 +444,10 @@ pub fn unpaged(statement: &str) -> String {
     unpage().unwrap_or_else(|| statement.to_string())
 }
 
-/// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
-/// matched.
-///
-/// Values go in as literals and are never cast. Postgres applies the target
-/// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
-/// would, and SQLite applies the column's type affinity to the same effect. A
-/// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
-/// is therefore the empty string, and [`NewValue`]'s other two arms are the
-/// keywords: three different writes, which is the whole point of spelling two
-/// of them as something other than a value.
-///
-/// `keys` carries plain values, because a row identified by a `NULL` is a row
-/// `=` does not find; the caller drops such a row before it gets here.
-///
-/// `types` names each column's type where it is known, for the engine whose
-/// literal depends on it (`Engine::quote_value`). A column missing from it is
-/// quoted the way any value is.
-///
-/// `None` when either list is empty. A statement with no `WHERE` rewrites every
-/// row in the table and one with no `SET` is not a statement at all, so a caller
-/// that has lost the row's key gets nothing to run rather than something that
-/// runs.
+/// [`sql_update_statement`] for `engine`. MongoDB's and Redis's edits are
+/// written by their own modules, and only the tests read the SQL-shaped text
+/// spelled with their quoting here.
+#[cfg(test)]
 pub fn update_row(
     engine: Engine,
     schema: &str,
@@ -410,6 +456,17 @@ pub fn update_row(
     keys: &[(&str, &str)],
     types: &[(String, String)],
 ) -> Option<String> {
+    if engine.syntax() == Syntax::Sql {
+        return sql_update_statement(
+            engine.spec(),
+            schema,
+            table,
+            sets,
+            Match { keys, nulls: &[] },
+            UpdateSpelling::Update,
+            types,
+        );
+    }
     if sets.is_empty() || keys.is_empty() {
         return None;
     }
@@ -448,30 +505,38 @@ pub fn insert_row(
     columns: &[(&str, Option<&str>)],
     types: &[(String, String)],
 ) -> Result<String, String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::insert_row(table, columns, types),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Sql => sql_insert_row(engine.spec(), schema, table, columns, types),
+        Syntax::Mongo => crate::mql::insert_row(table, columns, types),
+        Syntax::Redis => crate::redis_cmd::edit::insert_row(schema, table, columns),
     }
+}
+
+/// [`insert_row`] for a SQL engine, written from its spec alone: nothing here
+/// asks which engine it is, so an engine with no arm of its own writes through
+/// it too. The same holds for every `sql_` writer below.
+pub(crate) fn sql_insert_row(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, Option<&str>)],
+    types: &[(String, String)],
+) -> Result<String, String> {
     if columns.is_empty() {
         return Err("There is nothing in this row to insert.".into());
     }
 
     let names: Vec<String> = columns
         .iter()
-        .map(|&(column, _)| engine.quote_identifier(column))
+        .map(|&(column, _)| spec.quote_identifier(column))
         .collect();
     let values: Vec<String> = columns
         .iter()
         // An insert leaves a default to apply by omitting the column outright,
         // so the third state the grid's edits carry has nothing to mean here.
         .map(|&(column, value)| {
-            literal(
-                engine,
+            sql_literal(
+                spec,
                 &value.map_or(NewValue::Null, |value| NewValue::Value(value.into())),
                 type_of(types, column),
             )
@@ -479,10 +544,142 @@ pub fn insert_row(
         .collect();
     Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        engine.qualified(schema, table),
+        spec.qualified(schema, table),
         names.join(", "),
         values.join(", ")
     ))
+}
+
+/// One multi-row `INSERT` for an import chunk. `columns` holds `(name,
+/// data_type)`, each row its values in that order; a `None` has no SQL
+/// spelling, so it is an error. Every value is quoted as the engine quotes it,
+/// which is what the write gate's literal check relies on.
+pub(crate) fn insert_rows(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, &str)],
+    rows: &[Vec<Option<&Value>>],
+    skip: bool,
+) -> Result<String, String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_insert_rows(engine.spec(), schema, table, columns, rows, skip),
+        Syntax::Mongo => {
+            let names: Vec<&str> = columns.iter().map(|&(name, _)| name).collect();
+            crate::mql::insert_many(table, &names, rows)
+        }
+        Syntax::Redis => Err("Redis takes no imported rows.".into()),
+    }
+}
+
+pub(crate) fn sql_insert_rows(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[(&str, &str)],
+    rows: &[Vec<Option<&Value>>],
+    skip: bool,
+) -> Result<String, String> {
+    let Some(&(first, _)) = columns.first() else {
+        return Err("There is nothing in this row to insert.".into());
+    };
+    if rows.is_empty() {
+        return Err("There are no rows to insert.".into());
+    }
+    let names: Vec<String> = columns
+        .iter()
+        .map(|&(name, _)| spec.quote_identifier(name))
+        .collect();
+    let mut tuples = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values = Vec::with_capacity(columns.len());
+        for (&(_, data_type), value) in columns.iter().zip(row) {
+            let value = value.ok_or("A value is missing from a row to insert.")?;
+            let new = match value {
+                Value::Null => NewValue::Null,
+                Value::Bool(b) => NewValue::Value(spec.sql.boolean_literal.spelled(*b).into()),
+                Value::Json(json) => NewValue::Value(json.to_string().into()),
+                Value::Text(text) | Value::Number(text) | Value::Date { text, .. } => {
+                    NewValue::Value(text.clone().into())
+                }
+            };
+            values.push(sql_literal(spec, &new, Some(data_type)));
+        }
+        tuples.push(format!("({})", values.join(", ")));
+    }
+    // ponytail: Stop and Skip only. Update-existing-row is deferred: Postgres cannot spell ON CONFLICT (pk) DO UPDATE under the pinned grammar, MySQL's matches any unique key, SQL Server and Snowflake would need MERGE.
+    let tail = match (skip, spec.sql.skip_duplicates) {
+        (false, _) => String::new(),
+        (true, SkipDuplicates::OnConflictDoNothing { .. }) => " ON CONFLICT DO NOTHING".into(),
+        (true, SkipDuplicates::OnDuplicateKey) => {
+            let first = spec.quote_identifier(first);
+            format!(" ON DUPLICATE KEY UPDATE {first} = {first}")
+        }
+        (true, SkipDuplicates::None) => {
+            return Err("This engine cannot skip rows that already exist.".into());
+        }
+    };
+    Ok(format!(
+        "INSERT INTO {} ({}) VALUES {}{tail}",
+        spec.qualified(schema, table),
+        names.join(", "),
+        tuples.join(",\n")
+    ))
+}
+
+/// An `INSERT` naming every column an insert supplies, each value the engine's
+/// own parameter placeholder: a template for the user's code, put on the
+/// clipboard and never run. `None` on MongoDB, which has no placeholders, and
+/// with no such columns.
+pub fn insert_template(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    columns: &[ColumnDefinition],
+) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_insert_template(engine.spec(), schema, table, columns),
+        Syntax::Mongo | Syntax::Redis => None,
+    }
+}
+
+pub(crate) fn sql_insert_template(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    columns: &[ColumnDefinition],
+) -> Option<String> {
+    let placeholder: fn(usize) -> String = match spec.sql.params {
+        Params::Question => |_| "?".into(),
+        Params::Dollar => |n| format!("${n}"),
+        Params::AtP => |n| format!("@p{n}"),
+    };
+    let names: Vec<String> = columns
+        .iter()
+        .filter(|column| !spec.generates(column))
+        .map(|column| spec.quote_identifier(&column.name))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let values: Vec<String> = (1..=names.len()).map(placeholder).collect();
+    Some(format!(
+        "INSERT INTO {} ({}) VALUES ({});",
+        spec.qualified(schema, table),
+        names.join(", "),
+        values.join(", ")
+    ))
+}
+
+#[cfg(test)]
+pub fn delete_row(
+    engine: Engine,
+    schema: &str,
+    table: &str,
+    keys: &[(&str, &str)],
+    types: &[(String, String)],
+) -> Option<String> {
+    delete_row_matching(engine, schema, table, keys, &[], types)
 }
 
 /// One row's `DELETE`: every column in `keys` matched, and nothing else.
@@ -495,40 +692,95 @@ pub fn insert_row(
 /// `None` on an empty key list. A `DELETE` with no `WHERE` empties the table, so
 /// it must not be possible to produce one: a caller that has lost the row's key
 /// gets nothing to run rather than something that runs.
-pub fn delete_row(
+///
+/// `null_keys` are the columns of a row named by every value that read NULL,
+/// matched with `IS NULL`.
+pub fn delete_row_matching(
     engine: Engine,
     schema: &str,
     table: &str,
     keys: &[(&str, &str)],
+    null_keys: &[&str],
     types: &[(String, String)],
 ) -> Option<String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::delete_row(table, keys, types).ok(),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Sql => sql_delete_row(
+            engine.spec(),
+            schema,
+            table,
+            Match {
+                keys,
+                nulls: null_keys,
+            },
+            types,
+        ),
+        Syntax::Mongo => crate::mql::delete_row(table, keys, types).ok(),
+        Syntax::Redis => crate::redis_cmd::edit::delete_row(schema, table, keys, types).ok(),
     }
-    if keys.is_empty() {
-        return None;
-    }
+}
 
-    let keys: Vec<(&str, NewValue)> = keys
-        .iter()
-        .map(|&(column, value)| (column, NewValue::Value(value.into())))
-        .collect();
+pub(crate) fn sql_delete_row(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    row: Match,
+    types: &[(String, String)],
+) -> Option<String> {
     Some(format!(
         "DELETE FROM {} WHERE {}",
-        engine.qualified(schema, table),
-        assignments(engine, &keys, types, " AND ")
+        spec.qualified(schema, table),
+        sql_match(spec, row, types)?
     ))
 }
 
+/// The columns a statement names a row by: the values the server sent, and the
+/// columns that were NULL, which `=` does not find and so are matched with
+/// `IS NULL`. `nulls` is only ever filled for an engine that names a row by
+/// every value.
+#[derive(Clone, Copy)]
+pub(crate) struct Match<'a> {
+    pub keys: &'a [(&'a str, &'a str)],
+    pub nulls: &'a [&'a str],
+}
+
+/// The `WHERE` of a one-row statement, or `None` when it would name no row, or
+/// when the engine's `match_value` cannot spell one of the values.
+fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Option<String> {
+    if row.keys.is_empty() && row.nulls.is_empty() {
+        return None;
+    }
+    let Some(term) = spec.hooks.match_value else {
+        let keys: Vec<(&str, NewValue)> = row
+            .keys
+            .iter()
+            .map(|&(column, value)| (column, NewValue::Value(value.into())))
+            .collect();
+        let mut terms = Vec::new();
+        if !keys.is_empty() {
+            terms.push(sql_assignments(spec, &keys, types, " AND "));
+        }
+        terms.extend(
+            row.nulls
+                .iter()
+                .map(|column| format!("{} IS NULL", spec.quote_identifier(column))),
+        );
+        return Some(terms.join(" AND "));
+    };
+    let valued = row
+        .keys
+        .iter()
+        .map(|&(column, value)| (column, Some(value)));
+    let nulls = row.nulls.iter().map(|&column| (column, None));
+    valued
+        .chain(nulls)
+        .map(|(column, value)| term(column, value, type_of(types, column).unwrap_or_default()))
+        .collect::<Option<Vec<_>>>()
+        .map(|terms| terms.join(" AND "))
+}
+
 /// Whether `sql` is a statement dbdelve could have written: one or more `UPDATE`s,
-/// a single `INSERT`, or a single `DELETE` naming one row, and nothing else at
-/// all.
+/// a single `INSERT` of literals, a single `DELETE` naming one row, or a lone
+/// transaction bracket, and nothing else at all.
 ///
 /// The one gate every dbdelve-generated statement passes before anything runs,
 /// and the code half of hard rule 1 — dbdelve never writes a `DROP` or a
@@ -547,8 +799,34 @@ pub fn delete_row(
 /// admits more than one now: a rule that lets an `INSERT` through under a name
 /// promising an `UPDATE` is how a whitelist quietly becomes a list of things
 /// nobody refused.
+///
+/// Reads every literal as a backslash-escaping engine would, the stricter of
+/// the two readings. Every caller outside the tests has an engine and goes
+/// through [`is_generated_write_on`], which reads it as that engine does.
+#[cfg(test)]
 pub fn is_generated_write(sql: &str) -> bool {
-    let Some(tree) = parse(sql) else {
+    generated_write(&STRICTEST, sql)
+}
+
+/// The SQL every test-only gate entry reads with: literals as a
+/// backslash-escaping engine reads them, and nothing an engine's spec adds.
+#[cfg(test)]
+const STRICTEST: SqlSpec = SqlSpec {
+    backslash_escapes: true,
+    ..SqlSpec::ANSI
+};
+
+/// `spec` is the [`SqlSpec`] of the engine the statement is bound for.
+pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
+    // An exact-text whitelist rather than a parse, so nothing can ride along.
+    if is_transaction_bracket(sql) {
+        return true;
+    }
+    let Some(sql) = as_written(spec, sql) else {
+        return false;
+    };
+    let sql = sql.as_ref();
+    let Some(tree) = parse_write(sql, spec.backslash_escapes) else {
         return false;
     };
     let root = tree.root_node();
@@ -573,13 +851,214 @@ pub fn is_generated_write(sql: &str) -> bool {
     // The one place a `delete` node is tolerated, and only for the shape read
     // back out of the tree rather than trusted because dbdelve wrote it.
     if kinds == ["delete"] {
-        return delete_key_columns(sql).is_some();
+        return delete_key_columns(spec, sql).is_some();
     }
+
+    // A row named by every value is written only through a predicate the
+    // exactly-one guard can count, so each update must be that shape too.
+    let updates = !kinds.is_empty()
+        && kinds.iter().all(|kind| *kind == "update")
+        && (!spec.row_terms
+            || statements
+                .iter()
+                .all(|statement| one_row_update(spec, *statement, sql).is_some()));
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
-    (kinds == ["insert"] || (!kinds.is_empty() && kinds.iter().all(|kind| *kind == "update")))
+    // A comment anywhere in an insert refuses it: MySQL runs `/*! … */` as
+    // SQL, and the grammar hides one inside a name or between tokens the shape
+    // checks below read only by kind.
+    ((kinds == ["insert"] && literal_insert(statements[0], sql) && !commented(root)) || updates)
         && !deletes_anything(root)
+}
+
+/// `sql` as the write gate reads it: unchanged, except on ClickHouse, where
+/// each mutation spelled exactly as `sql_update_statement` writes it,
+/// `ALTER TABLE <t> UPDATE <a> WHERE <p> SETTINGS mutations_sync = 2`, reads as
+/// the `UPDATE <t> SET <a> WHERE <p>` it amounts to ([`mutation_as_dml`]),
+/// which keeps every byte of `<t>`, `<a>` and `<p>`.
+///
+/// `None`, refusing the submission, for any other statement opening with
+/// `ALTER`, and on ClickHouse for any comment, a quoted name holding an
+/// escaped quote, or anything else the server's lexer may read otherwise than
+/// sqlparser's tokenizer ([`misread`]). The tree-sitter grammar the gate reads
+/// knows neither nested comments nor backslash escapes in names, which the
+/// server has, and DBDelve writes no comment and no escaped quote in a name.
+fn as_written<'sql>(spec: &SqlSpec, sql: &'sql str) -> Option<Cow<'sql, str>> {
+    if spec.parser_dialect != ParserDialect::ClickHouse {
+        return Some(Cow::Borrowed(sql));
+    }
+    let dialect = parser(spec.parser_dialect);
+    let tokens = located_tokens(dialect.as_ref(), sql)?;
+    let hidden = tokens.iter().any(|(token, range)| match token {
+        Token::Whitespace(
+            Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_),
+        ) => true,
+        Token::Word(word) => {
+            word.quote_style.is_some() && escaped_quote(&sql[range.clone()], b"'\"`")
+        }
+        _ => false,
+    });
+    if hidden || misread(sql, &tokens) {
+        return None;
+    }
+    let pieces = between_semicolons(&tokens);
+    let altered = |piece: &Range<usize>| {
+        let first = tokens
+            .iter()
+            .find(|(token, range)| {
+                range.start >= piece.start && !matches!(token, Token::Whitespace(_))
+            })
+            .map(|(token, _)| token);
+        is_keyword(first.as_ref(), "ALTER")
+    };
+    if !pieces.iter().any(altered) {
+        return Some(Cow::Borrowed(sql));
+    }
+    pieces
+        .iter()
+        .map(|piece| {
+            let text = &sql[piece.clone()];
+            match altered(piece) {
+                true => alter_update_as_update(spec, text).map(|dml| format!("{dml};")),
+                false => Some(format!("{text};")),
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|statements| Cow::Owned(statements.join("\n")))
+}
+
+/// The `UPDATE` an `ALTER TABLE … UPDATE` amounts to, only when `statement` is
+/// exactly the spelling `sql_update_statement` writes for
+/// [`UpdateSpelling::AlterUpdate`]: one space between words, upper case, and
+/// `SETTINGS mutations_sync = 2` last, so the statement returns once every
+/// replica has the change rather than while it is still pending.
+fn alter_update_as_update(spec: &SqlSpec, statement: &str) -> Option<String> {
+    let mutation = read_mutation(spec, statement)?;
+    let exact = format!(
+        "ALTER TABLE {} UPDATE {} SETTINGS mutations_sync = 2",
+        &statement[mutation.table], &statement[mutation.body]
+    );
+    (mutation.updates && statement == exact).then_some(mutation.dml)
+}
+
+/// Whether `sql` is one lone `BEGIN`, `BEGIN TRANSACTION`, `COMMIT` or
+/// `ROLLBACK`, spelled as dbdelve writes it: the brackets of an import's
+/// transaction, which spans submissions on a connection of the import's own.
+/// Compared as text, so a bracket is never admitted beside anything else.
+pub(crate) fn is_transaction_bracket(sql: &str) -> bool {
+    let sql = sql.trim();
+    let sql = sql.strip_suffix(';').unwrap_or(sql).trim();
+    matches!(sql, "BEGIN" | "BEGIN TRANSACTION" | "COMMIT" | "ROLLBACK")
+}
+
+/// Whether `statement` is one `INSERT` naming its columns, of one or more rows
+/// of literals, ending in nothing or in Import Rows' fixed skip clause.
+///
+/// No subquery, function call, expression or `SELECT` source, because a value
+/// that computes something is a value dbdelve did not write. The skip clause is
+/// compared as text as well as read from the tree: `ON CONFLICT (a) DO NOTHING`
+/// and `ON DUPLICATE KEY UPDATE a = VALUES(a)` are real clauses nothing
+/// generates.
+fn literal_insert(statement: Node, sql: &str) -> bool {
+    // `RETURNING` hangs beside the insert, not under it.
+    let Some(insert) = statement
+        .named_child(0)
+        .filter(|_| statement.named_child_count() == 1)
+    else {
+        return false;
+    };
+    let mut cursor = insert.walk();
+    let children: Vec<_> = insert.named_children(&mut cursor).collect();
+    let [keyword, into, target, columns, values, rest @ ..] = children.as_slice() else {
+        return false;
+    };
+    let kinds = [keyword, into, target, columns, values].map(|node| node.kind());
+    if kinds
+        != [
+            "keyword_insert",
+            "keyword_into",
+            "object_reference",
+            "list",
+            "keyword_values",
+        ]
+        || !plain_columns(*columns, sql)
+    {
+        return false;
+    }
+
+    let rows = rest.iter().take_while(|node| node.kind() == "list").count();
+    let (rows, tail) = rest.split_at(rows);
+    let literal_rows = rows.iter().all(|row| {
+        let mut cursor = row.walk();
+        let values: Vec<_> = row.named_children(&mut cursor).collect();
+        !values.is_empty()
+            && values
+                .iter()
+                .all(|value| literal_value(*value, sql) || null_literal(*value, sql))
+    });
+    let Some(last) = rows.last() else {
+        return false;
+    };
+    let Some(text) = sql.get(last.end_byte()..insert.end_byte()) else {
+        return false;
+    };
+    let text = text.trim();
+    let tail_kinds: Vec<_> = tail.iter().map(|node| node.kind()).collect();
+    let skip = match tail_kinds.as_slice() {
+        [] => text.is_empty(),
+        [
+            "keyword_on",
+            "keyword_conflict",
+            "keyword_do",
+            "keyword_nothing",
+        ] => text == "ON CONFLICT DO NOTHING",
+        [
+            "keyword_on",
+            "keyword_duplicate",
+            "keyword_key",
+            "keyword_update",
+            "assignment_list",
+        ] => updates_itself(tail[4], sql)
+            .is_some_and(|column| text == format!("ON DUPLICATE KEY UPDATE {column} = {column}")),
+        _ => false,
+    };
+    literal_rows && skip
+}
+
+/// A column list whose every entry is a plain or quoted name. A `"…"` name is a
+/// `literal` to this grammar, so the quote character is what tells it from a
+/// string.
+fn plain_columns(list: Node, sql: &str) -> bool {
+    let mut cursor = list.walk();
+    let columns: Vec<_> = list.named_children(&mut cursor).collect();
+    !columns.is_empty()
+        && columns.iter().all(|column| {
+            let mut cursor = column.walk();
+            let named: Vec<_> = column.named_children(&mut cursor).collect();
+            column.kind() == "column"
+                && matches!(named.as_slice(), [name] if name.kind() == "identifier"
+                    || (name.kind() == "literal"
+                        && sql.get(name.byte_range()).is_some_and(|text| text.starts_with('"'))))
+        })
+}
+
+/// The text of `c` when `assignments` is exactly one `c = c`, the same bare or
+/// backticked name on both sides, which is MySQL's spelling of doing nothing.
+/// Not `"c"`: under MySQL's default `sql_mode` that is a string.
+fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> {
+    let assignment = assignments
+        .named_child(0)
+        .filter(|_| assignments.named_child_count() == 1)?;
+    let left = assignment.child_by_field_name("left")?;
+    let right = assignment.child_by_field_name("right")?;
+    let text = sql.get(left.byte_range())?;
+    (assignment.named_child_count() == 2
+        && [left, right]
+            .iter()
+            .all(|side| side.kind() == "field" && column_name(*side, sql).is_some())
+        && sql.get(right.byte_range()) == Some(text))
+    .then_some(text)
 }
 
 /// Whether `sql` is a `DELETE` whose `WHERE` names exactly `keys` — nothing
@@ -591,8 +1070,16 @@ pub fn is_generated_write(sql: &str) -> bool {
 ///
 /// Set equality, order-independent. A composite key matched on half of itself
 /// reaches every row sharing that half.
+///
+/// Reads literals as strictly as [`is_generated_write`] does; callers outside
+/// the tests go through [`delete_matches_key_on`].
+#[cfg(test)]
 pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
-    let Some(columns) = delete_key_columns(sql) else {
+    delete_key_matches(&STRICTEST, sql, keys)
+}
+
+fn delete_key_matches(spec: &SqlSpec, sql: &str, keys: &[&str]) -> bool {
+    let Some(columns) = as_written(spec, sql).and_then(|sql| delete_key_columns(spec, &sql)) else {
         return false;
     };
     columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
@@ -600,30 +1087,56 @@ pub fn delete_matches_key(sql: &str, keys: &[&str]) -> bool {
 
 /// [`is_generated_write`] for the engine the statement is bound for. A
 /// MongoDB grid writes mongosh statements, so its gate is `mql`'s, which
-/// admits the same three shapes read out of its own parse.
+/// admits the same shapes read out of its own parse, less the transaction
+/// bracket and with `insertMany` for the multi-row insert.
 pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
-    match engine {
-        Engine::MongoDb => crate::mql::is_generated_write(statement),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => is_generated_write(statement),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::is_generated_write(statement),
+        Syntax::Redis => crate::redis_cmd::edit::is_generated_write(statement),
+        Syntax::Sql => generated_write(&engine.spec().sql, statement),
     }
 }
 
 /// [`delete_matches_key`] for the engine the statement is bound for.
 pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
-    match engine {
-        Engine::MongoDb => crate::mql::delete_matches_key(statement, keys),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => delete_matches_key(statement, keys),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::delete_matches_key(statement, keys),
+        Syntax::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
+        Syntax::Sql => delete_key_matches(&engine.spec().sql, statement, keys),
     }
+}
+
+/// `SELECT COUNT(*) FROM <t> WHERE <p>` for one generated `UPDATE`, `DELETE`
+/// or ClickHouse `ALTER TABLE … UPDATE`: how many rows `statement` would
+/// write, counted with its own table and predicate, so a row named by every
+/// value is written only when exactly one row has those values.
+///
+/// `<t>` and `<p>` are cut from the tree the write gate reads, never from the
+/// generator's word, and only from a statement the gate admits whose predicate
+/// is a conjunction of one-row terms. `None` for anything else, and for a count
+/// [`is_generated_select`] does not admit: a caller that gets no guard runs
+/// nothing.
+pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
+    if engine.syntax() != Syntax::Sql {
+        return None;
+    }
+    let spec = &engine.spec().sql;
+    if is_transaction_bracket(statement) || !generated_write(spec, statement) {
+        return None;
+    }
+    let text = as_written(spec, statement)?;
+    let tree = parse_write(&text, spec.backslash_escapes)?;
+    let [one] = only_statement(&tree.root_node())?;
+    let (table, predicate) = one_row_delete(one)
+        .filter(|(_, predicate)| row_columns(spec, *predicate, &text).is_some())
+        .or_else(|| one_row_update(spec, one, &text))?;
+    let guard = format!(
+        "SELECT {} FROM {} WHERE {}",
+        spec.count_all.aggregate(),
+        text.get(table.byte_range())?,
+        text.get(predicate.byte_range())?
+    );
+    is_generated_select(engine, &guard).then_some(guard)
 }
 
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
@@ -645,14 +1158,10 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
 /// a transaction: a preview never brackets anything, so seeing through
 /// brackets here would only widen what is accepted.
 pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
-    match engine {
-        Engine::MongoDb => return crate::mql::browse::is_generated_read(sql),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => return crate::mql::browse::is_generated_read(sql),
+        Syntax::Redis => return crate::redis_cmd::browse::is_generated_read(sql),
+        Syntax::Sql => {}
     }
     let Some(tree) = parse(sql) else {
         return false;
@@ -714,6 +1223,7 @@ fn generated_statements<'tree>(root: &Node<'tree>) -> Option<Vec<Node<'tree>>> {
     }
 }
 
+#[cfg(test)]
 fn assignments(
     engine: Engine,
     columns: &[(&str, NewValue)],
@@ -733,6 +1243,25 @@ fn assignments(
         .join(separator)
 }
 
+fn sql_assignments(
+    spec: &EngineSpec,
+    columns: &[(&str, NewValue)],
+    types: &[(String, String)],
+    separator: &str,
+) -> String {
+    columns
+        .iter()
+        .map(|(column, value)| {
+            format!(
+                "{} = {}",
+                spec.quote_identifier(column),
+                sql_literal(spec, value, type_of(types, column))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
     types
         .iter()
@@ -740,13 +1269,22 @@ fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
         .map(|(_, data_type)| data_type.as_str())
 }
 
+#[cfg(test)]
+fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String {
+    match value {
+        NewValue::Value(value) => engine.quote_value(value, data_type),
+        NewValue::Null => "NULL".to_string(),
+        NewValue::Default => "DEFAULT".to_string(),
+    }
+}
+
 /// A value as it goes into a statement: quoted, or one of the two keywords that
 /// stand for there being no value to quote. Unquoted is the only way to write
 /// either — `'NULL'` and `'DEFAULT'` are the words, and a user who typed one of
 /// them into a cell meant the word.
-fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String {
+fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> String {
     match value {
-        NewValue::Value(value) => engine.quote_value(value, data_type),
+        NewValue::Value(value) => spec.quote_value(value, data_type),
         NewValue::Null => "NULL".to_string(),
         NewValue::Default => "DEFAULT".to_string(),
     }
@@ -785,22 +1323,35 @@ fn deletes_anything(node: tree_sitter::Node) -> bool {
 /// a `RETURNING`, a `LIMIT`, an `OR`, a subquery, a function call, a qualified
 /// column or a second statement all change that child list or that expression
 /// tree, and so all arrive here as `None`.
-fn delete_key_columns(sql: &str) -> Option<Vec<String>> {
-    let tree = parse(sql)?;
+///
+/// On an engine that names a row by every value (`row_terms`), a term may also
+/// be `toString(<column>) = '…'` or `<column> IS NULL` ([`equality_columns`]).
+///
+/// `sql` is as [`as_written`] gives it.
+fn delete_key_columns(spec: &SqlSpec, sql: &str) -> Option<Vec<String>> {
+    let tree = parse_write(sql, spec.backslash_escapes)?;
     let root = tree.root_node();
     if forbidden(root) {
         return None;
     }
+    let [statement] = only_statement(&root)?;
+    let (_, predicate) = one_row_delete(statement)?;
+    row_columns(spec, predicate, sql)
+}
 
+/// The root's one child, when it is a statement.
+fn only_statement<'tree>(root: &Node<'tree>) -> Option<[Node<'tree>; 1]> {
     let mut cursor = root.walk();
     let children: Vec<_> = root.named_children(&mut cursor).collect();
-    let [statement] = children.as_slice() else {
-        return None;
-    };
-    if statement.kind() != "statement" {
-        return None;
+    match children.as_slice() {
+        [statement] if statement.kind() == "statement" => Some([*statement]),
+        _ => None,
     }
+}
 
+/// The table and the predicate of `DELETE FROM <t> WHERE <p>`, and nothing
+/// else in `statement`.
+fn one_row_delete(statement: Node) -> Option<(Node, Node)> {
     let mut cursor = statement.walk();
     let parts: Vec<_> = statement.named_children(&mut cursor).collect();
     let [delete, from] = parts.as_slice() else {
@@ -815,37 +1366,114 @@ fn delete_key_columns(sql: &str) -> Option<Vec<String>> {
     let [keyword, relation, filter] = inside.as_slice() else {
         return None;
     };
-    if keyword.kind() != "keyword_from"
-        || relation.kind() != "object_reference"
-        || filter.kind() != "where"
+    if keyword.kind() != "keyword_from" || relation.kind() != "object_reference" {
+        return None;
+    }
+    Some((*relation, predicate_of(*filter)?))
+}
+
+/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
+/// where each `<v>` is a literal or `NULL` and no column is set twice, and
+/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
+fn one_row_update<'tree>(
+    spec: &SqlSpec,
+    statement: Node<'tree>,
+    sql: &str,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let mut cursor = statement.walk();
+    let parts: Vec<_> = statement.named_children(&mut cursor).collect();
+    let [update] = parts.as_slice() else {
+        return None;
+    };
+    if update.kind() != "update" {
+        return None;
+    }
+
+    let mut cursor = update.walk();
+    let inside: Vec<_> = update.named_children(&mut cursor).collect();
+    let [keyword, relation, set, assignments @ .., filter] = inside.as_slice() else {
+        return None;
+    };
+    let mut cursor = relation.walk();
+    let table: Vec<_> = relation.named_children(&mut cursor).collect();
+    let [table] = table.as_slice() else {
+        return None;
+    };
+    if keyword.kind() != "keyword_update"
+        || relation.kind() != "relation"
+        || table.kind() != "object_reference"
+        || set.kind() != "keyword_set"
+        || assignments.is_empty()
     {
         return None;
     }
 
+    let mut columns = Vec::new();
+    for assignment in assignments {
+        let mut cursor = assignment.walk();
+        let sides: Vec<_> = assignment.children(&mut cursor).collect();
+        let [left, equals, right] = sides.as_slice() else {
+            return None;
+        };
+        if assignment.kind() != "assignment"
+            || equals.kind() != "="
+            || !(literal_value(*right, sql) || null_literal(*right, sql))
+        {
+            return None;
+        }
+        columns.push(column_name(*left, sql)?);
+    }
+    distinct(&columns)?;
+    let predicate = predicate_of(*filter)?;
+    row_columns(spec, predicate, sql)?;
+    Some((*table, predicate))
+}
+
+/// The predicate of a `where` node holding nothing but `WHERE <p>`.
+fn predicate_of(filter: Node) -> Option<Node> {
     let mut cursor = filter.walk();
     let clause: Vec<_> = filter.named_children(&mut cursor).collect();
-    let [keyword_where, predicate] = clause.as_slice() else {
-        return None;
-    };
-    if keyword_where.kind() != "keyword_where" {
-        return None;
+    match clause.as_slice() {
+        [keyword, predicate] if filter.kind() == "where" && keyword.kind() == "keyword_where" => {
+            Some(*predicate)
+        }
+        _ => None,
     }
+}
 
+/// The columns `predicate` names, when it is a conjunction of one-row terms
+/// over distinct columns.
+fn row_columns(spec: &SqlSpec, predicate: Node, sql: &str) -> Option<Vec<String>> {
     let mut columns = Vec::new();
-    if !equality_columns(*predicate, sql, &mut columns) {
+    if !equality_columns(spec, predicate, sql, &mut columns) {
         return None;
     }
+    distinct(&columns)?;
+    Some(columns)
+}
 
-    // A column named twice is a predicate dbdelve never writes, and reading it as
-    // a one-column key would call a half-matched composite key a whole one.
-    let distinct = columns.iter().collect::<std::collections::HashSet<_>>();
-    (distinct.len() == columns.len()).then_some(columns)
+/// A column named twice is a predicate dbdelve never writes, and reading it as
+/// a one-column key would call a half-matched composite key a whole one.
+fn distinct(columns: &[String]) -> Option<()> {
+    let unique = columns.iter().collect::<std::collections::HashSet<_>>();
+    (unique.len() == columns.len()).then_some(())
 }
 
 /// Walks a conjunction, pushing the column each `=` predicate names. False the
 /// moment anything else appears — an `OR`, another operator, a parenthesized
 /// group, a subquery, a function call.
-fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String>) -> bool {
+///
+/// Under `row_terms`, two more terms name a column: `toString(<column>) = '…'`
+/// (the server's own text of a value no literal matches exactly, a float or a
+/// `DateTime64`) and `<column> IS NULL`. Nothing else: not `IS NOT NULL`, not a
+/// second argument to `toString` (a time zone changes its text), not any
+/// other function.
+fn equality_columns(
+    spec: &SqlSpec,
+    node: tree_sitter::Node,
+    sql: &str,
+    columns: &mut Vec<String>,
+) -> bool {
     if node.kind() != "binary_expression" {
         return false;
     }
@@ -855,35 +1483,132 @@ fn equality_columns(node: tree_sitter::Node, sql: &str, columns: &mut Vec<String
         return false;
     };
 
-    match operator.kind() {
+    let column = match operator.kind() {
         "keyword_and" => {
-            equality_columns(*left, sql, columns) && equality_columns(*right, sql, columns)
+            return equality_columns(spec, *left, sql, columns)
+                && equality_columns(spec, *right, sql, columns);
         }
-        "=" => {
-            let Some(value) = sql.get(right.byte_range()) else {
-                return false;
-            };
-            // A value is a single-quoted literal and nothing else. `"other"` is
-            // a `literal` to this grammar too, and matching a column against a
-            // column is not naming a row. `N'…'` is SQL Server's single-quoted
-            // literal, and `0x…` its binary one, which is never quoted.
-            let quoted = value.strip_prefix(['N', 'n']).unwrap_or(value);
-            let hex = value
-                .strip_prefix("0x")
-                .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
-            if right.kind() != "literal" || !(quoted.starts_with('\'') || hex) {
-                return false;
-            }
-            match column_name(*left, sql) {
-                Some(column) => {
-                    columns.push(column);
-                    true
-                }
-                None => false,
-            }
+        "=" if literal_value(*right, sql) => match left.kind() {
+            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(*left, sql),
+            _ => column_name(*left, sql),
+        },
+        "keyword_is" if spec.row_terms && null_literal(*right, sql) => column_name(*left, sql),
+        _ => None,
+    };
+    match column {
+        Some(column) => {
+            columns.push(column);
+            true
         }
-        _ => false,
+        None => false,
     }
+}
+
+/// The column of `toString(<column>)`, spelled exactly so: one argument, a
+/// bare or quoted unqualified column, the function's own name unquoted and
+/// unqualified.
+fn stringified(invocation: Node, sql: &str) -> Option<String> {
+    let mut cursor = invocation.walk();
+    let parts: Vec<_> = invocation.children(&mut cursor).collect();
+    let [function, open, argument, close] = parts.as_slice() else {
+        return None;
+    };
+    let mut cursor = argument.walk();
+    let value: Vec<_> = argument.children(&mut cursor).collect();
+    let [value] = value.as_slice() else {
+        return None;
+    };
+    let kinds = (function.kind(), open.kind(), argument.kind(), close.kind());
+    if kinds != ("object_reference", "(", "term", ")")
+        || sql.get(function.byte_range()) != Some("toString")
+    {
+        return None;
+    }
+    column_name(*value, sql)
+}
+
+fn null_literal(node: Node, sql: &str) -> bool {
+    node.kind() == "literal"
+        && sql
+            .get(node.byte_range())
+            .is_some_and(|text| text.eq_ignore_ascii_case("NULL"))
+}
+
+fn quoted(node: Node, sql: &str) -> bool {
+    sql.get(node.byte_range())
+        .is_some_and(|text| text.starts_with('\''))
+}
+
+/// A single-quoted literal and nothing else. `"other"` is a `literal` to this
+/// grammar too, and matching a column against a column is not naming a row.
+/// `N'…'` is SQL Server's single-quoted literal, and `0x…` its binary one,
+/// which is never quoted.
+///
+/// Exactly one token: the grammar reads `'1' '2'` as one `literal`, and every
+/// engine concatenates adjacent strings, so a quote inside must be doubled.
+///
+/// Not `NULL`: `WHERE id = NULL` matches no row, so only an insert admits it,
+/// and beside this rather than through it.
+fn literal_value(node: Node, sql: &str) -> bool {
+    let Some(value) = sql.get(node.byte_range()) else {
+        return false;
+    };
+    let quoted = value
+        .strip_prefix(['N', 'n'])
+        .unwrap_or(value)
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|inner| inner.replace("''", "").find('\'').is_none());
+    let hex = value.strip_prefix("0x").is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    node.kind() == "literal" && (quoted || hex)
+}
+
+fn commented(node: Node) -> bool {
+    let mut cursor = node.walk();
+    matches!(node.kind(), "comment" | "marginalia") || node.children(&mut cursor).any(commented)
+}
+
+/// [`parse`] for the write gate, refusing on an engine where a backslash
+/// escapes any literal holding a quote after an odd run of backslashes.
+///
+/// The grammar ends a string at the first lone quote whatever precedes it; the
+/// engine reads `\'` as part of the string. Everything between would be string
+/// to the gate and SQL to the engine, in any arm, so the check is on every
+/// literal in the tree rather than on the values one arm reads. Either quote
+/// character, because MySQL reads `"…"` as a string with the same escapes, and
+/// `quote_literal` doubles every backslash on these engines, so nothing it
+/// writes has an odd run.
+fn parse_write(sql: &str, backslash_escapes: bool) -> Option<Tree> {
+    let tree = parse(sql)?;
+    (!(backslash_escapes && misread_literal(tree.root_node(), sql))).then_some(tree)
+}
+
+fn misread_literal(node: Node, sql: &str) -> bool {
+    let mut cursor = node.walk();
+    (node.kind() == "literal"
+        && sql
+            .get(node.byte_range())
+            .is_some_and(|text| escaped_quote(text, b"'\"")))
+        || node
+            .children(&mut cursor)
+            .any(|child| misread_literal(child, sql))
+}
+
+/// Whether `text` holds one of `quotes` after an odd run of backslashes.
+fn escaped_quote(text: &str, quotes: &[u8]) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(at, byte)| {
+        quotes.contains(byte)
+            && bytes[..at]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'\\')
+                .count()
+                % 2
+                == 1
+    })
 }
 
 /// The unqualified column a predicate's left side names, unquoted.
@@ -1002,9 +1727,20 @@ fn child_of_kind<'tree>(
 /// runs of spaces across the whole statement instead would rewrite string
 /// literals, quoted identifiers and the user's indentation — a silent edit to
 /// what the statement means, which is the one thing this module must not do.
-fn splice(sql: &str, range: Range<usize>, clause: &str) -> String {
+///
+/// The seam is a newline when what comes before it ends in a `--` comment,
+/// which would otherwise run on over the clause and everything after it. The
+/// tree says whether it is one: a `--` inside a string is not, and a newline
+/// there would move the `ORDER BY (SELECT NULL)` that [`unpaged`] reads back
+/// after a space.
+fn splice(sql: &str, tree: &Tree, range: Range<usize>, clause: &str) -> String {
     let head = sql[..range.start].trim_end();
     let tail = sql[range.end..].trim_start();
+    let after_comment = head
+        .len()
+        .checked_sub(1)
+        .and_then(|last| tree.root_node().descendant_for_byte_range(last, head.len()))
+        .is_some_and(|node| node.kind() == "comment");
 
     let mut spliced = String::with_capacity(head.len() + clause.len() + tail.len() + 2);
     spliced.push_str(head);
@@ -1013,7 +1749,11 @@ fn splice(sql: &str, range: Range<usize>, clause: &str) -> String {
             continue;
         }
         if !spliced.is_empty() {
-            spliced.push(' ');
+            let seam = match after_comment && spliced.len() == head.len() {
+                true => '\n',
+                false => ' ',
+            };
+            spliced.push(seam);
         }
         spliced.push_str(part);
     }
@@ -1269,6 +2009,11 @@ fn go_lines(sql: &str) -> Vec<(Range<usize>, Option<u64>)> {
         .collect()
 }
 
+/// Whether `engine` reads a buffer as `GO`-separated batches.
+fn batches_on(engine: Engine) -> bool {
+    engine.syntax() == Syntax::Sql && engine.spec().sql.statement_split == StatementSplit::Batches
+}
+
 /// The text between `GO` lines.
 fn batches(sql: &str) -> Vec<Range<usize>> {
     let mut batches = Vec::new();
@@ -1357,7 +2102,7 @@ fn tsql_statements(sql: &str, batch: Range<usize>) -> Vec<Range<usize>> {
 /// `GO` lines around it. More than one batch, or a batch asked to run more than
 /// once, is refused rather than sent as text the server cannot read.
 pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(sql);
     }
     batch_counts(engine, sql)?;
@@ -1378,7 +2123,7 @@ pub(crate) fn one_batch(engine: Engine, sql: &str) -> Result<&str, String> {
 /// batch, and running it once is not what the buffer says; a selection run a
 /// batch at a time has to refuse it for the reason a single one does.
 pub(crate) fn batch_counts(engine: Engine, sql: &str) -> Result<(), String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(());
     }
     for (_, count) in go_lines(sql) {
@@ -1390,7 +2135,7 @@ pub(crate) fn batch_counts(engine: Engine, sql: &str) -> Result<(), String> {
 /// Refused when the `GO` that ends the batch holding `offset` carries a count:
 /// running the statement under the cursor once would quietly drop it.
 pub(crate) fn batch_repeats(engine: Engine, sql: &str, offset: usize) -> Result<(), String> {
-    if engine != Engine::SqlServer {
+    if !batches_on(engine) {
         return Ok(());
     }
     match go_lines(sql)
@@ -1414,7 +2159,7 @@ fn repeats(count: u64) -> Result<(), String> {
 /// Every pending row as one `UPDATE`, joined into a single string.
 ///
 /// All-or-nothing, which each engine reaches differently, and
-/// `Engine::transaction_start` is where that per-engine answer lives. Postgres
+/// `SqlSpec::transaction_opening` is where that per-engine answer lives. Postgres
 /// runs one submission as a single implicit transaction and needs nothing;
 /// MySQL and SQLite commit every statement on its own, so a batch of more than
 /// one is bracketed — in the statement text itself, where the user can read,
@@ -1426,15 +2171,14 @@ fn repeats(count: u64) -> Result<(), String> {
 /// the change the user made, and dbdelve would have no way to say which part of
 /// it ran.
 pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
-    match engine {
-        Engine::MongoDb => return crate::mql::update_batch(rows),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Sql => sql_update_batch(engine.spec(), rows),
+        Syntax::Mongo => crate::mql::update_batch(rows),
+        Syntax::Redis => crate::redis_cmd::edit::update_batch(rows),
     }
+}
+
+pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
         return Err("There are no edits to apply.".into());
     }
@@ -1454,12 +2198,16 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     let statements: Option<Vec<String>> = rows
         .iter()
         .map(|row| {
-            update_row(
-                engine,
+            sql_update_statement(
+                spec,
                 &row.schema,
                 &row.table,
                 &borrowed_sets(&row.sets),
-                &borrowed(&row.keys),
+                Match {
+                    keys: &borrowed(&row.keys),
+                    nulls: &row.null_keys.iter().map(String::as_str).collect::<Vec<_>>(),
+                },
+                row.update,
                 &row.types,
             )
             // Terminated, not separated: the last statement carries its
@@ -1472,10 +2220,56 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     let batch = statements
         .ok_or("dbdelve cannot name an edited row by its primary key.")?
         .join("\n");
-    let bracket = engine.transaction_start().filter(|_| rows.len() > 1);
+    let bracket = spec.sql.transaction_opening().filter(|_| rows.len() > 1);
     Ok(match bracket {
         Some(start) => format!("{start};\n{batch}\nCOMMIT;"),
         None => batch,
+    })
+}
+
+/// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
+/// matched.
+///
+/// Values go in as literals and are never cast. Postgres applies the target
+/// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
+/// would, and SQLite applies the column's type affinity to the same effect. A
+/// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
+/// is therefore the empty string, and [`NewValue`]'s other two arms are the
+/// keywords: three different writes, which is the whole point of spelling two
+/// of them as something other than a value.
+///
+/// `keys` carries plain values, because a row identified by a `NULL` is a row
+/// `=` does not find; the caller drops such a row before it gets here.
+///
+/// `types` names each column's type where it is known, for the engine whose
+/// literal depends on it (`EngineSpec::quote_value`). A column missing from it is
+/// quoted the way any value is.
+///
+/// `None` when either list is empty. A statement with no `WHERE` rewrites every
+/// row in the table and one with no `SET` is not a statement at all, so a caller
+/// that has lost the row's key gets nothing to run rather than something that
+/// runs.
+fn sql_update_statement(
+    spec: &EngineSpec,
+    schema: &str,
+    table: &str,
+    sets: &[(&str, NewValue)],
+    row: Match,
+    update: UpdateSpelling,
+    types: &[(String, String)],
+) -> Option<String> {
+    if sets.is_empty() {
+        return None;
+    }
+
+    let table = spec.qualified(schema, table);
+    let assignments = sql_assignments(spec, sets, types, ", ");
+    let predicate = sql_match(spec, row, types)?;
+    Some(match update {
+        UpdateSpelling::Update => format!("UPDATE {table} SET {assignments} WHERE {predicate}"),
+        UpdateSpelling::AlterUpdate => format!(
+            "ALTER TABLE {table} UPDATE {assignments} WHERE {predicate} SETTINGS mutations_sync = 2"
+        ),
     })
 }
 
@@ -1494,17 +2288,37 @@ pub(crate) fn remember_statement(history: &mut Vec<String>, sql: &str) {
 /// `UPDATE` appended to it becomes one statement, and the next `cmd+enter`
 /// would send both as one. dbdelve is writing here because the user asked it to,
 /// so the boundary of what they wrote has to survive the ask.
-pub(crate) fn appended_statement(buffer: &str, statement: &str) -> String {
+pub(crate) fn appended_statement(engine: Engine, buffer: &str, statement: &str) -> String {
     let text = buffer.trim_end();
     if text.is_empty() {
         return statement.to_string();
     }
+    // A Redis command ends with its line, and a `;` would join its last word.
+    if engine.syntax() == Syntax::Redis {
+        return format!("{text}\n\n{statement}");
+    }
 
-    let terminator = match text.ends_with(';') {
-        true => "",
-        false => ";",
-    };
-    format!("{text}{terminator}\n\n{statement}")
+    format!("{}\n\n{statement}", terminated(text))
+}
+
+fn terminated(text: &str) -> String {
+    let mut parser = Parser::new();
+    let end = parser
+        .set_language(&tree_sitter_sequel::LANGUAGE.into())
+        .ok()
+        .and_then(|_| parser.parse(text, None))
+        .and_then(|tree| {
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            root.children(&mut cursor)
+                .filter(|node| !matches!(node.kind(), "comment" | "marginalia"))
+                .last()
+                .map(|node| node.end_byte())
+        });
+    match end {
+        Some(end) if !text[..end].ends_with(';') => format!("{};{}", &text[..end], &text[end..]),
+        _ => text.to_string(),
+    }
 }
 
 /// What a connection is allowed to do, and what a statement needs in order to
@@ -1526,6 +2340,14 @@ pub(crate) enum Mode {
 
 impl Mode {
     pub(crate) const ALL: [Mode; 3] = [Mode::ReadOnly, Mode::ReadWrite, Mode::Full];
+
+    pub(crate) fn next(self) -> Mode {
+        match self {
+            Mode::ReadOnly => Mode::ReadWrite,
+            Mode::ReadWrite => Mode::Full,
+            Mode::Full => Mode::ReadOnly,
+        }
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -1636,7 +2458,7 @@ impl Verdict {
         mode: Mode::ReadWrite,
         destructive: Vec::new(),
     };
-    const FULL: Self = Self {
+    pub(crate) const FULL: Self = Self {
         mode: Mode::Full,
         destructive: Vec::new(),
     };
@@ -1665,15 +2487,89 @@ impl Verdict {
 
 /// Whether `sql` can be put in an Explain mode, and why not when it cannot.
 pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
-    match engine {
-        Engine::MongoDb => crate::mql::explainable(sql),
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::explainable(sql),
         // The server refuses what it cannot explain, and says so.
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => Ok(()),
+        Syntax::Sql | Syntax::Redis => Ok(()),
+    }
+}
+
+/// The Explain mode of a statement the user typed as an `EXPLAIN` themselves,
+/// so its answer is shown as a plan rather than as rows. Read off the words in
+/// front of the statement explained, never off the statement itself.
+///
+/// `None` wherever the answer is a shape `explain::parse` does not read:
+/// MySQL's traditional `EXPLAIN` and both of MariaDB's are tables, SQLite's
+/// bare `EXPLAIN` is bytecode, and a `FORMAT` other than text or tree is JSON,
+/// XML or YAML. Those stay in the grid, where they are at least legible.
+pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
+    if engine.syntax() == Syntax::Redis {
+        return None;
+    }
+    let Some(dialect) = dialect(engine) else {
+        return crate::mql::typed_explain(sql);
+    };
+    let tokens = Tokenizer::new(dialect.as_ref(), sql).tokenize().ok()?;
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    let word = |token: Option<&&Token>, word: &str| matches!(token, Some(Token::Word(found)) if found.value.eq_ignore_ascii_case(word));
+    if !word(tokens.next().as_ref(), "EXPLAIN") {
+        return None;
+    }
+    match engine.spec().sql.typed_explain {
+        TypedExplain::Postgres if tokens.next_if(|token| **token == Token::LParen).is_some() => {
+            let mut mode = ExplainMode::Plan;
+            loop {
+                let name = tokens.next()?;
+                let argument: Vec<String> = std::iter::from_fn(|| {
+                    tokens.next_if(|token| !matches!(token, Token::Comma | Token::RParen))
+                })
+                .map(|token| token.to_string().trim_matches('\'').to_ascii_lowercase())
+                .collect();
+                if word(Some(&name), "ANALYZE") || word(Some(&name), "ANALYSE") {
+                    let off = matches!(
+                        argument.as_slice(),
+                        [value] if ["false", "off", "0", "no"].contains(&value.as_str())
+                    );
+                    mode = if off {
+                        ExplainMode::Plan
+                    } else {
+                        ExplainMode::Analyze
+                    };
+                }
+                if word(Some(&name), "FORMAT") && argument != ["text"] {
+                    return None;
+                }
+                if tokens.next()? == &Token::RParen {
+                    return Some(mode);
+                }
+            }
+        }
+        TypedExplain::Postgres => Some(
+            match word(tokens.peek(), "ANALYZE") || word(tokens.peek(), "ANALYSE") {
+                true => ExplainMode::Analyze,
+                false => ExplainMode::Plan,
+            },
+        ),
+        TypedExplain::MySql => {
+            let analyze = tokens
+                .next_if(|token| word(Some(token), "ANALYZE"))
+                .is_some();
+            let tree = match tokens.next_if(|token| word(Some(token), "FORMAT")) {
+                Some(_) => tokens.next()? == &Token::Eq && word(tokens.next().as_ref(), "TREE"),
+                None => analyze,
+            };
+            tree.then_some(match analyze {
+                true => ExplainMode::Analyze,
+                false => ExplainMode::Plan,
+            })
+        }
+        TypedExplain::Sqlite => (word(tokens.next().as_ref(), "QUERY")
+            && word(tokens.next().as_ref(), "PLAN"))
+        .then_some(ExplainMode::Plan),
+        TypedExplain::None => None,
     }
 }
 
@@ -1685,19 +2581,22 @@ pub(crate) fn explainable(engine: Engine, sql: &str) -> Result<(), String> {
 /// finds statement boundaries in a buffer someone is still typing into;
 /// this needs a typed statement, and would rather refuse than guess.
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
-    let dialect: Box<dyn Dialect> = match engine {
-        Engine::Postgres => Box::new(PostgreSqlDialect {}),
-        Engine::MySql | Engine::MariaDb => Box::new(MySqlDialect {}),
-        Engine::Sqlite => Box::new(SQLiteDialect {}),
-        Engine::Snowflake => Box::new(SnowflakeDialect {}),
-        Engine::SqlServer => Box::new(MsSqlDialect {}),
-        Engine::MongoDb => return crate::mql::classify(sql),
+    if engine.syntax() == Syntax::Redis {
+        return crate::redis_cmd::classify(sql);
+    }
+    let Some(dialect) = dialect(engine) else {
+        return crate::mql::classify(sql);
     };
 
-    if engine == Engine::MariaDb
+    if engine.spec().sql.explain_analyze == Some(ExplainPrefix::Analyze)
         && let Some(explain) = mariadb_analyze_as_explain(dialect.as_ref(), sql)
     {
         return classify(engine, &explain);
+    }
+
+    let spec = engine.spec();
+    if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
+        return by_statement(spec, dialect.as_ref(), sql);
     }
 
     // All or nothing: one statement it cannot read makes the whole submission
@@ -1720,8 +2619,390 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     // nothing there to be dangerous, and a dialog over nothing is noise.
     statements
         .iter()
-        .map(statement_verdict)
+        .map(|statement| spec_verdict(spec, statement))
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// [`classify`] where the floor under an unreadable statement is its first
+/// keyword. Each statement between the tokenizer's `;`s is read on its own: by
+/// its tree where sqlparser reads it, as the `UPDATE` or `DELETE` a mutation
+/// amounts to ([`mutation_as_dml`]), and by [`first_keyword_verdict`]
+/// otherwise. One that cannot be read leaves the whole submission
+/// `Unreadable`, at the highest mode any statement in it needs.
+///
+/// The server's lexer and sqlparser's tokenizer agree on what is a comment
+/// (`--` to a newline, `/* */` nested) and where a literal ends, so the first
+/// word read here is the one the server runs. Where the two may part ways
+/// ([`misread`]), a word the server runs may be one the tokenizer never saw,
+/// so the submission needs Full. A tokenizer error is placed by the words it
+/// read before the error, and at Read-write at least.
+fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict {
+    let (tokens, whole) = located_prefix(dialect, sql);
+    // What the tokenizer stopped at is unread, so anything there [`misread`]
+    // might have caught counts as caught.
+    let unread = &sql[tokens.last().map_or(0, |(_, range)| range.end)..];
+    let misread = misread(sql, &tokens)
+        || !whole
+            && (unread.contains("//")
+                || unread.contains(|c: char| matches!(c, '#' | '$' | '\\') || !c.is_ascii()));
+    let trusted = whole && !misread;
+
+    let mut unreadable = !trusted;
+    let verdict = between_semicolons(&tokens)
+        .into_iter()
+        .map(|range| {
+            // A character the tokenizer does not know may be a space to the
+            // server, so the words either side of it count as neighbours.
+            let words: Vec<&Token> = tokens
+                .iter()
+                .filter(|(token, at)| {
+                    range.contains(&at.start)
+                        && !matches!(token, Token::Whitespace(_) | Token::Char(_))
+                })
+                .map(|(token, _)| token)
+                .collect();
+            let text = &sql[range];
+            let parsed = match trusted {
+                false => None,
+                true => match mutation_as_dml(spec, text) {
+                    Some(dml) => SqlParser::parse_sql(dialect, &dml).ok(),
+                    None => SqlParser::parse_sql(dialect, text).ok(),
+                },
+            };
+            let verdict = match parsed {
+                Some(statements) => statements
+                    .iter()
+                    .map(|statement| spec_verdict(spec, statement))
+                    .fold(Verdict::READ, Verdict::max),
+                None => {
+                    unreadable = true;
+                    first_keyword_verdict(&words)
+                }
+            };
+            verdict.max(words_verdict(&words))
+        })
+        .fold(Verdict::READ, Verdict::max);
+
+    let floor = match (misread, whole) {
+        (true, _) => Mode::Full,
+        (false, false) => Mode::ReadWrite,
+        (false, true) => Mode::ReadOnly,
+    };
+    match unreadable {
+        true => Verdict {
+            mode: verdict.mode.max(floor),
+            destructive: vec![Destructive::Unreadable],
+        },
+        false => verdict,
+    }
+}
+
+/// Whether the server's lexer may read `tokens` otherwise than sqlparser's
+/// tokenizer did, so that a word one of them sees is hidden from the other:
+///
+/// - a character the tokenizer does not know: the server skips Unicode spaces
+///   it does not (a zero-width space), and reads curly quotes as quotes;
+/// - a `#`, `$` or `//` outside a literal: the server starts a comment at
+///   `# `, `#!` and `//`, and keeps a `$` inside a bare word, so `a$$` is one
+///   word to it and a word and the start of a dollar-quoted string to the
+///   tokenizer;
+/// - a quoted identifier the server ends elsewhere: it escapes a quote with a
+///   backslash and the tokenizer does not, so ``` `a\`` ``` ends there for
+///   the server and runs on for the tokenizer;
+/// - a `--` comment a carriage return runs through, in case the server ends
+///   it there.
+fn misread(sql: &str, tokens: &[(Token, Range<usize>)]) -> bool {
+    tokens.iter().any(|(token, range)| {
+        // Read off the source rather than the next token: `//*` is a slash
+        // and an unended comment to the tokenizer, which stops there.
+        matches!(token, Token::Div) && sql[range.end..].starts_with('/')
+            || misread_token(token, &sql[range.clone()])
+    })
+}
+
+/// [`misread`] for one token, `text` in the source.
+fn misread_token(token: &Token, text: &str) -> bool {
+    match token {
+        Token::Char(_) => true,
+        Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
+            comment.trim_end_matches('\r').contains('\r')
+        }
+        Token::Whitespace(_)
+        | Token::SingleQuotedString(_)
+        | Token::NationalStringLiteral(_)
+        | Token::HexStringLiteral(_) => false,
+        Token::Word(word) if word.quote_style.is_some() => !quoted_whole(text),
+        _ => text.contains(['#', '$']),
+    }
+}
+
+/// Whether the server reads `text`, a quoted name as the tokenizer cut it, as
+/// one quoted name ending where the tokenizer's does: a backslash escapes the
+/// byte after it, and a doubled quote is a quote.
+fn quoted_whole(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let Some(&quote) = bytes.first() else {
+        return false;
+    };
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            byte if byte == quote && bytes.get(at + 1) == Some(&quote) => at += 2,
+            byte if byte == quote => return at + 1 == bytes.len(),
+            _ => at += 1,
+        }
+    }
+    false
+}
+
+/// Whether `token` is the unquoted keyword `keyword`.
+fn is_keyword(token: Option<&&Token>, keyword: &str) -> bool {
+    matches!(token, Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(keyword))
+}
+
+/// The first words of the statements that only read or change the session.
+/// The server's `readonly=2` refuses any write and any change to `readonly`
+/// itself, so one of these runs once on confirmation even in Read-only.
+const FLOOR_READS: &[&str] = &[
+    "SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXISTS", "EXPLAIN", "CHECK", "WATCH", "USE",
+    "SET",
+];
+
+/// The first words of DDL, access control and server control, `BACKUP` and
+/// `RESTORE` among them: `readonly=2` stops neither.
+const FLOOR_FULL: &[&str] = &[
+    "ALTER", "CREATE", "REPLACE", "DROP", "TRUNCATE", "RENAME", "EXCHANGE", "ATTACH", "DETACH",
+    "UNDROP", "MOVE", "OPTIMIZE", "SYSTEM", "KILL", "GRANT", "REVOKE", "BACKUP", "RESTORE",
+];
+
+/// The mode a statement sqlparser cannot read needs, by its first word
+/// (`words` holds no whitespace or comment). A first word in neither list, or
+/// a first token that is no word at all, fails closed: Read-write, so
+/// Read-only refuses it. An `INSERT INTO FUNCTION` is [`words_verdict`]'s.
+fn first_keyword_verdict(words: &[&Token]) -> Verdict {
+    let first = |list: &[&str]| list.iter().any(|word| is_keyword(words.first(), word));
+    if first(FLOOR_READS) {
+        Verdict::READ
+    } else if first(FLOOR_FULL) {
+        Verdict::FULL
+    } else {
+        Verdict::WRITE
+    }
+}
+
+/// What a statement's words say, read or not, that its tree or first word
+/// does not:
+///
+/// - `INTO OUTFILE` writes a file, and `INTO [TABLE] FUNCTION` writes through
+///   a table function to a URL, a file or another server;
+/// - `PARALLEL WITH` runs a second statement beside the first;
+/// - `ON CLUSTER` runs the statement on every server of the cluster (a read's
+///   `JOIN … ON cluster = …` is left alone);
+/// - `SET DEFAULT ROLE` changes a user's stored roles, not the session.
+fn words_verdict(words: &[&Token]) -> Verdict {
+    let at = |index: usize, keyword: &str| is_keyword(words.get(index), keyword);
+    let reads = FLOOR_READS.iter().any(|word| at(0, word));
+    let full = at(0, "SET") && at(1, "DEFAULT") && at(2, "ROLE")
+        || (0..words.len()).any(|index| {
+            at(index, "OUTFILE")
+                || at(index, "PARALLEL") && at(index + 1, "WITH")
+                || at(index, "INTO")
+                    && (at(index + 1, "FUNCTION")
+                        || at(index + 1, "TABLE") && at(index + 2, "FUNCTION"))
+                || !reads && at(index, "ON") && at(index + 1, "CLUSTER")
+        });
+    match full {
+        true => Verdict::FULL,
+        false => Verdict::READ,
+    }
+}
+
+/// [`statement_verdict`], raised by what the engine's spec says of it: a
+/// `CREATE TABLE` on a table engine outside the spec's `local_table_engines`
+/// keeps its rows somewhere else, a URL, a file or another server, so it needs
+/// Full.
+fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
+    let verdict = statement_verdict(statement);
+    let (Some(local), Statement::CreateTable(create)) = (spec.sql.local_table_engines, statement)
+    else {
+        return verdict;
+    };
+    let options = match &create.table_options {
+        CreateTableOptions::None => &[][..],
+        CreateTableOptions::With(options)
+        | CreateTableOptions::Options(options)
+        | CreateTableOptions::Plain(options)
+        | CreateTableOptions::TableProperties(options) => options,
+    };
+    let listed = |name: &str| local.contains(&name);
+    let elsewhere = options.iter().any(|option| match option {
+        SqlOption::NamedParenthesizedList(list)
+            if list.key.value.eq_ignore_ascii_case("ENGINE") =>
+        {
+            !list.name.as_ref().is_some_and(|name| listed(&name.value))
+        }
+        SqlOption::KeyValue { key, .. } => key.value.eq_ignore_ascii_case("ENGINE"),
+        _ => false,
+    });
+    match elsewhere {
+        true => verdict.max(Verdict::FULL),
+        false => verdict,
+    }
+}
+
+/// A ClickHouse mutation spelled as the statement it amounts to:
+/// `ALTER TABLE t UPDATE … WHERE …` as `UPDATE t SET … WHERE …`, and
+/// `ALTER TABLE t DELETE WHERE …` as `DELETE FROM t WHERE …`, each with at most
+/// a trailing `SETTINGS mutations_sync = n`, which is dropped. The text between
+/// is kept exactly as written.
+///
+/// `None` for anything else after `ALTER`: a second command, `ON CLUSTER`,
+/// `IN PARTITION`, any other setting, a token the server may read otherwise
+/// ([`misread`]), or a spelling that does not then read as exactly one `UPDATE`
+/// or `DELETE` with a `WHERE`. And on every dialect but ClickHouse's, which has
+/// no mutations.
+pub(crate) fn mutation_as_dml(spec: &EngineSpec, sql: &str) -> Option<String> {
+    read_mutation(&spec.sql, sql).map(|mutation| mutation.dml)
+}
+
+/// [`mutation_as_dml`]'s reading of a mutation, with where its parts lie in
+/// the text it was read from.
+struct Mutation {
+    dml: String,
+    updates: bool,
+    table: Range<usize>,
+    /// From the word after `UPDATE` or `DELETE` to the end of the `WHERE`.
+    body: Range<usize>,
+}
+
+fn read_mutation(spec: &SqlSpec, sql: &str) -> Option<Mutation> {
+    if spec.parser_dialect != ParserDialect::ClickHouse {
+        return None;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let tokens = located_tokens(dialect.as_ref(), sql)?;
+    if misread(sql, &tokens) {
+        return None;
+    }
+    let mut words: Vec<(&Token, Range<usize>)> = tokens
+        .iter()
+        .filter(|(token, _)| !matches!(token, Token::Whitespace(_)))
+        .map(|(token, range)| (token, range.clone()))
+        .collect();
+    if matches!(words.last(), Some((Token::SemiColon, _))) {
+        words.pop();
+    }
+    let keyword =
+        |at: usize, keyword: &str| is_keyword(words.get(at).map(|(token, _)| token), keyword);
+    if !keyword(0, "ALTER") || !keyword(1, "TABLE") {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        if !matches!(words.get(at), Some((Token::Word(_), _))) {
+            return None;
+        }
+        at += 1;
+        match words.get(at) {
+            Some((Token::Period, _)) => at += 1,
+            _ => break,
+        }
+    }
+    let table_range = words[2].1.start..words[at - 1].1.end;
+    let table = &sql[table_range.clone()];
+
+    let mut end = words.len();
+    if end >= at + 4
+        && keyword(end - 4, "SETTINGS")
+        && keyword(end - 3, "mutations_sync")
+        && matches!(words[end - 2].0, Token::Eq)
+        && matches!(words[end - 1].0, Token::Number(..))
+    {
+        end -= 4;
+    }
+    let body = &words[at..end];
+    let updates = keyword(at, "UPDATE");
+    if !updates && !keyword(at, "DELETE") {
+        return None;
+    }
+
+    // A comma outside brackets after the `WHERE` starts a second command.
+    let mut depth = 0i32;
+    let mut filter = None;
+    for (index, (token, _)) in body.iter().enumerate() {
+        match token {
+            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+            Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+            Token::Comma if depth == 0 && filter.is_some() => return None,
+            Token::SemiColon => return None,
+            _ if is_keyword(Some(token), "PARTITION") || is_keyword(Some(token), "SETTINGS") => {
+                return None;
+            }
+            _ if depth == 0 && filter.is_none() && is_keyword(Some(token), "WHERE") => {
+                filter = Some(index);
+            }
+            _ => {}
+        }
+    }
+    let filter = filter?;
+    let body_range = body.get(1)?.1.start..body.last()?.1.end;
+    let rest = &sql[body_range.clone()];
+    let dml = match updates {
+        true if filter > 1 => format!("UPDATE {table} SET {rest}"),
+        false if filter == 1 => format!("DELETE FROM {table} {rest}"),
+        _ => return None,
+    };
+    let statements = SqlParser::parse_sql(dialect.as_ref(), &dml).ok()?;
+    let plain = match statements.as_slice() {
+        [Statement::Update(update)] => {
+            updates
+                && update.table.joins.is_empty()
+                && update.from.is_none()
+                && update.selection.is_some()
+                && update.returning.is_none()
+                && update.output.is_none()
+                && update.or.is_none()
+                && update.order_by.is_empty()
+                && update.limit.is_none()
+        }
+        [Statement::Delete(delete)] => {
+            !updates
+                && delete.tables.is_empty()
+                && delete.using.is_none()
+                && delete.selection.is_some()
+                && delete.returning.is_none()
+                && delete.output.is_none()
+                && delete.order_by.is_empty()
+                && delete.limit.is_none()
+        }
+        _ => false,
+    };
+    plain.then_some(Mutation {
+        dml,
+        updates,
+        table: table_range,
+        body: body_range,
+    })
+}
+
+/// The `sqlparser` dialect an engine's SQL is read in; `None` for MongoDB
+/// and Redis, which are not SQL.
+fn dialect(engine: Engine) -> Option<Box<dyn Dialect>> {
+    (engine.syntax() == Syntax::Sql).then(|| parser(engine.spec().sql.parser_dialect))
+}
+
+fn parser(dialect: ParserDialect) -> Box<dyn Dialect> {
+    match dialect {
+        ParserDialect::Generic => Box::new(GenericDialect {}),
+        ParserDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
+        ParserDialect::MySql => Box::new(MySqlDialect {}),
+        ParserDialect::Sqlite => Box::new(SQLiteDialect {}),
+        ParserDialect::DuckDb => Box::new(DuckDbDialect {}),
+        ParserDialect::Snowflake => Box::new(SnowflakeDialect {}),
+        ParserDialect::MsSql => Box::new(MsSqlDialect {}),
+        ParserDialect::ClickHouse => Box::new(ClickHouseDialect {}),
+    }
 }
 
 /// MariaDB's `ANALYZE <statement>` respelled as the `EXPLAIN ANALYZE` sqlparser
@@ -1772,6 +3053,573 @@ fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String
 pub(crate) fn rerunnable(engine: Engine, sql: &str) -> bool {
     let verdict = classify(engine, sql);
     verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
+}
+
+/// Whether the last statement of `sql` answers with rows: a query, or a
+/// write with a `RETURNING`. DuckDB answers a command with a result set too,
+/// a single `Count` or `Success` column, which only the statement tells apart
+/// from a query's own column of that name.
+///
+/// duckdb-rs keeps the type DuckDB gives a prepared statement to itself, so
+/// it is read off the text: the last statement alone, so an earlier one the
+/// grammar cannot read does not hide it, and by its first word where the
+/// grammar cannot read it either -- DuckDB has queries of its own, `TABLE t`
+/// or `PIVOT`, as well as commands. A word not known as a command reads as a
+/// query, since showing a command's count as a row costs less than dropping
+/// a query's rows.
+pub(crate) fn answers_with_rows(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    let Some(tokens) = located_tokens(dialect.as_ref(), sql) else {
+        return true;
+    };
+    let Some(last) = between_semicolons(&tokens).pop() else {
+        return false;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), &sql[last.clone()]) {
+        Ok(statements) => statements.last().is_some_and(statement_answers_with_rows),
+        Err(_) => !tokens
+            .iter()
+            .filter(|(_, range)| last.contains(&range.start))
+            .find_map(|(token, _)| match token {
+                Token::Word(word) => Some(word),
+                _ => None,
+            })
+            .is_some_and(|word| {
+                COMMAND_WORDS
+                    .iter()
+                    .any(|command| word.value.eq_ignore_ascii_case(command))
+            }),
+    }
+}
+
+/// The first words of the statements DuckDB answers with a `Count` or a
+/// `Success` of its own.
+const COMMAND_WORDS: &[&str] = &[
+    "ABORT",
+    "ALTER",
+    "ANALYZE",
+    "ATTACH",
+    "BEGIN",
+    "CHECKPOINT",
+    "COMMENT",
+    "COMMIT",
+    "COPY",
+    "CREATE",
+    "DEALLOCATE",
+    "DELETE",
+    "DETACH",
+    "DROP",
+    "END",
+    "EXPORT",
+    "FORCE",
+    "IMPORT",
+    "INSERT",
+    "INSTALL",
+    "LOAD",
+    "MERGE",
+    "PREPARE",
+    "RESET",
+    "ROLLBACK",
+    "SET",
+    "START",
+    "TRUNCATE",
+    "UPDATE",
+    "USE",
+    "VACUUM",
+];
+
+fn statement_answers_with_rows(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(query) => query_answers_with_rows(query),
+        Statement::Insert(Insert { returning, .. })
+        | Statement::Update(Update { returning, .. })
+        | Statement::Delete(Delete { returning, .. }) => returning.is_some(),
+        Statement::Merge(Merge { output, .. }) => output.is_some(),
+        _ => false,
+    }
+}
+
+/// A query answers with rows unless its body is a write a `WITH` leads:
+/// `WITH s AS (…) INSERT INTO t SELECT * FROM s` parses as a query.
+fn query_answers_with_rows(query: &Query) -> bool {
+    match query.body.as_ref() {
+        SetExpr::Insert(statement)
+        | SetExpr::Update(statement)
+        | SetExpr::Delete(statement)
+        | SetExpr::Merge(statement) => statement_answers_with_rows(statement),
+        SetExpr::Query(query) => query_answers_with_rows(query),
+        _ => true,
+    }
+}
+
+/// Whether a submission may be stopped part way once its rows pass the limit:
+/// a read, and the only statement in it. Stopping one statement of several
+/// ends the rest with it -- a `COMMIT` behind a `SELECT` never runs, a `SET`
+/// before it is rolled back with the implicit transaction -- and the rows on
+/// screen are not the last statement's. A SQL Server batch is several
+/// statements in one submission wherever the user did not separate them.
+///
+/// Both parsers have to count one: the grammar reads `BEGIN; …; COMMIT` as a
+/// single transaction block. And it must leave the session alone: a Postgres
+/// cancel aborts the implicit transaction a `set_config` or advisory lock
+/// lives in, so such a read is drained rather than stopped.
+pub(crate) fn stoppable(engine: Engine, sql: &str) -> bool {
+    let parsed_alone = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql)
+            .is_ok_and(|statements| statements.len() == 1),
+        None => true,
+    };
+    rerunnable(engine, sql)
+        && parsed_alone
+        && Buffer::for_engine(engine, sql).statements().len() == 1
+        && !touches_session(engine, sql)
+}
+
+/// The one table a query's rows are rows of, read off the statement for an
+/// engine whose driver does not say which table a result column came from.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TableRead {
+    /// The name as written, one entry per dotted part.
+    pub(crate) table: Vec<String>,
+    pub(crate) columns: Vec<Projected>,
+}
+
+/// One entry of a [`TableRead`]'s select list.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Projected {
+    /// A `*`, which stands for every column of the table in its own order.
+    Every,
+    /// A bare or table-qualified name, as written.
+    Column(String),
+    /// Anything else, which names no column a write could land on.
+    Computed,
+}
+
+/// Why a statement's rows are not one table's rows, as [`table_read_or_why`]
+/// finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unread {
+    /// Nothing the grammar reads whole.
+    Unparsed,
+    /// A statement other than a query.
+    NotAQuery,
+    /// A `WITH` beside the select.
+    With,
+    /// A set operation, `VALUES` or a parenthesised query.
+    NotOneSelect,
+    /// A `SETTINGS` clause on the query.
+    Settings,
+    /// A `FORMAT` clause on the query.
+    Format,
+    Distinct,
+    /// `GROUP BY`, `HAVING`, a window or `QUALIFY`.
+    Grouped,
+    /// `ORDER BY … WITH FILL` or `INTERPOLATE`.
+    Filled,
+    /// A join, or a second relation in `FROM`.
+    Join,
+    ArrayJoin,
+    /// No `FROM`, a subquery or a table function in it.
+    NotATable,
+    /// A `*` with a modifier, or a select item that is not a column.
+    Projection,
+    /// Anything else the plain select does not have.
+    Other,
+}
+
+/// [`TableRead`] for the last statement of `sql`, when it is a plain select of
+/// one table: no join, subquery, table function, CTE, set operation,
+/// `DISTINCT`, grouping or window clause, and no table alias renaming the
+/// columns. Every one of those makes a result row something other than one
+/// row of the table, or a column something other than the column it names,
+/// so each refuses rather than being read past.
+pub(crate) fn table_read(engine: Engine, sql: &str) -> Option<TableRead> {
+    table_read_or_why(engine, sql).ok().map(|(read, _)| read)
+}
+
+/// [`table_read`], with the names the select list reads as something other
+/// than a column: an alias given by `AS` (`SELECT a AS b` gives `b`) and the
+/// first part of a name it takes for the table's (`t` of `t.a`). A column of
+/// the table by one of those names makes the reading ambiguous on an engine
+/// that resolves a name to more than one thing. Or what refused it. A
+/// `Computed` item refuses nothing here; that is the caller's to decide.
+pub(crate) fn table_read_or_why(
+    engine: Engine,
+    sql: &str,
+) -> Result<(TableRead, Vec<String>), Unread> {
+    use sqlparser::ast::{
+        GroupByExpr, JoinOperator, ObjectName, OrderByKind, SelectFlavor, SelectItem,
+        SelectItemQualifiedWildcardKind, TableFactor, WildcardAdditionalOptions,
+    };
+
+    let dialect = dialect(engine).ok_or(Unread::Unparsed)?;
+    let statement = SqlParser::parse_sql(dialect.as_ref(), sql)
+        .map_err(|_| Unread::Unparsed)?
+        .pop()
+        .ok_or(Unread::Unparsed)?;
+    let Statement::Query(query) = statement else {
+        return Err(Unread::NotAQuery);
+    };
+    let Query {
+        with,
+        body,
+        order_by,
+        locks,
+        for_clause,
+        settings,
+        format_clause,
+        pipe_operators,
+        ..
+    } = *query;
+    if with.is_some() {
+        return Err(Unread::With);
+    }
+    if settings.is_some() {
+        return Err(Unread::Settings);
+    }
+    if format_clause.is_some() {
+        return Err(Unread::Format);
+    }
+    if order_by.as_ref().is_some_and(|order_by| {
+        order_by.interpolate.is_some()
+            || matches!(&order_by.kind, OrderByKind::Expressions(by)
+                if by.iter().any(|by| by.with_fill.is_some()))
+    }) {
+        return Err(Unread::Filled);
+    }
+    if for_clause.is_some() || !locks.is_empty() || !pipe_operators.is_empty() {
+        return Err(Unread::Other);
+    }
+    let SetExpr::Select(select) = *body else {
+        return Err(Unread::NotOneSelect);
+    };
+    if select.distinct.is_some() {
+        return Err(Unread::Distinct);
+    }
+    if !matches!(&select.group_by, GroupByExpr::Expressions(by, with) if by.is_empty() && with.is_empty())
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+    {
+        return Err(Unread::Grouped);
+    }
+    let plain = select.select_modifiers.is_none()
+        && select.top.is_none()
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.lateral_views.is_empty()
+        && select.connect_by.is_empty()
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.value_table_mode.is_none();
+    if !plain {
+        return Err(Unread::Other);
+    }
+    let from = match select.from.as_slice() {
+        [from] => from,
+        [] => return Err(Unread::NotATable),
+        _ => return Err(Unread::Join),
+    };
+    if let Some(join) = from.joins.first() {
+        return Err(match join.join_operator {
+            JoinOperator::ArrayJoin
+            | JoinOperator::LeftArrayJoin
+            | JoinOperator::InnerArrayJoin => Unread::ArrayJoin,
+            _ => Unread::Join,
+        });
+    }
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        with_hints,
+        version: None,
+        with_ordinality: false,
+        partitions,
+        json_path: None,
+        index_hints,
+        ..
+    } = &from.relation
+    else {
+        return Err(Unread::NotATable);
+    };
+    if !with_hints.is_empty()
+        || !partitions.is_empty()
+        || !index_hints.is_empty()
+        || alias
+            .as_ref()
+            .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return Err(Unread::Other);
+    }
+
+    let parts = |name: &ObjectName| -> Option<Vec<String>> {
+        name.0
+            .iter()
+            .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+            .collect()
+    };
+    let table = parts(name).ok_or(Unread::NotATable)?;
+    // Once aliased, the table is named by its alias alone. Unaliased, by any
+    // tail of the name it was written with.
+    let qualifiers: Vec<&[String]> = match alias {
+        Some(alias) => vec![std::slice::from_ref(&alias.name.value)],
+        None => (0..table.len()).map(|from| &table[from..]).collect(),
+    };
+    // ClickHouse's names are case-sensitive: beside a table aliased `t`,
+    // `T.x` is a field of a column `T`.
+    let exact = engine.spec().sql.parser_dialect == ParserDialect::ClickHouse;
+    let qualifies = |written: &[String]| {
+        qualifiers.iter().any(|qualifier| {
+            qualifier.len() == written.len()
+                && qualifier.iter().zip(written).all(|(a, b)| {
+                    if exact {
+                        a == b
+                    } else {
+                        a.eq_ignore_ascii_case(b)
+                    }
+                })
+        })
+    };
+    let bare = |options: &WildcardAdditionalOptions| {
+        options.opt_ilike.is_none()
+            && options.opt_exclude.is_none()
+            && options.opt_except.is_none()
+            && options.opt_replace.is_none()
+            && options.opt_rename.is_none()
+            && options.opt_alias.is_none()
+    };
+    let mut shadows = Vec::new();
+    let mut column = |expr: &Expr| match expr {
+        Expr::Identifier(ident) => Projected::Column(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => match idents.split_last() {
+            Some((last, qualifier))
+                if qualifies(
+                    &qualifier
+                        .iter()
+                        .map(|ident| ident.value.clone())
+                        .collect::<Vec<_>>(),
+                ) =>
+            {
+                shadows.push(qualifier[0].value.clone());
+                Projected::Column(last.value.clone())
+            }
+            // A struct's field, read off a column of the table.
+            _ => Projected::Computed,
+        },
+        _ => Projected::Computed,
+    };
+
+    let mut columns = Vec::with_capacity(select.projection.len().max(1));
+    let mut aliases = Vec::new();
+    if select.projection.is_empty() && select.flavor == SelectFlavor::FromFirstNoSelect {
+        columns.push(Projected::Every);
+    }
+    for item in &select.projection {
+        columns.push(match item {
+            SelectItem::Wildcard(options) if bare(options) => Projected::Every,
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(name),
+                options,
+            ) if bare(options) && parts(name).is_some_and(|name| qualifies(&name)) => {
+                aliases.extend(parts(name).and_then(|name| name.into_iter().next()));
+                Projected::Every
+            }
+            SelectItem::UnnamedExpr(expr) => column(expr),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let projected = column(expr);
+                if !matches!(&projected, Projected::Column(name) if *name == alias.value) {
+                    aliases.push(alias.value.clone());
+                }
+                projected
+            }
+            _ => return Err(Unread::Projection),
+        });
+    }
+    aliases.extend(shadows);
+    Ok((TableRead { table, columns }, aliases))
+}
+
+/// Every unquoted word of `sql`, in order, outside strings and comments; `None`
+/// where the tokenizer cannot read it.
+pub(crate) fn bare_words(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    let dialect = dialect(engine)?;
+    let tokens = Tokenizer::new(dialect.as_ref(), sql).tokenize().ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Word(word) if word.quote_style.is_none() => Some(word.value),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Whether `sql` is nothing but queries that only read: no `SET`, `USE`,
+/// transaction control, declaration or `SELECT … INTO`, no call that reads or
+/// changes what only its session holds, and nothing `classify` cannot read.
+/// Such a submission leaves its session as it found it, and reads the same on
+/// another session to the same server as on this one, bar what this one
+/// already holds that a fresh one would not.
+pub(crate) fn plain_read(engine: Engine, sql: &str) -> bool {
+    let queries_only = match dialect(engine) {
+        Some(dialect) => SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+            statements
+                .iter()
+                .all(|statement| matches!(statement, Statement::Query(_)))
+        }),
+        None => true,
+    };
+    queries_only && rerunnable(engine, sql) && !touches_session(engine, sql)
+}
+
+/// Calls whose answer or effect belongs to the session they run on: a
+/// sequence's value, a session variable, an advisory or named lock, the last
+/// identity inserted.
+const SESSION_FUNCTIONS: &[&str] = &[
+    "nextval",
+    "currval",
+    "setval",
+    "lastval",
+    "set_config",
+    "last_insert_id",
+    "get_lock",
+    "release_lock",
+    "release_all_locks",
+    "scope_identity",
+    "sp_getapplock",
+    "sp_releaseapplock",
+];
+
+/// Whether a query calls one of [`SESSION_FUNCTIONS`], an advisory lock, reads
+/// `@@IDENTITY` or assigns a variable with `:=`. Read off the tokens whatever
+/// the engine, so a call anywhere in the statement counts, and a column that
+/// merely shares a name keeps its statement in turn, the conservative side.
+fn touches_session(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    let Ok(tokens) = Tokenizer::new(dialect.as_ref(), sql).tokenize() else {
+        return true;
+    };
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            Token::Assignment => return true,
+            Token::Word(word) => {
+                let name = word.value.to_lowercase();
+                let called = tokens.peek() == Some(&&Token::LParen);
+                if name == "@@identity"
+                    || called
+                        && (SESSION_FUNCTIONS.contains(&name.as_str())
+                            || name.starts_with("pg_advisory")
+                            || name.starts_with("pg_try_advisory"))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What running `sql` leaves on its session that a fresh connection to the
+/// same profile would not have, which is what keeps a queue of reads from
+/// running at once on fresh ones.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Leaves {
+    /// `Some(true)` when it leaves a transaction open, `Some(false)` when it
+    /// ends one, `None` when it does neither.
+    pub(crate) transaction: Option<bool>,
+    /// A `SET` (MySQL's `autocommit` among them), `USE`, `PRAGMA … =`, table
+    /// lock, temporary table or variable `SELECT … INTO`, which lasts until
+    /// the session does, or a call [`touches_session`] finds: `set_config`, a
+    /// lock, an `@x :=`. One that only reads what the session holds counts
+    /// too, the conservative side.
+    pub(crate) settings: bool,
+}
+
+/// [`Leaves`] for one submission of the user's. A read, a `SHOW`, an `EXPLAIN`
+/// or an autocommitted write leaves nothing a fresh connection would not see,
+/// and neither does a statement nothing can read -- bar a `SET` or `USE` the
+/// grammar does not know, which still changed the session if it ran.
+/// Snowflake and MongoDB keep nothing from one run to the next.
+pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
+    if engine.syntax() == Syntax::Redis {
+        return crate::redis_cmd::leaves(sql);
+    }
+    let mut leaves = Leaves::default();
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return leaves;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), sql) {
+        Ok(statements) => statements
+            .iter()
+            .for_each(|statement| leaves.add(statement)),
+        Err(_) => {
+            let tokens = Tokenizer::new(dialect.as_ref(), sql)
+                .tokenize()
+                .unwrap_or_default();
+            let first = tokens.iter().find_map(|token| match token {
+                Token::Word(word) => Some(word.keyword),
+                _ => None,
+            });
+            leaves.settings = match first {
+                Some(Keyword::SET | Keyword::USE) => true,
+                Some(Keyword::PRAGMA) => tokens.contains(&Token::Eq),
+                _ => false,
+            };
+        }
+    }
+    leaves.settings |= touches_session(engine, sql);
+    leaves
+}
+
+impl Leaves {
+    fn add(&mut self, statement: &Statement) {
+        match statement {
+            // A T-SQL `BEGIN … END` block, which opens no transaction itself.
+            Statement::StartTransaction {
+                has_end_keyword: true,
+                statements,
+                ..
+            } => statements.iter().for_each(|statement| self.add(statement)),
+            Statement::StartTransaction { .. } => self.transaction = Some(true),
+            // `AND CHAIN` opens the next one as it ends this one.
+            Statement::Commit { chain, .. }
+            | Statement::Rollback {
+                chain,
+                savepoint: None,
+            } => self.transaction = Some(*chain),
+            Statement::Set(_)
+            | Statement::Use(_)
+            | Statement::LockTables { .. }
+            | Statement::Pragma { is_eq: true, .. } => self.settings = true,
+            Statement::CreateTable(table) => {
+                self.settings |= table.temporary || table.name.to_string().starts_with('#');
+            }
+            Statement::Query(query) => {
+                if let SetExpr::Select(select) = query.body.as_ref()
+                    && let Some(into) = &select.into
+                {
+                    self.settings |= into.temporary
+                        || into
+                            .targets
+                            .iter()
+                            .any(|target| target.to_string().starts_with(['#', '@']));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The lowest mode that may run one statement: what its variant earns, raised
@@ -1931,6 +3779,12 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         | Statement::CreateStage {
             or_replace: true, ..
         } => Verdict::destroys(Destructive::Drop),
+        // `INSERT INTO FUNCTION url(…)`, `s3(…)`, `file(…)`, `remote(…)` and
+        // the rest write outside the database, as a `COPY … TO` file does.
+        // Only ClickHouse's dialect parses one.
+        Statement::Insert(insert) if matches!(insert.table, TableObject::TableFunction(_)) => {
+            Verdict::FULL
+        }
         Statement::Insert(insert) if insert.overwrite => {
             Verdict::destroys(Destructive::Truncate)
         }
@@ -2152,45 +4006,225 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 // Generic splits `[my col]` into `[ my col ]`, another name. Postgres's dialect
 // is the upgrade path if its output ever looks wrong there.
 ///
+/// Each statement is reflowed on its own, and the text between statements --
+/// blank lines, comments, the `;`s and SQL Server's `GO` lines -- is kept as
+/// written, but for two things: a statement sharing a line with the one before
+/// it starts a line of its own, and one indented on its line comes back flush.
+/// Reflowed with its batch, `GO 5` becomes a `GO` and a stray `5` on the next
+/// line: a count the refusal no longer sees.
+///
+/// Statements are cut at the `;`s sqlparser reads in the engine's dialect,
+/// which knows MySQL's `\'` where `Buffer`'s split does not and would cut a
+/// literal in two. SQL Server's are `Buffer`'s, which reads batches and
+/// `BEGIN … END`, and T-SQL has no backslash escapes.
+///
+/// The result must tokenize as the buffer did, whitespace aside, or it is
+/// refused: sqlformat respaces some tokens into others, like `[my col]`
+/// outside SQL Server's dialect or MySQL's `0x0A`.
+///
 /// Err is the refusal, said to the user as it stands. A MongoDB buffer is not
 /// SQL, and sqlformat over it splits regexes and turns comment text into code,
 /// so `mql::format` lays it out instead.
+//
+// ponytail: a selection that starts partway through a line comes back with its
+// later lines at column 0, not under its first. Indenting them is not a plain
+// prefix per line here, as it is in `mql::format`: sqlformat carries a
+// multi-line string literal through as one token, and a prefix would edit its
+// value.
 pub(crate) fn format(engine: Engine, sql: &str) -> Result<String, &'static str> {
-    let dialect = match engine {
-        Engine::MongoDb => return crate::mql::format(sql),
-        Engine::SqlServer => sqlformat::Dialect::SQLServer,
-        Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::Sqlite | Engine::Snowflake => {
-            sqlformat::Dialect::Generic
-        }
-    };
-    if has_dollar_quote(sql) {
-        return Err("Not formatting: a dollar-quoted body would be rewritten.");
+    match engine.syntax() {
+        Syntax::Sql => {}
+        Syntax::Mongo => return crate::mql::format(sql),
+        Syntax::Redis => return Err("Not formatting: a Redis command is one line, as typed."),
     }
+    let reader = parser(engine.spec().sql.parser_dialect);
+    let layout = sqlformat_dialect(engine.spec().sql.format_dialect);
+    if has_dollar_quote(sql) {
+        return Err(DOLLAR_QUOTED);
+    }
+    let Some(tokens) = located_tokens(reader.as_ref(), sql) else {
+        return Err(UNENDED);
+    };
+    let statements = match batches_on(engine) {
+        true => Buffer::for_engine(engine, sql).statements().to_vec(),
+        false => between_semicolons(&tokens),
+    };
     let options = sqlformat::FormatOptions {
-        dialect,
+        dialect: layout,
         ..sqlformat::FormatOptions::default()
     };
-    let reflow = |text: &str| sqlformat::format(text, &sqlformat::QueryParams::default(), &options);
-    if engine != Engine::SqlServer {
-        return Ok(reflow(sql));
+
+    let mut formatted = String::with_capacity(sql.len());
+    let mut written = 0;
+    for (index, statement) in statements.iter().enumerate() {
+        let gap = &sql[written..statement.start];
+        let gap = match gap.rfind('\n') {
+            Some(line) if gap[line + 1..].trim().is_empty() => &gap[..=line],
+            Some(_) => gap,
+            None if index > 0 => {
+                formatted += gap.trim_end();
+                "\n"
+            }
+            None => gap,
+        };
+        formatted += gap;
+        formatted += &sqlformat::format(
+            &sql[statement.clone()],
+            &sqlformat::QueryParams::default(),
+            &options,
+        );
+        written = statement.end;
     }
-    // A `GO` line is not T-SQL, and reflowed with its batch `GO 5` becomes a
-    // `GO` and a stray `5` on the next line: a count the refusal no longer
-    // sees. So each batch is reflowed alone and the lines kept as written.
-    let mut formatted = String::new();
-    let mut start = 0;
-    for (line, _) in go_lines(sql) {
-        let batch = reflow(&sql[start..line.start]);
-        if !batch.trim().is_empty() {
-            formatted += batch.trim();
-            formatted.push('\n');
+    formatted += &sql[written..];
+
+    let before = layout_free(tokens.into_iter().map(|(token, _)| token));
+    let after = Tokenizer::new(reader.as_ref(), &formatted)
+        .tokenize()
+        .ok()
+        .map(layout_free);
+    match after == Some(before) {
+        true => Ok(formatted),
+        false => Err("Not formatting: the new layout would read as different SQL."),
+    }
+}
+
+fn sqlformat_dialect(dialect: FormatDialect) -> sqlformat::Dialect {
+    match dialect {
+        FormatDialect::Generic => sqlformat::Dialect::Generic,
+        FormatDialect::SqlServer => sqlformat::Dialect::SQLServer,
+    }
+}
+
+const DOLLAR_QUOTED: &str = "Not formatting: a dollar-quoted body would be rewritten.";
+const UNENDED: &str = "Not formatting: a string, quoted name or comment does not end.";
+
+/// [`format`] of the `selection` of `sql` alone.
+///
+/// Refused when either end of the selection falls inside a word, a literal, a
+/// quoted name or a comment of the buffer around it: reflowed on its own, the
+/// piece of a literal reads as code, and its text changes with the layout.
+pub(crate) fn format_selection(
+    engine: Engine,
+    sql: &str,
+    selection: Range<usize>,
+) -> Result<String, &'static str> {
+    let splits = match dialect(engine) {
+        Some(reader) => {
+            // Text past the end's line cannot change how the text up to it
+            // reads, and a buffer can be megabytes.
+            let line_end = sql[selection.end..]
+                .find('\n')
+                .map_or(sql.len(), |at| selection.end + at);
+            let tokens = located_tokens(reader.as_ref(), &sql[..line_end]).ok_or(UNENDED)?;
+            [selection.start, selection.end].iter().any(|&at| {
+                tokens
+                    .iter()
+                    .any(|(token, range)| !is_layout(token) && range.start < at && at < range.end)
+            })
         }
-        formatted += sql[line.clone()].trim();
-        formatted.push('\n');
-        start = line.end;
+        None => [selection.start, selection.end]
+            .iter()
+            .any(|&at| crate::mql::splits_a_token(sql, at)),
+    };
+    if splits {
+        return Err(
+            "Not formatting: the selection starts or ends partway through a word, string or \
+             comment.",
+        );
     }
-    formatted += reflow(&sql[start..]).trim();
-    Ok(formatted)
+    format(engine, &sql[selection])
+}
+
+/// The statements in `tokens` as the dialect's tokenizer cuts them: from the
+/// first token after a `;` that is neither whitespace nor a comment to the last
+/// one before the next `;`.
+fn between_semicolons(tokens: &[(Token, Range<usize>)]) -> Vec<Range<usize>> {
+    let mut statements = Vec::new();
+    let mut current: Option<Range<usize>> = None;
+    for (token, range) in tokens {
+        match token {
+            Token::SemiColon => statements.extend(current.take()),
+            Token::Whitespace(_) => {}
+            _ => {
+                let start = current
+                    .as_ref()
+                    .map_or(range.start, |current| current.start);
+                current = Some(start..range.end);
+            }
+        }
+    }
+    statements.extend(current);
+    statements
+}
+
+fn is_layout(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Whitespace(Whitespace::Space | Whitespace::Newline | Whitespace::Tab)
+    )
+}
+
+/// `tokens` with the whitespace between them left out, and each comment
+/// reduced to its words, which sqlformat respaces but never rewrites.
+fn layout_free(tokens: impl IntoIterator<Item = Token>) -> Vec<Token> {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    tokens
+        .into_iter()
+        .filter(|token| !is_layout(token))
+        .map(|token| match token {
+            Token::Whitespace(Whitespace::SingleLineComment { comment, prefix }) => {
+                Token::Whitespace(Whitespace::SingleLineComment {
+                    comment: words(&comment),
+                    prefix,
+                })
+            }
+            Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
+                Token::Whitespace(Whitespace::MultiLineComment(words(&comment)))
+            }
+            token => token,
+        })
+        .collect()
+}
+
+/// The tokens of `sql` with the byte range each covers. `None` when `sql` does
+/// not tokenize.
+fn located_tokens(dialect: &dyn Dialect, sql: &str) -> Option<Vec<(Token, Range<usize>)>> {
+    let (tokens, whole) = located_prefix(dialect, sql);
+    whole.then_some(tokens)
+}
+
+/// [`located_tokens`] up to wherever the tokenizer stopped, and whether that
+/// was the end of `sql`.
+fn located_prefix(dialect: &dyn Dialect, sql: &str) -> (Vec<(Token, Range<usize>)>, bool) {
+    let mut tokens = Vec::new();
+    let whole = Tokenizer::new(dialect, sql)
+        .tokenize_with_location_into_buf(&mut tokens)
+        .is_ok();
+    // Spans are lines and columns of chars, in source order, so one walk
+    // forward through the text turns them all into byte offsets.
+    let mut chars = sql.char_indices().peekable();
+    let (mut line, mut column) = (1, 1);
+    let mut offset_of = |location: Location| {
+        while (line, column) < (location.line, location.column) {
+            let Some((_, c)) = chars.next() else {
+                break;
+            };
+            if c == '\n' {
+                (line, column) = (line + 1, 1);
+            } else {
+                column += 1;
+            }
+        }
+        chars.peek().map_or(sql.len(), |(offset, _)| *offset)
+    };
+    let tokens = tokens
+        .into_iter()
+        .map(|token| {
+            let start = offset_of(token.span.start);
+            (token.token, start..offset_of(token.span.end))
+        })
+        .collect();
+    (tokens, whole)
 }
 
 /// Whether `sql` opens a `$$` or `$tag$` body anywhere.
@@ -2219,6 +4253,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_mode_cycle_runs_read_only_to_full_and_back() {
+        assert_eq!(Mode::ReadOnly.next(), Mode::ReadWrite);
+        assert_eq!(Mode::ReadWrite.next(), Mode::Full);
+        assert_eq!(Mode::Full.next(), Mode::ReadOnly);
+    }
+
+    #[test]
     fn a_grids_statement_is_found_wherever_it_stands_in_the_buffer() {
         let sql = "SELECT 1;\nSELECT * FROM t;\nDELETE FROM t;";
         let buffer = Buffer::parse(sql);
@@ -2226,10 +4267,19 @@ mod tests {
         let delete = sql.find("DELETE").unwrap();
         // The cursor on another statement does not make that one the grid's.
         let grid = buffer.statement_at(select).unwrap();
-        assert_eq!(buffer.find(sql, delete, &sql[grid.clone()]), Some(grid));
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, delete, &sql[grid.clone()]),
+            Some(grid)
+        );
         let first = buffer.statement_at(0).unwrap();
-        assert_eq!(buffer.find(sql, 0, &sql[first.clone()]), Some(first));
-        assert_eq!(buffer.find(sql, delete, "SELECT * FROM u"), None);
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, 0, &sql[first.clone()]),
+            Some(first)
+        );
+        assert_eq!(
+            buffer.find(Engine::Postgres, sql, delete, "SELECT * FROM u"),
+            None
+        );
     }
 
     fn texts(sql: &str) -> Vec<&str> {
@@ -2592,6 +4642,53 @@ mod tests {
         assert_eq!(queued_statements(Engine::Postgres, sql, None).len(), 2);
     }
 
+    fn split_texts(engine: Engine, sql: &str) -> Vec<&str> {
+        let batches = queued_statements(engine, sql, Some(0..sql.len()));
+        queued_texts(sql, &split_reads(engine, sql, &batches, 0..sql.len()))
+    }
+
+    #[test]
+    fn a_sql_server_batch_of_plain_reads_splits_into_its_statements() {
+        let sql = "SELECT 1 AS a;\nSELECT [b] FROM t WHERE n = '@x #y';";
+        assert_eq!(
+            split_texts(Engine::SqlServer, sql),
+            vec!["SELECT 1 AS a", "SELECT [b] FROM t WHERE n = '@x #y'"]
+        );
+        assert_eq!(
+            split_texts(
+                Engine::SqlServer,
+                "SELECT 1;\nGO\nSELECT 2; SELECT @@VERSION;"
+            ),
+            vec!["SELECT 1", "SELECT 2", "SELECT @@VERSION"]
+        );
+
+        // Only the statements the selection touches.
+        let batches = queued_statements(Engine::SqlServer, sql, Some(0..3));
+        assert_eq!(split_reads(Engine::SqlServer, sql, &batches, 0..3).len(), 1);
+
+        assert!(split_texts(Engine::Postgres, "SELECT 1; SELECT 2;").is_empty());
+    }
+
+    /// Each of these needs the rest of its batch beside it, or is no plain
+    /// read, so the batch is sent whole as it always was.
+    #[test]
+    fn a_sql_server_batch_with_anything_but_plain_reads_stays_whole() {
+        for sql in [
+            "DECLARE @x int = 1; SELECT @x;",
+            "SELECT 1; SELECT @x;",
+            "SELECT 1; SELECT * FROM #t;",
+            "SELECT 1; SELECT * FROM ##t;",
+            "SELECT 1; EXEC sp_who;",
+            "SET NOCOUNT ON; SELECT 1;",
+            "SELECT 1; IF 1 = 1 BEGIN SELECT 2; END",
+            "BEGIN SELECT 1; SELECT 2; END",
+            "SELECT 1;\nGO\nSELECT 2; SELECT @x;",
+            "SELECT 1; UPDATE t SET a = 1;",
+        ] {
+            assert!(split_texts(Engine::SqlServer, sql).is_empty(), "{sql}");
+        }
+    }
+
     /// A batch is what SQL Server is sent, so a grid is reserved per statement
     /// inside it; everywhere else a submission is one statement and answers
     /// with at most one set.
@@ -2787,7 +4884,7 @@ mod tests {
         ] {
             for engine in Engine::ALL
                 .into_iter()
-                .filter(|e| !matches!(e, Engine::SqlServer | Engine::MongoDb))
+                .filter(|e| !matches!(e, Engine::SqlServer | Engine::MongoDb | Engine::Redis))
             {
                 assert_eq!(
                     Buffer::for_engine(engine, sql).statements(),
@@ -2923,6 +5020,16 @@ mod tests {
                 "{sql:?} was truncated to {run:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_whole_buffer_selection_is_found_without_its_semicolon() {
+        let sql = "select * from accounts;\n";
+        let found = Buffer::for_engine(Engine::Postgres, sql).find(Engine::Postgres, sql, 0, sql);
+        assert_eq!(
+            found.map(|range| &sql[range]),
+            Some("select * from accounts")
+        );
     }
 
     #[test]
@@ -3207,6 +5314,63 @@ mod tests {
     }
 
     #[test]
+    fn an_insert_template_numbers_or_marks_its_placeholders_the_engines_way() {
+        let columns = [column("id", None), column("email", None)];
+        assert_eq!(
+            insert_template(Engine::Postgres, "public", "users", &columns).unwrap(),
+            r#"INSERT INTO "public"."users" ("id", "email") VALUES ($1, $2);"#
+        );
+        assert_eq!(
+            insert_template(Engine::MySql, "app", "users", &columns).unwrap(),
+            "INSERT INTO `app`.`users` (`id`, `email`) VALUES (?, ?);"
+        );
+        assert_eq!(
+            insert_template(Engine::SqlServer, "dbo", "users", &columns).unwrap(),
+            r#"INSERT INTO "dbo"."users" ("id", "email") VALUES (@p1, @p2);"#
+        );
+        assert_eq!(
+            insert_template(Engine::MongoDb, "db", "users", &columns),
+            None
+        );
+    }
+
+    fn column(name: &str, default: Option<&str>) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.into(),
+            data_type: "integer".into(),
+            nullable: true,
+            default: default.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn an_insert_template_leaves_out_what_the_server_generates() {
+        let columns = [
+            column("id", Some("GENERATED ALWAYS AS IDENTITY")),
+            column("total", Some("GENERATED ALWAYS AS ((price * qty)) STORED")),
+            column("seq", Some("GENERATED BY DEFAULT AS IDENTITY")),
+            column("created_at", Some("now()")),
+        ];
+        assert_eq!(
+            insert_template(Engine::Postgres, "public", "orders", &columns).unwrap(),
+            r#"INSERT INTO "public"."orders" ("seq", "created_at") VALUES ($1, $2);"#
+        );
+        let columns = [
+            column("id", Some("IDENTITY(1,1)")),
+            column("total", Some("AS ([price]*[qty]) PERSISTED")),
+            column("created_at", Some("(getdate())")),
+        ];
+        assert_eq!(
+            insert_template(Engine::SqlServer, "dbo", "orders", &columns).unwrap(),
+            r#"INSERT INTO "dbo"."orders" ("created_at") VALUES (@p1);"#
+        );
+        assert_eq!(
+            insert_template(Engine::SqlServer, "dbo", "orders", &columns[..2]),
+            None
+        );
+    }
+
+    #[test]
     fn the_gate_admits_an_insert_and_still_admits_an_update() {
         assert!(is_generated_write(
             r#"INSERT INTO "public"."t" ("a") VALUES ('1')"#
@@ -3241,6 +5405,290 @@ mod tests {
         ] {
             assert!(!is_generated_write(sql), "{sql} passed the gate");
         }
+    }
+
+    #[test]
+    fn the_gate_admits_a_multi_row_insert_of_literals() {
+        for sql in [
+            "INSERT INTO \"public\".\"t\" (\"a\", \"b\") VALUES ('1', NULL),\n('2', 'x')",
+            "INSERT INTO \"dbo\".\"t\" (\"a\", \"b\") VALUES (N'é', 0xAB),\n('2024-01-02T03:04:05.000', NULL)",
+            "INSERT INTO `d`.`t` (`a`) VALUES ('1') ON DUPLICATE KEY UPDATE `a` = `a`",
+            "INSERT INTO \"main\".\"t\" (\"a\") VALUES ('1') ON CONFLICT DO NOTHING",
+        ] {
+            assert!(is_generated_write(sql), "{sql} was refused");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_an_insert_whose_values_are_not_literals() {
+        for sql in [
+            "INSERT INTO t (a) VALUES ((SELECT 1))",
+            "INSERT INTO t (a) VALUES (now())",
+            "INSERT INTO t (a) SELECT '1'",
+            "INSERT INTO t (a) VALUES ('1' || '2')",
+            "INSERT INTO t (a) VALUES (b)",
+            "INSERT INTO t (a) VALUES (\"b\")",
+            "INSERT INTO t (a) VALUES (1)",
+            "INSERT INTO t VALUES ('1')",
+            "INSERT INTO t (a) VALUES ('1') RETURNING *",
+            "INSERT INTO t (a) DEFAULT VALUES",
+            "REPLACE INTO t (a) VALUES ('1')",
+            "INSERT OR REPLACE INTO t (a) VALUES ('1')",
+            "INSERT IGNORE INTO t (a) VALUES ('1')",
+        ] {
+            assert!(!is_generated_write(sql), "{sql} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_conflict_clause_other_than_the_fixed_form() {
+        for tail in [
+            "ON CONFLICT (a) DO NOTHING",
+            "ON CONFLICT DO UPDATE SET a = '1'",
+            "ON DUPLICATE KEY UPDATE a = b",
+            "ON DUPLICATE KEY UPDATE a = '1'",
+            "ON DUPLICATE KEY UPDATE a = a, b = b",
+            "ON DUPLICATE KEY UPDATE a = VALUES(a)",
+        ] {
+            let sql = format!("INSERT INTO t (a) VALUES ('1') {tail}");
+            assert!(!is_generated_write(&sql), "{sql} passed the gate");
+        }
+    }
+
+    const SQL_ENGINES: [Engine; 8] = [
+        Engine::Postgres,
+        Engine::MySql,
+        Engine::MariaDb,
+        Engine::Sqlite,
+        Engine::Turso,
+        Engine::DuckDb,
+        Engine::Snowflake,
+        Engine::SqlServer,
+    ];
+
+    #[test]
+    fn the_gate_refuses_a_comment_anywhere_in_an_insert() {
+        // MySQL runs a `/*! … */` comment as SQL, so a comment is never inert.
+        for sql in [
+            "INSERT INTO d/**/.t (a) VALUES ('1')",
+            "INSERT INTO d/*!.u*/.t (a) VALUES ('1')",
+            "INSERT INTO `d`/*! .u */.`t` (`a`) VALUES ('1')",
+            "INSERT INTO d -- x\n.t (a) VALUES ('1')",
+            "INSERT INTO d.t/**/ (a) VALUES ('1')",
+            "INSERT /**/ INTO t (a) VALUES ('1')",
+            "INSERT INTO t (\"a\"/**/) VALUES ('1')",
+            "INSERT INTO t (/**/\"a\") VALUES ('1')",
+            "INSERT INTO t (`a`/*!, b*/) VALUES ('1')",
+            "INSERT INTO t (a) VALUES /**/ ('1')",
+            "INSERT INTO t (a) VALUES ('1'/**/)",
+            "INSERT INTO t (a) VALUES (/*!0x41*/'1')",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE `a`/**/ = `a`",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE `a` = /*!b*/`a`",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE a = a/*!, b = '1'*/",
+            "INSERT INTO t (a) VALUES ('1') ON CONFLICT DO NOTHING/**/",
+            "INSERT INTO t (a) VALUES ('1')/**/",
+            "INSERT INTO t (a) VALUES ('1') -- x",
+        ] {
+            for engine in SQL_ENGINES {
+                assert!(
+                    !is_generated_write_on(engine, sql),
+                    "{engine:?}: {sql} passed the gate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_duplicate_key_skip_names_its_column_as_mysql_reads_a_name() {
+        // `"a"` is a string under MySQL's default sql_mode, so `a = "a"`
+        // assigns one.
+        for sql in [
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE \"a\" = \"a\"",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE a = \"a\"",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE `a` = \"a\"",
+        ] {
+            for engine in SQL_ENGINES {
+                assert!(
+                    !is_generated_write_on(engine, sql),
+                    "{engine:?}: {sql} passed the gate"
+                );
+            }
+        }
+        for sql in [
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE `a` = `a`",
+            "INSERT INTO t (a) VALUES ('1') ON DUPLICATE KEY UPDATE a = a",
+        ] {
+            for engine in [Engine::MySql, Engine::MariaDb] {
+                assert!(is_generated_write_on(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_value_that_is_more_than_one_literal() {
+        for sql in [
+            "INSERT INTO t (a) VALUES ('1' '2')",
+            "INSERT INTO t (a) VALUES ('1'\n'2')",
+            "INSERT INTO t (a) VALUES (N'1' '2')",
+            "INSERT INTO t (a) VALUES ('1' N'2')",
+            "INSERT INTO t (a) VALUES ('1''2' '3')",
+            "INSERT INTO t (a) VALUES (0x)",
+            "INSERT INTO t (a) VALUES (0xAB 'c')",
+            "INSERT INTO t (a) VALUES (NULL '1')",
+            "DELETE FROM t WHERE id = '1' '2'",
+        ] {
+            for engine in SQL_ENGINES {
+                assert!(
+                    !is_generated_write_on(engine, sql),
+                    "{engine:?}: {sql} passed the gate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_literal_an_import_writes_passes_the_write_gate() {
+        use crate::import_rows::Value;
+        let values = [
+            Value::Null,
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Number("-1.5e3".into()),
+            Value::Text(String::new()),
+            Value::Text("it's".into()),
+            Value::Text("''".into()),
+            Value::Text("a\\b\\".into()),
+            Value::Text("\\'".into()),
+            Value::Text("é /* -- */ ;".into()),
+            Value::Text("0xAB".into()),
+            Value::Json(serde_json::from_str(r#"{"a": "b'c"}"#).unwrap()),
+        ];
+        let types = [
+            "text",
+            "varchar(10)",
+            "nvarchar(10)",
+            "integer",
+            "varbinary(10)",
+            "datetime",
+            "datetime2",
+            "bit",
+        ];
+        for engine in SQL_ENGINES {
+            for data_type in types {
+                let rows: Vec<Vec<Option<&Value>>> =
+                    values.iter().map(|value| vec![Some(value)]).collect();
+                for skip in [false, engine.skips_duplicates()] {
+                    let statement =
+                        insert_rows(engine, "s", "t", &[("a", data_type)], &rows, skip).unwrap();
+                    assert!(
+                        is_generated_write_on(engine, &statement),
+                        "{engine:?} {data_type}: {statement}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_gate_admits_a_lone_transaction_bracket() {
+        for sql in [
+            "BEGIN",
+            "BEGIN;",
+            "BEGIN TRANSACTION",
+            "COMMIT",
+            "COMMIT;",
+            "ROLLBACK",
+            " ROLLBACK; ",
+        ] {
+            assert!(is_generated_write(sql), "{sql:?} was refused");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_bracket_beside_anything_else() {
+        for sql in [
+            "BEGIN; INSERT INTO t (a) VALUES ('1')",
+            "INSERT INTO t (a) VALUES ('1'); COMMIT",
+            "COMMIT; DROP TABLE t",
+            "ROLLBACK; COMMIT",
+            "BEGIN; COMMIT",
+            "begin",
+            "START TRANSACTION",
+            "ROLLBACK TO SAVEPOINT s",
+            "COMMIT AND CHAIN",
+            "BEGIN WORK",
+            "COMMIT;;",
+        ] {
+            assert!(!is_generated_write(sql), "{sql:?} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_quote_a_backslash_escapes_where_the_engine_reads_one() {
+        // The grammar ends each of these strings at the second `'`; MySQL and
+        // Snowflake read `\'` as a quote inside it, and the rest as SQL.
+        let probes = [
+            r"INSERT INTO t (a, b) VALUES ('a\', ', (SELECT password FROM users LIMIT 1)) # ')",
+            r"INSERT INTO t (a, b) VALUES ('a\', ', sleep(5)) -- ')",
+            r"DELETE FROM t WHERE id = 'a\' AND b = ' OR 1=1 # '",
+            r"UPDATE t SET a = 'x\', b = ' WHERE 1=1 -- ' WHERE id = '1'",
+            r"UPDATE t SET a = 'x\', b = ' WHERE 1=1; DROP TABLE t; -- ' WHERE id = '1'",
+            r"UPDATE t SET a = '1' WHERE id = 'a\' OR b = ' OR 1=1 -- '",
+            r#"UPDATE t SET a = "x\", b = " WHERE 1=1 -- " WHERE id = '1'"#,
+        ];
+        for sql in probes {
+            assert!(!is_generated_write(sql), "{sql} passed the gate");
+        }
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
+            for sql in probes {
+                assert!(
+                    !is_generated_write_on(engine, sql),
+                    "{sql} passed the gate on {engine:?}"
+                );
+            }
+            assert!(!delete_matches_key_on(engine, probes[2], &["id", "b"]));
+            // What `quote_literal` writes there still reads as one literal.
+            for value in [r"a\", "it's", r"it\'s", r"\\", r"\", r#"a\"b"#] {
+                let literal = engine.quote_literal(value);
+                for sql in [
+                    format!("INSERT INTO t (a) VALUES ({literal})"),
+                    format!("DELETE FROM t WHERE id = {literal}"),
+                    format!("UPDATE t SET a = {literal} WHERE id = {literal}"),
+                ] {
+                    assert!(
+                        is_generated_write_on(engine, &sql),
+                        "{sql} was refused on {engine:?}"
+                    );
+                }
+            }
+        }
+        // A backslash is an ordinary character where the engine says so.
+        for engine in [Engine::Postgres, Engine::Sqlite, Engine::SqlServer] {
+            for sql in [
+                r"INSERT INTO t (a) VALUES ('C:\')",
+                r"DELETE FROM t WHERE id = 'C:\'",
+                r"UPDATE t SET a = 'C:\' WHERE id = 'C:\'",
+            ] {
+                assert!(
+                    is_generated_write_on(engine, sql),
+                    "{sql} was refused on {engine:?}"
+                );
+            }
+            assert!(delete_matches_key_on(
+                engine,
+                r"DELETE FROM t WHERE id = 'C:\'",
+                &["id"]
+            ));
+        }
+    }
+
+    #[test]
+    fn the_gate_still_refuses_a_delete_matching_null() {
+        // `= NULL` matches no row, and NULL is a value only an insert writes.
+        assert!(!is_generated_write("DELETE FROM t WHERE id = NULL"));
+        assert!(!is_generated_write(
+            "UPDATE t SET a = '1' WHERE id = '2'; DELETE FROM t WHERE id = NULL"
+        ));
     }
 
     #[test]
@@ -3287,7 +5735,7 @@ mod tests {
     fn the_gate_refuses_everything_that_is_not_a_write_dbdelve_writes() {
         // Hard rule 1 in code: DROP and TRUNCATE never leave dbdelve, whatever
         // the user asked for. SELECT is here because the gate is a whitelist --
-        // being harmless is not the test, being one of the three shapes dbdelve
+        // being harmless is not the test, being one of the shapes dbdelve
         // generates is. A keyed DELETE is no longer in this list because it is
         // one of those shapes; `delete_matches_key` is what asks whether the key
         // it names is the row's.
@@ -3650,6 +6098,64 @@ mod tests {
         assert!(!delete_matches_key("DROP TABLE t", &["id"]));
     }
 
+    #[test]
+    fn only_an_engine_naming_rows_by_every_value_reads_the_row_terms() {
+        let terms = [
+            "DELETE FROM t WHERE toString(c) = '1.5'",
+            "DELETE FROM t WHERE c IS NULL",
+            "ALTER TABLE t UPDATE a = '1' WHERE b = '2' SETTINGS mutations_sync = 2",
+        ];
+        for engine in Engine::ALL {
+            for sql in terms {
+                assert_eq!(
+                    is_generated_write_on(engine, sql),
+                    engine == Engine::ClickHouse,
+                    "{engine:?} {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_clickhouse_name_holding_a_backslash_names_no_row() {
+        // The gate's grammar does not read a backslash inside backticks, so
+        // such a row is refused rather than matched on a misread name.
+        let delete = format!(
+            "DELETE FROM t WHERE {} = '1' AND `n` IS NULL",
+            Engine::ClickHouse.spec().quote_identifier(r"a\b")
+        );
+        assert!(!is_generated_write_on(Engine::ClickHouse, &delete));
+        assert!(!delete_matches_key_on(
+            Engine::ClickHouse,
+            &delete,
+            &[r"a\b", "n"]
+        ));
+        assert_eq!(row_guard(Engine::ClickHouse, &delete), None);
+    }
+
+    #[test]
+    fn a_row_guard_counts_with_the_writes_own_table_and_predicate() {
+        assert_eq!(
+            row_guard(
+                Engine::Postgres,
+                r#"UPDATE "s"."t" SET "a" = 'x' WHERE "id" = '7';"#
+            )
+            .as_deref(),
+            Some(r#"SELECT COUNT(*) FROM "s"."t" WHERE "id" = '7'"#)
+        );
+        for refused in [
+            "SELECT 1",
+            "BEGIN",
+            "INSERT INTO t (a) VALUES ('1')",
+            "UPDATE t SET a = '1' WHERE id > '7'",
+            "UPDATE t SET a = '1' WHERE id = '7'; UPDATE t SET a = '2' WHERE id = '8'",
+            "DELETE FROM t WHERE id = '7' OR 1 = 1",
+        ] {
+            assert_eq!(row_guard(Engine::Postgres, refused), None, "{refused}");
+        }
+        assert_eq!(row_guard(Engine::MongoDb, "db.t.deleteOne({_id: 1})"), None);
+    }
+
     fn set(value: &str) -> NewValue {
         NewValue::Value(value.into())
     }
@@ -3670,6 +6176,8 @@ mod tests {
                 .collect(),
             keys: owned(keys),
             types: Vec::new(),
+            held: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -3808,8 +6316,11 @@ mod tests {
                 "{engine:?}"
             );
         }
-        // Not a preview: nothing to re-spell, so nothing to run.
-        assert_eq!(paged(Engine::SqlServer, &statement(""), &[]), None);
+        // No limit is one page, which needs no `OFFSET` and so no order.
+        assert_eq!(
+            paged(Engine::SqlServer, &statement(""), &[]).as_deref(),
+            Some(statement("").as_str())
+        );
         assert_eq!(paged(Engine::SqlServer, "DELETE FROM t LIMIT 1", &[]), None);
     }
 
@@ -3845,6 +6356,56 @@ mod tests {
         // Not `paged`'s shape: left alone.
         let typed = "SELECT * FROM t ORDER BY id OFFSET 5 ROWS";
         assert_eq!(unpaged(typed), typed);
+    }
+
+    #[test]
+    fn an_unsorted_clickhouse_page_is_ordered_by_the_key() {
+        let unsorted = "SELECT * FROM `db`.`events` WHERE `a` = 1 LIMIT 100 OFFSET 200";
+        let key = ["user_id".to_string(), "ts".to_string()];
+        let page = paged(Engine::ClickHouse, unsorted, &key).unwrap();
+        assert_eq!(
+            page,
+            "SELECT * FROM `db`.`events` WHERE `a` = 1 ORDER BY `user_id`, `ts` LIMIT 100 OFFSET 200"
+        );
+        assert!(is_generated_select(Engine::ClickHouse, &page), "{page}");
+
+        // The key's order is not a sort the user chose: read from the
+        // statement before paging, an unsorted preview has no sort keys.
+        assert_eq!(order_by(Engine::ClickHouse, unsorted), Some(Vec::new()));
+        assert_eq!(
+            order_by(Engine::ClickHouse, &page).map(|k| k.len()),
+            Some(2)
+        );
+
+        // A sort the user asked for is the order, key or no key, and is what
+        // the statement before paging reads back.
+        let sorted =
+            with_order_by(Engine::ClickHouse, unsorted, &[SortKey::new("`id`", true)]).unwrap();
+        assert_eq!(
+            paged(Engine::ClickHouse, &sorted, &key).as_deref(),
+            Some(sorted.as_str())
+        );
+        assert_eq!(
+            order_by(Engine::ClickHouse, &sorted),
+            Some(vec![SortKey::new("`id`", true)])
+        );
+
+        // No key, or a key made of an expression such as `toDate(ts)`, which
+        // gives none: the page stays as generated.
+        assert_eq!(
+            paged(Engine::ClickHouse, unsorted, &[]).as_deref(),
+            Some(unsorted)
+        );
+        // No limit is one page.
+        let whole = "SELECT * FROM `db`.`events`";
+        assert_eq!(
+            paged(Engine::ClickHouse, whole, &key).as_deref(),
+            Some(whole)
+        );
+        assert_eq!(
+            paged(Engine::ClickHouse, "DELETE FROM t LIMIT 1", &key),
+            None
+        );
     }
 
     #[test]
@@ -4002,7 +6563,7 @@ mod tests {
             ("SELECT 2", "SELECT 1"),
             ("SELECT 2;\n", "SELECT\n  1"),
         ] {
-            let appended = appended_statement(buffer, recalled);
+            let appended = appended_statement(Engine::Postgres, buffer, recalled);
             let line = appended.lines().count() - recalled.lines().count();
 
             assert_eq!(
@@ -4018,23 +6579,100 @@ mod tests {
         // Without the semicolon, "SELECT 1" and "UPDATE ..." would read back
         // as a single statement, and cmd+enter would send both at once.
         assert_eq!(
-            appended_statement("SELECT 1", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
+    }
+
+    #[test]
+    fn a_redis_buffer_takes_its_appended_command_on_a_line_of_its_own() {
+        let appended = appended_statement(Engine::Redis, "GET a  \n", "SET a 1 KEEPTTL");
+        assert_eq!(appended, "GET a\n\nSET a 1 KEEPTTL");
+        assert_eq!(crate::redis_cmd::parse(&appended).unwrap().len(), 2);
     }
 
     #[test]
     fn an_already_terminated_buffer_keeps_a_single_semicolon() {
         assert_eq!(
-            appended_statement("SELECT 1;", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1;", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
     }
 
     #[test]
+    fn a_sort_spliced_after_a_line_comment_starts_its_own_line() {
+        let by_name = [SortKey::new("name", true)];
+        for (statement, expected) in [
+            (
+                "select * from t -- recent\nlimit 10",
+                "select * from t -- recent\nORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t -- recent\norder by id limit 10",
+                "select * from t -- recent\nORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t /* recent */ limit 10",
+                "select * from t /* recent */ ORDER BY name ASC limit 10",
+            ),
+            (
+                "select * from t where note = 'a--b' limit 10",
+                "select * from t where note = 'a--b' ORDER BY name ASC limit 10",
+            ),
+        ] {
+            assert_eq!(
+                with_order_by(Engine::Sqlite, statement, &by_name).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            with_order_by(
+                Engine::Sqlite,
+                "select * from t -- recent\norder by id limit 10",
+                &[]
+            )
+            .as_deref(),
+            Some("select * from t -- recent\nlimit 10")
+        );
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_string_still_unpages_on_sql_server() {
+        for value in ["'a--b'", "'a#b'"] {
+            let preview =
+                format!("SELECT * FROM \"t\" WHERE \"name\" = {value} LIMIT 100 OFFSET 0");
+            let paged = paged(Engine::SqlServer, &preview, &["id".into()]).unwrap();
+
+            assert_eq!(unpaged(&paged), preview, "{paged}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_comment_does_not_swallow_the_terminator() {
+        for (buffer, expected) in [
+            ("SELECT 1 -- note", "SELECT 1; -- note"),
+            ("SELECT 1 -- note;", "SELECT 1; -- note;"),
+            ("SELECT 1 /* note */", "SELECT 1; /* note */"),
+            ("SELECT 1; -- note", "SELECT 1; -- note"),
+            ("SELECT 1; /* note; */", "SELECT 1; /* note; */"),
+            ("SELECT 'a;'", "SELECT 'a;';"),
+            ("SELECT 1;;", "SELECT 1;;"),
+        ] {
+            let appended = appended_statement(Engine::Postgres, buffer, "UPDATE t SET a = 1");
+
+            assert_eq!(appended, format!("{expected}\n\nUPDATE t SET a = 1"));
+            assert_eq!(
+                Buffer::parse(&appended).statements().len(),
+                2,
+                "{appended:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_empty_buffer_yields_just_the_statement() {
         assert_eq!(
-            appended_statement("", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "", "UPDATE t SET a = 1"),
             "UPDATE t SET a = 1"
         );
     }
@@ -4042,7 +6680,7 @@ mod tests {
     #[test]
     fn trailing_whitespace_in_the_buffer_does_not_ragged_the_join() {
         assert_eq!(
-            appended_statement("SELECT 1\n\n  ", "UPDATE t SET a = 1"),
+            appended_statement(Engine::Postgres, "SELECT 1\n\n  ", "UPDATE t SET a = 1"),
             "SELECT 1;\n\nUPDATE t SET a = 1"
         );
     }
@@ -4144,6 +6782,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_lone_read_is_stopped_at_the_limit() {
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Snowflake,
+            Engine::SqlServer,
+        ] {
+            assert!(stoppable(engine, "SELECT * FROM t"), "{engine:?}");
+            assert!(stoppable(engine, "SELECT * FROM t;"), "{engine:?}");
+            assert!(
+                stoppable(engine, "-- the big one\nSELECT * FROM t"),
+                "{engine:?}"
+            );
+            for sql in [
+                "SELECT * FROM t; COMMIT",
+                "SET x = 1; SELECT * FROM t",
+                "BEGIN; SELECT * FROM t; COMMIT",
+                "SELECT 1; SELECT * FROM t",
+                "UPDATE t SET v = 1",
+            ] {
+                assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        assert!(!stoppable(
+            Engine::SqlServer,
+            "SELECT * FROM t\nSELECT * FROM u"
+        ));
+        // SQL Server caps a stoppable read with `SET ROWCOUNT`, which caps a
+        // write just the same, so nothing that writes may get through.
+        for sql in [
+            "SELECT * INTO #copy FROM t",
+            "SELECT * INTO copy FROM t",
+            "EXEC dbo.report",
+            "EXECUTE dbo.report 1",
+            "dbo.report",
+            "INSERT INTO t SELECT * FROM u",
+            "SELECT * FROM t; DELETE FROM t",
+            "IF 1 = 1 DELETE FROM t",
+            "BEGIN SELECT * FROM t; DELETE FROM t END",
+            "WITH c AS (SELECT 1 AS a) DELETE FROM t",
+            "MERGE t USING u ON t.id = u.id WHEN MATCHED THEN DELETE;",
+        ] {
+            assert!(!stoppable(Engine::SqlServer, sql), "{sql}");
+        }
+        assert!(stoppable(
+            Engine::SqlServer,
+            "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
+        ));
+        for (engine, sql) in [
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false), * FROM t",
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1), * FROM t"),
+            (Engine::MySql, "SELECT GET_LOCK('held', 0), t.* FROM t"),
+            (Engine::MySql, "SELECT @n := @n + 1, t.* FROM t"),
+        ] {
+            assert!(!stoppable(engine, sql), "{engine:?}: {sql}");
+        }
+        assert!(stoppable(Engine::MongoDb, "db.accounts.find({})"));
+        assert!(stoppable(
+            Engine::MongoDb,
+            "db.accounts\n  .find({})\n  .sort({a: 1})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.find({})\ndb.other.find({})"
+        ));
+        assert!(!stoppable(
+            Engine::MongoDb,
+            "db.accounts.aggregate([{$out: 'copy'}])"
+        ));
+    }
+
     /// Every MongoDB write returns a reply grid, so a restored one is offered
     /// Refresh only when this holds.
     #[test]
@@ -4160,6 +6875,7 @@ mod tests {
             "db.accounts.deleteOne({_id: 1})",
             "db.accounts.findOneAndUpdate({_id: 1}, {$set: {a: 2}})",
             "db.accounts.aggregate([{$out: 'copy'}])",
+            "db.accounts.aggregate([{$merge: 'copy'}])",
             "db.accounts.find({}",
         ] {
             assert!(!rerunnable(Engine::MongoDb, sql), "{sql}");
@@ -4272,6 +6988,135 @@ mod tests {
             classify(Engine::MySql, "ANALYZE SELECT * FROM t").destructive,
             vec![Destructive::Unreadable],
         );
+    }
+
+    #[test]
+    fn a_typed_explain_is_read_from_its_leading_words() {
+        use ExplainMode::{Analyze, Plan};
+        let cases = [
+            (Engine::Postgres, "EXPLAIN SELECT 1", Some(Plan)),
+            (Engine::Postgres, "explain verbose select 1", Some(Plan)),
+            (Engine::Postgres, "EXPLAIN ANALYZE SELECT 1", Some(Analyze)),
+            (
+                Engine::Postgres,
+                "EXPLAIN ANALYSE VERBOSE SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "-- why\nEXPLAIN ANALYZE SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "  /* why */ explain analyze select 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (analyze true) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (COSTS FALSE, ANALYZE ON) SELECT 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE false) SELECT 1",
+                Some(Plan),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE OFF, BUFFERS) SELECT 1",
+                Some(Plan),
+            ),
+            (
+                Engine::Postgres,
+                "EXPLAIN (FORMAT TEXT, ANALYZE) SELECT 1",
+                Some(Analyze),
+            ),
+            (Engine::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", None),
+            (
+                Engine::Postgres,
+                "EXPLAIN (ANALYZE, format yaml) SELECT 1",
+                None,
+            ),
+            (Engine::Postgres, "EXPLAIN (FORMAT XML) SELECT 1", None),
+            (Engine::Postgres, "SELECT 'EXPLAIN ANALYZE'", None),
+            (Engine::Postgres, "ANALYZE t", None),
+            (Engine::Postgres, "-- EXPLAIN\nSELECT 1", None),
+            (Engine::MySql, "EXPLAIN ANALYZE SELECT 1", Some(Analyze)),
+            (
+                Engine::MySql,
+                "/* why */ explain analyze select 1",
+                Some(Analyze),
+            ),
+            (
+                Engine::MySql,
+                "EXPLAIN ANALYZE FORMAT=TREE SELECT 1",
+                Some(Analyze),
+            ),
+            (Engine::MySql, "EXPLAIN FORMAT=TREE SELECT 1", Some(Plan)),
+            (Engine::MySql, "explain format = tree select 1", Some(Plan)),
+            (Engine::MySql, "EXPLAIN ANALYZE FORMAT=JSON SELECT 1", None),
+            (Engine::MySql, "EXPLAIN FORMAT=JSON SELECT 1", None),
+            // Tabular, a shape the plan pane does not read.
+            (Engine::MySql, "EXPLAIN SELECT 1", None),
+            (Engine::MySql, "EXPLAIN FORMAT=TRADITIONAL SELECT 1", None),
+            (Engine::MySql, "EXPLAIN t", None),
+            (Engine::MySql, "DESCRIBE SELECT 1", None),
+            (Engine::MySql, "DESC t", None),
+            // Both of MariaDB's are tabular.
+            (Engine::MariaDb, "EXPLAIN SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE FORMAT=JSON SELECT 1", None),
+            (Engine::MariaDb, "ANALYZE TABLE t", None),
+            (Engine::Sqlite, "EXPLAIN QUERY PLAN SELECT 1", Some(Plan)),
+            (
+                Engine::Sqlite,
+                "-- why\nexplain query plan select 1",
+                Some(Plan),
+            ),
+            // Bytecode, not a plan.
+            (Engine::Sqlite, "EXPLAIN SELECT 1", None),
+            (Engine::Snowflake, "EXPLAIN SELECT 1", None),
+            (Engine::SqlServer, "EXPLAIN SELECT 1", None),
+            (Engine::MongoDb, "db.c.find({a: 1}).explain()", Some(Plan)),
+            (
+                Engine::MongoDb,
+                "db.c.find().explain('queryPlanner')",
+                Some(Plan),
+            ),
+            (Engine::MongoDb, "db.c.find().explain(false)", Some(Plan)),
+            (
+                Engine::MongoDb,
+                "db.c.find().sort({a: 1}).explain('executionStats')",
+                Some(Analyze),
+            ),
+            (
+                Engine::MongoDb,
+                "db.c.aggregate([]).explain(\"allPlansExecution\")",
+                Some(Analyze),
+            ),
+            (
+                Engine::MongoDb,
+                "db.c.countDocuments({}).explain(true)",
+                Some(Analyze),
+            ),
+            (Engine::MongoDb, "// why\ndb.c.find().explain()", Some(Plan)),
+            (Engine::MongoDb, "db.c.find()", None),
+            (Engine::MongoDb, "db.c.find().explain(); db.c.find()", None),
+        ];
+        for (engine, sql, mode) in cases {
+            assert_eq!(typed_explain(engine, sql), mode, "{engine:?} {sql}");
+        }
     }
 
     /// `TO STDOUT` hands rows to the client; a `PROGRAM` or file target runs a
@@ -4404,6 +7249,561 @@ mod tests {
                 "{engine:?}"
             );
         }
+    }
+
+    fn unreadable_at(mode: Mode) -> Verdict {
+        Verdict {
+            mode,
+            destructive: vec![Destructive::Unreadable],
+        }
+    }
+
+    #[test]
+    fn clickhouse_reads_its_own_dialect() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "SELECT * FROM t FINAL",
+            "SELECT * FROM t PREWHERE a = 1",
+            "SELECT a FROM t ARRAY JOIN arr AS a",
+            "SELECT * FROM t LIMIT 1 BY a",
+            "SELECT arrayMap(x -> x + 1, [1, 2])",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SHOW TABLES",
+            "DESCRIBE TABLE t",
+            "DESC t",
+            "USE analytics",
+            "SET max_threads = 1",
+            "SET readonly = 0",
+            "SELECT number FROM system.numbers",
+            "SELECT * FROM url('http://example.test/x.csv', CSV)",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::READ, "{sql}");
+        }
+        for sql in [
+            "SELECT 1 SETTINGS readonly = 0",
+            "SELECT 1 FORMAT JSON",
+            "WITH 1 AS x SELECT x",
+            "EXISTS t",
+            "EXISTS TABLE t",
+            "EXPLAIN PIPELINE SELECT 1",
+            "EXPLAIN AST ALTER TABLE t DELETE WHERE 1",
+            "CHECK TABLE t",
+            "WATCH lv",
+        ] {
+            let verdict = classify(ch, sql);
+            assert_eq!(verdict, unreadable_at(Mode::ReadOnly), "{sql}");
+            assert_eq!(gate(&verdict, Mode::ReadOnly, &[]), Some(Stop::RunOnce));
+        }
+        assert_eq!(
+            classify(ch, "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory"),
+            Verdict::WRITE
+        );
+    }
+
+    #[test]
+    fn clickhouse_floors_what_it_cannot_parse_by_its_first_keyword() {
+        let ch = Engine::ClickHouse;
+        let words = FLOOR_READS
+            .iter()
+            .map(|word| (*word, Mode::ReadOnly))
+            .chain(FLOOR_FULL.iter().map(|word| (*word, Mode::Full)))
+            .chain([
+                ("INSERT", Mode::ReadWrite),
+                ("INSERT INTO FUNCTION", Mode::Full),
+                ("INSERT INTO TABLE FUNCTION", Mode::Full),
+                ("insert into /* c */ function", Mode::Full),
+                ("DELETE", Mode::ReadWrite),
+                ("UPDATE", Mode::ReadWrite),
+                ("FROBNICATE", Mode::ReadWrite),
+                ("`SELECT`", Mode::ReadWrite),
+                ("(", Mode::ReadWrite),
+            ]);
+        for (word, mode) in words {
+            for word in [word.to_owned(), word.to_lowercase()] {
+                for lead in [
+                    "",
+                    "-- c\n",
+                    "--c\r\n",
+                    "/* c */",
+                    "/* a /* b */ c */\n",
+                    " \t\n",
+                ] {
+                    let sql = format!("{lead}{word} ) (");
+                    let verdict = classify(ch, &sql);
+                    // sqlparser reads any `SHOW …` as a variable to show.
+                    let expected = match word.eq_ignore_ascii_case("SHOW") {
+                        true => Verdict::READ,
+                        false => unreadable_at(mode),
+                    };
+                    assert_eq!(verdict, expected, "{sql:?}");
+                    let stop = match mode {
+                        Mode::ReadOnly => verdict.destructive.first().map(|_| Stop::RunOnce),
+                        mode => Some(Stop::Upgrade(mode)),
+                    };
+                    assert_eq!(gate(&verdict, Mode::ReadOnly, &[]), stop, "{sql:?}");
+                }
+            }
+        }
+
+        // A tokenizer error is placed by the words before it, at Read-write
+        // at least.
+        for (sql, mode) in [
+            (
+                "/* unended BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::ReadWrite,
+            ),
+            ("SELECT 'unended", Mode::ReadWrite),
+            ("SELECT `unended", Mode::ReadWrite),
+            ("BACKUP TABLE t TO Disk('b', 'x') 'unended", Mode::Full),
+            (
+                "SELECT 1; RESTORE TABLE t FROM Disk('b', 'x') `",
+                Mode::Full,
+            ),
+            // Where the tokenizer stops, the server may read on.
+            (
+                "SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::Full,
+            ),
+            (
+                "SELECT `a\\`` PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+                Mode::Full,
+            ),
+            ("SELECT 1 /* \u{e9}", Mode::Full),
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(mode), "{sql:?}");
+        }
+
+        // The server's lexer and sqlparser's tokenizer part ways on these, so
+        // a word the server runs may be one the tokenizer never sees: each
+        // needs Full.
+        let backup = "BACKUP TABLE t TO Disk('backups', 'review-poc')";
+        let restore = "RESTORE TABLE t FROM Disk('backups', 'review-poc')";
+        for sql in [
+            // `//` and `# ` comment to the server, and hide the quote that
+            // opens a string to the tokenizer.
+            format!("SELECT 1 // '\nPARALLEL WITH {backup} -- '"),
+            format!("SELECT 1 // '\nPARALLEL WITH {restore} -- '"),
+            format!("{backup} // '"),
+            format!("SELECT 1 //* '\nPARALLEL WITH {backup} -- '"),
+            format!("SELECT 1 #'\nPARALLEL WITH {backup} -- '"),
+            "# c\nSELECT 1".to_owned(),
+            "#!c\nSELECT 1".to_owned(),
+            // A backslash escapes the backtick for the server alone, which
+            // then reads the doubled one as the end of the name.
+            format!("SELECT `a\\`` PARALLEL WITH {backup} -- `"),
+            format!("SELECT \"a\\\"\" PARALLEL WITH {backup} -- \""),
+            // `a$$` is one bare word to the server.
+            format!("SELECT a$$ PARALLEL WITH {backup} --$$"),
+            format!("SELECT 1 AS a$$ PARALLEL WITH {backup} --$$"),
+            format!("SELECT $$x$$ PARALLEL WITH {backup}"),
+            "SELECT $1".to_owned(),
+            // A zero-width space is a space to the server.
+            format!("SELECT 1 PARALLEL\u{200b}WITH {backup}"),
+            format!("\u{200b}{backup}"),
+            "\u{200b}SELECT 1".to_owned(),
+            "\u{feff}SELECT 1".to_owned(),
+            "INSERT INTO\u{200b}FUNCTION file('x') VALUES (1)".to_owned(),
+            // Curly quotes are quotes to the server.
+            format!("SELECT \u{2018}'\u{2019} PARALLEL WITH {backup} --'"),
+            "SELECT caf\u{e9}".to_owned(),
+            format!("-- c\r{backup}"),
+        ] {
+            assert_eq!(classify(ch, &sql), unreadable_at(Mode::Full), "{sql:?}");
+        }
+        assert_eq!(classify(ch, "SELECT 4 / 2"), Verdict::READ);
+        assert_eq!(classify(ch, "SELECT 4 / /* c */ 2"), Verdict::READ);
+        // Inside a literal or a comment, none of them matters.
+        for sql in [
+            "SELECT 'a#b$c\u{200b}\u{2018}\\'' AS x",
+            "SELECT `a#b$c\u{200b}` FROM t",
+            "SELECT 1 /* # $ \u{200b} ` \\ */",
+            "-- # $ \u{200b}\nSELECT 1",
+            "SELECT 1\u{a0}FROM t",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::READ, "{sql:?}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO\u{a0}FUNCTION file('x') VALUES (1)"),
+            Verdict::FULL
+        );
+        assert_eq!(classify(ch, "-- c\r\nSELECT 1"), Verdict::READ);
+        assert_eq!(
+            classify(ch, "/* /* */ */ BACKUP TABLE t TO Disk('b', 'x')"),
+            unreadable_at(Mode::Full)
+        );
+    }
+
+    #[test]
+    fn clickhouse_needs_full_for_what_writes_outside_the_database() {
+        let ch = Engine::ClickHouse;
+        for target in [
+            "url('http://example.test/x', CSV, 'a Int32')",
+            "s3('http://example.test/b/x.csv')",
+            "s3Cluster('c', 'http://example.test/b/x.csv')",
+            "file('x.csv', 'CSV', 'a Int32')",
+            "hdfs('hdfs://example.test/x', 'CSV', 'a Int32')",
+            "remote('h', db.t)",
+            "remoteSecure('h', db.t)",
+            "mysql('h:3306', 'db', 't', 'u', 'p')",
+            "postgresql('h:5432', 'db', 't', 'u', 'p')",
+            "azureBlobStorage('c', 'x')",
+            "gcs('http://example.test/x')",
+            "mongodb('h', 'db', 'c', 'u', 'p', 'a Int32')",
+            "odbc('dsn', 't')",
+            "jdbc('dsn', 't')",
+            "db.f('x')",
+        ] {
+            for into in ["INTO FUNCTION", "INTO TABLE FUNCTION", "into function"] {
+                let sql = format!("INSERT {into} {target} VALUES (1)");
+                assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+                let sql = format!("INSERT {into} {target} SELECT * FROM t");
+                assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+            }
+            // Unparseable, so the floor reads the same words.
+            let sql = format!("INSERT INTO FUNCTION {target} SETTINGS a = 1 VALUES (1)");
+            assert_eq!(classify(ch, &sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO `function` VALUES (1)"),
+            Verdict::WRITE
+        );
+
+        // No other dialect reads a table function as an insert's target:
+        // Postgres's reads a table named `FUNCTION` aliased `url`, the rest
+        // nothing at all, and the verdict each gave before stands.
+        let insert = "INSERT INTO FUNCTION url('http://example.test/x') VALUES (1)";
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql && *engine != ch)
+        {
+            let dialect = dialect(engine).unwrap();
+            let expected = match SqlParser::parse_sql(dialect.as_ref(), insert) {
+                Ok(statements) => {
+                    assert!(
+                        matches!(
+                            statements.as_slice(),
+                            [Statement::Insert(Insert {
+                                table: TableObject::TableName(_),
+                                ..
+                            })]
+                        ),
+                        "{engine:?}"
+                    );
+                    Verdict::WRITE
+                }
+                Err(_) => Verdict {
+                    mode: match engine.holds_read_only() {
+                        true => Mode::ReadOnly,
+                        false => Mode::ReadWrite,
+                    },
+                    destructive: vec![Destructive::Unreadable],
+                },
+            };
+            assert_eq!(classify(engine, insert), expected, "{engine:?}");
+        }
+
+        for sql in [
+            "SELECT 1 INTO OUTFILE 'x'",
+            "select 1 into outfile 'x' format CSV",
+            "WITH x AS (SELECT 1) SELECT * FROM x INTO OUTFILE 'y'",
+            "INSERT INTO t SELECT 1 INTO OUTFILE 'x'",
+            "SELECT 1 PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x')",
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(classify(ch, "SELECT outfile FROM t"), Verdict::FULL);
+
+        for engine in [
+            "URL('http://example.test/x', CSV)",
+            "File(CSV)",
+            "S3('http://example.test/b/x.csv')",
+            "SQLite('x.db', 't')",
+            "Kafka",
+            "mergetree",
+            "Distributed('one_shard_cluster', 'db', 'target')",
+            "KeeperMap('/k')",
+            "FrobMergeTree",
+        ] {
+            let sql = format!("CREATE TABLE t2 (a Int32) ENGINE = {engine}");
+            assert_eq!(classify(ch, &sql), Verdict::FULL, "{sql}");
+        }
+        assert_eq!(
+            classify(
+                ch,
+                "CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', \
+                 'target') AS SELECT 1"
+            ),
+            Verdict::FULL
+        );
+        for family in [
+            "",
+            "Replacing",
+            "Summing",
+            "Aggregating",
+            "Collapsing",
+            "VersionedCollapsing",
+            "Graphite",
+            "Coalescing",
+        ] {
+            for prefix in ["", "Replicated", "Shared"] {
+                let sql = format!(
+                    "CREATE TABLE t2 (a Int32) ENGINE = {prefix}{family}MergeTree ORDER BY a"
+                );
+                assert_eq!(classify(ch, &sql), Verdict::WRITE, "{sql}");
+            }
+        }
+        // `ON CLUSTER` runs it on every server of the cluster; a join on a
+        // column named `cluster` is still a read.
+        for sql in [
+            "CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a",
+            "CREATE DATABASE d ON CLUSTER c",
+            "ALTER TABLE t ON CLUSTER c ADD COLUMN b Int32",
+            "INSERT INTO t SELECT * FROM a JOIN b ON cluster = b.c",
+        ] {
+            assert_eq!(classify(ch, sql).mode, Mode::Full, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "SELECT * FROM a JOIN b ON cluster = b.c"),
+            Verdict::READ
+        );
+        // `SET DEFAULT ROLE` stores a user's roles; the other `SET`s change
+        // the session, and the server's `readonly=2` refuses any `readonly`.
+        for sql in [
+            "SET DEFAULT ROLE NONE TO CURRENT_USER",
+            "SET DEFAULT ROLE r TO u",
+            "set default role all to u",
+            "/* c */ SET DEFAULT ROLE ALL EXCEPT r TO u",
+        ] {
+            assert_eq!(classify(ch, sql).mode, Mode::Full, "{sql}");
+        }
+        for sql in ["SET readonly = 0", "SET max_threads = 1", "SET ROLE r"] {
+            assert_eq!(classify(ch, sql).mode, Mode::ReadOnly, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1"),
+            Verdict::FULL
+        );
+        for sql in [
+            "CREATE TABLE t2 (a Int32) ENGINE = MergeTree ORDER BY a",
+            "CREATE TABLE t2 (a Int32) ENGINE = ReplicatedReplacingMergeTree('/x', '{r}') ORDER BY a",
+            "CREATE TABLE t2 (a Int32) ENGINE = Memory",
+            "CREATE TABLE t2 (a Int32)",
+            "CREATE TABLE t2 AS SELECT 1",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::WRITE, "{sql}");
+        }
+        // The engine list is ClickHouse's alone: MySQL's `ENGINE =` is read as
+        // it always was.
+        assert_eq!(
+            classify(Engine::MySql, "CREATE TABLE t2 (a int) ENGINE = CSV"),
+            Verdict::WRITE
+        );
+    }
+
+    #[test]
+    fn a_clickhouse_mutation_is_classified_as_the_statement_it_amounts_to() {
+        let spec = Engine::ClickHouse.spec();
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "ALTER TABLE t UPDATE a = 1 WHERE b = 2",
+                Some("UPDATE t SET a = 1 WHERE b = 2"),
+            ),
+            (
+                "ALTER TABLE t UPDATE a = 1, b = 'x' WHERE c = 3 SETTINGS mutations_sync = 2",
+                Some("UPDATE t SET a = 1, b = 'x' WHERE c = 3"),
+            ),
+            (
+                "ALTER TABLE `db`.`t` DELETE WHERE a IN (1, 2) SETTINGS mutations_sync = 2;",
+                Some("DELETE FROM `db`.`t` WHERE a IN (1, 2)"),
+            ),
+            (
+                "alter table t delete /* c */ where a = 1",
+                Some("DELETE FROM t where a = 1"),
+            ),
+            (
+                "ALTER TABLE t UPDATE a = 1 WHERE b = 2, DROP COLUMN c",
+                None,
+            ),
+            ("ALTER TABLE t DELETE WHERE 1, UPDATE a = 1 WHERE 1", None),
+            ("ALTER TABLE t ON CLUSTER c DELETE WHERE a = 1", None),
+            ("ALTER TABLE t UPDATE a = 1 IN PARTITION p WHERE 1", None),
+            ("ALTER TABLE t DELETE IN PARTITION p WHERE 1", None),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS mutations_sync = '2'",
+                None,
+            ),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS max_threads = 1",
+                None,
+            ),
+            (
+                "ALTER TABLE t DELETE WHERE 1 SETTINGS mutations_sync = 2, max_threads = 1",
+                None,
+            ),
+            ("ALTER TABLE t UPDATE a = 1", None),
+            ("ALTER TABLE t DELETE WHERE 1 RETURNING *", None),
+            ("ALTER TABLE t MODIFY COLUMN a String", None),
+            ("ALTER TABLE t DELETE WHERE 1; DROP TABLE t", None),
+            (
+                "ALTER TABLE t DELETE WHERE a = '#$\\''",
+                Some("DELETE FROM t WHERE a = '#$\\''"),
+            ),
+            ("ALTER TABLE `t\\`` DELETE WHERE 1 -- `", None),
+            ("ALTER TABLE t DELETE WHERE a = 1 # c", None),
+            ("ALTER TABLE t DELETE WHERE a = $$x$$", None),
+            (
+                "ALTER TABLE t DELETE WHERE 1 PARALLEL\u{200b}WITH DROP TABLE t",
+                None,
+            ),
+            ("DELETE FROM t WHERE a = 1", None),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(mutation_as_dml(spec, sql).as_deref(), *expected, "{sql}");
+            let verdict = classify(Engine::ClickHouse, sql);
+            match expected {
+                Some(_) => assert_eq!(verdict, Verdict::WRITE, "{sql}"),
+                // Whatever does not re-spell takes `ALTER`'s floor.
+                None if sql.starts_with("ALTER") => assert_eq!(verdict.mode, Mode::Full, "{sql}"),
+                None => {}
+            }
+        }
+        assert_eq!(
+            classify(
+                Engine::ClickHouse,
+                "ALTER TABLE t ON CLUSTER c DELETE WHERE a = 1"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(
+                Engine::ClickHouse,
+                "ALTER TABLE t UPDATE a = 1 WHERE 1, DROP COLUMN c"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(Engine::ClickHouse, "SELECT 1; ALTER TABLE t DELETE WHERE 1"),
+            Verdict::WRITE
+        );
+        for engine in [Engine::MySql, Engine::Postgres, Engine::DuckDb] {
+            assert_eq!(
+                mutation_as_dml(engine.spec(), "ALTER TABLE t DELETE WHERE a = 1"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_writes_and_several_statements_need_what_their_worst_needs() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "INSERT INTO t SELECT * FROM s",
+            "INSERT INTO t WITH x AS (SELECT 1) SELECT * FROM x",
+            "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+            "CREATE TABLE t2 AS SELECT * FROM t",
+            "DELETE FROM t WHERE a = 1",
+            "UPDATE t SET a = 1 WHERE b = 2",
+            "ALTER TABLE t DELETE WHERE a = 1",
+        ] {
+            assert_eq!(classify(ch, sql), Verdict::WRITE, "{sql}");
+        }
+        assert_eq!(
+            classify(ch, "INSERT INTO t SETTINGS async_insert = 1 VALUES (1)"),
+            unreadable_at(Mode::ReadWrite)
+        );
+        assert_eq!(
+            classify(ch, "DELETE FROM t ON CLUSTER c WHERE a = 1"),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1; DROP TABLE t"),
+            Verdict::destroys(Destructive::Drop)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1; SELECT 1 FORMAT JSON"),
+            unreadable_at(Mode::ReadOnly)
+        );
+        assert_eq!(
+            classify(
+                ch,
+                "SELECT 1 SETTINGS readonly = 0; BACKUP TABLE t TO Disk('b', 'x')"
+            ),
+            unreadable_at(Mode::Full)
+        );
+        assert_eq!(
+            classify(ch, "SELECT 1 FROM t; DROP TABLE t SYNC"),
+            unreadable_at(Mode::Full)
+        );
+        // `EXPLAIN` never runs its statement on ClickHouse.
+        assert_eq!(
+            classify(ch, "EXPLAIN INSERT INTO t SELECT 1"),
+            Verdict::READ
+        );
+        assert_eq!(
+            classify(ch, "EXPLAIN DELETE FROM t WHERE a = 1"),
+            Verdict::READ
+        );
+        for sql in [
+            "SYSTEM SHUTDOWN",
+            "KILL QUERY WHERE 1",
+            "BACKUP TABLE t TO Disk('b', 'x')",
+            "RESTORE TABLE t FROM Disk('b', 'x')",
+            "REPLACE TABLE t AS SELECT 1",
+            "ATTACH TABLE t",
+        ] {
+            assert_eq!(classify(ch, sql), unreadable_at(Mode::Full), "{sql}");
+        }
+        assert_eq!(classify(ch, "OPTIMIZE TABLE t FINAL"), Verdict::FULL);
+    }
+
+    #[test]
+    fn a_clickhouse_statement_is_rerun_stopped_and_kept_by_what_it_is() {
+        let ch = Engine::ClickHouse;
+        for sql in [
+            "SELECT number FROM system.numbers",
+            "SELECT number FROM system.numbers FORMAT JSON",
+            "SELECT number FROM system.numbers SETTINGS max_threads = 1",
+            "SELECT * FROM t FINAL PREWHERE a = 1",
+        ] {
+            assert!(stoppable(ch, sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1 FORMAT JSON",
+            "SELECT 1 SETTINGS readonly = 0",
+            "SELECT 1; SELECT 2",
+            "ALTER TABLE t DELETE WHERE 1",
+            "SELECT number FROM system.numbers INTO OUTFILE 'x'",
+        ] {
+            assert!(!stoppable(ch, sql), "{sql}");
+        }
+
+        assert!(rerunnable(ch, "SELECT * FROM t LIMIT 1 BY a"));
+        assert!(!rerunnable(ch, "SELECT 1 FORMAT JSON"));
+        assert!(!rerunnable(ch, "ALTER TABLE t UPDATE a = 1 WHERE 1"));
+        assert!(!rerunnable(ch, "INSERT INTO FUNCTION file('x') VALUES (1)"));
+
+        assert!(plain_read(ch, "SELECT arrayMap(x -> x + 1, [1, 2])"));
+        for sql in ["SHOW TABLES", "SET max_threads = 1", "SELECT 1 FORMAT JSON"] {
+            assert!(!plain_read(ch, sql), "{sql}");
+        }
+
+        let settings = |sql: &str| leaves(ch, sql).settings;
+        for sql in [
+            "SET max_threads = 1",
+            "USE analytics",
+            "SET max_threads = 1 SETTINGS x",
+            "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory",
+        ] {
+            assert!(settings(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "SELECT 1 SETTINGS max_threads = 1",
+            "ALTER TABLE t DELETE WHERE 1",
+        ] {
+            assert!(!settings(sql), "{sql}");
+        }
+        assert_eq!(leaves(ch, "BEGIN").transaction, Some(true));
     }
 
     /// One AST, three dialects. Two statements genuinely differ and are asserted as
@@ -4672,10 +8072,349 @@ mod tests {
     }
 
     #[test]
+    fn formatting_keeps_the_text_between_statements_as_written() {
+        let sql = "\n  select a,b from t;  -- why\n\n\n-- next\nselect 2;\n";
+        let formatted = format(Engine::Postgres, sql).unwrap();
+
+        assert_eq!(
+            formatted,
+            "\nselect\n  a,\n  b\nfrom\n  t;  -- why\n\n\n-- next\nselect\n  2;\n"
+        );
+    }
+
+    #[test]
+    fn statements_on_one_line_are_formatted_onto_lines_of_their_own() {
+        assert_eq!(
+            format(Engine::Postgres, "select 1; select 2").unwrap(),
+            "select\n  1;\nselect\n  2"
+        );
+    }
+
+    // `Buffer`'s split does not read `\'`, and would cut this literal at its
+    // `;`, or run the rest of the buffer into one statement after it.
+    #[test]
+    fn a_backslash_escaped_literal_keeps_its_text_and_the_lines_after_it_on_mysql() {
+        let sql =
+            "select 1;\n\ninsert into t values ('Don\\'t; be    late');\n\n\n-- keep\nselect   3;";
+        assert_eq!(
+            format(Engine::MySql, sql).unwrap(),
+            "select\n  1;\n\ninsert into\n  t\nvalues\n  ('Don\\'t; be    late');\n\n\n-- keep\nselect\n  3;"
+        );
+    }
+
+    #[test]
+    fn an_indented_statement_comes_back_flush() {
+        assert_eq!(
+            format(Engine::Postgres, "select 1;\n    select a from t;").unwrap(),
+            "select\n  1;\nselect\n  a\nfrom\n  t;"
+        );
+    }
+
+    #[test]
+    fn a_respaced_token_is_refused_rather_than_formatted() {
+        assert!(format(Engine::Sqlite, "select [my col] from t").is_err());
+        assert!(format(Engine::MySql, "select 0x0A").is_err());
+    }
+
+    #[test]
+    fn a_selection_cutting_through_a_literal_or_comment_is_refused() {
+        let sql = "insert into t values ('line one\nline   two');\n/* a   b */ select  1;";
+        let from = |text: &str| sql.find(text).unwrap();
+        // Line by line through a literal that spans two.
+        assert!(
+            format_selection(Engine::Postgres, sql, from("line   two")..from(";\n/*")).is_err()
+        );
+        assert!(format_selection(Engine::Postgres, sql, from("b */")..sql.len()).is_err());
+        assert!(format_selection(Engine::Postgres, sql, from("ect  1")..sql.len()).is_err());
+        assert_eq!(
+            format_selection(Engine::Postgres, sql, from("/*")..sql.len()).unwrap(),
+            "/* a   b */ select\n  1;"
+        );
+    }
+
+    #[test]
+    fn a_selection_inside_a_dollar_quoted_body_is_refused() {
+        for engine in [Engine::Postgres, Engine::Snowflake] {
+            let sql = "select $$hello   world$$";
+            let start = sql.find("hello").unwrap();
+            assert!(format_selection(engine, sql, start..start + 13).is_err());
+        }
+    }
+
+    #[test]
+    fn a_selection_beside_a_dollar_quoted_body_formats() {
+        let sql =
+            "create function f() returns int as $$ select 1 $$ language sql;\n\nselect a,b from t;";
+        let start = sql.find("select a").unwrap();
+        assert_eq!(
+            format_selection(Engine::Postgres, sql, start..sql.len()).unwrap(),
+            "select\n  a,\n  b\nfrom\n  t;"
+        );
+    }
+
+    #[test]
+    fn a_comment_ahead_of_an_indented_statement_stays() {
+        assert_eq!(
+            format(Engine::Postgres, "select 1;\n/* c */ select 2;").unwrap(),
+            "select\n  1;\n/* c */ select\n  2;"
+        );
+    }
+
+    #[test]
+    fn a_mongodb_selection_cutting_through_a_comment_is_refused() {
+        let sql = "// old: db.t.find({a:   1})\ndb.t.find({b:   2})";
+        let inside = sql.find("db.t").unwrap();
+        let next = sql.rfind("db.t").unwrap();
+        assert!(format_selection(Engine::MongoDb, sql, inside..sql.len()).is_err());
+        assert!(format_selection(Engine::MongoDb, sql, next..sql.len()).is_ok());
+    }
+
+    #[test]
+    fn only_the_text_up_to_a_selection_must_tokenize() {
+        let sql = "select 1 from t;\nselect 'unfinished";
+        assert!(format_selection(Engine::Postgres, sql, 0..16).is_ok());
+    }
+
+    #[test]
     fn a_flat_statement_gains_line_breaks() {
         let formatted = format(Engine::Postgres, "select a, b from t where x = 1").unwrap();
 
         assert!(formatted.lines().count() > 1, "{formatted}");
         assert!(formatted.contains("  "), "{formatted}");
+    }
+
+    #[test]
+    fn a_query_calling_on_its_session_is_no_plain_read() {
+        for (engine, statement) in [
+            (Engine::Postgres, "SELECT nextval('s')"),
+            (
+                Engine::Postgres,
+                "SELECT pg_catalog.currval('s'), lastval()",
+            ),
+            (Engine::Postgres, "SELECT setval('s', 5)"),
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'x', false)",
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1)"),
+            (Engine::Postgres, "SELECT pg_try_advisory_xact_lock(1)"),
+            (Engine::MySql, "SELECT @x := 1"),
+            (Engine::MariaDb, "SELECT @n := @n + 1 FROM t"),
+            (Engine::MySql, "SELECT LAST_INSERT_ID()"),
+            (Engine::MySql, "SELECT GET_LOCK('a', 10)"),
+            (Engine::MySql, "SELECT RELEASE_LOCK('a')"),
+            (Engine::SqlServer, "SELECT SCOPE_IDENTITY()"),
+            (Engine::SqlServer, "SELECT @@IDENTITY"),
+        ] {
+            assert!(!plain_read(engine, statement), "{statement}");
+        }
+        assert!(plain_read(Engine::Postgres, "SELECT nextval FROM t"));
+        assert!(plain_read(Engine::MySql, "SELECT @x, 1"));
+        assert!(plain_read(Engine::SqlServer, "SELECT @@VERSION"));
+    }
+
+    #[test]
+    fn only_an_open_transaction_or_a_changed_session_is_left_behind() {
+        let open = Leaves {
+            transaction: Some(true),
+            settings: false,
+        };
+        let closed = Leaves {
+            transaction: Some(false),
+            settings: false,
+        };
+        let settings = Leaves {
+            transaction: None,
+            settings: true,
+        };
+        for (engine, statement, left) in [
+            (Engine::Postgres, "BEGIN", &open),
+            (Engine::Postgres, "START TRANSACTION", &open),
+            (Engine::MySql, "START TRANSACTION", &open),
+            (Engine::SqlServer, "BEGIN TRANSACTION", &open),
+            (Engine::Postgres, "COMMIT", &closed),
+            (Engine::Postgres, "END", &closed),
+            (Engine::MySql, "ROLLBACK", &closed),
+            (Engine::Postgres, "COMMIT AND CHAIN", &open),
+            (
+                Engine::Postgres,
+                "BEGIN; UPDATE t SET a = 1; COMMIT",
+                &closed,
+            ),
+            (Engine::Postgres, "SET search_path TO other", &settings),
+            (Engine::MySql, "SET autocommit = 0", &settings),
+            (Engine::MySql, "SET @x = 1", &settings),
+            (Engine::MySql, "USE other", &settings),
+            (Engine::SqlServer, "SET NOCOUNT ON", &settings),
+            (
+                Engine::Postgres,
+                "CREATE TEMPORARY TABLE t (a int)",
+                &settings,
+            ),
+            (Engine::SqlServer, "CREATE TABLE #t (a int)", &settings),
+            (Engine::SqlServer, "SELECT * INTO #t FROM s", &settings),
+            (Engine::MySql, "SELECT 1 INTO @x", &settings),
+            (Engine::Sqlite, "PRAGMA foreign_keys = OFF", &settings),
+            (
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'other', false)",
+                &settings,
+            ),
+            (Engine::Postgres, "SELECT pg_advisory_lock(1)", &settings),
+            (Engine::MySql, "SELECT GET_LOCK('a', 10)", &settings),
+            (Engine::MySql, "SELECT @x := 1", &settings),
+        ] {
+            assert_eq!(&leaves(engine, statement), left, "{statement}");
+        }
+        for (engine, statement) in [
+            (Engine::Postgres, "SELECT 1"),
+            (Engine::Postgres, "SHOW search_path"),
+            (Engine::MySql, "DESCRIBE t"),
+            (Engine::Postgres, "EXPLAIN SELECT 1"),
+            (Engine::Postgres, "SELEC 1"),
+            (Engine::Postgres, "INSERT INTO t VALUES (1)"),
+            (Engine::MySql, "CREATE TABLE t (a int)"),
+            (Engine::Postgres, "SELECT * INTO t2 FROM t"),
+            (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
+            (Engine::Sqlite, "PRAGMA table_info(t)"),
+            (Engine::Snowflake, "BEGIN"),
+            (Engine::MongoDb, "db.a.insertOne({ x: 1 })"),
+        ] {
+            assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
+        }
+    }
+
+    #[test]
+    fn insert_rows_writes_one_multi_row_insert_in_each_engines_spelling() {
+        use crate::import_rows::Value;
+        let (one, two, it, yes, no) = (
+            Value::Number("1".into()),
+            Value::Number("2".into()),
+            Value::Text("it's".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        );
+        let cols = [("id", "integer"), ("note", "text"), ("ok", "boolean")];
+        assert_eq!(
+            insert_rows(
+                Engine::Postgres,
+                "public",
+                "t",
+                &cols,
+                &[
+                    vec![Some(&one), Some(&it), Some(&yes)],
+                    vec![Some(&two), Some(&Value::Null), Some(&no)]
+                ],
+                true
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"t\" (\"id\", \"note\", \"ok\") VALUES ('1', 'it''s', 'true'),\n('2', NULL, 'false') ON CONFLICT DO NOTHING"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::MySql,
+                "d",
+                "t",
+                &cols[..2],
+                &[vec![Some(&one), Some(&Value::Text("a\\b".into()))]],
+                true
+            )
+            .unwrap(),
+            "INSERT INTO `d`.`t` (`id`, `note`) VALUES ('1', 'a\\\\b') ON DUPLICATE KEY UPDATE `id` = `id`"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::SqlServer,
+                "dbo",
+                "t",
+                &[("note", "nvarchar(10)"), ("ok", "bit")],
+                &[vec![Some(&Value::Text("é".into())), Some(&yes)]],
+                false
+            )
+            .unwrap(),
+            "INSERT INTO \"dbo\".\"t\" (\"note\", \"ok\") VALUES (N'é', '1')"
+        );
+        assert_eq!(
+            insert_rows(
+                Engine::MongoDb,
+                "db",
+                "t",
+                &cols[..2],
+                &[
+                    vec![Some(&one), Some(&Value::Text("x".into()))],
+                    vec![Some(&two), None]
+                ],
+                false
+            )
+            .unwrap(),
+            "db.getCollection(\"t\").insertMany([{\"id\": 1, \"note\": \"x\"},\n{\"id\": 2}])"
+        );
+    }
+
+    #[test]
+    fn insert_rows_quotes_every_name() {
+        let v = crate::import_rows::Value::Text("x".into());
+        assert_eq!(
+            insert_rows(
+                Engine::Postgres,
+                "public",
+                "t",
+                &[("order", "text"), ("a\"b", "text")],
+                &[vec![Some(&v), Some(&v)]],
+                false
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"t\" (\"order\", \"a\"\"b\") VALUES ('x', 'x')"
+        );
+    }
+
+    #[test]
+    fn every_engines_import_statements_pass_the_write_gate_and_the_mode_check() {
+        let v = crate::import_rows::Value::Text("x".into());
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::DuckDb,
+            Engine::Snowflake,
+            Engine::SqlServer,
+            Engine::MongoDb,
+        ] {
+            let statement = insert_rows(
+                engine,
+                "s",
+                "t",
+                &[("a", "text")],
+                &[vec![Some(&v)], vec![Some(&v)]],
+                engine.skips_duplicates(),
+            )
+            .unwrap();
+            assert!(
+                is_generated_write_on(engine, &statement),
+                "{engine:?}: {statement}"
+            );
+            assert_eq!(
+                gate(&classify(engine, &statement), Mode::ReadWrite, &[]),
+                None,
+                "{engine:?}: {statement}"
+            );
+            assert_eq!(
+                engine.skips_duplicates(),
+                statement.contains(" ON "),
+                "{engine:?}"
+            );
+            if let Ok(begin) = engine.all_or_nothing() {
+                for bracket in [begin, "COMMIT", "ROLLBACK"] {
+                    assert!(is_generated_write_on(engine, bracket));
+                    assert_eq!(
+                        gate(&classify(engine, bracket), Mode::ReadOnly, &[]),
+                        None,
+                        "{engine:?} {bracket}"
+                    );
+                }
+            }
+        }
     }
 }

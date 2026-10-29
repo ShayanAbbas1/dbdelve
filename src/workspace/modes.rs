@@ -80,6 +80,7 @@ impl Workspace {
                 destructive: Vec::new(),
             },
             dont_ask: false,
+            commit_cell: false,
         });
         cx.notify();
         false
@@ -90,6 +91,20 @@ impl Workspace {
     /// the same grid push and save as every other path into `set_mode`.
     pub(crate) fn choose_mode(&mut self, action: &SetMode, _: &mut Window, cx: &mut Context<Self>) {
         self.set_mode(action.mode, cx);
+    }
+
+    /// Steps through the same door as the titlebar menu, so it inherits
+    /// whatever that does and nothing more.
+    pub(crate) fn cycle_mode(
+        &mut self,
+        _: &CycleMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mode) = self.profile().map(|profile| profile.mode) else {
+            return;
+        };
+        self.choose_mode(&SetMode { mode: mode.next() }, window, cx);
     }
 
     /// The picker's way back out of a silenced confirmation -- see `set_mode`'s
@@ -145,6 +160,7 @@ impl Workspace {
             resume,
             verdict,
             dont_ask,
+            commit_cell,
         }) = profile.session.pending_run.take()
         else {
             return;
@@ -156,6 +172,21 @@ impl Workspace {
         match stop {
             Stop::Upgrade(mode) => {
                 self.set_mode(mode, cx);
+                if commit_cell
+                    && let Some(results) = self
+                        .profile()
+                        .and_then(|profile| profile.session.active_results())
+                        .cloned()
+                {
+                    let grid = results.update(cx, |table, cx| {
+                        table.delegate_mut().commit_edit(cx);
+                        cx.notify();
+                        table.focus_handle(cx)
+                    });
+                    // The input the prompt went up over closes with the
+                    // commit, so the dialog hands the keyboard to the grid.
+                    self.focus_before_dialog.replace(Some(grid));
+                }
                 // Re-checked rather than run outright: raising Read-only to
                 // Full for a DROP answers "may this connection do this at
                 // all" and leaves "did you mean this table", which is a
@@ -202,6 +233,7 @@ impl Workspace {
             resume.refresh,
             resume.keep_rows,
             resume.explain,
+            None,
             cx,
         );
     }

@@ -9,7 +9,7 @@ use gpui::{
 use gpui_component::{
     InteractiveElementExt,
     input::{Input, InputState},
-    menu::{PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
     table::TableEvent,
     table::{Column, TableDelegate, TableState},
 };
@@ -21,7 +21,7 @@ use crate::{
     icons::icon,
     sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
-    theme::{ConnectionColor, color::Srgb, layout, theme},
+    theme::{ConnectionColor, color::Srgb, fonts, layout, theme},
     ui::{Control, Tone, icon_button},
 };
 
@@ -39,7 +39,10 @@ const CLIP_SCAN_LIMIT: usize = 16 * CELL_DISPLAY_LIMIT;
 /// "the value" has to stop somewhere, because a multi-megabyte document laid
 /// out as wrapped text stalls the frame it is laid out in. `cmd+c` on the cell
 /// still copies all of it. Raise this if a real value gets cut.
-const FIELD_DISPLAY_LIMIT: usize = 4_000;
+pub(crate) const FIELD_DISPLAY_LIMIT: usize = 4_000;
+
+/// How much of a row's name the cell menu's Open entry spells out.
+const OPEN_LABEL_CHARS: usize = 40;
 
 /// What an absent value is called wherever one is shown.
 pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
@@ -47,10 +50,22 @@ pub const NULL_LABEL: SharedString = SharedString::new_static("NULL");
 /// What a staged `DEFAULT` is called in the cell holding it. Its own word
 /// rather than NULL's: the server resolves the two to different values, and a
 /// cell that painted one of them for the other would be lying about the write.
-const DEFAULT_LABEL: SharedString = SharedString::new_static("DEFAULT");
+pub const DEFAULT_LABEL: SharedString = SharedString::new_static("DEFAULT");
 
-/// Where every column starts and the narrowest a drag can leave it.
-const MIN_COLUMN_WIDTH: f32 = 180.0;
+/// The narrowest a drag can leave a column, and the narrowest one is fitted to.
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+/// The widest a column is fitted to, at the grid's default size. A JSON or a
+/// long text column would otherwise take the screen to show one value, which
+/// the row inspector shows better.
+const MAX_FITTED_WIDTH: f32 = 400.0;
+/// How many of the first rows a column is fitted to: a screenful and then
+/// some, so a column is sized by what is seen first, and fitting stops costing
+/// anything once they are in.
+const FITTED_ROWS: usize = 200;
+/// A character's advance as a share of the font size in the bundled Lilex, a
+/// monospaced face. What a grid is fitted with before the face it is drawn in
+/// has been measured, which needs the text system (`fit_to_face`).
+const ESTIMATED_ADVANCE: f32 = 0.6;
 
 /// The table's column 0 is the row-number gutter, which is not part of the
 /// result: every index the library hands the delegate is one past the result's
@@ -74,12 +89,141 @@ fn gutter_cell() -> Div {
 /// `referenced_by` and the label to show for it.
 type ReferenceMenu = Rc<Vec<(usize, SharedString)>>;
 
-/// A row's schema and table, and its primary key as column/value pairs — what a
-/// one-row `DELETE` needs and nothing else.
-pub type RowKey = (String, String, Vec<(String, String)>);
+/// A row's schema and table, its primary key as column/value pairs, and the
+/// columns of a row named by every value that were NULL — what a one-row
+/// `DELETE` needs and nothing else.
+pub type RowKey = (String, String, Vec<(String, String)>, Vec<String>);
+
+/// A row's key columns against the values the server sent, and the columns of a
+/// row named by every value that were NULL.
+type KeyValues = (Vec<(String, String)>, Vec<String>);
+
+/// A grid's schema and table, and the columns a new row of it fills as
+/// column/type pairs — what the New row form is built from.
+pub type InsertTarget = (String, String, Vec<(String, String)>);
+
+/// A grid's selection, apart from the grid it was made in.
+pub struct GridSelection {
+    active: Option<(usize, usize)>,
+    rows: std::collections::BTreeSet<usize>,
+    anchor: Option<usize>,
+    row: Option<usize>,
+}
+
+/// The columns a grid hides and pins, by name, carried from one result to
+/// the next in the same tab.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnView {
+    hidden: Vec<ColumnKey>,
+    pinned: Vec<ColumnKey>,
+}
+
+/// A column by name, and which of the columns sharing that name it is:
+/// `SELECT a, a` has two columns `a`, and hiding the second must not hide
+/// the first on the next run.
+type ColumnKey = (String, usize);
+
+/// A column's width as carried to the next result with the same columns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnWidth {
+    pub width: Pixels,
+    /// Set by the user's drag rather than fitted, and so never fitted again.
+    pub dragged: bool,
+}
+
+/// How a column came by its width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sizing {
+    /// Fitted to its header and values, and never narrower than `floor`: a
+    /// width carried from an earlier result of the same columns, so a re-run
+    /// does not snap its columns narrower.
+    Fitted {
+        floor: f32,
+    },
+    Dragged,
+}
+
+/// One character's advance in each face a column is fitted to: the values,
+/// the header's name and its type label.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Advances {
+    value: f32,
+    name: f32,
+    data_type: f32,
+}
+
+impl Advances {
+    fn estimated() -> Self {
+        Self {
+            value: layout::grid(layout::BODY_FONT_SIZE) * ESTIMATED_ADVANCE,
+            name: layout::grid(layout::TEXT_SM) * ESTIMATED_ADVANCE,
+            data_type: layout::grid(layout::TEXT_XS) * ESTIMATED_ADVANCE,
+        }
+    }
+
+    /// Measured in the grid's own family. A monospaced face is what the grid
+    /// is drawn in, so one advance stands for every character.
+    fn measured(family: &SharedString, cx: &App) -> Self {
+        let text = cx.text_system();
+        let advance = |size: f32, weight: gpui::FontWeight| {
+            let font = text.resolve_font(&gpui::Font {
+                weight,
+                ..gpui::font(family.clone())
+            });
+            text.ch_advance(font, px(size))
+                .map_or(size * ESTIMATED_ADVANCE, f32::from)
+        };
+        Self {
+            value: advance(
+                layout::grid(layout::BODY_FONT_SIZE),
+                gpui::FontWeight::NORMAL,
+            ),
+            name: advance(layout::grid(layout::TEXT_SM), gpui::FontWeight::MEDIUM),
+            data_type: advance(layout::grid(layout::TEXT_XS), gpui::FontWeight::NORMAL),
+        }
+    }
+}
+
+/// A fitted column's width: as wide as the wider of its header and its widest
+/// value, each with its padding, between the drag minimum and `cap`, and never
+/// narrower than a width carried over.
+fn fitted_width(header: f32, value: f32, cap: f32, floor: f32) -> f32 {
+    header
+        .max(value)
+        .ceil()
+        .clamp(MIN_COLUMN_WIDTH, cap.max(MIN_COLUMN_WIDTH))
+        .max(floor)
+}
 
 pub struct ResultGrid {
+    /// Which rows sit at which index: new with every grid and every reorder,
+    /// so whatever holds a row by its index can tell it now names another.
+    rows_id: u64,
     columns: Vec<Column>,
+    /// Per column, how it came by its width.
+    sizing: Vec<Sizing>,
+    /// Per column, the most characters a value shows among the rows fitted so
+    /// far. It only grows, so a column never narrows under rows already on
+    /// screen as more arrive.
+    widest: Vec<usize>,
+    /// How many of the first rows `widest` has read.
+    fitted_rows: usize,
+    /// The grid's family and scale the widths were fitted in, or `None` while
+    /// they are fitted to `Advances::estimated`.
+    face: Option<(SharedString, f32)>,
+    advances: Advances,
+    /// A fitted width changed since the table last read the widths, which it
+    /// does only on a refresh.
+    resized: bool,
+    /// The columns as drawn, left to right: indices into `columns`, the pinned
+    /// ones first. A column missing from it is hidden. Everything else in the
+    /// grid -- `active`, the pending edits, the sort -- speaks in indices into
+    /// `columns`, and only the library's side of `TableDelegate` speaks in
+    /// these positions, so the translation lives where `GUTTER` is added and
+    /// taken away and nowhere else.
+    view: Vec<usize>,
+    /// How many leading entries of `view` are pinned to the left edge.
+    pinned: usize,
     result: QueryResult,
     /// Per column, read for every visible cell on every frame, and
     /// `db::is_numeric_type` lowercases the type name to answer.
@@ -105,6 +249,9 @@ pub struct ResultGrid {
     /// How wide the scrolling columns were laid out last frame, for
     /// `keep_active_in_view`.
     laid_out_width: Pixels,
+    /// The horizontal offset last frame, for selecting a fixed column to put
+    /// back after the library scrolls it away.
+    painted_x: Pixels,
     /// What the user has changed and not yet applied. No value in
     /// `result.rows` is ever written -- a sort in memory moves whole rows, and
     /// these with them -- so the grid can always show pending against
@@ -123,10 +270,13 @@ pub struct ResultGrid {
     /// whole delegate: there is no field anyone has to remember to clear, and
     /// so no way for a live result to keep claiming it is a snapshot.
     captured: Option<u64>,
-    /// How many rows the result had, for a snapshot that was capped before it
-    /// was written. Held beside `captured` and for the same reason: a run
-    /// replaces the whole delegate, so a live result cannot keep a stale count.
-    restored_total: Option<usize>,
+    /// Which of a run's result sets these rows are, while the run is still
+    /// appending them (`db::Fed::set`). Dropped with the delegate, like
+    /// `captured`, when the finished result replaces it.
+    streamed: Option<usize>,
+    /// When a streamed run's kept rows reached the limit, for its clock to
+    /// stop at.
+    filled: Option<std::time::Instant>,
     /// Whether a restored grid's edits wait on the user accepting that its rows
     /// may be stale. Session-only, and dropped with the delegate like
     /// `captured` is, so a run's own rows never ask.
@@ -156,6 +306,9 @@ pub struct ResultGrid {
     /// The result columns that make up the relation's primary key, marked
     /// where the structure arrives, by name for the reason `foreign_keys` is.
     primary_key: Vec<usize>,
+    /// The column naming what each row opens as a result of its own
+    /// (`Engine::opened_column`), marked where the structure arrives.
+    opened: Option<usize>,
     /// The rows picked out by clicks in the gutter or cells, for a multi-row copy.
     /// Separate from `active`, which is the single cell the keyboard and the
     /// single-cell gestures act on.
@@ -167,6 +320,11 @@ pub struct ResultGrid {
     /// it echoes back as `TableEvent::SelectRow`, which must not collapse the
     /// range or toggle the click just made the way a keyboard move does.
     pointer_row: Option<usize>,
+    /// The row the library last selected, until it clears its selection: what
+    /// the row panel shows. Kept here because the library reports its own only
+    /// while it is selecting rows, and `left`, `right`, `tab` and a header
+    /// click switch it to selecting a column, which keeps the row.
+    selected_row: Option<usize>,
     /// Where the pointer last went down on a reference arrow, for the popup it
     /// opens to hang from.
     reference_anchor: Option<Point<Pixels>>,
@@ -245,6 +403,7 @@ struct Editing {
 
 /// One row's worth of pending edits, resolved to real column names and ready
 /// for `sql::update_row`. Alias resolution happens here so the caller does none.
+#[derive(Default)]
 pub struct PendingRow {
     pub schema: String,
     pub table: String,
@@ -253,8 +412,33 @@ pub struct PendingRow {
     /// The key columns' real names against their **as-fetched** values: the row
     /// is identified by what the server holds, not by what the user has typed.
     pub keys: Vec<(String, String)>,
+    /// The columns of a row named by every value that read NULL, which `keys`
+    /// leaves out; always empty for a row named by a unique key.
+    pub null_keys: Vec<String>,
+    /// How the row's update is written.
+    pub update: db::UpdateSpelling,
     /// Real column name against its type, where the result says it.
     pub types: Vec<(String, String)>,
+    /// Each changed column's as-fetched value, where it has one: what an edit
+    /// that writes only its differences is diffed against.
+    pub held: Vec<(String, String)>,
+}
+
+fn numeric_columns(engine: db::Engine, columns: &[db::Column]) -> Vec<bool> {
+    columns
+        .iter()
+        .map(|column| {
+            column
+                .data_type
+                .as_deref()
+                .is_some_and(|data_type| engine.is_numeric_type(data_type))
+        })
+        .collect()
+}
+
+fn next_rows_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ResultGrid {
@@ -279,6 +463,9 @@ impl ResultGrid {
                 Column::new(index.to_string(), column.name.clone())
                     .width(px(MIN_COLUMN_WIDTH))
                     .min_width(px(MIN_COLUMN_WIDTH))
+                    // The library stops a drag at 1200px by default, and a
+                    // long value is worth dragging wider than that.
+                    .max_width(px(f32::MAX))
                     .resizable(true)
                     .movable(false)
                     // The cell padding is dbdelve's, applied in `render_td` and
@@ -288,8 +475,17 @@ impl ResultGrid {
             })
             .collect();
 
-        Self {
+        let mut grid = Self {
+            rows_id: next_rows_id(),
+            view: (0..result.columns.len()).collect(),
+            pinned: 0,
             columns,
+            sizing: vec![Sizing::Fitted { floor: 0. }; result.columns.len()],
+            widest: vec![0; result.columns.len()],
+            fitted_rows: 0,
+            face: None,
+            advances: Advances::estimated(),
+            resized: false,
             sort: Vec::new(),
             sortable: false,
             fetched: Vec::new(),
@@ -297,10 +493,12 @@ impl ResultGrid {
             numeric,
             active: None,
             laid_out_width: Pixels::ZERO,
+            painted_x: Pixels::ZERO,
             pending: Vec::new(),
             editing: None,
             captured: None,
-            restored_total: None,
+            streamed: None,
+            filled: None,
             unconfirmed: false,
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
@@ -308,18 +506,23 @@ impl ResultGrid {
             follow_groups: Vec::new(),
             reference_menus: Vec::new(),
             primary_key: Vec::new(),
+            opened: None,
             selected_rows: std::collections::BTreeSet::new(),
             row_selection_anchor: None,
             pointer_row: None,
+            selected_row: None,
             reference_anchor: None,
             mode,
             engine: db::Engine::default(),
             focus: None,
-        }
+        };
+        grid.refit();
+        grid
     }
 
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
         self.engine = engine;
+        self.numeric = numeric_columns(engine, &self.result.columns);
         self
     }
 
@@ -368,6 +571,8 @@ impl ResultGrid {
                     })
                     .collect(),
                 rows: stored.rows.clone(),
+                capped_from: (stored.total_rows > stored.rows.len()).then_some(stored.total_rows),
+                stopped: stored.stopped,
                 // All or none: a snapshot naming a type this build does not
                 // know is read as having none, never as rows out of step.
                 cell_types: stored
@@ -385,18 +590,28 @@ impl ResultGrid {
         // The headers say what the rows are ordered by. `sortable` stays false:
         // whether a header click can do anything is a fact about the statement,
         // and a snapshot is not a statement -- the next run settles it.
-        for (column, width) in grid.columns.iter_mut().zip(&stored.widths) {
-            column.width = px(width.max(MIN_COLUMN_WIDTH));
-        }
+        let widths: Vec<ColumnWidth> = stored
+            .widths
+            .iter()
+            .enumerate()
+            .map(|(col, &width)| ColumnWidth {
+                width: px(width),
+                dragged: stored.dragged.get(col) == Some(&true),
+            })
+            .collect();
+        grid.carry_widths(&widths);
         grid.sort = stored.sort.clone();
+        grid = grid.with_column_view(&ColumnView {
+            hidden: stored.hidden.clone(),
+            pinned: stored.pinned.clone(),
+        });
         let (rows, columns) = (grid.result.rows.len(), grid.columns.len());
         // A snapshot is capped, so the cell that was active may be past the
         // rows that came back with it -- and that is not a cell.
         grid.active = stored
             .active
-            .filter(|(row, col)| *row < rows && *col < columns);
+            .filter(|(row, col)| *row < rows && *col < columns && grid.position_of(*col).is_some());
         grid.captured = Some(stored.captured);
-        grid.restored_total = Some(stored.total_rows);
         grid.unconfirmed = stored.edit.is_some();
         grid
     }
@@ -405,6 +620,68 @@ impl ResultGrid {
     /// put here.
     pub fn captured(&self) -> Option<u64> {
         self.captured
+    }
+
+    /// A grid for result set `set` of a run's rows to arrive in.
+    pub fn streaming(mut self, set: usize) -> Self {
+        self.streamed = Some(set);
+        self
+    }
+
+    pub fn streamed_set(&self) -> Option<usize> {
+        self.streamed
+    }
+
+    /// The columns' types, learned while their rows are still arriving. The
+    /// rows are kept; what is worked out from the types is worked out again.
+    /// Their values are rendered apart, off the frame thread
+    /// ([`db::unrendered`]).
+    pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
+        self.numeric = numeric_columns(self.engine, &columns);
+        self.result.columns = columns;
+        self.refit_from_the_top();
+    }
+
+    /// Put values rendered off the frame thread in place, each only where the
+    /// cell still holds what was rendered: a sort or a new run in between has
+    /// moved or replaced it, and a value written there would be another
+    /// row's.
+    pub fn apply_rendered(&mut self, mut rendered: Vec<(usize, usize, String, String)>) {
+        rendered.sort_by_key(|(row, ..)| *row);
+        for cells in rendered.chunk_by(|a, b| a.0 == b.0) {
+            let Some(row) = self.result.rows.get_mut(cells[0].0) else {
+                continue;
+            };
+            let edits: Vec<_> = cells
+                .iter()
+                .filter(|(_, column, was, _)| row.get(*column) == Some(was.as_str()))
+                .map(|(_, column, _, now)| (*column, Some(now.as_str())))
+                .collect();
+            if !edits.is_empty() {
+                row.replace(&edits);
+            }
+        }
+        self.refit_from_the_top();
+    }
+
+    pub fn fill(&mut self, at: Option<std::time::Instant>) {
+        self.filled = at;
+    }
+
+    pub fn filled(&self) -> Option<std::time::Instant> {
+        self.filled
+    }
+
+    pub fn append_rows(&mut self, rows: Vec<db::Row>) {
+        self.result.rows.extend(rows);
+        if self.fitted_rows < FITTED_ROWS {
+            self.refit();
+        }
+    }
+
+    /// The rows streamed in, for the finished result to be built around.
+    pub fn take_rows(&mut self) -> Vec<db::Row> {
+        std::mem::take(&mut self.result.rows)
     }
 
     /// Whether an edit here has to be confirmed against stale rows first.
@@ -417,10 +694,9 @@ impl ResultGrid {
     }
 
     /// How many rows the result behind this grid had. More than the grid holds
-    /// only for a restored snapshot the cap trimmed -- which is the one case
-    /// where the rows on screen are not the whole result set.
+    /// when the row limit or a snapshot's cap trimmed it.
     pub fn total_rows(&self) -> usize {
-        self.restored_total.unwrap_or(self.result.rows.len())
+        self.result.total_rows()
     }
 
     /// What a snapshot of this grid keeps. The tab's own fields -- the
@@ -430,6 +706,7 @@ impl ResultGrid {
     /// `pending` and `editing` are deliberately absent. An unapplied edit is
     /// against rows this session fetched, and a restored grid is not those rows.
     pub fn stored(&self) -> StoredGrid {
+        let view = self.column_view();
         StoredGrid {
             columns: self
                 .result
@@ -450,6 +727,7 @@ impl ResultGrid {
             // hold: recomputing it from the capped rows is what collapsed a
             // 20,000-row snapshot to 5,000 on the next save.
             total_rows: self.total_rows(),
+            stopped: self.result.stopped,
             sort: self.sort.clone(),
             order_by: Vec::new(),
             client_sort: None,
@@ -458,11 +736,17 @@ impl ResultGrid {
                 .iter()
                 .map(|column| f32::from(column.width))
                 .collect(),
+            dragged: self
+                .sizing
+                .iter()
+                .map(|sizing| *sizing == Sizing::Dragged)
+                .collect(),
+            hidden: view.hidden,
+            pinned: view.pinned,
             active: self.active,
             last_query: None,
             limit: None,
             filter: String::new(),
-            showing_structure: false,
             // A snapshot that is written back unchanged keeps its own age: it
             // is still the rows it was, and restamping it would make every
             // restart claim the cache was just taken.
@@ -481,33 +765,346 @@ impl ResultGrid {
                 .iter()
                 .map(|column| column.data_type.clone())
                 .collect(),
+            plan: None,
+            messages: Vec::new(),
         }
     }
 
-    /// The widths the table is drawing, which is where a drag lands: the
-    /// library resizes its own copy of the columns.
-    pub fn set_widths(&mut self, widths: &[gpui::Pixels]) {
-        for (column, width) in self.columns.iter_mut().zip(widths) {
-            column.width = *width;
+    /// The widths as the table draws them, one per drawn column in drawn
+    /// order, which is how a drag reports them: the library resizes its own
+    /// copy of the columns, and reports every column's width when one moves.
+    fn set_drawn_widths(&mut self, widths: &[gpui::Pixels]) {
+        for (&col, width) in self.view.iter().zip(widths) {
+            if self.columns[col].width != *width {
+                self.columns[col].width = *width;
+                self.sizing[col] = Sizing::Dragged;
+            }
         }
+    }
+
+    /// Widths an earlier grid of the same columns had: a dragged one stays as
+    /// it was, and a fitted one is the least it can be fitted to.
+    fn carry_widths(&mut self, widths: &[ColumnWidth]) {
+        for (col, carried) in widths.iter().enumerate().take(self.columns.len()) {
+            let width = f32::from(carried.width).max(MIN_COLUMN_WIDTH);
+            self.columns[col].width = px(width);
+            self.sizing[col] = match carried.dragged {
+                true => Sizing::Dragged,
+                false => Sizing::Fitted { floor: width },
+            };
+        }
+        self.refit();
+    }
+
+    /// Read the rows not yet fitted to, up to [`FITTED_ROWS`], and widen the
+    /// fitted columns to what they now have to show.
+    fn refit(&mut self) {
+        let rows = self.result.rows.len().min(FITTED_ROWS);
+        for row in self.fitted_rows..rows {
+            for col in 0..self.columns.len() {
+                let shows = match self.shown(row, col) {
+                    Some(shown) => shown.chars().count(),
+                    None if self.missing(row, col) => 0,
+                    None => NULL_LABEL.len(),
+                };
+                self.widest[col] = self.widest[col].max(shows);
+            }
+        }
+        self.fitted_rows = self.fitted_rows.max(rows);
+
+        let cap = layout::grid(MAX_FITTED_WIDTH);
+        for col in 0..self.columns.len() {
+            let Sizing::Fitted { floor } = self.sizing[col] else {
+                continue;
+            };
+            let width = px(fitted_width(
+                self.header_width(col),
+                self.value_width(col),
+                cap,
+                floor,
+            ));
+            if self.columns[col].width != width {
+                self.columns[col].width = width;
+                self.resized = true;
+            }
+        }
+    }
+
+    /// Read the first rows again for what they show: their types or their
+    /// rendering changed what that is. `widest` keeps what it had, so nothing
+    /// narrows.
+    fn refit_from_the_top(&mut self) {
+        self.fitted_rows = 0;
+        self.refit();
+    }
+
+    /// Everything a header draws across its column, at `advances`: its
+    /// padding, the key icon, the name, the type label, and the sort control,
+    /// whose room is kept whether or not the column can be sorted so sorting
+    /// it moves nothing.
+    fn header_width(&self, col: usize) -> f32 {
+        let icon = layout::grid(12.) + layout::SPACE_XS;
+        let key = match self.primary_key.contains(&col) {
+            true => icon,
+            false => 0.,
+        };
+        let data_type = self
+            .result
+            .columns
+            .get(col)
+            .and_then(|column| column.data_type.as_deref())
+            .map_or(0., |data_type| {
+                layout::SPACE_XS
+                    + data_type.to_uppercase().chars().count() as f32 * self.advances.data_type
+            });
+        // `data_th`'s own padding, and the room the library keeps on the right
+        // of every header for a sort icon of its own.
+        let padding = 2. * layout::SPACE_SM
+            + 1.
+            + f32::from(gpui_component::Size::Medium.table_cell_padding().right);
+        padding
+            + key
+            + self.columns[col].name.chars().count() as f32 * self.advances.name
+            + data_type
+            + icon
+    }
+
+    /// The widest value fitted to so far, with the cell's padding and border
+    /// and whichever arrows the column's cells carry.
+    fn value_width(&self, col: usize) -> f32 {
+        let follow = match self.follows_a_key(col) {
+            true => layout::grid(gpui_component::Size::Medium.table_row_height().into()),
+            false => 0.,
+        };
+        let references = match self.reference_menu(col) {
+            Some(_) => Control::Inline.height(),
+            None => 0.,
+        };
+        2. * layout::SPACE_SM
+            + 2.
+            + self.widest[col] as f32 * self.advances.value
+            + follow
+            + references
+    }
+
+    /// Where a column is drawn, counting from the first after the gutter, or
+    /// `None` while it is hidden.
+    fn position_of(&self, col: usize) -> Option<usize> {
+        self.view.iter().position(|&shown| shown == col)
+    }
+
+    /// The column drawn at a position, counting from the first after the gutter.
+    fn column_at(&self, position: usize) -> Option<usize> {
+        self.view.get(position).copied()
+    }
+
+    /// The library's column index for a column: its position, past the gutter.
+    pub(crate) fn table_col(&self, col: usize) -> Option<usize> {
+        self.position_of(col).map(|position| position + GUTTER)
+    }
+
+    /// The cell a step lands on from the ring, across the columns as drawn so a
+    /// column step goes to the one on screen beside it, not the next fetched.
+    fn step_from_active(&self, step: &Step, rows: usize) -> Option<(usize, usize)> {
+        self.active
+            .and_then(|(row, col)| Some((row, self.position_of(col)?)))
+            .and_then(|from| step_target(from, step, rows, self.view.len()))
+            .and_then(|(row, position)| Some((row, self.column_at(position)?)))
+    }
+
+    /// Take a column out of the drawn ones. The last one stays: a grid with
+    /// rows and no columns reads as a broken grid, not a choice.
+    pub fn hide_column(&mut self, col: usize) {
+        let Some(position) = self.position_of(col) else {
+            return;
+        };
+        if self.view.len() == 1 {
+            return;
+        }
+        self.view.remove(position);
+        if position < self.pinned {
+            self.pinned -= 1;
+        }
+        // The ring on a hidden column would act on a cell nobody can see, and
+        // an input there would keep the keyboard for a cell nobody can see.
+        if self.active.is_some_and(|(_, active)| active == col) {
+            self.active = None;
+        }
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.col == col)
+        {
+            self.editing = None;
+        }
+    }
+
+    /// Where the library's column selection belongs once the columns are laid
+    /// out again: on the ring's column at its new position, or nowhere when
+    /// the ring went with a hidden column. The library keeps that selection as
+    /// a drawn position, so left alone it stays on whatever column moved in.
+    fn ring_table_col(&self) -> Option<usize> {
+        self.table_col(self.active?.1)
+    }
+
+    /// Put a hidden column back where it sits among the columns as fetched.
+    pub fn show_column(&mut self, col: usize) {
+        if col >= self.columns.len() || self.position_of(col).is_some() {
+            return;
+        }
+        let at = self.view[self.pinned..]
+            .iter()
+            .position(|&shown| shown > col)
+            .map_or(self.view.len(), |offset| self.pinned + offset);
+        self.view.insert(at, col);
+    }
+
+    pub fn show_all_columns(&mut self) {
+        let pinned: Vec<usize> = self.view[..self.pinned].to_vec();
+        self.view = pinned
+            .iter()
+            .copied()
+            .chain((0..self.columns.len()).filter(|col| !pinned.contains(col)))
+            .collect();
+    }
+
+    /// How wide a row's cells run: the gutter and the columns drawn.
+    fn content_width(&self) -> f32 {
+        self.gutter_width()
+            + self
+                .view
+                .iter()
+                .map(|&col| f32::from(self.columns[col].width))
+                .sum::<f32>()
+    }
+
+    pub fn hidden_columns(&self) -> usize {
+        self.columns.len() - self.view.len()
+    }
+
+    pub fn is_pinned(&self, col: usize) -> bool {
+        self.position_of(col)
+            .is_some_and(|position| position < self.pinned)
+    }
+
+    /// Pin a column to the left edge, after the ones pinned before it, or let
+    /// a pinned one go back to its place among the rest.
+    pub fn toggle_pinned(&mut self, col: usize) {
+        let Some(position) = self.position_of(col) else {
+            return;
+        };
+        self.view.remove(position);
+        if position < self.pinned {
+            self.pinned -= 1;
+            let at = self.view[self.pinned..]
+                .iter()
+                .position(|&shown| shown > col)
+                .map_or(self.view.len(), |offset| self.pinned + offset);
+            self.view.insert(at, col);
+        } else {
+            self.view.insert(self.pinned, col);
+            self.pinned += 1;
+        }
+    }
+
+    /// A column's name, and how many before it share that name.
+    fn column_key(&self, col: usize) -> ColumnKey {
+        let name = &self.result.columns[col].name;
+        let earlier = self.result.columns[..col]
+            .iter()
+            .filter(|c| c.name == *name)
+            .count();
+        (name.clone(), earlier)
+    }
+
+    fn column_keyed(&self, (name, nth): &ColumnKey) -> Option<usize> {
+        self.result
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name == *name)
+            .nth(*nth)
+            .map(|(col, _)| col)
+    }
+
+    /// What a later result keeps of this one's hidden and pinned columns, by
+    /// name, so a refresh or the next page does not undo them.
+    pub fn column_view(&self) -> ColumnView {
+        ColumnView {
+            hidden: (0..self.columns.len())
+                .filter(|&col| self.position_of(col).is_none())
+                .map(|col| self.column_key(col))
+                .collect(),
+            pinned: self.view[..self.pinned]
+                .iter()
+                .map(|&col| self.column_key(col))
+                .collect(),
+        }
+    }
+
+    /// Hide and pin this result's columns as an earlier one had them, by
+    /// name. A column the earlier result did not have -- one just added to
+    /// the `SELECT` -- is drawn, and a name no longer here is let go.
+    pub fn with_column_view(mut self, view: &ColumnView) -> Self {
+        for key in &view.pinned {
+            if let Some(col) = self.column_keyed(key)
+                && !self.is_pinned(col)
+            {
+                self.toggle_pinned(col);
+            }
+        }
+        for key in &view.hidden {
+            if let Some(col) = self.column_keyed(key) {
+                self.hide_column(col);
+            }
+        }
+        self
     }
 
     pub fn columns(&self) -> &[crate::db::Column] {
         &self.result.columns
     }
 
-    pub fn layout(&self) -> (Vec<String>, Vec<gpui::Pixels>) {
+    /// The grid column that shows the relation's column `name`, as Structure
+    /// lists it. The source column comes first: a `SELECT body AS note` shows
+    /// `note`, but Structure says `body`. The header is the fallback, for a
+    /// result with no edit target behind it.
+    pub fn column_named(&self, name: &str) -> Option<usize> {
+        self.result
+            .edit
+            .as_ref()
+            .and_then(|edit| {
+                edit.columns
+                    .iter()
+                    .position(|source| source.as_deref() == Some(name))
+            })
+            .or_else(|| {
+                self.result
+                    .columns
+                    .iter()
+                    .position(|column| column.name == name)
+            })
+    }
+
+    pub fn layout(&self) -> (Vec<String>, Vec<ColumnWidth>) {
         (
             self.result
                 .columns
                 .iter()
                 .map(|column| column.name.clone())
                 .collect(),
-            self.columns.iter().map(|column| column.width).collect(),
+            self.columns
+                .iter()
+                .zip(&self.sizing)
+                .map(|(column, sizing)| ColumnWidth {
+                    width: column.width,
+                    dragged: *sizing == Sizing::Dragged,
+                })
+                .collect(),
         )
     }
 
-    pub fn with_layout(mut self, names: &[String], widths: &[gpui::Pixels]) -> Self {
+    pub fn with_layout(mut self, names: &[String], widths: &[ColumnWidth]) -> Self {
         let same = self.result.columns.len() == names.len()
             && self
                 .result
@@ -516,7 +1113,7 @@ impl ResultGrid {
                 .zip(names)
                 .all(|(column, name)| column.name == *name);
         if same {
-            self.set_widths(widths);
+            self.carry_widths(widths);
         }
         self
     }
@@ -536,6 +1133,7 @@ impl ResultGrid {
             .iter()
             .map(|col| SharedString::from(format!("follow-key-{col}")))
             .collect();
+        self.refit();
     }
 
     /// Record which of this result's columns other relations point at, given
@@ -568,6 +1166,7 @@ impl ResultGrid {
                 (!menu.is_empty()).then(|| (col, Rc::new(menu)))
             })
             .collect();
+        self.refit();
     }
 
     /// Wide enough for the last row's number and no wider, padded the same on
@@ -612,6 +1211,37 @@ impl ResultGrid {
         }
     }
 
+    /// What the user has picked out, to be carried onto the finished result
+    /// of the rows it was picked from.
+    pub fn selection(&self) -> GridSelection {
+        GridSelection {
+            active: self.active,
+            rows: self.selected_rows.clone(),
+            anchor: self.row_selection_anchor,
+            row: self.selected_row,
+        }
+    }
+
+    /// Take `selection` back if every row and cell it names is still here:
+    /// `false`, with nothing taken, otherwise or when it picks nothing.
+    pub fn select(&mut self, selection: GridSelection) -> bool {
+        let (rows, columns) = (self.result.rows.len(), self.columns.len());
+        // A ring on a column hidden since it was picked would act unseen.
+        let fits = selection.active.is_none_or(|(row, col)| {
+            row < rows && col < columns && self.position_of(col).is_some()
+        }) && selection.rows.iter().all(|row| *row < rows)
+            && selection.anchor.is_none_or(|row| row < rows)
+            && selection.row.is_none_or(|row| row < rows);
+        if !fits || (selection.active.is_none() && selection.rows.is_empty()) {
+            return false;
+        }
+        self.active = selection.active;
+        self.selected_rows = selection.rows;
+        self.row_selection_anchor = selection.anchor;
+        self.selected_row = selection.row;
+        true
+    }
+
     pub fn clear_row_selection(&mut self) {
         self.selected_rows.clear();
         self.row_selection_anchor = None;
@@ -619,6 +1249,21 @@ impl ResultGrid {
 
     pub fn mark_primary_key(&mut self, columns: &[String]) {
         self.primary_key = self.columns_named(columns);
+        self.refit();
+    }
+
+    /// Record which column names what a row opens, by name for the reason
+    /// [`ResultGrid::mark_foreign_keys`] is. Its cells carry the follow arrow
+    /// once it is marked as a key too; this is what lets the rest of the row
+    /// open it, from the cell menu and by a double-click on a cell that cannot
+    /// be edited.
+    pub fn mark_opened(&mut self, column: Option<&str>) {
+        self.opened = column.and_then(|name| {
+            self.result
+                .columns
+                .iter()
+                .position(|column| column.name == name)
+        });
     }
 
     fn key_icon(&self, col: usize, color: Srgb) -> Option<impl IntoElement> {
@@ -692,7 +1337,7 @@ impl ResultGrid {
     /// and copying what happens to fit would be the same bug as reading a value
     /// through the column.
     pub(crate) fn cell(&self, row_ix: usize, col_ix: usize) -> Option<&str> {
-        self.result.rows.get(row_ix)?.get(col_ix)?.as_deref()
+        self.result.rows.get(row_ix)?.get(col_ix)
     }
 
     /// What a fetched cell paints, worked out as it is drawn rather than kept:
@@ -724,7 +1369,8 @@ impl ResultGrid {
 
     /// Every column of one row, named, typed where the type is known, and
     /// carrying the value itself rather than the string the column had room
-    /// for. This is what the row inspector reads.
+    /// for -- the staged one where the cell has an edit pending, as the grid
+    /// paints it. This is what the row inspector reads.
     pub fn fields(&self, row_ix: usize) -> Vec<Field> {
         if row_ix >= self.result.rows.len() {
             return Vec::new();
@@ -734,26 +1380,48 @@ impl ResultGrid {
             .columns
             .iter()
             .enumerate()
-            .map(|(col_ix, column)| Field {
-                name: column.name.clone().into(),
-                // The cell's own type where it has one: the column's is `mixed`
-                // as soon as two documents disagree.
-                data_type: self
-                    .result
-                    .cell_types
-                    .get(row_ix)
-                    .and_then(|types| types.get(col_ix))
-                    .map(|alias| SharedString::new_static(alias))
-                    .or_else(|| column.data_type.clone().map(SharedString::from)),
-                missing: self.missing(row_ix, col_ix),
-                // Reformatted before it is clipped, never after: a document cut
-                // at 4,000 characters does not parse, and the inspector would
-                // fall back to the one long line for exactly the values big
-                // enough to need the help.
-                value: self.cell(row_ix, col_ix).map(|value| {
-                    let value = indented_json(value);
-                    clip_to(&value, FIELD_DISPLAY_LIMIT).into()
-                }),
+            .map(|(col_ix, column)| {
+                let edit = self.pending_value(row_ix, col_ix).cloned();
+                let cell = match &edit {
+                    Some(NewValue::Value(value)) => Some(value.as_ref()),
+                    Some(NewValue::Null | NewValue::Default) => None,
+                    None => self.cell(row_ix, col_ix),
+                };
+                let json = cell.and_then(indented_json);
+                Field {
+                    name: column.name.clone().into(),
+                    // The cell's own type where it has one: the column's is `mixed`
+                    // as soon as two documents disagree.
+                    data_type: self
+                        .result
+                        .cell_types
+                        .get(row_ix)
+                        .and_then(|types| types.get(col_ix))
+                        .map(|alias| SharedString::new_static(alias))
+                        .or_else(|| column.data_type.clone().map(SharedString::from)),
+                    // Staging anything on an absent field writes it.
+                    missing: edit.is_none() && self.missing(row_ix, col_ix),
+                    // Reformatted before it is clipped, never after: a document cut
+                    // at 4,000 characters does not parse, and the inspector would
+                    // fall back to the one long line for exactly the values big
+                    // enough to need the help.
+                    value: cell.map(|value| {
+                        let value = json.as_deref().unwrap_or(value);
+                        let clipped = clip_to(value, FIELD_DISPLAY_LIMIT);
+                        // Whole lines only, so the highlighter never sees a
+                        // document cut mid-string or mid-number.
+                        match (json.is_some(), clipped.strip_suffix('…')) {
+                            (true, Some(body)) => match body.rfind('\n') {
+                                Some(newline) => format!("{}…", &body[..=newline]),
+                                None => clipped,
+                            },
+                            _ => clipped,
+                        }
+                        .into()
+                    }),
+                    json: json.is_some(),
+                    edit,
+                }
             })
             .collect()
     }
@@ -779,7 +1447,7 @@ impl ResultGrid {
             .get(row)
             .and_then(|types| types.get(col));
         let numeric = match (tag, self.column_type(col)) {
-            (Some(tag), _) => db::is_numeric_type(tag),
+            (Some(tag), _) => self.engine.is_numeric_type(tag),
             (None, Some(_)) => self.is_numeric_column(col),
             (None, None) => true,
         };
@@ -836,6 +1504,10 @@ impl ResultGrid {
     /// against those rows. The ring, the row selection and an open input are
     /// dropped, as a sort the server runs drops them by replacing the grid:
     /// each names a position, and a different row is there now.
+    pub fn rows_id(&self) -> u64 {
+        self.rows_id
+    }
+
     pub fn sort_in_memory(&mut self, keys: Vec<(usize, bool)>) {
         let order = self.client_order(&keys);
         let mut moved_to = vec![0; order.len()];
@@ -855,6 +1527,7 @@ impl ResultGrid {
         self.editing = None;
         self.pointer_row = None;
         self.clear_row_selection();
+        self.rows_id = next_rows_id();
         self.sort = keys;
         // A sort in memory asks nothing of the statement, so every header
         // takes a click.
@@ -878,9 +1551,20 @@ impl ResultGrid {
             return None;
         }
         let (_, col) = self.active?;
-        let left: Pixels = self.columns.get(..col)?.iter().map(|c| c.width).sum();
-        let right = left + self.columns.get(col)?.width;
+        // A pinned column never scrolls out of view, and the ones pinned
+        // before a column take no room from the viewport it scrolls in.
+        let position = self.position_of(col)?.checked_sub(self.pinned)?;
+        let left: Pixels = self.view[self.pinned..][..position]
+            .iter()
+            .map(|&shown| self.columns[shown].width)
+            .sum();
+        let right = left + self.columns[col].width;
         (right + offset_x > Pixels::ZERO && left + offset_x < was).then_some(col)
+    }
+
+    /// The row the row panel shows.
+    pub fn selected_row(&self) -> Option<usize> {
+        self.selected_row
     }
 
     /// The cell `Enter` acts on, if the user has reached one. `None` on a
@@ -953,8 +1637,8 @@ impl ResultGrid {
     /// them move the ring, and there is no competing binding to fight.
     ///
     /// The column is kept: moving down a column is not moving out of it. With
-    /// nothing active yet the first column is the origin, because a keystroke
-    /// on a grid has to leave the ring somewhere readable.
+    /// nothing active yet the first column drawn is the origin, because a
+    /// keystroke on a grid has to leave the ring somewhere readable.
     ///
     /// Also folds into the row selection, exactly as a plain click on this
     /// row would: without it, arrow-key movement would leave a stale
@@ -962,10 +1646,12 @@ impl ResultGrid {
     /// while the ring itself moved on. Not for the echo of a pointer
     /// selection, which has already chosen the rows.
     pub fn select_row(&mut self, row: usize) {
+        self.selected_row = Some(row);
         if self.pointer_row.take() != Some(row) {
             self.click_row(row, false, false);
         }
-        self.set_active(row, self.active.map_or(0, |(_, col)| col));
+        let first = self.view.first().copied().unwrap_or(0);
+        self.set_active(row, self.active.map_or(first, |(_, col)| col));
     }
 
     /// The same fold for a column change, keeping the row. A header click lands
@@ -975,6 +1661,11 @@ impl ResultGrid {
     /// that cannot be sorted the ring sitting at the top of the column the
     /// user just pointed at is where their last action was.
     pub fn select_col(&mut self, col: usize) {
+        // A result with no rows has no cell for the ring to sit on, and every
+        // reader of `active` takes its row to be one that exists.
+        if self.result.rows.is_empty() {
+            return;
+        }
         self.set_active(self.active.map_or(0, |(row, _)| row), col);
     }
 
@@ -1008,15 +1699,22 @@ impl ResultGrid {
         self.mode = mode;
     }
 
+    /// Whether any cell of the row can be edited: what the row panel's pencil
+    /// and the "cannot be edited" refusal both ask.
+    pub fn row_editable(&self, row: usize) -> bool {
+        (0..self.columns.len()).any(|col| self.editable(row, col))
+    }
+
     /// Whether this cell can be written back at all: the result has to be
     /// traceable to one table, the column has to exist in it, and it must not
     /// be part of the key — a key edit is the one edit whose result cannot be
-    /// re-verified afterwards, so the spec's §3 refuses it.
+    /// re-verified afterwards, so the spec's §3 refuses it. The exception is a
+    /// key the engine edits as what the row is ([`db::Engine::edits_key_column`]).
     ///
     /// Nor a binary column. What the grid shows there is a blob *literal* the
     /// user could not type a replacement for anyway, and the value that came
     /// back would be written as the text it looks like — see
-    /// [`db::Engine::is_binary_type`].
+    /// [`db::Engine::writes_back`].
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -1025,13 +1723,20 @@ impl ResultGrid {
         let Some(edit) = &self.result.edit else {
             return false;
         };
+        let Some(Some(name)) = edit.columns.get(col) else {
+            return false;
+        };
+        let settable = match &edit.row_match {
+            db::RowMatch::Key => !edit.keys.contains(&col) || self.engine.edits_key_column(name),
+            db::RowMatch::EveryColumn { fixed } => !fixed.contains(&col),
+        };
         row < self.result.rows.len()
-            && edit.columns.get(col).is_some_and(Option::is_some)
-            && !edit.keys.contains(&col)
-            && ![self.column_type(col), self.cell_type(row, col)]
-                .into_iter()
-                .flatten()
-                .any(|data_type| self.engine.is_binary_type(data_type))
+            && settable
+            && self.engine.writes_back(
+                [self.column_type(col), self.cell_type(row, col)]
+                    .into_iter()
+                    .flatten(),
+            )
     }
 
     fn column_type(&self, col: usize) -> Option<&str> {
@@ -1091,11 +1796,36 @@ impl ResultGrid {
         if row >= self.result.rows.len() {
             return None;
         }
-        Some((
-            edit.schema.clone(),
-            edit.table.clone(),
-            self.key_values(edit, row)?,
-        ))
+        let (keys, null_keys) = self.key_values(edit, row)?;
+        Some((edit.schema.clone(), edit.table.clone(), keys, null_keys))
+    }
+
+    /// Why the result's rows cannot be written back, when the engine said.
+    pub fn read_only_reason(&self) -> Option<&str> {
+        self.result.read_only_reason.as_deref()
+    }
+
+    /// What a new row of this grid's own is written into: where its rows are
+    /// written back to, and each column that names, typed as the first row's
+    /// cell is. `None` where its rows are written back nowhere, or into a
+    /// table on an engine that takes no inserts.
+    pub fn insert_target(&self) -> Option<InsertTarget> {
+        if !self.engine.takes_inserts(db::RelationKind::Table) {
+            return None;
+        }
+        let edit = self.result.edit.as_ref()?;
+        let columns = edit
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(col, name)| {
+                Some((
+                    name.clone()?,
+                    self.cell_type(0, col).unwrap_or_default().to_string(),
+                ))
+            })
+            .collect();
+        Some((edit.schema.clone(), edit.table.clone(), columns))
     }
 
     /// Open an input on a cell. `false` when the cell is not editable, and
@@ -1287,12 +2017,24 @@ impl ResultGrid {
                 if sets.is_empty() {
                     return None;
                 }
+                let (keys, null_keys) = self.key_values(edit, row)?;
                 Some(PendingRow {
                     schema: edit.schema.clone(),
                     table: edit.table.clone(),
                     sets,
-                    keys: self.key_values(edit, row)?,
+                    keys,
+                    null_keys,
+                    update: edit.update,
                     types: self.row_types(row),
+                    held: self
+                        .pending
+                        .iter()
+                        .filter(|pending| pending.row == row)
+                        .filter_map(|pending| {
+                            let name = edit.columns.get(pending.col)?.clone()?;
+                            Some((name, self.cell(row, pending.col)?.to_string()))
+                        })
+                        .collect(),
                 })
             })
             .collect()
@@ -1311,22 +2053,47 @@ impl ResultGrid {
             .collect()
     }
 
-    /// The row's key columns, named and carrying the value the server sent.
-    /// `None` if any of them is missing, which is what refuses the whole row.
-    fn key_values(&self, edit: &EditTarget, row: usize) -> Option<Vec<(String, String)>> {
-        edit.keys
-            .iter()
-            .map(|&col| {
-                let name = edit.columns.get(col)?.clone()?;
-                Some((name, self.cell(row, col)?.to_string()))
-            })
-            .collect()
+    /// The row's key columns, named and carrying the value the server sent,
+    /// and apart from them the columns that were NULL. `None` if any key is
+    /// missing, which is what refuses the whole row: a NULL is missing from a
+    /// unique key, where `=` would not find it, and is a value to match in a
+    /// row named by every column.
+    fn key_values(&self, edit: &EditTarget, row: usize) -> Option<KeyValues> {
+        let every_column = matches!(edit.row_match, db::RowMatch::EveryColumn { .. });
+        let mut keys = Vec::new();
+        let mut null_keys = Vec::new();
+        for &col in &edit.keys {
+            let name = edit.columns.get(col)?.clone()?;
+            match self.cell(row, col) {
+                Some(value) => keys.push((name, value.to_string())),
+                None if every_column && row < self.result.rows.len() => null_keys.push(name),
+                None => return None,
+            }
+        }
+        Some((keys, null_keys))
     }
 
     fn pending_at(&self, row: usize, col: usize) -> Option<&PendingEdit> {
         self.pending
             .iter()
             .find(|edit| edit.row == row && edit.col == col)
+    }
+
+    pub fn pending_value(&self, row: usize, col: usize) -> Option<&NewValue> {
+        self.pending_at(row, col).map(|edit| &edit.value)
+    }
+
+    /// What an input opened on the cell starts out holding: the whole value,
+    /// not the clipped one, since this is the value being changed. A NULL
+    /// seeds as the empty string because that is the only thing an input can
+    /// hold; typing one back is the `SetNull` action's job, not the input's
+    /// (spec §3). Either keyword seeds empty for the same reason.
+    pub fn edit_seed(&self, row: usize, col: usize) -> &str {
+        match self.pending_value(row, col) {
+            Some(NewValue::Value(value)) => value,
+            Some(NewValue::Null | NewValue::Default) => "",
+            None => self.cell(row, col).unwrap_or_default(),
+        }
     }
 
     /// The input for the cell being edited, created on its first render. `None`
@@ -1346,37 +2113,25 @@ impl ResultGrid {
             return Some(input.clone());
         }
 
-        // The whole value, not the clipped one: this is the value being
-        // changed. A NULL seeds as the empty string because that is the only
-        // thing an input can hold; typing one back is the `SetNull` action's
-        // job, not the input's (spec §3).
-        let seed = match self.pending_at(row, col) {
-            // Either keyword seeds empty for the same reason a fetched NULL
-            // does: neither is text an input could hold and commit back.
-            Some(pending) => match &pending.value {
-                NewValue::Value(value) => value.clone(),
-                NewValue::Null | NewValue::Default => SharedString::default(),
-            },
-            None => self
-                .cell(row, col)
-                .map(|value| SharedString::from(value.to_string()))
-                .unwrap_or_default(),
-        };
+        let seed = SharedString::from(self.edit_seed(row, col).to_string());
         let input = cx.new(|cx| InputState::new(window, cx));
         // `set_value` rather than `default_value`: only the former leaves the
         // caret after the text, and an edit starts from the end of the value.
         input.update(cx, |input, cx| input.set_value(seed, window, cx));
         // The keystrokes that follow belong to the value rather than to the
-        // grid's selection, so the input takes focus as it appears.
-        input.focus_handle(cx).focus(window, cx);
+        // grid's selection, so the input takes focus as it appears. Through
+        // `InputState::focus`, not its handle: the state's own focus listener,
+        // which starts the caret blinking, is only activated once this frame's
+        // effects flush, after the focus event it would have caught has fired.
+        input.update(cx, |input, cx| input.focus(window, cx));
         self.editing.as_mut()?.input = Some(input.clone());
         Some(input)
     }
 
     /// Take the open input's value into the pending set. `false` when the mode
-    /// refused the write, and the input is left open then: the prompt its caller
-    /// raises is answered by raising the mode and pressing `enter` again.
-    fn commit_edit(&mut self, cx: &App) -> bool {
+    /// refused the write, and the input is left open then, for raising the mode
+    /// in the prompt its caller raises to commit it.
+    pub(crate) fn commit_edit(&mut self, cx: &App) -> bool {
         let Some(editing) = self.editing.as_ref() else {
             return true;
         };
@@ -1400,8 +2155,13 @@ pub struct Field {
     /// without running the statement twice.
     pub data_type: Option<SharedString>,
     pub value: Option<SharedString>,
+    /// `value` is a JSON object or array, reformatted, so it can be highlighted.
+    pub json: bool,
     /// The row has no such field at all, which is not a NULL.
     pub missing: bool,
+    /// The edit staged on this cell, which `value` already shows where it is
+    /// a value rather than a keyword.
+    pub edit: Option<NewValue>,
 }
 
 enum Step {
@@ -1421,7 +2181,7 @@ fn commit_from_input(
     if !table.delegate_mut().commit_edit(cx) {
         // A mode refusal has an action attached -- raise the mode -- and the
         // grid has nowhere to put one. The input stays open behind the prompt,
-        // so answering it and pressing the key again commits what was typed.
+        // and raising the mode there commits what was typed.
         window.dispatch_action(Box::new(crate::RequestWriteMode), cx);
         return false;
     }
@@ -1445,10 +2205,7 @@ fn commit_and_step(
 ) {
     cx.stop_propagation();
     let grid = table.delegate();
-    let Some(to) = grid
-        .active()
-        .and_then(|from| step_target(from, &step, grid.rows_count(cx), grid.columns.len()))
-    else {
+    let Some(to) = grid.step_from_active(&step, grid.rows_count(cx)) else {
         return;
     };
     if !commit_from_input(table, window, cx) {
@@ -1458,7 +2215,33 @@ fn commit_and_step(
     table.delegate_mut().begin_edit(to.0, to.1);
     match step {
         Step::Rows(_) => table.set_selected_row(to.0, cx),
-        Step::Cols(_) => table.set_selected_col(to.1 + GUTTER, cx),
+        Step::Cols(_) => {
+            if let Some(col) = table.delegate().table_col(to.1) {
+                table.set_selected_col(col, cx);
+            }
+        }
+    }
+}
+
+/// `left`, `right` and `tab` on the grid, stepped from the ring. The library
+/// steps from its own selected column instead, which a cell click never moves
+/// and hiding or pinning a column renumbers, so its first step would land one
+/// past whatever column it last selected.
+pub(crate) fn step_col(
+    table: &mut TableState<ResultGrid>,
+    by: isize,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    let grid = table.delegate();
+    if grid.active().is_none() {
+        return;
+    }
+    cx.stop_propagation();
+    let to = grid
+        .step_from_active(&Step::Cols(by), grid.rows_count(cx))
+        .and_then(|(_, col)| grid.table_col(col));
+    if let Some(col) = to {
+        table.set_selected_col(col, cx);
     }
 }
 
@@ -1480,9 +2263,129 @@ pub(crate) fn step_pending(
         return;
     };
     table.focus_handle(cx).focus(window, cx);
+    // An edit in a hidden column is still an edit about to be applied, and
+    // stepping to it is the way to see it.
+    table.delegate_mut().show_column(col);
+    relaid(table, cx);
     table.delegate_mut().set_active(row, col);
     table.set_selected_row(row, cx);
-    table.scroll_to_col(col + GUTTER, cx);
+    scroll_to_drawn_col(table, col, cx);
+}
+
+/// A header's menu: hide, pin or unpin that column, and bring back the
+/// hidden ones.
+fn column_menu(
+    menu: PopupMenu,
+    table: &Entity<TableState<ResultGrid>>,
+    col: usize,
+    cx: &App,
+) -> PopupMenu {
+    let grid = table.read(cx).delegate();
+    let (drawn, hidden, pinned) = (grid.view.len(), grid.hidden_columns(), grid.is_pinned(col));
+    let relay = |change: fn(&mut ResultGrid, usize)| {
+        let table = table.clone();
+        move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+            table.update(cx, |table, cx| {
+                change(table.delegate_mut(), col);
+                relaid(table, cx);
+                cx.notify();
+            });
+        }
+    };
+    menu.when(drawn > 1, |menu| {
+        menu.item(PopupMenuItem::new("Hide Column").on_click(relay(ResultGrid::hide_column)))
+    })
+    .item(
+        PopupMenuItem::new(match pinned {
+            true => "Unpin Column",
+            false => "Pin Column to the Left",
+        })
+        .on_click(relay(ResultGrid::toggle_pinned)),
+    )
+    .when(hidden > 0, |menu| {
+        menu.item(
+            PopupMenuItem::new(format!("Show All Columns ({hidden} hidden)"))
+                .on_click(relay(|grid, _| grid.show_all_columns())),
+        )
+    })
+}
+
+/// Have the table rebuild its columns after the grid changed which are drawn
+/// or where, and move its column selection with them. Every change to the
+/// drawn columns ends here.
+pub(crate) fn relaid(table: &mut TableState<ResultGrid>, cx: &mut Context<TableState<ResultGrid>>) {
+    table.refresh(cx);
+    if table.selected_col().is_none() {
+        return;
+    }
+    match table.delegate().ring_table_col() {
+        // Reselected where it stands now, without the scroll that comes with it.
+        Some(col) => {
+            let from = table.horizontal_scroll_handle.offset();
+            table.set_selected_col(col, cx);
+            table.horizontal_scroll_handle.set_offset(from);
+        }
+        None => table.clear_selection(cx),
+    }
+}
+
+/// Fit the columns in the face the grid is drawn in, measured once per family
+/// and size, and have the table take any width that changed. Called as the grid
+/// is drawn and before the table lays it out, so rows that just arrived are
+/// shown at the width fitted to them in the frame they arrive.
+pub(crate) fn fit_to_face(
+    table: &mut TableState<ResultGrid>,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    let face = (fonts(cx).grid.clone(), layout::grid(1.));
+    let grid = table.delegate_mut();
+    if grid.face.as_ref() != Some(&face) {
+        grid.advances = Advances::measured(&face.0, cx);
+        grid.face = Some(face);
+        grid.refit();
+    }
+    if std::mem::take(&mut grid.resized) {
+        table.refresh(cx);
+    }
+}
+
+/// Bring a drawn column into view. A pinned one always is, and the library,
+/// asked to scroll to one, scrolls to the first column that does scroll.
+fn scroll_to_drawn_col(
+    table: &mut TableState<ResultGrid>,
+    col: usize,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    if table.delegate().is_pinned(col) {
+        return;
+    }
+    if let Some(col) = table.delegate().table_col(col) {
+        table.scroll_to_col(col, cx);
+    }
+}
+
+/// Put the ring on a column and bring it into view, for "Go to column". The
+/// ring stays on the row it was on, so the eye lands on the same record.
+/// Answers whether the grid took focus for it.
+pub(crate) fn reveal_column(
+    table: &mut TableState<ResultGrid>,
+    col: usize,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) -> bool {
+    if col >= table.delegate().columns().len() {
+        return false;
+    }
+    table.focus_handle(cx).focus(window, cx);
+    // Going to a hidden column is asking to see it.
+    if table.delegate().position_of(col).is_none() {
+        table.delegate_mut().show_column(col);
+        relaid(table, cx);
+    }
+    table.delegate_mut().select_col(col);
+    scroll_to_drawn_col(table, col, cx);
+    cx.notify();
+    true
 }
 
 /// Scroll the active cell back into view when the grid's width changes under
@@ -1493,11 +2396,13 @@ pub(crate) fn step_pending(
 ///
 /// Run after the table's prepaint, the first point the new width is known.
 /// Answers the horizontal offset to glide to, leaving the offset where it was.
+/// Notes that offset too, as the one a fixed column's selection keeps.
 pub(crate) fn keep_active_in_view(
     table: &mut TableState<ResultGrid>,
     cx: &mut Context<TableState<ResultGrid>>,
 ) -> Option<Pixels> {
     let handle = table.horizontal_scroll_handle.clone();
+    table.delegate_mut().painted_x = handle.offset().x;
     let width = handle.bounds().size.width;
     // At no width `scroll_to_col` defers to the list's next layout, which the
     // jump back below could not undo.
@@ -1506,9 +2411,10 @@ pub(crate) fn keep_active_in_view(
     }
     let from = handle.offset();
     let col = table.delegate_mut().relaid_out(width, from.x)?;
+    let col = table.delegate().table_col(col)?;
     // The library keeps the offset that brings a column into view private;
     // jumping there is the only way to learn it, so jump back straight after.
-    table.scroll_to_col(col + GUTTER, cx);
+    table.scroll_to_col(col, cx);
     let to = handle.offset().x;
     handle.set_offset(from);
     // A glide that goes nowhere would still stop a wheel's in flight.
@@ -1618,31 +2524,31 @@ fn clip(value: &str) -> String {
     flattened
 }
 
-/// A JSON object or array laid out over indented lines, or the value unchanged
-/// where it is not one.
+/// A JSON object or array laid out over indented lines, `None` where the value
+/// is not one.
 ///
 /// Parsed rather than taken from the column's type. SQLite has no JSON type to
 /// report — a document there lives in whatever `text` column was declared for
 /// it — so the type name answers this question for two engines out of three,
 /// and the value itself answers it for all of them.
 ///
+/// The caller keeps the original text on `None`.
+///
 /// Objects and arrays only. A bare number, string or `true` is also valid JSON,
 /// and reformatting one produces the same characters back.
 ///
-/// ponytail: runs on every repaint of the inspector rather than caching, which
-/// the leading-byte check is what makes affordable — it costs one comparison
-/// for a UUID or a timestamp and only reaches the parser for a value already
-/// shaped like a document. Cache per cell if a wide row of large documents ever
-/// makes the panel feel slow.
-fn indented_json(value: &str) -> String {
+/// ponytail: runs on every repaint of the inspector rather than caching. The
+/// leading-byte check keeps a UUID or a timestamp to one comparison, but a value
+/// shaped like a document pays for the parse and the pretty-print both. Cache
+/// per cell if a wide row of large documents ever makes the panel feel slow.
+fn indented_json(value: &str) -> Option<String> {
     let trimmed = value.trim_start();
     if !trimmed.starts_with(['{', '[']) {
-        return value.to_string();
+        return None;
     }
     serde_json::from_str::<serde_json::Value>(trimmed)
         .ok()
         .and_then(|parsed| serde_json::to_string_pretty(&parsed).ok())
-        .unwrap_or_else(|| value.to_string())
 }
 
 /// Cut to a character count, never a byte count: slicing bytes panics in the
@@ -1665,7 +2571,7 @@ fn reorder<T: Default>(items: &mut Vec<T>, order: &[usize]) {
 
 impl TableDelegate for ResultGrid {
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len() + GUTTER
+        self.view.len() + GUTTER
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -1698,12 +2604,7 @@ impl TableDelegate for ResultGrid {
         // scroll and the cells stay put while the header moves.
         // Not a mask painted over the margin: on a glass theme a second
         // `data_glass` stacks on the plane's own and the margin turns solid.
-        let content_width = self.gutter_width()
-            + self
-                .columns
-                .iter()
-                .map(|column| f32::from(column.width))
-                .sum::<f32>();
+        let content_width = self.content_width();
         let row = div()
             .id(("row", row_ix))
             .relative()
@@ -1727,7 +2628,13 @@ impl TableDelegate for ResultGrid {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix.checked_sub(GUTTER) {
-            Some(col) => self.columns[col].clone(),
+            Some(position) => {
+                let column = self.columns[self.view[position]].clone();
+                match position < self.pinned {
+                    true => column.fixed_left(),
+                    false => column,
+                }
+            }
             None => Column::new("row-number", "#")
                 .width(px(self.gutter_width()))
                 .resizable(false)
@@ -1744,8 +2651,21 @@ impl TableDelegate for ResultGrid {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match col_ix.checked_sub(GUTTER) {
-            Some(col) => self.data_th(col, window, cx).into_any_element(),
+        match col_ix.checked_sub(GUTTER).and_then(|p| self.column_at(p)) {
+            Some(col) => {
+                // The library has no menu for a header, so the header brings
+                // its own: right-clicking the column is where hiding or
+                // pinning it is looked for, and it names the column plainly.
+                let table = cx.entity();
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .child(self.data_th(col, window, cx))
+                    .context_menu(move |menu, _, cx| column_menu(menu, &table, col, cx))
+                    .into_any_element()
+            }
             None => {
                 let faint = theme(cx).text_faint;
                 gutter_cell()
@@ -1771,7 +2691,7 @@ impl TableDelegate for ResultGrid {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match col_ix.checked_sub(GUTTER) {
+        match col_ix.checked_sub(GUTTER).and_then(|p| self.column_at(p)) {
             Some(col) => self.data_td(row_ix, col, window, cx).into_any_element(),
             None => {
                 let (faint, text, selected_bg) = {
@@ -1868,10 +2788,50 @@ impl TableDelegate for ResultGrid {
             1 => "Copy Row As",
             _ => "Copy Rows As",
         };
+        let hidden = self.hidden_columns();
+        let name = &self.result.columns[col].name;
+        // The row's own name for it, which is the one thing a generic label
+        // could not say.
+        let opens = self
+            .opened
+            .and_then(|opened| self.cell(row, opened))
+            .map(|name| {
+                let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
+                match short.len() < name.len() {
+                    true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
+                    false => format!("Open \u{201c}{name}\u{201d}"),
+                }
+            });
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
+            .when_some(opens, |menu, label| {
+                menu.menu(label, Box::new(crate::FollowForeignKey))
+                    .separator()
+            })
             .menu("Copy Cell", Box::new(crate::CopyCell))
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
+            .separator()
+            // Named, because the row is what lights up under a right click and
+            // the column these act on is only the cell's.
+            .when(self.view.len() > 1, |menu| {
+                menu.menu(
+                    format!("Hide Column \u{201c}{name}\u{201d}"),
+                    Box::new(crate::HideColumn),
+                )
+            })
+            .menu(
+                match self.is_pinned(col) {
+                    true => format!("Unpin Column \u{201c}{name}\u{201d}"),
+                    false => format!("Pin Column \u{201c}{name}\u{201d} to the Left"),
+                },
+                Box::new(crate::TogglePinColumn),
+            )
+            .when(hidden > 0, |menu| {
+                menu.menu(
+                    format!("Show All Columns ({hidden} hidden)"),
+                    Box::new(crate::ShowAllColumns),
+                )
+            })
             .when(!stages.is_empty(), PopupMenu::separator);
         stages
             .into_iter()
@@ -1936,7 +2896,12 @@ impl ResultGrid {
                     .get(col_ix)
                     .and_then(|column| column.data_type.clone())
                     .map(|data_type| {
+                        // Only the room the name leaves: from no width of its
+                        // own, the type ellipsizes and goes before the name
+                        // gives up a character. Both shrinking from their full
+                        // widths cut the name while the type still showed.
                         div()
+                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
@@ -2051,10 +3016,6 @@ impl ResultGrid {
                     grid.focus = Some(handle);
                     grid.pointer_row = Some(row_ix);
                     table.set_selected_row(row_ix, cx);
-                    // set_selected_row consumes the event; the row beneath
-                    // still needs its own right click to record where the
-                    // context menu opens.
-                    cx.propagate();
                 }),
             )
             // A plain cell click must establish the anchor before Shift is
@@ -2110,7 +3071,8 @@ impl ResultGrid {
                 .on_click(|_, _, cx| cx.stop_propagation())
                 // The input has focus, so both keystrokes arrive here on their
                 // way out of it. Consumed rather than propagated: `escape`
-                // otherwise reaches the workspace and moves focus to the editor.
+                // otherwise goes on to the table's own binding for it, which
+                // clears the selection the edit was opened from.
                 .on_action(cx.listener(
                     move |table, _: &gpui_component::input::Enter, window, cx| {
                         commit_from_input(table, window, cx);
@@ -2275,8 +3237,15 @@ impl ResultGrid {
             // Read-write, a key or computed column) reaches the same
             // explanation `EditCell` already gives from the keyboard.
             .on_double_click(cx.listener(move |table, _, window, cx| {
-                table.delegate_mut().set_active(row_ix, col_ix);
-                window.dispatch_action(Box::new(crate::EditCell), cx);
+                let grid = table.delegate_mut();
+                grid.set_active(row_ix, col_ix);
+                // A row that opens as a result of its own opens from any cell
+                // there is no edit to begin in.
+                let opens = grid.opened.is_some() && !grid.editable(row_ix, col_ix);
+                match opens {
+                    true => window.dispatch_action(Box::new(crate::FollowForeignKey), cx),
+                    false => window.dispatch_action(Box::new(crate::EditCell), cx),
+                }
                 cx.notify();
             }))
             // The library's row click would select a toggled-off row again.
@@ -2303,9 +3272,6 @@ fn click_row(
     } else {
         table.clear_selection(cx);
     }
-    // set_selected_row consumes the event; the cell still needs mouse-down
-    // for its click and double-click handlers.
-    cx.propagate();
 }
 
 pub(crate) fn new_grid(
@@ -2338,14 +3304,37 @@ pub(crate) fn new_grid(
         }
         TableEvent::ColumnWidthsChanged(widths) => {
             let widths = widths.get(GUTTER..).unwrap_or_default().to_vec();
-            table.update(cx, |table, _| table.delegate_mut().set_widths(&widths));
+            table.update(cx, |table, _| {
+                table.delegate_mut().set_drawn_widths(&widths)
+            });
         }
         TableEvent::SelectColumn(col) => {
-            let Some(col) = col.checked_sub(GUTTER) else {
-                return;
-            };
+            let col = *col;
             table.update(cx, |table, cx| {
+                // Selecting a fixed column (the gutter or a pinned one) makes
+                // the library scroll to the first column that scrolls instead.
+                // A fixed column is always in view, so put the offset back
+                // before the frame that would show the jump. Caught here
+                // because arrows, tab and header clicks all select inside the
+                // library, past any hook of ours.
+                if col < GUTTER + table.delegate().pinned {
+                    let mut offset = table.horizontal_scroll_handle.offset();
+                    offset.x = table.delegate().painted_x;
+                    table.horizontal_scroll_handle.set_offset(offset);
+                }
+                let Some(col) = col
+                    .checked_sub(GUTTER)
+                    .and_then(|position| table.delegate().column_at(position))
+                else {
+                    return;
+                };
                 table.delegate_mut().select_col(col);
+                cx.notify();
+            });
+        }
+        TableEvent::ClearSelection => {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().selected_row = None;
                 cx.notify();
             });
         }
@@ -2360,6 +3349,7 @@ pub(crate) fn new_grid(
 mod tests {
     use super::*;
     use crate::db::Column as DbColumn;
+    use crate::db::rows;
 
     fn column(name: &str) -> DbColumn {
         DbColumn {
@@ -2375,6 +3365,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rows_held_for_their_types_stream_in_as_the_finished_result_shows_them() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n"), column("p")]);
+        feed.push(db::Row::new([Some("1234567"), Some(point)]).unwrap());
+        assert_eq!(feed.take().set, 0, "held until the describe answers");
+
+        feed.describe(vec!["int4".into(), "geometry".into()]);
+        let fed = feed.take();
+        let mut streamed = ResultGrid::new(
+            QueryResult {
+                columns: fed.columns,
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .streaming(fed.set);
+        streamed.append_rows(fed.rows);
+
+        let mut finished = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("n", "int4"), typed("p", "geometry")],
+                rows: rows(vec![vec![Some("1234567".into()), Some(point.into())]]),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        finished.apply_rendered(db::render(db::unrendered(
+            db::Engine::Postgres,
+            finished.result(),
+        )));
+
+        for col in 0..2 {
+            assert_eq!(streamed.shown(0, col), finished.shown(0, col));
+        }
+        assert!(streamed.is_numeric_column(0));
+        assert!(db::unrendered(db::Engine::Postgres, streamed.result()).is_empty());
+    }
+
+    #[test]
+    fn rows_held_for_a_describe_go_once_the_statement_is_over() {
+        let feed = db::Feed::default();
+        feed.await_types(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        feed.begin(vec![column("n")]);
+        feed.push(db::Row::new([Some("1")]).unwrap());
+        assert!(feed.take().rows.is_empty());
+
+        feed.release();
+        assert_eq!(feed.take().rows, vec![vec![Some("1".to_string())]]);
+    }
+
+    #[test]
+    fn rows_streamed_in_before_their_types_are_rendered_once_the_types_arrive() {
+        let point = "0101000000000000000000F03F000000000000F03F";
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("n"), column("p")],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres)
+        .streaming(1);
+        grid.append_rows(rows(vec![vec![Some("1".into()), Some(point.into())]]));
+
+        grid.set_column_types(vec![typed("n", "int4"), typed("p", "geometry")]);
+        let rendered = db::render(db::unrendered(db::Engine::Postgres, grid.result()));
+        grid.apply_rendered(rendered);
+
+        assert!(grid.is_numeric_column(0));
+        let shown = grid.result().rows[0].get(1).unwrap_or_default();
+        assert!(shown.starts_with("POINT"), "{shown}");
+        // Rendered already, so a second pass finds nothing left to do.
+        assert!(db::unrendered(db::Engine::Postgres, grid.result()).is_empty());
+    }
+
+    #[test]
+    fn a_rendered_value_lands_only_where_the_cell_still_holds_what_was_rendered() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("p")],
+                rows: rows(vec![vec![Some("moved".into())], vec![Some("0101".into())]]),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        grid.apply_rendered(vec![
+            (0, 0, "0101".into(), "POINT(1 1)".into()),
+            (1, 0, "0101".into(), "POINT(2 2)".into()),
+        ]);
+        assert_eq!(grid.result().rows[0].get(0), Some("moved"));
+        assert_eq!(grid.result().rows[1].get(0), Some("POINT(2 2)"));
+    }
+
     fn value(text: &str) -> NewValue {
         NewValue::Value(text.into())
     }
@@ -2387,10 +3473,10 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("b", "int4"), typed("a", "int4")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("1".into()), Some("9".into())],
                     vec![Some("2".into()), Some("8".into())],
-                ],
+                ]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2419,10 +3505,12 @@ mod tests {
                     name: "a".into(),
                     data_type: data_type.map(str::to_string),
                 }],
-                rows: values
-                    .iter()
-                    .map(|value| vec![value.map(str::to_string)])
-                    .collect(),
+                rows: rows(
+                    values
+                        .iter()
+                        .map(|value| vec![value.map(str::to_string)])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2511,13 +3599,13 @@ mod tests {
                     name: "v".into(),
                     data_type: Some("mixed".into()),
                 }],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("b".into())],
                     vec![Some("10".into())],
                     vec![None],
                     vec![Some("9".into())],
                     vec![Some("10".into())],
-                ],
+                ]),
                 cell_types: vec![
                     vec!["string"],
                     vec!["int"],
@@ -2537,10 +3625,12 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("team", "text"), typed("score", "int4")],
-                rows: [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
-                    .iter()
-                    .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
-                    .collect(),
+                rows: rows(
+                    [("b", "1"), ("a", "2"), ("b", "2"), ("a", "2")]
+                        .iter()
+                        .map(|(team, score)| vec![Some(team.to_string()), Some(score.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2557,15 +3647,16 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note"), column("total")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("7".into()), Some("first".into()), Some("1".into())],
                     vec![Some("8".into()), Some("second".into()), Some("2".into())],
-                ],
+                ]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into()), None],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -2579,16 +3670,17 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note"), typed("depth", "int4")],
-                rows: vec![vec![
+                rows: rows(vec![vec![
                     Some("7".into()),
                     Some("first".into()),
                     Some("1".into()),
-                ]],
+                ]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("note".into()), Some("depth".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -2604,12 +3696,13 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![Some("7".into()), None]],
+                rows: rows(vec![vec![Some("7".into()), None]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -2623,17 +3716,99 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![None, Some("first".into())]],
+                rows: rows(vec![vec![None, Some("first".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
         )
+    }
+
+    /// `a` is fixed, and `b` reads NULL in the second row; the target names a
+    /// row by all three columns.
+    fn every_column_grid(row_match: db::RowMatch) -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: vec![column("a"), column("b"), column("c")],
+                rows: rows(vec![
+                    vec![Some("1".into()), Some("p".into()), Some("x".into())],
+                    vec![Some("2".into()), None, Some("y".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "db".into(),
+                    table: "t".into(),
+                    columns: vec![Some("a".into()), Some("b".into()), Some("c".into())],
+                    keys: vec![0, 1, 2],
+                    row_match,
+                    update: db::UpdateSpelling::AlterUpdate,
+                }),
+                read_only_reason: Some("Rows cannot be matched by value.".into()),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+    }
+
+    #[test]
+    fn a_row_named_by_every_column_carries_its_nulls_apart() {
+        let grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        assert_eq!(
+            grid.row_key(1),
+            Some((
+                "db".to_string(),
+                "t".to_string(),
+                vec![
+                    ("a".to_string(), "2".to_string()),
+                    ("c".to_string(), "y".to_string())
+                ],
+                vec!["b".to_string()]
+            ))
+        );
+        assert_eq!(grid.row_key(9), None);
+    }
+
+    #[test]
+    fn a_key_target_still_refuses_a_row_with_a_null_key() {
+        let grid = every_column_grid(db::RowMatch::Key);
+        assert_eq!(grid.row_key(0).map(|key| key.3), Some(Vec::new()));
+        assert_eq!(grid.row_key(1), None);
+    }
+
+    #[test]
+    fn under_every_column_the_fixed_columns_are_not_editable_and_the_rest_are() {
+        let grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        assert!(!grid.editable(0, 0));
+        assert!(grid.editable(0, 1));
+        assert!(grid.editable(0, 2));
+        let keyed = every_column_grid(db::RowMatch::Key);
+        assert!(!keyed.editable(0, 0));
+        assert!(!keyed.editable(0, 2));
+    }
+
+    #[test]
+    fn a_pending_row_carries_the_nulls_and_the_update_spelling() {
+        let mut grid = every_column_grid(db::RowMatch::EveryColumn { fixed: vec![0] });
+        grid.pending.push(PendingEdit {
+            row: 1,
+            col: 2,
+            value: NewValue::Value("z".into()),
+            shown: None,
+        });
+        let [row] = &grid.pending_updates()[..] else {
+            panic!("one pending row");
+        };
+        assert_eq!(row.null_keys, ["b"]);
+        assert_eq!(row.update, db::UpdateSpelling::AlterUpdate);
+        assert_eq!(
+            grid.read_only_reason(),
+            Some("Rows cannot be matched by value.")
+        );
     }
 
     #[test]
@@ -2646,7 +3821,8 @@ mod tests {
             Some((
                 "public".to_string(),
                 "measurements".to_string(),
-                vec![("id".to_string(), "8".to_string())]
+                vec![("id".to_string(), "8".to_string())],
+                Vec::new()
             ))
         );
         // A row index can outlive the rows it was taken from.
@@ -2670,10 +3846,10 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "int8"), column("ddl")],
-                rows: vec![vec![
+                rows: rows(vec![vec![
                     Some("1234567".into()),
                     Some("CREATE\n  VIEW v".into()),
-                ]],
+                ]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2697,7 +3873,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "numeric")],
-                rows: vec![vec![Some(digits.clone())]],
+                rows: rows(vec![vec![Some(digits.clone())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -2765,7 +3941,7 @@ mod tests {
         let mut grid = editable_grid();
         assert!(grid.set_pending(0, 1, value("changed")));
 
-        assert_eq!(grid.result.rows[0][1].as_deref(), Some("first"));
+        assert_eq!(grid.result.rows[0].get(1), Some("first"));
         assert_eq!(grid.shown(0, 1).as_deref(), Some("first"));
         assert_eq!(grid.cell(0, 1), Some("first"));
         assert!(grid.has_pending());
@@ -2808,7 +3984,7 @@ mod tests {
         // the ring on another cell.
         let mut grid = editable_grid();
         grid.sort = vec![(2, false), (0, true)];
-        grid.set_widths(&[px(200.), px(190.), px(240.)]);
+        grid.set_drawn_widths(&[px(200.), px(190.), px(240.)]);
         grid.set_active(1, 2);
         // An edit nobody applied stays with the session that typed it.
         assert!(grid.set_pending(0, 1, value("changed")));
@@ -2840,6 +4016,61 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_carries_onto_rows_that_are_still_there_and_no_further() {
+        let grid = |rows: usize| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: crate::db::rows(
+                        (0..rows).map(|row| vec![Some(row.to_string())]).collect(),
+                    ),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+        };
+        let mut streaming = grid(3);
+        streaming.click_row(1, false, false);
+        streaming.click_row(2, true, false);
+        streaming.set_active(2, 0);
+
+        let mut landed = grid(5);
+        assert!(landed.select(streaming.selection()));
+        assert_eq!(landed.active(), Some((2, 0)));
+        assert_eq!(landed.selected_rows, [1, 2].into());
+        assert_eq!(landed.row_selection_anchor, Some(1));
+
+        let mut shorter = grid(2);
+        assert!(!shorter.select(streaming.selection()));
+        assert_eq!(shorter.active(), None);
+        assert!(shorter.selected_rows.is_empty());
+        assert!(!grid(5).select(grid(3).selection()), "nothing was picked");
+    }
+
+    #[test]
+    fn a_stopped_result_is_still_stopped_once_restored() {
+        for stopped in [db::Stopped::AtLimit, db::Stopped::Cancelled] {
+            let grid = ResultGrid::new(
+                QueryResult {
+                    columns: vec![db::Column {
+                        name: "id".into(),
+                        data_type: None,
+                    }],
+                    rows: rows(vec![vec![Some("1".into())], vec![Some("2".into())]]),
+                    stopped: Some(stopped),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            );
+            let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+            assert_eq!(restored.result().stopped, Some(stopped));
+        }
+    }
+
+    #[test]
     fn the_inspector_reads_each_cells_own_type_and_knows_missing_from_null() {
         let grid = ResultGrid::new(
             QueryResult {
@@ -2850,7 +4081,7 @@ mod tests {
                     },
                     column("phone"),
                 ],
-                rows: vec![vec![None, None]],
+                rows: rows(vec![vec![None, None]]),
                 cell_types: vec![vec![db::MISSING, "null"]],
                 ..QueryResult::default()
             },
@@ -2867,7 +4098,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("email"), column("phone")],
-                rows: vec![vec![None, None]],
+                rows: rows(vec![vec![None, None]]),
                 cell_types: vec![vec![db::MISSING, "null"]],
                 ..QueryResult::default()
             },
@@ -2895,11 +4126,11 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("_id", "mixed"), typed("value", "mixed")],
-                rows: vec![
+                rows: rows(vec![
                     vec![Some("ObjectId('65a4f1c0ffffffffffffffff')".into()), None],
                     vec![Some("2".into()), Some("BinData(0, 'AP8=')".into())],
                     vec![Some("3".into()), Some("42".into())],
-                ],
+                ]),
                 cell_types: vec![
                     vec!["objectId", db::MISSING],
                     vec!["int", "binData"],
@@ -2910,6 +4141,7 @@ mod tests {
                     table: "mixed_shapes".into(),
                     columns: vec![Some("_id".into()), Some("value".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -2948,23 +4180,30 @@ mod tests {
         let restored = ResultGrid::restored(
             &StoredGrid {
                 columns: vec!["n".into()],
-                rows: (0..GRID_ROW_CAP)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 total_rows: 20_000,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
+                messages: Vec::new(),
             },
             Mode::ReadWrite,
         );
@@ -2989,9 +4228,11 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("n")],
-                rows: (0..GRID_ROW_CAP + 10)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP + 10)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3044,12 +4285,13 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), typed("payload", "bytea")],
-                rows: vec![vec![Some("7".into()), Some("\\xab".into())]],
+                rows: rows(vec![vec![Some("7".into()), Some("\\xab".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("payload".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -3099,12 +4341,13 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("note")],
-                rows: vec![vec![None, Some("orphan".into())]],
+                rows: rows(vec![vec![None, Some("orphan".into())]]),
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "measurements".into(),
                     columns: vec![Some("id".into()), Some("body".into())],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 ..QueryResult::default()
             },
@@ -3186,12 +4429,13 @@ mod tests {
                             data_type: Some(data_type.into()),
                         },
                     ],
-                    rows: vec![vec![Some("7".into()), Some("x'AB'".into())]],
+                    rows: rows(vec![vec![Some("7".into()), Some("x'AB'".into())]]),
                     edit: Some(EditTarget {
                         schema: "public".into(),
                         table: "measurements".into(),
                         columns: vec![Some("id".into()), Some("payload".into())],
                         keys: vec![0],
+                        ..Default::default()
                     }),
                     ..QueryResult::default()
                 },
@@ -3203,6 +4447,75 @@ mod tests {
             assert!(!grid.set_pending(0, 1, value("x'CD'")), "{data_type}");
             assert!(!grid.has_pending(), "{data_type}");
         }
+    }
+
+    #[test]
+    fn a_redis_grid_edits_what_it_holds_whole_and_renames_by_its_key() {
+        use crate::redis_cmd::edit::{BYTES, INTEGER, STRING, SUMMARY, TRUNCATED};
+        let keys = |cells: Vec<Vec<Option<&str>>>, tags: Vec<Vec<&'static str>>| {
+            ResultGrid::new(
+                QueryResult {
+                    columns: ["key", "type", "ttl", "value"].map(column).to_vec(),
+                    rows: rows(
+                        cells
+                            .into_iter()
+                            .map(|row| row.into_iter().map(|cell| cell.map(String::from)).collect())
+                            .collect(),
+                    ),
+                    cell_types: tags,
+                    edit: Some(EditTarget {
+                        schema: "db0".into(),
+                        table: "keys".into(),
+                        columns: vec![
+                            Some("key".into()),
+                            None,
+                            Some("ttl".into()),
+                            Some("value".into()),
+                        ],
+                        keys: vec![0],
+                        ..Default::default()
+                    }),
+                    ..QueryResult::default()
+                },
+                Mode::ReadWrite,
+            )
+            .with_engine(db::Engine::Redis)
+        };
+        let mut grid = keys(
+            vec![
+                vec![Some("greeting"), Some("string"), None, Some("hello")],
+                vec![Some("long"), Some("string"), None, Some("xx…")],
+                vec![Some("user:1"), Some("hash"), Some("60"), Some("3 fields")],
+                vec![Some("\"\\xff\""), Some("string"), None, Some("\"\\xfe\"")],
+            ],
+            vec![
+                vec![STRING, STRING, INTEGER, STRING],
+                vec![STRING, STRING, INTEGER, TRUNCATED],
+                vec![STRING, STRING, INTEGER, SUMMARY],
+                vec![BYTES, STRING, INTEGER, BYTES],
+            ],
+        );
+        let editable = |grid: &ResultGrid, row| {
+            (0..4)
+                .map(|col| grid.editable(row, col))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(editable(&grid, 0), [true, false, true, true]);
+        assert_eq!(editable(&grid, 1), [true, false, true, false]);
+        assert_eq!(editable(&grid, 2), [true, false, true, false]);
+        // A name that is not text can be named, not typed.
+        assert_eq!(editable(&grid, 3), [false, false, true, false]);
+
+        assert!(grid.set_pending(0, 0, value("salutation")));
+        assert!(grid.set_pending(3, 2, value("30")));
+        let batch = crate::sql::update_batch(db::Engine::Redis, &grid.pending_updates()).unwrap();
+        assert_eq!(batch, "RENAMENX greeting salutation\nEXPIRE \"\\xff\" 30");
+        assert!(crate::sql::is_generated_write_on(db::Engine::Redis, &batch));
+
+        // The same grid on an engine that never edits a key column.
+        let postgres = keys(vec![vec![Some("k"), None, None, Some("v")]], Vec::new())
+            .with_engine(db::Engine::Postgres);
+        assert!(!postgres.editable(0, 0) && postgres.editable(0, 3));
     }
 
     #[test]
@@ -3219,12 +4532,13 @@ mod tests {
                             data_type: Some("image".into()),
                         },
                     ],
-                    rows: vec![vec![Some("7".into()), Some("cat.png".into())]],
+                    rows: rows(vec![vec![Some("7".into()), Some("cat.png".into())]]),
                     edit: Some(EditTarget {
                         schema: "main".into(),
                         table: "pets".into(),
                         columns: vec![Some("id".into()), Some("picture".into())],
                         keys: vec![0],
+                        ..Default::default()
                     }),
                     ..QueryResult::default()
                 },
@@ -3402,6 +4716,27 @@ mod tests {
     }
 
     #[test]
+    fn a_row_is_editable_when_any_cell_of_it_is() {
+        assert!(editable_grid().row_editable(0));
+        assert!(!editable_grid().row_editable(2));
+        assert!(!grid_of(&[Some("x")]).row_editable(0));
+    }
+
+    #[test]
+    fn a_new_grid_or_a_sort_puts_other_rows_at_the_same_indices() {
+        // What the row panel's inputs check before staging text typed against
+        // a row index: a record at that index now may not be the one typed at.
+        let mut grid = editable_grid();
+        let before = grid.rows_id();
+        assert_ne!(editable_grid().rows_id(), before);
+
+        grid.append_rows(Vec::new());
+        assert_eq!(grid.rows_id(), before);
+        grid.sort_in_memory(vec![(1, false)]);
+        assert_ne!(grid.rows_id(), before);
+    }
+
+    #[test]
     fn nothing_is_editable_without_an_edit_target() {
         // A join, an aggregate, or a select that dropped the key: `db` says the
         // rows cannot be addressed, and the grid stays read-only.
@@ -3464,6 +4799,7 @@ mod tests {
     fn the_active_cell_is_scrolled_back_only_when_the_grid_is_relaid_out_at_a_new_width() {
         // Three columns of 180: the active one spans 360..540.
         let mut grid = editable_grid();
+        grid.set_drawn_widths(&[px(180.), px(180.), px(180.)]);
         assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
         grid.set_active(0, 2);
         assert_eq!(grid.relaid_out(px(800.), px(0.)), None);
@@ -3474,6 +4810,292 @@ mod tests {
         assert_eq!(grid.relaid_out(px(300.), px(0.)), Some(2));
         assert_eq!(grid.relaid_out(px(250.), px(0.)), None);
         assert_eq!(grid.relaid_out(px(300.), px(-540.)), None);
+    }
+
+    #[test]
+    fn a_column_from_structure_is_found_by_its_source_name_before_its_header() {
+        // `editable_grid` shows `note` for the relation's `body`: Structure
+        // lists `body`, and that is the column it has to land on.
+        let grid = editable_grid();
+        assert_eq!(grid.column_named("body"), Some(1));
+        assert_eq!(grid.column_named("id"), Some(0));
+        // `total` has no source column; its header is all there is.
+        assert_eq!(grid.column_named("total"), Some(2));
+        // Identifiers are compared exactly: a quoted `"ID"` is another column.
+        assert_eq!(grid.column_named("ID"), None);
+        assert_eq!(grid.column_named("missing"), None);
+    }
+
+    fn abcd() -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: ["a", "b", "c", "d"].map(column).to_vec(),
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        )
+    }
+
+    #[test]
+    fn a_hidden_column_comes_back_where_it_was_fetched() {
+        let mut grid = abcd();
+        grid.hide_column(1);
+        grid.hide_column(2);
+        assert_eq!(grid.view, [0, 3]);
+        assert_eq!(grid.hidden_columns(), 2);
+        // The library's index skips the gutter; a hidden column has none.
+        assert_eq!(grid.table_col(3), Some(1 + GUTTER));
+        assert_eq!(grid.table_col(1), None);
+        grid.show_column(2);
+        assert_eq!(grid.view, [0, 2, 3]);
+        grid.show_all_columns();
+        assert_eq!(grid.view, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn the_last_drawn_column_stays() {
+        let mut grid = abcd();
+        for col in 0..4 {
+            grid.hide_column(col);
+        }
+        assert_eq!(grid.view, [3]);
+    }
+
+    #[test]
+    fn pinned_columns_lead_in_the_order_pinned_and_unpin_to_their_place() {
+        let mut grid = abcd();
+        grid.toggle_pinned(2);
+        grid.toggle_pinned(0);
+        assert_eq!(
+            (grid.view.as_slice(), grid.pinned),
+            ([2, 0, 1, 3].as_slice(), 2)
+        );
+        assert!(grid.is_pinned(0) && !grid.is_pinned(1));
+        grid.toggle_pinned(2);
+        assert_eq!(
+            (grid.view.as_slice(), grid.pinned),
+            ([0, 1, 2, 3].as_slice(), 1)
+        );
+        // Hiding a pinned column takes it out of the pinned run too.
+        grid.hide_column(0);
+        assert_eq!(
+            (grid.view.as_slice(), grid.pinned),
+            ([1, 2, 3].as_slice(), 0)
+        );
+        // Showing everything again keeps what is still pinned in front.
+        grid.toggle_pinned(3);
+        grid.show_all_columns();
+        assert_eq!(
+            (grid.view.as_slice(), grid.pinned),
+            ([3, 0, 1, 2].as_slice(), 1)
+        );
+    }
+
+    #[test]
+    fn a_column_step_from_a_pinned_column_goes_to_the_one_drawn_beside_it() {
+        let mut grid = abcd();
+        grid.toggle_pinned(1);
+        grid.toggle_pinned(3);
+        assert_eq!(grid.view, [1, 3, 0, 2]);
+        grid.set_active(0, 3);
+        assert_eq!(grid.step_from_active(&Step::Cols(1), 1), Some((0, 0)));
+        assert_eq!(grid.step_from_active(&Step::Cols(-1), 1), Some((0, 1)));
+        grid.set_active(0, 2);
+        assert_eq!(grid.step_from_active(&Step::Cols(1), 1), None);
+    }
+
+    #[test]
+    fn a_rerun_keeps_hidden_and_pinned_columns_and_draws_one_just_added() {
+        let mut grid = abcd();
+        grid.hide_column(1);
+        grid.toggle_pinned(3);
+        let kept = grid.column_view();
+
+        // The same columns, as a refresh or the next page brings them.
+        let again = abcd().with_column_view(&kept);
+        assert_eq!(
+            (again.view.as_slice(), again.pinned),
+            ([3, 0, 2].as_slice(), 1)
+        );
+
+        // The `SELECT` grew a column `e` and lost `c`: `e` is drawn, not
+        // taken for hidden because the last run never listed it.
+        let grown = ResultGrid::new(
+            QueryResult {
+                columns: ["a", "b", "d", "e"].map(column).to_vec(),
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        )
+        .with_column_view(&kept);
+        assert_eq!(
+            (grown.view.as_slice(), grown.pinned),
+            ([2, 0, 3].as_slice(), 1)
+        );
+    }
+
+    #[test]
+    fn hidden_and_pinned_columns_survive_a_snapshot() {
+        let mut grid = abcd();
+        grid.hide_column(1);
+        grid.toggle_pinned(3);
+        let mut stored = grid.stored();
+        // A column the result no longer has is ignored, not an error.
+        stored.hidden.push(("gone".into(), 0));
+        stored.pinned.push(("gone".into(), 0));
+
+        let restored = ResultGrid::restored(&stored, Mode::default());
+        assert_eq!(
+            (restored.view.as_slice(), restored.pinned),
+            ([3, 0, 2].as_slice(), 1)
+        );
+    }
+
+    /// `names` over two rows, every cell `x`.
+    fn filled(names: &[&str]) -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: names.iter().map(|name| column(name)).collect(),
+                rows: rows(vec![names.iter().map(|_| Some("x".into())).collect(); 2]),
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        )
+    }
+
+    #[test]
+    fn a_second_column_of_the_same_name_stays_hidden_through_a_rerun() {
+        // `SELECT a, a, b`, and the second `a` hidden.
+        let mut grid = filled(&["a", "a", "b"]);
+        grid.hide_column(1);
+        let again = filled(&["a", "a", "b"]).with_column_view(&grid.column_view());
+        assert_eq!(again.view, [0, 2]);
+
+        // Both hidden, and the second pinned before that in another run.
+        grid.hide_column(0);
+        let again = filled(&["a", "a", "b"]).with_column_view(&grid.column_view());
+        assert_eq!(again.view, [2]);
+        let mut grid = filled(&["a", "a", "b"]);
+        grid.toggle_pinned(1);
+        let again = filled(&["a", "a", "b"]).with_column_view(&grid.column_view());
+        assert_eq!(
+            (again.view.as_slice(), again.pinned),
+            ([1, 0, 2].as_slice(), 1)
+        );
+    }
+
+    #[test]
+    fn an_arrow_key_with_nothing_active_lands_on_the_first_column_drawn() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.hide_column(0);
+        grid.select_row(1);
+        assert_eq!(grid.active(), Some((1, 1)));
+
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.toggle_pinned(2);
+        grid.select_row(0);
+        assert_eq!(grid.active(), Some((0, 2)));
+    }
+
+    #[test]
+    fn hiding_the_column_under_the_ring_lets_the_ring_go() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.select_col(1);
+        grid.hide_column(1);
+        assert_eq!(grid.active(), None);
+    }
+
+    #[test]
+    fn hiding_the_column_being_edited_closes_its_input() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_active(0, 1);
+        grid.editing = Some(Editing {
+            row: 0,
+            col: 1,
+            input: None,
+        });
+        grid.hide_column(1);
+        assert!(grid.editing.is_none());
+
+        // An input in another column stays open.
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_active(0, 2);
+        grid.editing = Some(Editing {
+            row: 0,
+            col: 2,
+            input: None,
+        });
+        grid.hide_column(1);
+        assert!(grid.editing.is_some());
+    }
+
+    #[test]
+    fn the_column_selection_follows_the_ring_when_the_columns_move() {
+        // `a b c d`, the ring on `c`: pinned, `c` is drawn first.
+        let mut grid = filled(&["a", "b", "c", "d"]);
+        grid.select_col(2);
+        assert_eq!(grid.ring_table_col(), Some(2 + GUTTER));
+        grid.toggle_pinned(2);
+        assert_eq!(grid.ring_table_col(), Some(GUTTER));
+        // `a` hidden: `c` stays first.
+        grid.hide_column(0);
+        assert_eq!(grid.ring_table_col(), Some(GUTTER));
+        // `c` hidden: the selection has nowhere to be.
+        grid.hide_column(2);
+        assert_eq!(grid.ring_table_col(), None);
+    }
+
+    #[test]
+    fn a_row_is_as_wide_as_the_columns_drawn() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.set_drawn_widths(&[px(100.), px(100.), px(100.)]);
+        let full = grid.content_width();
+        grid.hide_column(0);
+        grid.hide_column(2);
+        assert_eq!(grid.content_width(), full - 200.);
+    }
+
+    #[test]
+    fn a_selection_carried_onto_a_hidden_column_is_refused() {
+        let mut grid = filled(&["a", "b", "c"]);
+        grid.select_col(1);
+        let selection = grid.selection();
+        let mut again = filled(&["a", "b", "c"]);
+        again.hide_column(1);
+        assert!(!again.select(selection));
+        assert_eq!(again.active(), None);
+    }
+
+    #[test]
+    fn a_resize_measures_the_active_cell_among_the_columns_that_scroll() {
+        let mut grid = filled(&["id", "note", "total"]);
+        grid.set_drawn_widths(&[px(180.), px(180.), px(180.)]);
+        assert_eq!(grid.relaid_out(px(300.), px(0.)), None);
+        grid.set_active(0, 2);
+        // `note` hidden: `total` is drawn at 180..360, half in at 300.
+        grid.hide_column(1);
+        assert_eq!(grid.relaid_out(px(250.), px(0.)), Some(2));
+        // `id` pinned too: `total` is the first column that scrolls.
+        grid.toggle_pinned(0);
+        assert_eq!(grid.relaid_out(px(200.), px(0.)), Some(2));
+        // A pinned column is always in view; nothing to bring back.
+        grid.set_active(0, 0);
+        assert_eq!(grid.relaid_out(px(150.), px(0.)), None);
+    }
+
+    #[test]
+    fn a_column_picked_on_a_result_with_no_rows_puts_the_ring_nowhere() {
+        // "Copy row" slices the ring's row out of the result, so a ring on
+        // row 0 of an empty one took the app down.
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("a"), column("b")],
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        );
+        grid.select_col(1);
+        assert_eq!(grid.active(), None);
     }
 
     #[test]
@@ -3620,7 +5242,7 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a"), column("b")],
-                rows: vec![vec![Some(value.clone()), None]],
+                rows: rows(vec![vec![Some(value.clone()), None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3679,7 +5301,7 @@ mod tests {
         let replaced = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a")],
-                rows: vec![vec![Some("only".into())]],
+                rows: rows(vec![vec![Some("only".into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3696,7 +5318,11 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id"), column("account_id"), column("sku")],
-                rows: vec![vec![Some("7".into()), Some("42".into()), Some("x".into())]],
+                rows: rows(vec![vec![
+                    Some("7".into()),
+                    Some("42".into()),
+                    Some("x".into()),
+                ]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3773,23 +5399,148 @@ mod tests {
     }
 
     #[test]
-    fn a_column_starts_at_the_minimum_width_and_a_restore_never_goes_below_it() {
-        let mut grid = editable_grid();
-        assert!(
-            grid.columns
-                .iter()
-                .all(|column| column.width == px(MIN_COLUMN_WIDTH))
-        );
+    fn a_fitted_width_is_the_wider_of_header_and_value_between_the_minimum_and_the_cap() {
+        assert_eq!(fitted_width(90.4, 120.2, 400., 0.), 121.);
+        assert_eq!(fitted_width(20., 30., 400., 0.), MIN_COLUMN_WIDTH);
+        assert_eq!(fitted_width(100., 2_000., 400., 0.), 400.);
+        // A width carried from the last run wins over a narrower fit, and
+        // over the cap too: it was on screen at that width.
+        assert_eq!(fitted_width(100., 150., 400., 180.), 180.);
+        assert_eq!(fitted_width(100., 150., 400., 520.), 520.);
+    }
 
-        grid.set_widths(&[px(100.), px(190.), px(240.)]);
-        let restored = ResultGrid::restored(&grid.stored(), Mode::ReadWrite);
+    /// A grid fitted in a face whose every character is 10px wide.
+    fn measured(columns: Vec<DbColumn>, values: Vec<Vec<Option<String>>>) -> ResultGrid {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns,
+                rows: rows(values),
+                ..QueryResult::default()
+            },
+            Mode::default(),
+        );
+        grid.advances = Advances {
+            value: 10.,
+            name: 10.,
+            data_type: 10.,
+        };
+        grid.refit();
+        grid
+    }
+
+    fn widths(grid: &ResultGrid) -> Vec<Pixels> {
+        grid.columns.iter().map(|column| column.width).collect()
+    }
+
+    #[test]
+    fn a_column_is_fitted_to_what_its_cells_and_its_header_show() {
+        let uuid = "77dd89bb-469c-4dad-9c3e-5f2a8b1c0d4e";
+        let grid = measured(
+            vec![
+                typed("id", "uuid"),
+                typed("created_at", "timestamp with time zone"),
+                typed("total", "integer"),
+                column("n"),
+            ],
+            vec![vec![
+                Some(uuid.into()),
+                Some("2024-01-02 03:04:05.678901+00".into()),
+                Some("1234567".into()),
+                None,
+            ]],
+        );
+        // The value whole, inside the cell's padding and border.
+        assert_eq!(grid.columns[0].width, px(18. + 360.));
+        // The header whole: padding and the library's sort room, the name,
+        // the type label and the sort control.
+        assert_eq!(grid.columns[1].width, px(25. + 100. + 4. + 240. + 16.));
+        // What the cell paints, grouped, and a NULL as the word painted for it.
+        assert_eq!(grid.widest[2], "1,234,567".len());
+        assert_eq!(grid.widest[3], NULL_LABEL.len());
+        // Narrow, but still something to grab.
+        assert_eq!(grid.columns[3].width, px(MIN_COLUMN_WIDTH));
+    }
+
+    #[test]
+    fn a_key_column_makes_room_for_its_icon() {
+        let mut grid = measured(vec![column("identifier")], vec![]);
+        let plain = grid.columns[0].width;
+        grid.mark_primary_key(&["identifier".into()]);
+        assert_eq!(grid.columns[0].width, plain + px(16.));
+    }
+
+    #[test]
+    fn streamed_rows_widen_a_column_until_enough_are_in_and_never_narrow_it() {
+        let mut grid = measured(vec![column("v")], Vec::new());
+        grid.append_rows(rows(vec![vec![Some("x".repeat(20))]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+        assert!(std::mem::take(&mut grid.resized));
+
+        grid.append_rows(rows(vec![vec![Some("short".into())]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+        assert!(!grid.resized);
+
+        // Past the rows a column is fitted to, a wider value ellipsizes.
+        grid.append_rows(rows(vec![vec![Some("y".repeat(20))]; FITTED_ROWS]));
+        grid.append_rows(rows(vec![vec![Some("z".repeat(30))]]));
+        assert_eq!(widths(&grid), [px(218.)]);
+    }
+
+    #[test]
+    fn a_long_value_is_fitted_no_wider_than_the_cap() {
+        let grid = measured(vec![column("doc")], vec![vec![Some("{}".repeat(500))]]);
+        assert_eq!(widths(&grid), [px(MAX_FITTED_WIDTH)]);
+    }
+
+    #[test]
+    fn a_dragged_column_is_never_fitted_again() {
+        let mut grid = measured(vec![column("a"), column("b")], Vec::new());
+        let b = grid.columns[1].width;
+        grid.set_drawn_widths(&[px(90.), b]);
+        grid.append_rows(rows(vec![vec![Some("x".repeat(30)), Some("y".repeat(30))]]));
+        assert_eq!(widths(&grid), [px(90.), px(318.)]);
+    }
+
+    #[test]
+    fn a_rerun_keeps_dragged_widths_and_fits_no_narrower_than_before() {
+        let long = vec![vec![Some("x".repeat(30)), Some("y".repeat(30))]];
+        let mut first = measured(vec![column("a"), column("b")], long);
+        let b = first.columns[1].width;
+        first.set_drawn_widths(&[px(90.), b]);
+        let (names, carried) = first.layout();
+
+        let short = vec![vec![Some("x".into()), Some("y".into())]];
+        let mut again =
+            measured(vec![column("a"), column("b")], short).with_layout(&names, &carried);
+        assert_eq!(widths(&again), [px(90.), px(318.)]);
+
+        again.append_rows(rows(vec![vec![Some("x".repeat(36)), Some("y".repeat(36))]]));
+        assert_eq!(widths(&again), [px(90.), px(378.)]);
+    }
+
+    #[test]
+    fn a_restore_keeps_what_was_dragged_and_never_goes_below_the_minimum() {
+        let mut grid = editable_grid();
+        let total = grid.columns[2].width;
+        grid.set_drawn_widths(&[px(20.), px(190.), total]);
+
+        let (_, carried) = ResultGrid::restored(&grid.stored(), Mode::ReadWrite).layout();
         assert_eq!(
-            restored
-                .columns
-                .iter()
-                .map(|column| column.width)
-                .collect::<Vec<_>>(),
-            [px(MIN_COLUMN_WIDTH), px(190.), px(240.)]
+            carried,
+            [
+                ColumnWidth {
+                    width: px(MIN_COLUMN_WIDTH),
+                    dragged: true,
+                },
+                ColumnWidth {
+                    width: px(190.),
+                    dragged: true,
+                },
+                ColumnWidth {
+                    width: total,
+                    dragged: false,
+                },
+            ]
         );
     }
 
@@ -3797,7 +5548,7 @@ mod tests {
         ResultGrid::new(
             QueryResult {
                 columns: vec![column("id")],
-                rows: (0..4).map(|row| vec![Some(row.to_string())]).collect(),
+                rows: rows((0..4).map(|row| vec![Some(row.to_string())]).collect()),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3865,6 +5616,17 @@ mod tests {
         grid.select_row(2);
         assert_eq!(grid.selected_row_indices(), vec![2]);
         assert_eq!(grid.row_selection_anchor, Some(2));
+    }
+
+    #[test]
+    fn a_column_step_keeps_the_row_panels_row() {
+        // The library stops reporting its selected row once `right` switches
+        // it to selecting a column, and the row panel closed on every other
+        // arrow press while it read that.
+        let mut grid = four_row_grid();
+        grid.select_row(2);
+        grid.select_col(1);
+        assert_eq!(grid.selected_row(), Some(2));
     }
 
     #[test]
@@ -3940,6 +5702,37 @@ mod tests {
     }
 
     #[test]
+    fn the_row_panel_stages_into_any_cell_and_reads_back_what_is_staged() {
+        // The panel stages into the field it was typed in, which need not be
+        // the active cell, and shows what the grid paints there.
+        let mut grid = editable_grid();
+        grid.active = Some((0, 0));
+        let edited = NewValue::Value("edited".into());
+        assert!(grid.stage(1, 1, edited.clone()));
+        assert_eq!(grid.pending_value(1, 1), Some(&edited));
+        assert_eq!(grid.pending_value(0, 1), None);
+        assert_eq!(grid.edit_seed(1, 1), "edited");
+        assert_eq!(grid.edit_seed(0, 1), "first");
+        let fields = grid.fields(1);
+        assert_eq!(fields[1].value.as_deref(), Some("edited"));
+        assert_eq!(fields[1].edit, Some(edited));
+        assert!(fields[0].edit.is_none());
+
+        // A keyword is no text: an input on it starts empty, and the field
+        // has no value to show, only the edit saying which keyword it is.
+        assert!(grid.stage(1, 1, NewValue::Default));
+        assert_eq!(grid.edit_seed(1, 1), "");
+        let field = grid.fields(1).remove(1);
+        assert!(field.value.is_none());
+        assert_eq!(field.edit, Some(NewValue::Default));
+
+        // Typing the fetched value back is no edit at all.
+        assert!(grid.stage(1, 1, NewValue::Value("second".into())));
+        assert_eq!(grid.pending_value(1, 1), None);
+        assert!(grid.fields(1)[1].edit.is_none());
+    }
+
+    #[test]
     fn a_row_reads_out_as_its_named_and_typed_fields() {
         let grid = ResultGrid::new(
             QueryResult {
@@ -3950,7 +5743,7 @@ mod tests {
                     },
                     column("note"),
                 ],
-                rows: vec![vec![Some("7".into()), None]],
+                rows: rows(vec![vec![Some("7".into()), None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -3977,7 +5770,7 @@ mod tests {
 
     #[test]
     fn the_inspector_breaks_a_json_document_up_and_leaves_everything_else_alone() {
-        let document = indented_json(r#"{"aoi":{"acres":69.7},"tags":[1,2]}"#);
+        let document = indented_json(r#"{"aoi":{"acres":69.7},"tags":[1,2]}"#).unwrap();
         assert!(document.starts_with("{\n"), "{document}");
         assert!(document.contains("\n  \"tags\""), "{document}");
 
@@ -3985,14 +5778,38 @@ mod tests {
         // Reformatting a scalar is the characters back again, so the parser is
         // never worth reaching for one.
         for scalar in ["22.38", "true", "null", "\"quoted\""] {
-            assert_eq!(indented_json(scalar), scalar);
+            assert_eq!(indented_json(scalar), None);
         }
         // Shaped like a document without being one -- a truncated value, or
-        // prose that opens with a brace. Handed back as it arrived rather than
-        // swallowed by a parse that failed.
+        // prose that opens with a brace. Not a document, so `None`, and `fields`
+        // keeps the original text.
         for other in ["{not json at all", "[1, 2", "an ordinary sentence", ""] {
-            assert_eq!(indented_json(other), other);
+            assert_eq!(indented_json(other), None);
         }
+    }
+
+    #[test]
+    fn a_field_is_json_only_when_it_parsed_as_a_document() {
+        let grid = grid_of(&[Some(r#"{"a":1}"#), Some("[not json")]);
+        assert!(grid.fields(0)[0].json);
+        assert!(!grid.fields(1)[0].json);
+        assert_eq!(grid.fields(1)[0].value.as_deref(), Some("[not json"));
+    }
+
+    #[test]
+    fn a_clipped_document_ends_after_a_complete_line() {
+        let document = format!(
+            "[{}]",
+            (0..2_000)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let grid = grid_of(&[Some(&document)]);
+        let shown = grid.fields(0).remove(0).value.unwrap();
+
+        assert!(shown.len() < document.len());
+        assert!(shown.ends_with(",\n…"), "{}", &shown[shown.len() - 20..]);
     }
 
     #[test]
@@ -4021,12 +5838,12 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![Default::default()],
-                rows: vec![vec![Some("a\nb".to_string())]],
+                rows: rows(vec![vec![Some("a\nb".to_string())]]),
                 ..Default::default()
             },
             Mode::ReadWrite,
         );
-        assert_eq!(grid.result.rows[0][0].as_deref(), Some("a\nb"));
+        assert_eq!(grid.result.rows[0].get(0), Some("a\nb"));
     }
 
     #[test]
@@ -4080,7 +5897,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a")],
-                rows: vec![vec![Some(value.clone())], vec![None]],
+                rows: rows(vec![vec![Some(value.clone())], vec![None]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4099,7 +5916,7 @@ mod tests {
         let grid = ResultGrid::new(
             QueryResult {
                 columns: vec![column("a"), column("b")],
-                rows: vec![vec![Some("only one cell".into())]],
+                rows: rows(vec![vec![Some("only one cell".into())]]),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4138,10 +5955,12 @@ mod tests {
         let mut grid = ResultGrid::new(
             QueryResult {
                 columns: vec![typed("n", "int4"), typed("tag", "text")],
-                rows: [("2", "x"), ("3", "y"), ("1", "x")]
-                    .iter()
-                    .map(|(n, tag)| vec![Some(n.to_string()), Some(tag.to_string())])
-                    .collect(),
+                rows: rows(
+                    [("2", "x"), ("3", "y"), ("1", "x")]
+                        .iter()
+                        .map(|(n, tag)| vec![Some(n.to_string()), Some(tag.to_string())])
+                        .collect(),
+                ),
                 ..QueryResult::default()
             },
             Mode::ReadWrite,
@@ -4170,7 +5989,7 @@ mod tests {
                     name: "v".into(),
                     data_type: Some("mixed".into()),
                 }],
-                rows: vec![vec![None], vec![Some("1".into())]],
+                rows: rows(vec![vec![None], vec![Some("1".into())]]),
                 cell_types: vec![vec![db::MISSING], vec!["int"]],
                 ..QueryResult::default()
             },

@@ -1,0 +1,626 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[clickhouse] "SELECT * FROM t FINAL PREWHERE a = 1 LIMIT 1 BY a"
+  |SELECT * FROM t FINAL PREWHERE a = 1 LIMIT 1 BY a|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT a FROM t ARRAY JOIN arr AS a"
+  |SELECT a FROM t ARRAY JOIN arr AS a|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT arrayMap(x -> x + 1, [1, 2])"
+  |SELECT arrayMap(x -> x + 1, [1, 2])|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "WITH 1 AS x SELECT x"
+  |WITH 1 AS x SELECT x|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT number FROM system.numbers SETTINGS max_threads = 1"
+  |SELECT number FROM system.numbers SETTINGS max_threads = 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT number FROM system.numbers FORMAT JSON"
+  |SELECT number FROM system.numbers FORMAT JSON|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SHOW TABLES"
+  |SHOW TABLES|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DESCRIBE TABLE t"
+  |DESCRIBE TABLE t|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "EXISTS t"
+  |EXISTS t|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "USE analytics"
+  |USE analytics|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SET max_threads = 1"
+  |SET max_threads = 1|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory"
+  |CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO t SELECT * FROM s"
+  |INSERT INTO t SELECT * FROM s|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 AS SELECT * FROM t"
+  |CREATE TABLE t2 AS SELECT * FROM t|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1; DROP TABLE t"
+  |SELECT 1; DROP TABLE t|
+  = write_on=false select=false classify=Full [Drop] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(Drop)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(Drop)) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ BACKUP TABLE t TO Disk('b', 'x')"
+  |/* c */ BACKUP TABLE t TO Disk('b', 'x')|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nRESTORE TABLE t FROM Disk('b', 'x')"
+  |-- c|
+  |RESTORE TABLE t FROM Disk('b', 'x')|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SET readonly = 0"
+  |SET readonly = 0|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 SETTINGS readonly = 0"
+  |SELECT 1 SETTINGS readonly = 0|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SYSTEM SHUTDOWN"
+  |SYSTEM SHUTDOWN|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "KILL QUERY WHERE 1"
+  |KILL QUERY WHERE 1|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "OPTIMIZE TABLE t FINAL"
+  |OPTIMIZE TABLE t FINAL|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "#c\nSELECT 1"
+  |#c|
+  |SELECT 1|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 INTO OUTFILE 'x'"
+  |SELECT 1 INTO OUTFILE 'x'|
+  = write_on=false select=true classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 PARALLEL WITH SELECT 2"
+  |SELECT 1 PARALLEL WITH SELECT 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 (a Int32) ENGINE = MergeTree ORDER BY a"
+  |CREATE TABLE t2 (a Int32) ENGINE = MergeTree ORDER BY a|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 (a Int32) ENGINE = URL('http://example.test/x', CSV)"
+  |CREATE TABLE t2 (a Int32) ENGINE = URL('http://example.test/x', CSV)|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1"
+  |CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION url('http://example.test/x', CSV, 'a Int32') SELECT * FROM t"
+  |INSERT INTO FUNCTION url('http://example.test/x', CSV, 'a Int32') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION s3('http://example.test/b/x.csv') SELECT * FROM t"
+  |INSERT INTO FUNCTION s3('http://example.test/b/x.csv') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION file('x.csv', 'CSV', 'a Int32') SELECT * FROM t"
+  |INSERT INTO FUNCTION file('x.csv', 'CSV', 'a Int32') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION hdfs('hdfs://example.test/x', 'CSV', 'a Int32') SELECT * FROM t"
+  |INSERT INTO FUNCTION hdfs('hdfs://example.test/x', 'CSV', 'a Int32') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION remote('h', db.t) SELECT * FROM t"
+  |INSERT INTO FUNCTION remote('h', db.t) SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION mysql('h:3306', 'db', 't', 'u', 'p') SELECT * FROM t"
+  |INSERT INTO FUNCTION mysql('h:3306', 'db', 't', 'u', 'p') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO FUNCTION postgresql('h:5432', 'db', 't', 'u', 'p') SELECT * FROM t"
+  |INSERT INTO FUNCTION postgresql('h:5432', 'db', 't', 'u', 'p') SELECT * FROM t|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT INTO TABLE FUNCTION file('x.csv') VALUES (1)"
+  |INSERT INTO TABLE FUNCTION file('x.csv') VALUES (1)|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t UPDATE a = 1 WHERE b = 2"
+  |ALTER TABLE t UPDATE a = 1 WHERE b = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t UPDATE a = 1 WHERE b = 2 SETTINGS mutations_sync = 2"
+  |ALTER TABLE t UPDATE a = 1 WHERE b = 2 SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t UPDATE a = 1 WHERE b = 2, DROP COLUMN c"
+  |ALTER TABLE t UPDATE a = 1 WHERE b = 2, DROP COLUMN c|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t ON CLUSTER c UPDATE a = 1 WHERE b = 2"
+  |ALTER TABLE t ON CLUSTER c UPDATE a = 1 WHERE b = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t DELETE WHERE b = 2"
+  |ALTER TABLE t DELETE WHERE b = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t DELETE WHERE b = 2 SETTINGS mutations_sync = 2"
+  |ALTER TABLE t DELETE WHERE b = 2 SETTINGS mutations_sync = 2|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t DELETE WHERE b = 2, DROP COLUMN c"
+  |ALTER TABLE t DELETE WHERE b = 2, DROP COLUMN c|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER TABLE t ON CLUSTER c DELETE WHERE b = 2"
+  |ALTER TABLE t ON CLUSTER c DELETE WHERE b = 2|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT garbage ) ("
+  |SELECT garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nSELECT garbage ) ("
+  |-- c|
+  |SELECT garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ SELECT garbage ) ("
+  |/* c */ SELECT garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "WITH garbage ) ("
+  |WITH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nWITH garbage ) ("
+  |-- c|
+  |WITH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ WITH garbage ) ("
+  |/* c */ WITH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SHOW garbage ) ("
+  |SHOW garbage ) (|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nSHOW garbage ) ("
+  |-- c|
+  |SHOW garbage ) (|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ SHOW garbage ) ("
+  |/* c */ SHOW garbage ) (|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DESCRIBE garbage ) ("
+  |DESCRIBE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nDESCRIBE garbage ) ("
+  |-- c|
+  |DESCRIBE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ DESCRIBE garbage ) ("
+  |/* c */ DESCRIBE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DESC garbage ) ("
+  |DESC garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nDESC garbage ) ("
+  |-- c|
+  |DESC garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ DESC garbage ) ("
+  |/* c */ DESC garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "EXISTS garbage ) ("
+  |EXISTS garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nEXISTS garbage ) ("
+  |-- c|
+  |EXISTS garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ EXISTS garbage ) ("
+  |/* c */ EXISTS garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "EXPLAIN garbage ) ("
+  |EXPLAIN garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nEXPLAIN garbage ) ("
+  |-- c|
+  |EXPLAIN garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ EXPLAIN garbage ) ("
+  |/* c */ EXPLAIN garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CHECK garbage ) ("
+  |CHECK garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nCHECK garbage ) ("
+  |-- c|
+  |CHECK garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ CHECK garbage ) ("
+  |/* c */ CHECK garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "WATCH garbage ) ("
+  |WATCH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nWATCH garbage ) ("
+  |-- c|
+  |WATCH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ WATCH garbage ) ("
+  |/* c */ WATCH garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "USE garbage ) ("
+  |USE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nUSE garbage ) ("
+  |-- c|
+  |USE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ USE garbage ) ("
+  |/* c */ USE garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SET garbage ) ("
+  |SET garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nSET garbage ) ("
+  |-- c|
+  |SET garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ SET garbage ) ("
+  |/* c */ SET garbage ) (|
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "INSERT garbage ) ("
+  |INSERT garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nINSERT garbage ) ("
+  |-- c|
+  |INSERT garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ INSERT garbage ) ("
+  |/* c */ INSERT garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DELETE garbage ) ("
+  |DELETE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nDELETE garbage ) ("
+  |-- c|
+  |DELETE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ DELETE garbage ) ("
+  |/* c */ DELETE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "UPDATE garbage ) ("
+  |UPDATE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nUPDATE garbage ) ("
+  |-- c|
+  |UPDATE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ UPDATE garbage ) ("
+  |/* c */ UPDATE garbage ) (|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ALTER garbage ) ("
+  |ALTER garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nALTER garbage ) ("
+  |-- c|
+  |ALTER garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ ALTER garbage ) ("
+  |/* c */ ALTER garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE garbage ) ("
+  |CREATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nCREATE garbage ) ("
+  |-- c|
+  |CREATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ CREATE garbage ) ("
+  |/* c */ CREATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DROP garbage ) ("
+  |DROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nDROP garbage ) ("
+  |-- c|
+  |DROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ DROP garbage ) ("
+  |/* c */ DROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "TRUNCATE garbage ) ("
+  |TRUNCATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nTRUNCATE garbage ) ("
+  |-- c|
+  |TRUNCATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ TRUNCATE garbage ) ("
+  |/* c */ TRUNCATE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "RENAME garbage ) ("
+  |RENAME garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nRENAME garbage ) ("
+  |-- c|
+  |RENAME garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ RENAME garbage ) ("
+  |/* c */ RENAME garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "EXCHANGE garbage ) ("
+  |EXCHANGE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nEXCHANGE garbage ) ("
+  |-- c|
+  |EXCHANGE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ EXCHANGE garbage ) ("
+  |/* c */ EXCHANGE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "ATTACH garbage ) ("
+  |ATTACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nATTACH garbage ) ("
+  |-- c|
+  |ATTACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ ATTACH garbage ) ("
+  |/* c */ ATTACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "DETACH garbage ) ("
+  |DETACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nDETACH garbage ) ("
+  |-- c|
+  |DETACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ DETACH garbage ) ("
+  |/* c */ DETACH garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "UNDROP garbage ) ("
+  |UNDROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nUNDROP garbage ) ("
+  |-- c|
+  |UNDROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ UNDROP garbage ) ("
+  |/* c */ UNDROP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "MOVE garbage ) ("
+  |MOVE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nMOVE garbage ) ("
+  |-- c|
+  |MOVE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ MOVE garbage ) ("
+  |/* c */ MOVE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "OPTIMIZE garbage ) ("
+  |OPTIMIZE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nOPTIMIZE garbage ) ("
+  |-- c|
+  |OPTIMIZE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ OPTIMIZE garbage ) ("
+  |/* c */ OPTIMIZE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SYSTEM garbage ) ("
+  |SYSTEM garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nSYSTEM garbage ) ("
+  |-- c|
+  |SYSTEM garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ SYSTEM garbage ) ("
+  |/* c */ SYSTEM garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "KILL garbage ) ("
+  |KILL garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nKILL garbage ) ("
+  |-- c|
+  |KILL garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ KILL garbage ) ("
+  |/* c */ KILL garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "GRANT garbage ) ("
+  |GRANT garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nGRANT garbage ) ("
+  |-- c|
+  |GRANT garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ GRANT garbage ) ("
+  |/* c */ GRANT garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "REVOKE garbage ) ("
+  |REVOKE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nREVOKE garbage ) ("
+  |-- c|
+  |REVOKE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ REVOKE garbage ) ("
+  |/* c */ REVOKE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "BACKUP garbage ) ("
+  |BACKUP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nBACKUP garbage ) ("
+  |-- c|
+  |BACKUP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ BACKUP garbage ) ("
+  |/* c */ BACKUP garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "RESTORE garbage ) ("
+  |RESTORE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "-- c\nRESTORE garbage ) ("
+  |-- c|
+  |RESTORE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "/* c */ RESTORE garbage ) ("
+  |/* c */ RESTORE garbage ) (|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x') --$$"
+  |SELECT a$$ PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x') --$$|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 // '\nPARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') -- '"
+  |SELECT 1 // '|
+  |PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') -- '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 // '\nPARALLEL WITH RESTORE TABLE t FROM Disk('backups', 'review-poc') -- '"
+  |SELECT 1 // '|
+  |PARALLEL WITH RESTORE TABLE t FROM Disk('backups', 'review-poc') -- '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "BACKUP TABLE t TO Disk('backups', 'review-poc') // '"
+  |BACKUP TABLE t TO Disk('backups', 'review-poc') // '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "RESTORE TABLE t FROM Disk('backups', 'review-poc') // '"
+  |RESTORE TABLE t FROM Disk('backups', 'review-poc') // '|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SELECT 1 AS a$$ PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') --$$"
+  |SELECT 1 AS a$$ PARALLEL WITH BACKUP TABLE t TO Disk('backups', 'review-poc') --$$|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "SET DEFAULT ROLE NONE TO CURRENT_USER"
+  |SET DEFAULT ROLE NONE TO CURRENT_USER|
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a"
+  |CREATE TABLE t2 ON CLUSTER c (a Int32) ENGINE = MergeTree ORDER BY a|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', 'target') AS SELECT 1"
+  |CREATE TABLE relay (x UInt8) ENGINE = Distributed('one_shard_cluster', 'db', 'target') AS SELECT 1|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] "CREATE TABLE t2 (a Int32) ENGINE = KeeperMap('/k')"
+  |CREATE TABLE t2 (a Int32) ENGINE = KeeperMap('/k')|
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false

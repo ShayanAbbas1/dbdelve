@@ -9,16 +9,23 @@ mod explain;
 mod explorer;
 mod export;
 mod filter;
+mod fuzzy;
 mod import;
+mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
 #[cfg_attr(not(test), allow(dead_code))]
 mod mql;
 mod palette;
+mod redis_cmd;
 mod result_grid;
 mod scroller;
 mod session;
+mod settings_panel;
 mod sql;
+#[cfg(test)]
+mod sql_snapshots;
 mod store;
+mod structure_grid;
 mod tab_drag;
 mod views;
 mod workspace;
@@ -36,30 +43,29 @@ use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
     Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render,
     StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowDecorations, WindowOptions,
-    deferred, div, point, prelude::FluentBuilder, px,
+    div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    Disableable, IndexPath, Root,
-    input::{
-        CompletionProvider, EditorMode, EditorState, Enter, IndentInline, Input, InputEvent,
-        InputModeKind, InputState, Position,
-    },
-    list::{List, ListEvent, ListItem, ListState},
+    Disableable, Root,
+    input::{CompletionProvider, EditorState, Input, InputEvent, InputState, Position},
+    list::ListItem,
     resizable::{ResizableState, h_resizable, resizable_panel},
     tree::tree as render_tree,
 };
 
 use actions::{
-    AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
-    CopyCell, CopyResults, CopyRow, CopyRows, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
-    FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection, NewProject,
-    NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings,
-    PaletteNext, PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab, Quit,
-    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
-    ResetEditorZoom, RunQuery, SaveQuery, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
-    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetRowLimit, ShowEditor,
-    ShowReferences, SortColumn, ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
-    ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell,
+    CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, EditCell,
+    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
+    ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
+    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PreviousEdit,
+    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+    SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
+    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
+    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, SubmitConnection, SwitchConnection,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -75,19 +81,20 @@ use filter::{
     sort_columns, sort_expression, value_placeholder,
 };
 use icons::{Icons, icon};
-use palette::{Command, Mode as PaletteMode, Palette};
+use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke};
 use result_grid::{NewValue, ResultGrid};
 use session::{
-    ApplyReview, CatalogState, CloseTarget, Explained, Focus, InsertField, InsertForm, ObjectBody,
-    ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines,
-    RowCount, Session, Sorting, StructureState, Tab, TabKey, close_target, insert_value,
-    matching_tab, relation_kind, restored_state, show_snapshot,
+    ApplyReview, CatalogState, Explained, Focus, InsertField, InsertForm, ObjectBody, ObjectTab,
+    OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines, RowCount,
+    Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab, relation_kind,
+    restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
-use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, theme};
+use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};
 use ui::{
-    Control, Tone, button, button_label, dialog, group_thousands, human_bytes, icon_button,
-    object_icon, relative_age, row_icon, row_icon_tinted, row_readout, section_label, titlebar,
+    Control, Tone, button, button_label, dialog, engine_logo, frosted_card, group_thousands,
+    highlighted, human_bytes, icon_button, object_icon, one_line, relative_age, row_icon,
+    row_readout, section_label, segment, titlebar,
 };
 use workspace::Workspace;
 
@@ -155,6 +162,7 @@ fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, Stri
         // No `PG*` variable means it, and dbdelve is not inventing one.
         statement_timeout: 0,
         ssh: None,
+        schema: None,
     })))
 }
 
@@ -248,7 +256,8 @@ fn main() {
             // theme is applied through them, and `apply_to_components` reads the
             // global rather than naming a family itself.
             cx.set_global(Fonts::default());
-            let theme = Theme::default();
+            theme::user::load();
+            let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
             theme.apply_to_components(cx);
             cx.set_global(theme);
             // The keymap is built from `keybindings::REGISTRY` plus whatever
@@ -259,7 +268,7 @@ fn main() {
             // same file: nothing here can wait for a window and an entity to
             // exist first.
             let overrides = store::peek_profiles()
-                .and_then(|(_, _, _, settings, _)| settings)
+                .and_then(|list| list.settings)
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
             cx.bind_keys(keybindings::build_bindings(&overrides));
@@ -276,71 +285,7 @@ fn main() {
             // Edit menu -- dbdelve does not own cut, copy and paste, the focused
             // field does, and a menu claiming them would take them from it.
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![
-                Menu {
-                    name: "dbdelve".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Settings…", OpenSettings),
-                        MenuItem::separator(),
-                        MenuItem::action("Quit dbdelve", Quit),
-                    ],
-                },
-                Menu {
-                    name: "File".into(),
-                    disabled: false,
-                    items: [
-                        MenuItem::action("New Query", NewQuery),
-                        MenuItem::action("New Connection", NewConnection),
-                        MenuItem::action("New Project", NewProject),
-                    ]
-                    .into_iter()
-                    .chain({
-                        let sources = import::Source::ALL
-                            .into_iter()
-                            .filter(|source| source.found())
-                            .map(|source| {
-                                MenuItem::action(
-                                    format!("Import from {}…", source.label()),
-                                    ImportConnections { source },
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let separator = (!sources.is_empty()).then(MenuItem::separator);
-                        separator.into_iter().chain(sources)
-                    })
-                    .chain([
-                        MenuItem::separator(),
-                        MenuItem::action("Save Query", SaveQuery),
-                        MenuItem::separator(),
-                        MenuItem::action("Close Tab", CloseTab),
-                    ])
-                    .collect(),
-                },
-                Menu {
-                    name: "Query".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Run", RunQuery),
-                        MenuItem::action("Cancel", CancelQuery),
-                    ],
-                },
-                Menu {
-                    name: "View".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-                        MenuItem::action("Toggle Row Panel", ToggleRowPanel),
-                        MenuItem::separator(),
-                        MenuItem::action("Zoom In", ZoomEditorIn),
-                        MenuItem::action("Zoom Out", ZoomEditorOut),
-                        MenuItem::action("Reset Zoom", ResetEditorZoom),
-                        MenuItem::separator(),
-                        MenuItem::action("Select Database…", SelectDatabase),
-                        MenuItem::action("Select Theme…", SelectTheme),
-                    ],
-                },
-            ]);
+            cx.set_menus(app_menus(false));
 
             // The platform titlebar is kept only for its window buttons on macOS:
             // a system bar in its own grey above dbdelve's chrome is the seam
@@ -371,7 +316,12 @@ fn main() {
                 // by nothing else, so without this the app runs with a blank
                 // icon however well the .desktop file is installed. It has to
                 // equal the entry's basename.
-                app_id: Some("dbdelve".into()),
+                app_id: Some(
+                    std::env::var("DBDELVE_APP_ID")
+                        .ok()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| "dbdelve".into()),
+                ),
                 ..Default::default()
             };
 
@@ -399,4 +349,84 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// The menu bar. Import Rows is listed only while a table that takes rows is
+/// in front, so `Workspace` sets the bar again whenever that flips.
+pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "dbdelve".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit dbdelve", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            disabled: false,
+            items: [
+                MenuItem::action("New Query", NewQuery),
+                MenuItem::action("New Connection", NewConnection),
+                MenuItem::action("New Project", NewProject),
+            ]
+            .into_iter()
+            .chain({
+                let sources = import::Source::ALL
+                    .into_iter()
+                    .filter(|source| source.found())
+                    .map(|source| {
+                        MenuItem::action(
+                            format!("Import from {}…", source.label()),
+                            ImportConnections { source },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let separator = (!sources.is_empty()).then(MenuItem::separator);
+                separator.into_iter().chain(sources)
+            })
+            .chain(
+                [
+                    MenuItem::separator(),
+                    MenuItem::action("Import Rows…", ImportRows),
+                ]
+                .into_iter()
+                .filter(|_| imports_rows),
+            )
+            .chain([
+                MenuItem::separator(),
+                MenuItem::action("Save Query", SaveQuery),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+            ])
+            .collect(),
+        },
+        Menu {
+            name: "Query".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Run", RunQuery),
+                MenuItem::action("Cancel", CancelQuery),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Row Panel", ToggleRowPanel),
+                MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
+                MenuItem::action("Toggle Data / Structure", ToggleStructure),
+                MenuItem::separator(),
+                MenuItem::action("Zoom In", ZoomEditorIn),
+                MenuItem::action("Zoom Out", ZoomEditorOut),
+                MenuItem::action("Reset Zoom", ResetEditorZoom),
+                MenuItem::separator(),
+                MenuItem::action("Select Database…", SelectDatabase),
+                MenuItem::action("Select Theme…", SelectTheme),
+            ],
+        },
+    ]
 }

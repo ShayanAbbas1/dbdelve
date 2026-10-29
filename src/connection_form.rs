@@ -7,13 +7,16 @@
 //! This was a plain type at the crate root. It moved out whole; nothing changed
 //! but its visibility.
 
-use gpui::{App, AppContext, Context, Entity, Task, Window};
-use gpui_component::input::InputState;
+use std::time::Instant;
+
+use gpui::{App, AppContext, Context, Entity, SharedString, Subscription, Task, TextAlign, Window};
+use gpui_component::input::{InputEvent, InputState};
 
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Engine, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
+        ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel,
+        SslMode,
     },
     session::Profile,
     sql::Mode,
@@ -88,9 +91,47 @@ pub(crate) struct ConnectionForm {
     /// when the form is saved, rather than the list of existing ones.
     pub(crate) naming_project: bool,
     pub(crate) project_name: Entity<InputState>,
+    /// When the form came up, for its card's entrance.
+    pub(crate) opened: Instant,
+    /// The welcome surface's contours were already on screen, so the form's,
+    /// the same ones, are there from the start rather than fading in again.
+    pub(crate) backdrop_shown: bool,
+    /// The engine the engine-dependent placeholders were last written for.
+    pub(crate) placeholders_for: Option<Engine>,
+    /// The URL field as of its last change, to tell a URL pasted whole from
+    /// one being typed.
+    pub(crate) last_url: SharedString,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ConnectionForm {
+    /// The first field the form draws for its engine.
+    pub(crate) fn lead_field(&self) -> Entity<InputState> {
+        match self.engine.fields() {
+            Fields::Server => self.url.clone(),
+            Fields::File => self.path.clone(),
+            Fields::Account => self.account.clone(),
+        }
+    }
+
+    pub(crate) fn set_engine(&mut self, engine: Engine) {
+        // Only when the field set actually changes: Postgres and MySQL show
+        // the same fields, so a switch between them leaves focus where the
+        // palette hands it back (the lead field). Only a change of field set
+        // moves it, to the new set's first field.
+        if self.engine.fields() != engine.fields() {
+            self.needs_focus = Some(match engine.fields() {
+                Fields::Server => self.host.clone(),
+                Fields::File => self.path.clone(),
+                Fields::Account => self.account.clone(),
+            });
+        }
+        self.engine = engine;
+        // Both belonged to the fields that just left the screen.
+        self.error = None;
+        self.test = None;
+    }
+
     pub(crate) fn new(
         config: Option<&ConnectionConfig>,
         window: &mut Window,
@@ -103,7 +144,11 @@ impl ConnectionForm {
             _ => None,
         };
         let file = match config {
-            Some(ConnectionConfig::Sqlite { path, .. }) => Some(path.as_str()),
+            Some(
+                ConnectionConfig::Sqlite { path, .. }
+                | ConnectionConfig::Turso { path, .. }
+                | ConnectionConfig::DuckDb { path, .. },
+            ) => Some(path.as_str()),
             _ => None,
         };
         let mongo = match config {
@@ -111,70 +156,59 @@ impl ConnectionForm {
             _ => None,
         };
 
-        let url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("postgresql://…  or  sqlite://…"));
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a connection URL"));
         let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Display name")
-                .default_value(value(
-                    server
-                        .map(|server| server.database.as_str())
-                        .or_else(|| account.map(|account| account.database.as_str()))
-                        .or_else(|| file.map(file_stem)),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.database.as_str())
+                    .or_else(|| account.map(|account| account.database.as_str()))
+                    .or_else(|| file.map(file_stem)),
+            ))
         });
         let path = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Database file")
+                .placeholder("/path/to/app.sqlite")
                 .default_value(value(file))
         });
         let host = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Host (optional)")
-                .default_value(value(
-                    server
-                        .map(|server| server.host.as_str())
-                        .or_else(|| account.and_then(|account| account.host.as_deref())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.host.as_str())
+                    .or_else(|| account.and_then(|account| account.host.as_deref())),
+            ))
         });
         let port = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Port (optional)")
-                .default_value(
-                    server
-                        .and_then(|server| server.port)
-                        .map(|port| port.to_string())
-                        .unwrap_or_default(),
-                )
+            InputState::new(window, cx).default_value(
+                server
+                    .and_then(|server| server.port)
+                    .map(|port| port.to_string())
+                    .unwrap_or_default(),
+            )
         });
         let database = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Database")
-                .default_value(value(
-                    server
-                        .map(|server| server.database.as_str())
-                        .or_else(|| account.map(|account| account.database.as_str())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.database.as_str())
+                    .or_else(|| account.map(|account| account.database.as_str())),
+            ))
         });
         let user = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Username")
-                .default_value(value(
-                    server
-                        .map(|server| server.user.as_str())
-                        .or_else(|| account.map(|account| account.user.as_str())),
-                ))
+            InputState::new(window, cx).default_value(value(
+                server
+                    .map(|server| server.user.as_str())
+                    .or_else(|| account.map(|account| account.user.as_str())),
+            ))
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Password (optional)")
+                .placeholder("Optional")
                 .default_value(value(server.map(|server| server.password.as_str())))
                 .masked(true)
         });
 
         let root_certificate = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Root certificate file (optional)")
+                .placeholder("System trust store")
                 .default_value(value(
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
@@ -189,9 +223,9 @@ impl ConnectionForm {
             })
         };
         let ssh_host = input("Host or ~/.ssh/config alias", ssh_host);
-        let ssh_port = input("Port (optional)", ssh_port);
-        let ssh_user = input("Username (optional)", ssh_user);
-        let ssh_identity_file = input("Identity file (optional)", ssh_identity_file);
+        let ssh_port = input("22", ssh_port);
+        let ssh_user = input("Optional", ssh_user);
+        let ssh_identity_file = input("SSH agent", ssh_identity_file);
         let account_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Account identifier")
@@ -199,30 +233,30 @@ impl ConnectionForm {
         });
         let private_key = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Absolute path to the private key file")
+                .placeholder("/absolute/path/to/key.p8")
                 .default_value(value(account.map(|account| account.private_key.as_str())))
         });
         let warehouse = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Warehouse (optional)")
+                .placeholder("Optional")
                 .default_value(value(
                     account.and_then(|account| account.warehouse.as_deref()),
                 ))
         });
         let role = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Role (optional)")
+                .placeholder("Optional")
                 .default_value(value(account.and_then(|account| account.role.as_deref())))
         });
         let options = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("authSource=admin&replicaSet=rs0 (optional)")
+                .placeholder("authSource=admin&replicaSet=rs0")
                 .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
         });
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Seconds (0 for no limit)")
+                .placeholder("No limit")
                 .default_value(
                     config
                         .map(ConnectionConfig::statement_timeout)
@@ -232,17 +266,43 @@ impl ConnectionForm {
                 )
         });
 
-        Self {
-            // The form is the whole window while it is open, and a window
-            // with nothing focused has no dispatch path -- every binding is
-            // dead until a field is clicked. So the field the user is meant to
-            // start in asks for focus the moment it is mounted.
-            needs_focus: Some(url.clone()),
+        statement_timeout.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
+
+        let mut subscriptions = vec![cx.subscribe_in(
+            &url,
+            window,
+            |workspace, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => workspace.url_changed(window, cx),
+                InputEvent::PressEnter { .. } => workspace.fill_from_url(window, cx),
+                _ => {}
+            },
+        )];
+        // What the header reads: its title and the line saying where the
+        // form points.
+        for input in [
+            &name,
+            &path,
+            &host,
+            &port,
+            &database,
+            &user,
+            &ssh_host,
+            &account_name,
+        ] {
+            subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
+
+        let mut form = Self {
+            needs_focus: None,
             url,
             engine: config.map(ConnectionConfig::engine).unwrap_or_default(),
             name,
             color: None,
-            mode: Mode::default(),
+            mode: starting_mode(None),
             path,
             host,
             port,
@@ -270,7 +330,18 @@ impl ConnectionForm {
             project: None,
             naming_project: false,
             project_name,
-        }
+            opened: Instant::now(),
+            backdrop_shown: false,
+            placeholders_for: None,
+            last_url: SharedString::default(),
+            _subscriptions: subscriptions,
+        };
+        // The form is the whole window while it is open, and a window with
+        // nothing focused has no dispatch path -- every binding is dead until
+        // a field is clicked. So the field the user is meant to start in asks
+        // for focus the moment it is mounted.
+        form.needs_focus = Some(form.lead_field());
+        form
     }
 
     /// The same form, pointed at a profile that already exists.
@@ -293,8 +364,10 @@ impl ConnectionForm {
         form.name.update(cx, |name, cx| {
             name.set_value(profile.name.clone(), window, cx);
         });
-        form.password
-            .update(cx, |password, cx| password.set_value("", window, cx));
+        form.password.update(cx, |password, cx| {
+            password.set_value("", window, cx);
+            password.set_placeholder("Unchanged", window, cx);
+        });
         form
     }
 
@@ -316,7 +389,7 @@ impl ConnectionForm {
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
-        form.mode = profile.mode;
+        form.mode = starting_mode(Some(profile.mode));
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });
@@ -325,27 +398,35 @@ impl ConnectionForm {
 
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        let name = read(&self.name);
-        if name.is_empty() {
-            return Err("Display name is required.".into());
-        }
-
         let statement_timeout = self.statement_timeout(cx)?;
+        let file = || match read(&self.path) {
+            path if path.is_empty() => Err("Database file is required.".to_string()),
+            path => Ok(path),
+        };
         let config = match self.engine {
-            Engine::Sqlite => {
-                let path = read(&self.path);
-                if path.is_empty() {
-                    return Err("Database file is required.".into());
-                }
-                ConnectionConfig::Sqlite {
-                    path,
-                    statement_timeout,
-                }
-            }
+            Engine::Sqlite => ConnectionConfig::Sqlite {
+                path: file()?,
+                statement_timeout,
+            },
+            Engine::Turso => ConnectionConfig::Turso {
+                path: file()?,
+                statement_timeout,
+            },
+            // No file is a database in memory, which is what a profile for
+            // reading CSV and Parquet files wants.
+            Engine::DuckDb => ConnectionConfig::duckdb(
+                match read(&self.path) {
+                    path if path.is_empty() => crate::db::DUCKDB_IN_MEMORY.to_string(),
+                    path => path,
+                },
+                statement_timeout,
+            ),
             Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
+            // A blank username sends none, and the server signs in `default`.
+            Engine::ClickHouse => ConnectionConfig::ClickHouse(self.server_requiring(&[], cx)?),
             Engine::Snowflake => ConnectionConfig::Snowflake(self.account(cx)?),
             Engine::MongoDb => {
                 let mut server = self.server_requiring(&[], cx)?;
@@ -360,9 +441,61 @@ impl ConnectionForm {
                     options: read(&self.options),
                 })
             }
+            // An ACL user and a password are both optional: a server with
+            // neither configured takes any connection.
+            Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
         };
 
+        let name = match read(&self.name) {
+            name if name.is_empty() => default_profile_name(&config),
+            name => name,
+        };
+        if name.is_empty() {
+            return Err("Display name is required.".into());
+        }
         Ok((name, config))
+    }
+
+    /// The placeholders that say what a blank field means, which is the
+    /// engine's to say: its port, whether it asks for a user, what it names
+    /// a connection after. Written whenever the engine has changed since.
+    pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
+        if self.placeholders_for == Some(self.engine) {
+            return;
+        }
+        self.placeholders_for = Some(self.engine);
+        let blank = placeholders(self.engine);
+        for (input, placeholder) in [
+            (&self.name, SharedString::from(blank.name)),
+            (&self.host, blank.host.into()),
+            (&self.port, blank.port.into()),
+            (&self.database, blank.database.into()),
+            (&self.user, blank.user.into()),
+            (&self.path, blank.path.into()),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+    }
+
+    /// Where the form points, for the line under its title.
+    pub(crate) fn summary(&self, cx: &App) -> Option<String> {
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        let tunnel = read(&self.ssh_host);
+        summary(
+            self.engine,
+            self.srv,
+            &Typed {
+                host: &read(&self.host),
+                port: &read(&self.port),
+                database: &read(&self.database),
+                user: &read(&self.user),
+                path: &read(&self.path),
+                account: &read(&self.account),
+                tunnel: self.ssh.then_some(tunnel.as_str()),
+            },
+        )
     }
 
     /// Blank is 0 is no limit, so a user who never had an opinion about it is
@@ -414,6 +547,7 @@ impl ConnectionForm {
             warehouse: optional(&self.warehouse),
             role: optional(&self.role),
             statement_timeout: self.statement_timeout(cx)?,
+            schema: None,
         })
     }
 
@@ -467,7 +601,124 @@ impl ConnectionForm {
                     read(&self.ssh_identity_file),
                 ],
             )?,
+            schema: None,
         })
+    }
+}
+
+/// The active schema `current` holds, picked in the titlebar rather than the
+/// form, onto `config`, only while it is on the same engine and database:
+/// schemas belong to one database. Read from the profile at save time, so one
+/// picked while the form was open stays. The database is compared as the
+/// engine spells it, so `analytics` is still Snowflake's `ANALYTICS`.
+///
+/// DuckDB's database is picked in the titlebar too, among those attached to
+/// the file, and the form has no field for it: it stays while the file does.
+pub(crate) fn keep_schema(config: &mut ConnectionConfig, current: &ConnectionConfig) {
+    if let (
+        ConnectionConfig::DuckDb { path, database, .. },
+        ConnectionConfig::DuckDb {
+            path: was,
+            database: picked,
+            ..
+        },
+    ) = (&mut *config, current)
+        && path == was
+    {
+        *database = picked.clone();
+    }
+    if let Some(schema) = current.schema()
+        && config.engine() == current.engine()
+        && config.database_name() == current.database_name()
+    {
+        config.set_schema(Some(schema.to_string()));
+    }
+}
+
+/// What a new connection may do until told otherwise: read. A copy keeps the
+/// mode of the connection it was copied from.
+pub(crate) fn starting_mode(copied_from: Option<Mode>) -> Mode {
+    copied_from.unwrap_or(Mode::ReadOnly)
+}
+
+/// What a blank field means, field by field.
+pub(crate) struct Placeholders {
+    pub(crate) name: &'static str,
+    pub(crate) host: &'static str,
+    pub(crate) port: String,
+    pub(crate) database: &'static str,
+    pub(crate) user: &'static str,
+    pub(crate) path: &'static str,
+}
+
+/// Read against `ConnectionConfig::server`, `account` and
+/// `default_profile_name`, which decide what blank actually does.
+pub(crate) fn placeholders(engine: Engine) -> Placeholders {
+    let hints = engine.spec().hints;
+    Placeholders {
+        name: match engine.fields() {
+            Fields::File => "Named after the file",
+            Fields::Server | Fields::Account => hints.name,
+        },
+        host: hints.host,
+        port: engine
+            .default_port()
+            .map(|port| port.to_string())
+            .unwrap_or_default(),
+        database: hints.database,
+        user: hints.user,
+        path: hints.path,
+    }
+}
+
+/// The fields `summary` reads, as typed and trimmed.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Typed<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) port: &'a str,
+    pub(crate) database: &'a str,
+    pub(crate) user: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) account: &'a str,
+    /// The SSH host, while the tunnel is on.
+    pub(crate) tunnel: Option<&'a str>,
+}
+
+/// Where a form points, in one line: `user@host:port/database` and the SSH
+/// host it goes through, the file for a file, the account for an account.
+/// `None` until there is somewhere: a user on its own points nowhere.
+pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String> {
+    let signed_in = |place: String| match typed.user {
+        "" => place,
+        user => format!("{user}@{place}"),
+    };
+    let database = |place: String| match typed.database {
+        "" => place,
+        database => format!("{place}/{database}"),
+    };
+    match engine.fields() {
+        Fields::File => Some(typed.path.to_string()).filter(|path| !path.is_empty()),
+        Fields::Account => {
+            (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
+        }
+        Fields::Server => {
+            if typed.host.is_empty() {
+                return None;
+            }
+            // An SRV name takes no port, so whatever the hidden field holds
+            // is not where it points.
+            let place = match typed.port {
+                port if !port.is_empty() && !(srv && engine.resolves_srv()) => {
+                    format!("{}:{port}", typed.host)
+                }
+                _ => typed.host.to_string(),
+            };
+            let line = signed_in(database(place));
+            Some(match typed.tunnel {
+                Some(tunnel) if !tunnel.is_empty() => format!("{line} via {tunnel}"),
+                _ => line,
+            })
+        }
     }
 }
 
@@ -540,19 +791,27 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         | ConnectionConfig::MySql(server)
         | ConnectionConfig::MariaDb(server)
         | ConnectionConfig::SqlServer(server)
+        | ConnectionConfig::ClickHouse(server)
         | ConnectionConfig::MongoDb(MongoConfig { server, .. }) => if server.database.is_empty() {
             &server.host
         } else {
             &server.database
         }
         .clone(),
-        ConnectionConfig::Sqlite { path, .. } => file_stem(path).to_string(),
+        ConnectionConfig::DuckDb { path, .. } if path == crate::db::DUCKDB_IN_MEMORY => {
+            "DuckDB".to_string()
+        }
+        ConnectionConfig::Sqlite { path, .. }
+        | ConnectionConfig::Turso { path, .. }
+        | ConnectionConfig::DuckDb { path, .. } => file_stem(path).to_string(),
         ConnectionConfig::Snowflake(account) => account.database.clone(),
+        // A database there is a number, which names nothing.
+        ConnectionConfig::Redis(server) => server.host.clone(),
     }
 }
 
 /// Checks display names rather than ids: `store::profile_id` already dedupes
-/// the id, but two rows with the same name in the switcher are ambiguous.
+/// the id, but two rows with the same name in the palette are ambiguous.
 pub(crate) fn duplicate_profile_name(name: &str, existing: &[String]) -> String {
     (1..)
         .map(|n| match n {
@@ -603,6 +862,53 @@ mod tests {
 
     fn fields(host: &str, port: &str) -> [String; 4] {
         [host.into(), port.into(), String::new(), String::new()]
+    }
+
+    #[test]
+    fn the_active_schema_stays_only_on_the_engine_and_database_it_was_picked_on() {
+        let postgres = |database: &str| {
+            ConnectionConfig::Postgres(ServerConfig {
+                database: database.into(),
+                ..ServerConfig::default()
+            })
+        };
+        let snowflake = |database: &str| {
+            ConnectionConfig::Snowflake(SnowflakeConfig {
+                database: database.into(),
+                ..SnowflakeConfig::default()
+            })
+        };
+        let kept = |picked_on: &ConnectionConfig, mut saved: ConnectionConfig| {
+            let mut current = picked_on.clone();
+            current.set_schema(Some("sales".into()));
+            keep_schema(&mut saved, &current);
+            saved.schema().map(str::to_string)
+        };
+        let sales = Some("sales".to_string());
+        assert_eq!(kept(&postgres("app"), postgres("app")), sales);
+        assert_eq!(kept(&postgres("app"), postgres("other")), None);
+        // Blank is the `postgres` it connects to.
+        assert_eq!(kept(&postgres(""), postgres("postgres")), sales);
+        assert_eq!(kept(&postgres("app"), snowflake("app")), None);
+        assert_eq!(kept(&snowflake("ANALYTICS"), snowflake("analytics")), sales);
+        assert_eq!(
+            kept(&snowflake("ANALYTICS"), snowflake(r#""analytics""#)),
+            None
+        );
+
+        let duckdb = |path: &str| ConnectionConfig::duckdb(path.into(), 0);
+        let mut picked = duckdb("/data/dev.duckdb");
+        picked.set_database("other".into());
+        picked.set_schema(Some("sales".into()));
+        let saved = |mut saved: ConnectionConfig| {
+            keep_schema(&mut saved, &picked);
+            (saved.database_name(), saved.schema().map(str::to_string))
+        };
+        assert_eq!(
+            saved(duckdb("/data/dev.duckdb")),
+            (Some("other".into()), sales.clone())
+        );
+        assert_eq!(saved(duckdb("/data/prod.duckdb")), (None, None));
     }
 
     #[test]
@@ -657,6 +963,140 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_says_where_the_form_points_once_it_points_somewhere() {
+        let at = |engine, srv, typed: &Typed| summary(engine, srv, typed);
+        let server = Typed {
+            host: "db.internal",
+            port: "5432",
+            database: "orders",
+            user: "ada",
+            ..Typed::default()
+        };
+        assert_eq!(
+            at(Engine::Postgres, false, &server).as_deref(),
+            Some("ada@db.internal:5432/orders")
+        );
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    tunnel: Some("bastion.internal"),
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("ada@db.internal:5432/orders via bastion.internal")
+        );
+        // Switched on before its host is typed, the tunnel names nothing yet.
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    tunnel: Some(""),
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("ada@db.internal:5432/orders")
+        );
+        // Only what was typed: a blank port is the default, not "".
+        assert_eq!(
+            at(
+                Engine::MySql,
+                false,
+                &Typed {
+                    host: "localhost",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("localhost")
+        );
+        // The port an SRV name hides is not where it points.
+        assert_eq!(
+            at(
+                Engine::MongoDb,
+                true,
+                &Typed {
+                    host: "cluster0.example.net",
+                    port: "27017",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("cluster0.example.net")
+        );
+        assert_eq!(
+            at(
+                Engine::Sqlite,
+                false,
+                &Typed {
+                    path: "~/Projects/app/data.sqlite",
+                    ..server
+                }
+            )
+            .as_deref(),
+            Some("~/Projects/app/data.sqlite")
+        );
+        assert_eq!(
+            at(
+                Engine::Snowflake,
+                false,
+                &Typed {
+                    account: "acme-prod",
+                    user: "ada",
+                    database: "ANALYTICS",
+                    ..Typed::default()
+                }
+            )
+            .as_deref(),
+            Some("ada@acme-prod/ANALYTICS")
+        );
+        for engine in Engine::ALL {
+            assert_eq!(at(engine, false, &Typed::default()), None, "{engine:?}");
+        }
+        // A user on its own points nowhere.
+        assert_eq!(
+            at(
+                Engine::Postgres,
+                false,
+                &Typed {
+                    user: "ada",
+                    ..Typed::default()
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_connection_starts_read_only_and_a_copy_keeps_its_mode() {
+        assert_eq!(starting_mode(None), Mode::ReadOnly);
+        for mode in Mode::ALL {
+            assert_eq!(starting_mode(Some(mode)), mode);
+        }
+    }
+
+    #[test]
+    fn a_blank_field_says_what_blank_means_for_the_engine() {
+        let postgres = placeholders(Engine::Postgres);
+        assert_eq!(postgres.port, "5432");
+        assert_eq!(postgres.database, "postgres");
+        // `server` asks for a user here, and `server_requiring(&[])` there.
+        assert_eq!(postgres.user, "Required");
+        assert_eq!(placeholders(Engine::MongoDb).user, "Optional");
+        assert_eq!(placeholders(Engine::Redis).name, "Named after the host");
+        assert_eq!(placeholders(Engine::Turso).name, "Named after the file");
+        assert_eq!(
+            placeholders(Engine::DuckDb).path,
+            "Blank for a database in memory"
+        );
+        assert_eq!(placeholders(Engine::Snowflake).port, "");
+    }
+
+    #[test]
     fn a_duplicate_name_does_not_collide_with_one_already_there() {
         assert_eq!(duplicate_profile_name("Prod", &[]), "Prod copy");
         assert_eq!(
@@ -689,6 +1129,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         };
         let typed = ConnectionConfig::Postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

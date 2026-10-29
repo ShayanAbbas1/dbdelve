@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=DBDelve
-Comment=A modern and performant database client for Postgres, MySQL and SQLite
+Comment=A fast, native, multi-engine database client
 Exec=dbdelve %f
 Icon=dbdelve
 Terminal=false

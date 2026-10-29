@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 50] = [
+const ICONS: [(&str, &IconData); 69] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -48,6 +48,7 @@ const ICONS: [(&str, &IconData); 50] = [
     ("icons/search.svg", icondata_lu::LuSearch),
     ("icons/arrow-up.svg", icondata_lu::LuArrowUp),
     ("icons/arrow-down.svg", icondata_lu::LuArrowDown),
+    ("icons/arrow-right.svg", icondata_lu::LuArrowRight),
     ("icons/database.svg", icondata_lu::LuDatabase),
     ("icons/table.svg", icondata_lu::LuTable),
     ("icons/layers.svg", icondata_lu::LuLayers),
@@ -74,8 +75,29 @@ const ICONS: [(&str, &IconData); 50] = [
     ("icons/replace.svg", icondata_lu::LuReplace),
     ("icons/case-sensitive.svg", icondata_lu::LuCaseSensitive),
     ("icons/folder.svg", icondata_lu::LuFolder),
+    ("icons/folder-open.svg", icondata_lu::LuFolderOpen),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
+    (
+        "icons/sliders-horizontal.svg",
+        icondata_lu::LuSlidersHorizontal,
+    ),
+    ("icons/keyboard.svg", icondata_lu::LuKeyboard),
+    ("icons/link.svg", icondata_lu::LuLink),
+    ("icons/import.svg", icondata_lu::LuImport),
+    ("icons/ban.svg", icondata_lu::LuBan),
+    ("icons/rotate-ccw.svg", icondata_lu::LuRotateCcw),
+    ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
+    ("icons/engine-mysql.svg", icondata_si::SiMysql),
+    ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
+    ("icons/engine-sqlite.svg", icondata_si::SiSqlite),
+    ("icons/engine-turso.svg", icondata_si::SiTurso),
+    ("icons/engine-duckdb.svg", icondata_si::SiDuckdb),
+    ("icons/engine-snowflake.svg", icondata_si::SiSnowflake),
+    ("icons/engine-clickhouse.svg", icondata_si::SiClickhouse),
+    ("icons/engine-sqlserver.svg", icondata_lu::LuServer),
+    ("icons/engine-mongodb.svg", icondata_si::SiMongodb),
+    ("icons/engine-redis.svg", icondata_si::SiRedis),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
@@ -88,7 +110,6 @@ pub mod icon {
     pub const CLOSE_WINDOW: &str = "icons/close.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";
-    pub const SWITCHER: &str = "icons/chevrons-up-down.svg";
     /// A connection's mode, on its pill in the titlebar.
     pub const READ_ONLY: &str = "icons/eye.svg";
     pub const READ_WRITE: &str = "icons/pencil.svg";
@@ -97,16 +118,23 @@ pub mod icon {
     pub const SIDEBAR: &str = "icons/panel-left.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
+    /// Switches the row panel between reading a row and editing it.
+    pub const EDIT: &str = "icons/pencil.svg";
     /// A column header's sort state: which way the server ordered the rows, or
     /// that it could be asked to.
     pub const SORT_UP: &str = "icons/sort-ascending.svg";
     pub const SORT_DOWN: &str = "icons/sort-descending.svg";
     pub const SORTABLE: &str = "icons/chevrons-up-down.svg";
+    /// A picker that opens a list to choose from rather than a menu under it.
+    pub const CHOOSE: &str = "icons/chevrons-up-down.svg";
+    /// No connection colour.
+    pub const NO_COLOR: &str = "icons/ban.svg";
     pub const SAVED_QUERY: &str = "icons/file-code.svg";
     pub const DELETE: &str = "icons/trash.svg";
     pub const SEARCH: &str = "icons/search.svg";
     pub const DATABASE: &str = "icons/database.svg";
     pub const PROJECT: &str = "icons/folder.svg";
+    pub const BROWSE: &str = "icons/folder-open.svg";
     pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const ADD_TO_PROJECT: &str = "icons/folder-plus.svg";
     pub const TABLE: &str = "icons/table.svg";
@@ -121,6 +149,8 @@ pub mod icon {
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
     pub const COPY: &str = "icons/copy.svg";
+    /// What else can be done to a row, beside it.
+    pub const MORE: &str = "icons/ellipsis.svg";
     /// A floppy disk, which is what "save" looks like everywhere else.
     pub const SAVE: &str = "icons/save.svg";
     pub const RENAME: &str = "icons/pencil.svg";
@@ -129,9 +159,8 @@ pub mod icon {
     pub const PLAN: &str = "icons/git-fork.svg";
     pub const SCRATCH_QUERY: &str = "icons/square-pen.svg";
     pub const HISTORY: &str = "icons/history.svg";
-    /// The connection form's "fill the fields from this URL" action: the URL
-    /// flows down into the fields below it.
-    pub const FILL_DOWN: &str = "icons/arrow-down.svg";
+    /// Import Rows: a file column flows into the table column beside it.
+    pub const MAPS_TO: &str = "icons/arrow-right.svg";
     pub const FONT: &str = "icons/type.svg";
     pub const THEME: &str = "icons/palette.svg";
     /// A cell whose column carries a foreign key: the arrow leaves this row for
@@ -140,6 +169,14 @@ pub mod icon {
     pub const REFERENCED_BY: &str = "icons/arrow-down-right.svg";
     pub const PRIMARY_KEY: &str = "icons/key.svg";
     pub const SETTINGS: &str = "icons/settings.svg";
+    pub const SLIDERS: &str = "icons/sliders-horizontal.svg";
+    pub const KEYBOARD: &str = "icons/keyboard.svg";
+    /// The welcome surface's URL field, before it knows the engine.
+    pub const LINK: &str = "icons/link.svg";
+    /// Connections read in from another client.
+    pub const IMPORT: &str = "icons/import.svg";
+    /// Back to the default: a font's family or size.
+    pub const RESET: &str = "icons/rotate-ccw.svg";
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -148,8 +185,46 @@ pub fn icon(path: &'static str) -> Icon {
 
 pub struct Icons;
 
+/// The app's own mark, in colour. Drawn with `img`, which keeps an SVG's
+/// paint, where `svg` and `icon` keep only its shape.
+pub const BRAND: &str = "brand/dbdelve.svg";
+
+/// The icon's file declares 1024px, and `img` rasterises an SVG at its
+/// declared size and then scales the bitmap. Shrinking that far with no
+/// mipmaps shimmers at the edges, so it is declared at three times the size it
+/// is drawn: enough for a 2x and a 3x display.
+fn brand_document() -> String {
+    let side = (3. * crate::theme::layout::WELCOME_MARK_SIZE) as u32;
+    include_str!("../assets/icon/dbdelve.svg").replacen(
+        r#"width="1024" height="1024""#,
+        &format!(r#"width="{side}" height="{side}""#),
+        1,
+    )
+}
+
+/// The depth contours behind the welcome card, faded out toward the middle
+/// inside the file itself: GPUI has no gradient mask to fade them with.
+pub const CONTOURS: &str = "welcome/contours.svg";
+/// The soft light the welcome card sits in. GPUI paints no radial gradient,
+/// but an SVG drawn as a mask keeps its gradient's alpha.
+pub const LIFT: &str = "welcome/lift.svg";
+
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        match path {
+            BRAND => return Ok(Some(Cow::Owned(brand_document().into_bytes()))),
+            CONTOURS => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/welcome/contours.svg"
+                ))));
+            }
+            LIFT => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../assets/welcome/lift.svg"
+                ))));
+            }
+            _ => {}
+        }
         Ok(ICONS
             .iter()
             .find(|(name, _)| *name == path)
@@ -185,6 +260,14 @@ fn document(icon: &IconData) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
+
+    #[test]
+    fn the_brand_mark_is_declared_near_the_size_it_is_drawn() {
+        let document = brand_document();
+        assert!(document.contains(r#"width="132" height="132""#));
+        assert!(!document.contains(r#"width="1024""#));
+    }
 
     #[test]
     fn every_named_icon_resolves_to_a_document() {
@@ -193,7 +276,6 @@ mod tests {
         for path in [
             icon::CHEVRON_DOWN,
             icon::CHEVRON_RIGHT,
-            icon::SWITCHER,
             icon::READ_ONLY,
             icon::READ_WRITE,
             icon::FULL_ACCESS,
@@ -223,14 +305,23 @@ mod tests {
             icon::RUN,
             icon::PLAN,
             icon::SCRATCH_QUERY,
-            icon::FILL_DOWN,
             icon::FONT,
             icon::FOLLOW_KEY,
             icon::REFERENCED_BY,
             icon::PRIMARY_KEY,
             icon::SETTINGS,
+            icon::SLIDERS,
+            icon::KEYBOARD,
+            icon::THEME,
+            icon::LINK,
+            icon::IMPORT,
+            icon::CHOOSE,
+            icon::NO_COLOR,
         ] {
             assert_draws(path);
+        }
+        for engine in Engine::ALL {
+            assert_draws(engine.logo());
         }
     }
 

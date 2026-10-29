@@ -111,8 +111,11 @@ jobs:
           mkdir -p target/dmg
           cp -R target/DBDelve.app target/dmg/
           ln -s /Applications target/dmg/Applications
+          # hdiutil's own estimate from -srcfolder came up short once the
+          # binary grew; it only sizes the scratch image, not the compressed DMG.
+          SIZE_MB=$(( $(du -sm target/dmg | cut -f1) * 2 + 50 ))
           hdiutil create -volname "DBDelve $VERSION" -srcfolder target/dmg \
-            -ov -format UDZO "target/DBDelve-$VERSION.dmg"
+            -size "${SIZE_MB}m" -ov -format UDZO "target/DBDelve-$VERSION.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -206,7 +209,7 @@ jobs:
 
             url "https://github.com/ShayanAbbas1/dbdelve/releases/download/v#{version}/DBDelve-#{version}.dmg"
             name "DBDelve"
-            desc "Native SQL client"
+            desc "Fast, native, multi-engine database client"
             homepage "https://github.com/ShayanAbbas1/dbdelve"
 
             depends_on arch: :arm64

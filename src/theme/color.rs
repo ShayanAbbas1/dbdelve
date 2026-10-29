@@ -182,9 +182,8 @@ impl Srgb {
 ///
 /// AA wants 4.5 for body text and 3.0 for large text; AAA wants 7.0.
 ///
-/// Test-only by design: the spec requires contrast to be *checked*, not painted
-/// with. Nothing at runtime should be picking colours by measuring them.
-#[cfg(test)]
+/// The shipped palettes are *checked* with this, not painted with. At runtime
+/// it only fills in what a theme imported from Zed or VS Code leaves unnamed.
 pub fn contrast_ratio(a: Srgb, b: Srgb) -> f32 {
     let (l1, l2) = (a.relative_luminance(), b.relative_luminance());
     let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };

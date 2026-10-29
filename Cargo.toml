@@ -1,9 +1,9 @@
 [package]
 name = "dbdelve"
-version = "0.3.4"
+version = "0.6.1"
 edition = "2024"
-license = "MIT"
-description = "A native SQL client"
+license = "GPL-3.0-only"
+description = "A fast, native, multi-engine database client"
 publish = false
 
 # Exact pins: gpui is pre-1.0 and breaks on minor bumps. See AGENTS.md before
@@ -14,8 +14,8 @@ publish = false
 # republish of zed main. gpui-component depends on it under the name `gpui`, so
 # taking it here is what keeps one copy of the framework in the graph.
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.5" }
-gpui-component = { version = "=0.6.4", features = ["tree-sitter-sql", "tree-sitter-javascript"] }
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript", "tree-sitter-bash"] }
 
 # gpui-component keeps its parse tree private, so we run our own parser to find
 # statement boundaries. Versions match what gpui-component pulls, to avoid
@@ -45,10 +45,18 @@ tree-sitter-javascript = "=0.23.1"
 # implement and the types we hand it are the same crate rather than two copies.
 lsp-types = "=0.97.0"
 
-# Blocking client, deliberately. GPUI's executor is async-task over Grand
-# Central Dispatch with no reactor, so a tokio future panics on it. This owns
-# its runtime and runs on the background executor. See AGENTS.md.
-postgres = "0.19"
+# The table's arrow-key actions, which gpui-component binds but keeps in a
+# private module, so the grid can step them from its own active cell. A crate
+# already in the graph, pinned to the version gpui-component resolves so the
+# actions caught are the ones its keymap dispatches.
+gpui-base = "=0.8.0"
+
+# Async, driven the way SQL Server's tiberius is below: each connection owns a
+# tokio current-thread runtime and blocks on it from the background executor,
+# so no tokio future reaches GPUI's. Directly rather than through the blocking
+# `postgres` crate, whose `simple_query` collects every row before returning
+# one, which leaves nothing to stop at a row limit. See AGENTS.md.
+tokio-postgres = "0.7"
 
 # SQLite. Blocking like the Postgres driver, and for the same reason.
 #
@@ -65,6 +73,29 @@ rusqlite = { version = "0.40", default-features = false, features = [
     "column_metadata",
     "column_decltype",
 ] }
+# DuckDB, embedded the way SQLite is: no server, the engine compiled into the
+# binary. `parquet` and `json` are DuckDB's own readers, linked in so a file
+# opens with no extension downloaded at run time; `vtab` is duckdb-rs's
+# table-function API, through which `db::xlsx` adds `read_xlsx`. Its default
+# features only add a prebuilt-library download that `bundled` has no use for.
+duckdb = { version = "=1.20000.0", default-features = false, features = [
+    "bundled",
+    "parquet",
+    "json",
+    "vtab",
+] }
+# Spreadsheets for DuckDB's `read_xlsx` (`db::xlsx`): DuckDB's own excel
+# extension is not one libduckdb-sys can link in, and a download at run time is
+# not something a database client should need to open a file.
+calamine = { version = "=0.36.1", features = ["dates"] }
+# A DuckDB `UUID` arrives as its sixteen bytes and a `BIGNUM` as its digits in
+# base 256; see `db::duckdb::printable`.
+uuid = "=1.24.1"
+num-bigint = "=0.4.8"
+
+# Turso, a local file only, through the blocking rsapi; turso_core for its Value.
+turso_sdk_kit = { version = "=0.8.2", default-features = false, features = ["fts"] }
+turso_core = "=0.8.2"
 
 # MySQL. Blocking, and with no tokio anywhere in its tree -- rust-mysql-simple
 # is the sibling of the blocking `postgres` client, not of `mysql_async`.
@@ -116,10 +147,12 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
     "ring",
 ] }
 
-# Snowflake. It publishes no Rust driver, and the community ones are tokio plus
-# reqwest, so this speaks its documented SQL REST API over a blocking client --
-# the same "blocking, owns no runtime GPUI has to host" rule as the three
-# drivers above.
+# Snowflake and ClickHouse. Snowflake publishes no Rust driver, and the
+# community ones are tokio plus reqwest, so this speaks its documented SQL REST
+# API over a blocking client -- the same "blocking, owns no runtime GPUI has to
+# host" rule as the three drivers above. ClickHouse is raw HTTP on the same
+# client, with `ureq::unversioned` for the tunnel resolver and the watched
+# transport; that module is not semver-covered, which the exact pin makes safe.
 #
 # Default features off for the usual reason, though here they happen to be the
 # right ones: `rustls` is ureq's spelling of rustls *on ring* with webpki-roots,
@@ -150,7 +183,7 @@ cbc = "=0.1.2"
 # `postgres` crate drives tokio-postgres: each connection owns a tokio
 # current-thread runtime and every call is a `block_on` on the background
 # thread the query already runs on. Nothing tokio-shaped reaches GPUI's
-# executor (AGENTS.md, "Do not add tokio").
+# executor (AGENTS.md, "Do not put tokio on GPUI's executor").
 #
 # Default features off: they are `native-tls`, which is OpenSSL on Linux, and
 # `winauth`. `rustls` is the only TLS it offers otherwise, and it is
@@ -158,6 +191,10 @@ cbc = "=0.1.2"
 # 0.23 the other engines share. Pure Rust and still on `ring`, so no second
 # crypto library, but a second copy of the TLS stack all the same, and one
 # `tls.rs` cannot configure: tiberius builds its own rustls config.
+#
+# A bump must re-check `INFO_TOKEN_LINE` in mssql.rs: the server's `PRINT`
+# and informational messages are told from environment changes by the line of
+# tiberius's source that logs them.
 tiberius = { version = "=0.12.3", default-features = false, features = [
     "tds73",
     "rustls",
@@ -177,6 +214,12 @@ tokio = { version = "=1.53.1", default-features = false, features = [
 tokio-util = { version = "=0.7.19", default-features = false, features = ["compat"] }
 # `try_next` over tiberius's result stream. Already linked through tiberius.
 futures-util = { version = "=0.3.34", default-features = false }
+# Where tiberius puts the server's `PRINT` and informational messages: it
+# decodes them, leaves them out of the result stream and logs them, so
+# mssql.rs subscribes for the length of a submission. Pinned to the version
+# already locked, with the default features tiberius already enables, so
+# naming it adds no copy.
+tracing = "=0.1.44"
 
 # MongoDB. The official driver, async on tokio like tiberius and driven the
 # same way: each connection owns a runtime and every call is a `block_on` on
@@ -194,6 +237,20 @@ mongodb = { version = "=3.9.1", default-features = false, features = [
     "rustls-tls",
     "dns-resolver",
 ] }
+# Redis, and what speaks its protocol (Valkey, KeyDB, Dragonfly). redis-rs's
+# blocking client, the sibling of `mysql` above rather than of the drivers
+# that own a runtime: `aio` and every `*-comp` feature stay off, so no tokio.
+#
+# `default-features = false` drops the typed command helpers (`acl`,
+# `streams`, `geospatial`, `script`) and `num-bigint`: every command goes out
+# as the words the user typed, and a big number renders from its own digits.
+# `tls-rustls` is rustls 0.23 with its default features off, so on the `ring`
+# provider already linked and the platform trust store the Postgres path reads;
+# `tls-rustls-insecure` is what `require` and `verify-ca` are spelled with.
+redis = { version = "=1.7.1", default-features = false, features = [
+    "tls-rustls",
+    "tls-rustls-insecure",
+] }
 # A MongoDB profile's user, password and database, escaped into the connection
 # string the driver reads its options from. Already in the graph through `url`;
 # pinned to the locked version so naming it links no second copy.
@@ -204,10 +261,28 @@ percent-encoding = "=2.3.2"
 # as obvious (whole words, word starts, runs of adjacent characters) is not a
 # few lines. This is Helix's matcher, and it pulls in memchr and nothing else.
 nucleo-matcher = "=0.3.1"
+# The grapheme clusters nucleo-matcher indexes a match by, to turn its indices
+# back into the text they cover. Already in the graph through it; pinned to the
+# locked version so naming it links no second copy.
+unicode-segmentation = "=1.13.3"
+# ClickHouse's result reader: `memmem` finds the exception frame a server
+# appends to a body across read boundaries, and `memchr_iter` counts the rows
+# of a result being drained. Already in the graph through nucleo-matcher and
+# the regex stack; pinned to the locked version so naming it links no second copy.
+memchr = "=2.8.3"
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.9"
+# `raw_value` lets Import Rows keep a JSON number's own text (`import_rows::Json`),
+# which `Value` reads through an f64. Already on in the graph through gpui; named
+# so it does not depend on that. Not `arbitrary_precision`: that feature unifies
+# into every serde_json user in the graph (bson, mysql_common, gpui's settings)
+# and changes how they read numbers.
+serde_json = { version = "1", features = ["raw_value"] }
+# VS Code theme files are JSONC: comments and trailing commas, which serde_json
+# refuses. dprint's parser, straight into a serde_json `Value`; its `serde`
+# feature adds only serde, already in the graph.
+jsonc-parser = { version = "=0.34.0", features = ["serde"] }
+toml = "0.9"   # profiles.toml
 url = "2"
 
 # ISO-8601 dates in mongosh statements (`ISODate(…)`, `{"$date": …}`), for
@@ -220,6 +295,10 @@ time = { version = "=0.3.55", default-features = false, features = [
     "formatting",
     "macros",
 ] }
+
+# Import Rows' UTF-16 and Windows-1252 files; std decodes only UTF-8. Already
+# in the graph; pinned to the locked version so naming it links no second copy.
+encoding_rs = "=0.8.35"
 
 # Classification only, for `sql::classify`: the mode check reads a typed
 # `Statement` so it cannot mistake one statement for another. tree-sitter-sequel
@@ -253,8 +332,11 @@ sqlformat = { version = "=0.5.0", default-features = false }
 # writes the same generic-password items security-framework did, so passwords
 # saved by an earlier build still read back.
 keyring = "4"
+# The bundled fonts; Lucide icon data and Simple Icons brand logos for the
+# engines, since gpui-component ships no icon files.
 guic-gpui-assets = "=0.2.0"
 icondata_lu = "=0.1.0"
+icondata_si = "=0.1.0"
 icondata_core = "=0.1.0"
 # `font-kit` is not in this crate's default features, and without it the macOS
 # backend swaps the text system for `NoopTextSystem` and renders no text at all
@@ -263,48 +345,77 @@ icondata_core = "=0.1.0"
 # backend panics on the first frame unless at least one is on. Both are inert
 # on macOS and Windows -- they forward to gpui_linux, which is not in that
 # graph. font-kit is the macOS text system; Windows uses DirectWrite either way.
-gpui_platform = { version = "=0.3.5", package = "gpui-pre-platform", features = [
+gpui_platform = { version = "=0.3.9", package = "gpui-pre-platform", features = [
     "font-kit",
     "x11",
     "wayland",
 ] }
 
-# The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits, however
-# it exits: Windows has no pipe-closing watchdog like the `sh` one on Unix.
-# Pinned to the version already locked, so naming it adds no copy.
+[dev-dependencies]
+# Headless keyboard regressions exercise GPUI's real focus and action dispatch.
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+# The SQL snapshots are the net that lets the engine-spec refactor prove it
+# changed no generated statement by one character. insta brings the diff,
+# accept and CI-strict behaviour instead of hand-rolled golden files; no
+# default features, so the colored-diff console stack stays out.
+insta = { version = "=1.49.0", default-features = false }
+
+# The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits, and
+# MoveFileExW for atomic no-overwrite query renames. Pinned to the version
+# already locked, so naming it adds no copy.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
 ] }
 
-# The Unix side of the same: `pthread_sigmask`, so the ssh a background thread
-# starts still dies when told to. Pinned to the version already locked.
+# pthread_sigmask for SSH shutdown and native no-overwrite query renames.
+# Pinned to the version already locked.
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
-
-# The headless test platform, simulated input and the `#[gpui::test]` harness
-# the end-to-end tests in `src/workspace/e2e.rs` drive the app through.
-[dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.5", features = ["test-support"] }
 
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "=0.1.31"
 
-# gpui's Metal (macOS) and DirectX 11 (Windows) renderers, each with one blend
-# factor changed in two pipelines (see the `dbdelve patch` notes in their
-# metal_renderer.rs and directx_renderer.rs). Upstream sums alpha instead of
-# compositing it, so on a glass theme every tint laid over the frost -- the
-# editor and the results planes above all -- loses about a tenth of the
-# desktop's light and goes grey. Opaque windows keep alpha at 1 either way, and
-# Linux's wgpu renderer already composites alpha correctly. Drop these once
-# upstream composites alpha with `over`; re-apply the lines on a gpui bump.
+# gpui's Metal (macOS), DirectX 11 (Windows) and wgpu (Linux) renderers, each
+# with one blend factor changed (in two pipelines on Metal and DirectX, in the
+# path pipeline on wgpu; see the `dbdelve patch` notes in their
+# metal_renderer.rs, directx_renderer.rs and wgpu_renderer.rs). Upstream sums
+# alpha instead of compositing it, so on a glass theme every tint laid over the
+# frost -- the editor and the results planes above all -- loses about a tenth
+# of the desktop's light and goes grey. Opaque windows keep alpha at 1 either
+# way. Drop these once upstream composites alpha with `over`; re-apply the
+# lines on a gpui bump.
+#
+# gpui-pre itself is vendored for a backdrop blur ported from zui, the gpui fork
+# behind Zeron: `Window::paint_backdrop_blur` and the `backdrop_blur` style,
+# which frost whatever a popover is painted over. The scene records the blur
+# regions and every renderer (Metal, DirectX, wgpu) draws them. Every change is
+# marked `dbdelve patch`, in gpui-pre and its renderer crates alike; re-apply
+# them on a gpui bump.
+# The vendored wgpu renderer is a member only so CI can run its tests;
+# default-members stays the root package, so plain cargo commands are unchanged.
+[workspace]
+members = ["vendor/gpui-pre-wgpu"]
+default-members = ["."]
+
 [patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# gpui-component is vendored so its popups can use that blur: every menu,
+# select, popover, tooltip and completion list it draws goes through
+# `popover_style`, which frosts the card when the theme hands it a translucent
+# `popover` colour -- a glass theme does, an opaque one never -- with a
+# hairline in place of the drop shadow that would darken the frost, and thin
+# washes for the hover and selection inside it. Every change is marked
+# `dbdelve patch`; re-apply them on a gpui-component bump.
+gpui-component = { path = "vendor/gpui-component" }
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
 # an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are

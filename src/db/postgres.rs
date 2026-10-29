@@ -1,20 +1,31 @@
 use std::collections::HashSet;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::pin::{Pin, pin};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use futures_util::{Stream, StreamExt, stream};
 use geozero::{CoordDimensions, ToWkt, wkb::Ewkb};
-use postgres::{CancelToken, Client, NoTls, SimpleQueryMessage, config::Host};
+use tokio::runtime::Runtime;
+use tokio_postgres::{
+    AsyncMessage, CancelToken, NoTls, SimpleQueryMessage, SimpleQueryStream, config::Host,
+    error::SqlState,
+};
 
 use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, QueryResult, Reference, RelationKind,
-    ServerConfig, Sizes, Structure, assemble_catalog, assemble_databases, assemble_foreign_keys,
-    assemble_references, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
+    RelationKind, Row, RowBuilder, ServerConfig, Sizes, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
+    assemble_structure, create_table, non_utf8_error, optional_cell, plain_error, required_cell,
+    terminated,
 };
+
+mod pgpass;
 
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 5432;
@@ -214,9 +225,31 @@ WHERE namespace.nspname = {schema}
 ORDER BY attribute.attnum
 ";
 
+// A key column's own rendering leaves out its order, which `indoption` holds:
+// bit 1 for DESC, bit 2 for NULLS FIRST, each spelled only where it is not the
+// default for the direction. Columns past `indnkeyatts` are INCLUDE columns.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT
     index_class.relname AS object_name,
+    CASE
+        WHEN index_entry.indisprimary THEN 'primary'
+        WHEN index_entry.indisunique THEN 'unique'
+        ELSE 'plain'
+    END AS index_kind,
+    (
+        SELECT string_agg(
+            pg_catalog.pg_get_indexdef(index_entry.indexrelid, key, true)
+                || CASE index_entry.indoption[key - 1] & 3
+                    WHEN 1 THEN ' DESC NULLS LAST'
+                    WHEN 2 THEN ' NULLS FIRST'
+                    WHEN 3 THEN ' DESC'
+                    ELSE ''
+                END,
+            chr(31) ORDER BY key
+        )
+        FROM generate_series(1, index_entry.indnkeyatts) AS key
+    ) AS index_columns,
+    pg_catalog.pg_get_expr(index_entry.indpred, index_entry.indrelid, true) AS index_predicate,
     pg_catalog.pg_get_indexdef(index_entry.indexrelid) AS definition
 FROM pg_catalog.pg_index AS index_entry
 JOIN pg_catalog.pg_class AS index_class
@@ -366,6 +399,14 @@ ORDER BY attribute.attnum
 ";
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
+/// The side session's statement timeout, and how long a stop at the row
+/// limit waits for the side session before draining instead. A describe
+/// there waits on the same locks the user's statement took, and the user's
+/// own open transaction can hold them for as long as it likes.
+const SIDE_TIMEOUT_SECONDS: u32 = 2;
+/// How long a streamed run's first rows wait for the describe beside it
+/// before they are shown untyped, to be restyled once it answers.
+const TYPES_PATIENCE: Duration = Duration::from_secs(1);
 
 pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     let url_parts =
@@ -400,7 +441,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
             query.append_pair(key, value);
         }
     }
-    let parsed: postgres::Config = without_tls_keys
+    let parsed: tokio_postgres::Config = without_tls_keys
         .as_str()
         .parse()
         .map_err(|error| format!("Connection URL is invalid: {error}"))?;
@@ -443,6 +484,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
         ssh: None,
+        schema: None,
     })
 }
 
@@ -452,16 +494,9 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 /// that a username containing `@` or a password containing a space is
 /// passed through intact instead of truncating the string.
 fn connection_string(server: &ServerConfig) -> String {
-    // An empty `dbname` would have the server pick the user's name, often a
-    // database that does not exist; `postgres` is what createdb connects to.
-    let dbname = if server.database.is_empty() {
-        "postgres"
-    } else {
-        &server.database
-    };
     let mut parts = vec![
         format!("host={}", quote(&server.host)),
-        format!("dbname={}", quote(dbname)),
+        format!("dbname={}", quote(dbname(server))),
         format!("user={}", quote(&server.user)),
     ];
     if let Some(port) = server.port {
@@ -496,8 +531,70 @@ fn connection_string(server: &ServerConfig) -> String {
     parts.join(" ")
 }
 
+/// `schema` ahead of the session's default `search_path`, as the role,
+/// database or server set it, so `"$user"` and extension schemas stay on it.
+/// `reset_val` is that default however many switches came before. Sets nothing
+/// inside a transaction block, where the block's first statement has already
+/// moved `statement_timestamp` past its start: a ROLLBACK would undo the set.
+fn set_search_path_sql(schema: &str) -> String {
+    // An `E''` literal reads the same whatever `standard_conforming_strings` is.
+    let first = Engine::Postgres
+        .quote_identifier(schema)
+        .replace('\\', r"\\")
+        .replace('\'', "''");
+    format!(
+        "SELECT pg_catalog.set_config('search_path', \
+         pg_catalog.concat_ws(', ', E'{first}', NULLIF(reset_val, '')), false) \
+         FROM pg_catalog.pg_settings WHERE name = 'search_path' \
+         AND pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp()"
+    )
+}
+
+/// A `SET` after connecting rather than a startup option: PgBouncer and other
+/// poolers refuse a connection that sends `options` at all.
+fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
+    let set = set_search_path_sql(schema);
+    let Client { client, driver } = client;
+    let messages = driver
+        .block_on(client.simple_query(&set))
+        .and_then(|done| done)
+        .map_err(|error| query_error(&error, &set))?;
+    match messages
+        .iter()
+        .any(|message| matches!(message, SimpleQueryMessage::Row(_)))
+    {
+        true => Ok(()),
+        false => Err(plain_error(
+            "A transaction is open on this connection, so the schema was not switched.".into(),
+        )),
+    }
+}
+
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
 /// through `hostaddr`, which the certificate check never sees.
+/// An empty `dbname` would have the server pick the user's name, often a
+/// database that does not exist; `postgres` is what createdb connects to.
+fn dbname(server: &ServerConfig) -> &str {
+    if server.database.is_empty() {
+        "postgres"
+    } else {
+        &server.database
+    }
+}
+
+/// The profile's own host and port, not the tunnel's local end: those are
+/// what a `.pgpass` line written for the server names.
+fn password_file(server: &ServerConfig) -> Option<pgpass::Lookup> {
+    server.password.is_empty().then(|| {
+        pgpass::lookup(
+            &server.host,
+            server.port.unwrap_or(DEFAULT_PORT),
+            dbname(server),
+            &server.user,
+        )
+    })
+}
+
 fn tunnelled_string(server: &ServerConfig, dial: SocketAddr) -> String {
     let dialled = ServerConfig {
         port: Some(dial.port()),
@@ -509,6 +606,91 @@ fn tunnelled_string(server: &ServerConfig, dial: SocketAddr) -> String {
 fn quote(value: &str) -> String {
     let escaped = value.replace('\\', r"\\").replace('\'', r"\'");
     format!("'{escaped}'")
+}
+
+type Error = tokio_postgres::Error;
+/// The driver's half of a connection, whose type differs with the TLS stream.
+/// Read as a stream of its messages rather than awaited as a future: awaiting
+/// it logs each notice and drops it.
+type Socket = Pin<Box<dyn Stream<Item = Result<AsyncMessage, Error>> + Send>>;
+
+/// tokio-postgres on a current-thread runtime of its own, driven only while a
+/// call blocks on it: what the `postgres` crate does, which offers no way to
+/// read a simple query's rows as they arrive rather than all at once.
+struct Client {
+    // Declared before `driver` so it drops first. A dropped client is what
+    // tells the connection to send `Terminate`, and `Driver::drop` is what
+    // polls it long enough to.
+    client: tokio_postgres::Client,
+    driver: Driver,
+}
+
+struct Driver {
+    runtime: Runtime,
+    /// `None` once the connection has ended, cleanly or with an error.
+    connection: Option<Socket>,
+    /// The server's notices, as psql prints them, in the order they came.
+    notices: Vec<String>,
+}
+
+impl Driver {
+    /// `future`, with the connection polled beside it so the socket is read
+    /// while the request waits. A connection that fails ends the call with its
+    /// own error. For a backend killed mid-statement that is "connection
+    /// closed", not the server's FATAL, as it was under the `postgres` crate.
+    fn block_on<T>(&mut self, future: impl Future<Output = T>) -> Result<T, Error> {
+        let mut future = pin!(future);
+        let Self {
+            runtime,
+            connection,
+            notices,
+        } = self;
+        runtime.block_on(poll_fn(|cx| {
+            while let Some(socket) = connection {
+                match socket.poll_next_unpin(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(Some(Ok(AsyncMessage::Notice(notice)))) => {
+                        notices.push(notice_text(&notice));
+                    }
+                    Poll::Ready(Some(Ok(_))) => {}
+                    Poll::Ready(Some(Err(error))) => {
+                        *connection = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(None) => *connection = None,
+                }
+            }
+            future.as_mut().poll(cx).map(Ok)
+        }))
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        // An ended connection is pending forever, so waiting on one would sit
+        // out the whole grace period.
+        let Some(connection) = &mut self.connection else {
+            return;
+        };
+        let ended = async { while let Some(Ok(_)) = connection.next().await {} };
+        // Built inside the runtime: a timer outside one has no clock to read.
+        let _ = self
+            .runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(1), ended).await });
+    }
+}
+
+/// psql's layout: the severity, then any `DETAIL` and `HINT` on lines of their
+/// own.
+fn notice_text(notice: &tokio_postgres::error::DbError) -> String {
+    let mut text = format!("{}:  {}", notice.severity(), notice.message());
+    if let Some(detail) = notice.detail() {
+        text.push_str(&format!("\nDETAIL:  {detail}"));
+    }
+    if let Some(hint) = notice.hint() {
+        text.push_str(&format!("\nHINT:  {hint}"));
+    }
+    text
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -527,21 +709,41 @@ pub struct Connection {
     cancel: CancelToken,
     /// The same connector the client was built with, because cancelling opens a
     /// second socket to the same server and an `sslmode` is never quietly
-    /// weakened for it either (AGENTS.md, hard rule 7).
+    /// weakened for it either (AGENTS.md, hard rule 6).
     connector: Option<tls::MakeRustlsConnect>,
+    /// The server process behind the client, for asking after the statement
+    /// it is running from another connection. `None` if it would not say.
+    pid: Option<i32>,
+    /// The schema the server's own `search_path` put the session in, read
+    /// before a picked one is set. None if it would not say, or names none.
+    current_schema: Option<String>,
+    /// A second session to the same server, for what has to be asked while
+    /// this one is busy with a statement's rows: its column types, and
+    /// whether it can be stopped at the row limit. Opened the first time it
+    /// is needed and kept, so a run does not pay for a connect. Never in a
+    /// transaction of the user's, which is what makes it safe to describe on.
+    side: Arc<Mutex<Option<Connection>>>,
     /// Held so ssh runs as long as any clone does. The cancel token dials the
     /// address the client connected to, so a cancel goes through it too.
     tunnel: Option<Arc<Tunnel>>,
     /// What [`Self::sizes`] opens its own connection with. Kept for the reason
     /// MySQL keeps its copy: the password is already held by the live client,
     /// and nothing above `src/db/` may learn which engines want a second one
-    /// (AGENTS.md, hard rule 4).
-    server: ServerConfig,
+    /// (AGENTS.md, hard rule 4). Shared between clones, so a schema set on one
+    /// reaches the sessions any of them opens later.
+    server: Arc<Mutex<ServerConfig>>,
 }
 
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
         tunnelled(server, DEFAULT_PORT, |tunnel| Self::connect(server, tunnel))
+    }
+
+    /// Open the side session now, so the first run's types and stop do not
+    /// wait out its connect.
+    pub fn warm(&self) {
+        let this = self.clone();
+        std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
     }
 
     fn connect(server: &ServerConfig, tunnel: Option<Arc<Tunnel>>) -> Result<Self, DbError> {
@@ -553,28 +755,153 @@ impl Connection {
                 message,
                 position: None,
             })?;
-        let string = match &tunnel {
-            None => connection_string(server),
-            Some(tunnel) => tunnelled_string(server, tunnel.dial()?),
+        let password_file = password_file(server);
+        // Only for this connect: the profile keeps its blank password, so the
+        // file is read again by the next one and never reaches the Keychain.
+        let signing_in = match &password_file {
+            Some(pgpass::Lookup::Found { password, .. }) => &ServerConfig {
+                password: password.clone(),
+                ..server.clone()
+            },
+            _ => server,
         };
-        let client = match &connector {
-            None => Client::connect(&string, NoTls),
-            Some(connector) => Client::connect(&string, connector.clone()),
+        let string = match &tunnel {
+            None => connection_string(signing_in),
+            Some(tunnel) => tunnelled_string(signing_in, tunnel.dial()?),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
+        let (client, connection) = match &connector {
+            None => runtime
+                .block_on(tokio_postgres::connect(&string, NoTls))
+                .map(|(client, mut connection)| {
+                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                    (client, Box::pin(socket) as Socket)
+                }),
+            Some(connector) => runtime
+                .block_on(tokio_postgres::connect(&string, connector.clone()))
+                .map(|(client, mut connection)| {
+                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                    (client, Box::pin(socket) as Socket)
+                }),
         }
-        .map_err(|error| connect_error(&error, server))?;
+        .map_err(|error| {
+            let mut failure = connect_error(&error, server);
+            if let Some(note) = password_file
+                .as_ref()
+                .and_then(|lookup| lookup.note(&error))
+            {
+                failure.message.push('\n');
+                failure.message.push_str(&note);
+            }
+            failure
+        })?;
+        let mut client = Client {
+            client,
+            driver: Driver {
+                runtime,
+                connection: Some(connection),
+                notices: Vec::new(),
+            },
+        };
+        let row =
+            client
+                .driver
+                .block_on(client.client.simple_query(
+                    "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_schema()",
+                ))
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|messages| {
+                    messages.into_iter().find_map(|message| match message {
+                        SimpleQueryMessage::Row(row) => Some(row),
+                        _ => None,
+                    })
+                });
+        let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
+        let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
+        if let Some(schema) = &server.schema {
+            set_search_path(&mut client, schema)?;
+        }
 
         Ok(Self {
-            cancel: client.cancel_token(),
+            cancel: client.client.cancel_token(),
+            pid,
+            current_schema,
+            side: Arc::default(),
             connector,
             client: Arc::new(Mutex::new(client)),
             tunnel,
-            server: server.clone(),
+            server: Arc::new(Mutex::new(server.clone())),
+        })
+    }
+
+    fn server(&self) -> ServerConfig {
+        self.server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// For every session opened from here on; [`Self::apply_schema`] moves
+    /// the two already open.
+    pub fn set_schema(&self, schema: Option<&str>) {
+        self.server
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .schema = schema.map(str::to_string);
+    }
+
+    pub fn current_schema(&self) -> Option<&str> {
+        self.current_schema.as_deref()
+    }
+
+    /// `SET` on this session, then on the side session, which is never in a
+    /// transaction of the user's. This one waits for a statement running on
+    /// it to finish, and a `SET` inside a transaction the user then rolls back
+    /// is undone with it, as one they typed would be.
+    pub fn apply_schema(&self) -> Result<(), DbError> {
+        let mut client = self.client.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        // Read only once the session is held: two switches whose threads take
+        // it out of order both apply the later one, not each their own.
+        let Some(schema) = self.server().schema else {
+            return Ok(());
+        };
+        set_search_path(&mut client, &schema)?;
+        if let Ok(mut side) = self.side.lock()
+            && side.as_ref().is_some_and(|side| {
+                side.client.lock().map_or(true, |mut side| {
+                    set_search_path(&mut side, &schema).is_err()
+                })
+            })
+        {
+            // Reopened from the recorded schema the next time it is needed.
+            *side = None;
+        }
+        Ok(())
+    }
+
+    /// A second session, for a statement to run on beside this one's; see
+    /// [`super::Connection::query_alongside`]. It shares the side session, so
+    /// a run of several costs one connection per statement and not two.
+    pub fn alongside(&self) -> Result<Self, DbError> {
+        Ok(Self {
+            side: self.side.clone(),
+            server: self.server.clone(),
+            ..Self::connect(&self.server(), self.tunnel.clone())?
         })
     }
 
     /// A poisoned mutex counts: every later statement would fail on it too.
     pub fn is_lost(&self) -> bool {
-        self.client.lock().map_or(true, |client| client.is_closed())
+        self.client
+            .lock()
+            .map_or(true, |client| client.client.is_closed())
     }
 
     /// Cancellation is advisory and racy by the driver's own admission: the
@@ -586,9 +913,15 @@ impl Connection {
         if let Some(tunnel) = &self.tunnel {
             tunnel.dial()?;
         }
+        // Its own runtime: the connection's is blocked on the very statement
+        // this is here to stop.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| plain_error(format!("Could not ask the server to cancel: {error}")))?;
         match &self.connector {
-            None => self.cancel.cancel_query(NoTls),
-            Some(connector) => self.cancel.cancel_query(connector.clone()),
+            None => runtime.block_on(self.cancel.cancel_query(NoTls)),
+            Some(connector) => runtime.block_on(self.cancel.cancel_query(connector.clone())),
         }
         .map_err(|error| DbError {
             message: format!("Could not ask the server to cancel: {error}"),
@@ -596,36 +929,72 @@ impl Connection {
         })
     }
 
-    /// Run one statement verbatim.
+    /// Run one statement verbatim, keeping at most `limit` rows of its result.
     ///
-    /// The SQL is never rewritten — no limit injected, no reformatting. Row
-    /// limits belong to the caller that *generated* a query, never to one the
-    /// user typed.
-    pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, true)
+    /// The SQL is never rewritten — no limit injected, no reformatting. The
+    /// server sends every row and the ones past the limit are read and
+    /// dropped, so the statement runs to completion exactly as typed. Kept
+    /// rows go to `feed` when there is one; see [`super::Connection::query`].
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        let result = self.run(sql, true, fetch);
+        if let Some(feed) = fetch.feed {
+            feed.release();
+        }
+        result
     }
 
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false)
+        self.run(sql, false, Fetch::default())
     }
 
-    fn run(&self, sql: &str, typed: bool) -> Result<QueryResult, DbError> {
+    fn run(&self, sql: &str, typed: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
+        fetch.hold()?;
 
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
         // the server spent on this statement.
         let started = Instant::now();
-        let messages = client
-            .simple_query(sql)
-            .map_err(|error| query_error(&error, sql))?;
-
-        let (mut result, commands) = assemble(messages, started.elapsed())?;
+        let Client {
+            client: inner,
+            driver,
+        } = &mut *client;
+        let failed = |error: Error| query_error(&error, sql);
+        driver.notices.clear();
+        let mut messages = Box::pin(
+            driver
+                .block_on(inner.simple_query_raw(sql))
+                .map_err(failed)?
+                .map_err(failed)?,
+        );
+        if typed && let Some(feed) = fetch.feed {
+            self.describe_aside(sql, feed);
+        }
+        let mut assembly = Assembly::new(sql, fetch, started);
+        let stoppable = fetch.reads_only && fetch.limit.is_some();
+        // Split at the first row past the limit, because whether to stop there
+        // is asked on another connection, and that cannot be done from inside
+        // this one's `block_on`.
+        if driver
+            .block_on(assembly.read(&mut messages, stoppable))
+            .map_err(failed)??
+        {
+            assembly.stopping = self.stop_at_limit(sql);
+            driver
+                .block_on(assembly.read(&mut messages, false))
+                .map_err(failed)??;
+        }
+        drop(messages);
+        let notices = std::mem::take(&mut driver.notices);
+        let (mut result, commands) = assembly.finish();
+        if typed {
+            result.messages = notices;
+        }
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -639,7 +1008,10 @@ impl Connection {
         // some utility statements -- can still abort an open transaction. That
         // is the whole of the remaining hole, and the driver exposes no
         // transaction state to guard it with.
-        let mut probed = if typed && !result.columns.is_empty() && commands == 1 {
+        // A statement stopped at the limit never completed, so it counts no
+        // command; it is still the one statement that returned these columns.
+        let single = commands == 1 || (commands == 0 && result.stopped.is_some());
+        let mut probed = if typed && !result.columns.is_empty() && single {
             describe_columns(&mut client, sql)
         } else {
             Vec::new()
@@ -680,6 +1052,111 @@ impl Connection {
         resolve_edit_target(probed, &keyed_table(&catalog)?)
     }
 
+    /// `ask` on the side session, opened if there is none or the last one
+    /// was lost. `None` when it could not be opened, `ask` had no answer, or
+    /// the session was still busy after `wait` -- never blocked on, so no
+    /// caller queues behind a describe stuck on a lock.
+    fn aside<T>(&self, wait: Duration, ask: impl FnOnce(&Connection) -> Option<T>) -> Option<T> {
+        let deadline = Instant::now() + wait;
+        let mut side = loop {
+            match self.side.try_lock() {
+                Ok(side) => break side,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        };
+        if side.as_ref().is_none_or(Connection::is_lost) {
+            let server = ServerConfig {
+                statement_timeout: SIDE_TIMEOUT_SECONDS,
+                ..self.server()
+            };
+            *side = Self::connect(&server, self.tunnel.clone()).ok();
+        }
+        ask(side.as_ref()?)
+    }
+
+    /// Learn the statement's column types while it runs, so its rows can be
+    /// shown by type -- numbers aligned, geometry as text -- as they stream in
+    /// rather than once it is done. On the side session: a describe this
+    /// session's server refuses aborts the transaction it is in (see
+    /// [`Self::run`]), and the side session has none of the user's to abort.
+    /// One that cannot see what this session sees -- a temporary table, a
+    /// `SET search_path` -- learns nothing, and the rows are rendered at the
+    /// end as before. So does one that times out on a lock, or waits out
+    /// another statement's describe or stop on the side session.
+    ///
+    /// The first rows are held for it ([`Feed::await_types`]). Sent beside
+    /// the statement, it usually answers before them; the wait is felt while
+    /// the side session is first opened, or queued behind the describes of
+    /// statements run at once.
+    fn describe_aside(&self, sql: &str, feed: &Feed) {
+        feed.await_types(Instant::now() + TYPES_PATIENCE);
+        let (this, sql, feed) = (self.clone(), sql.to_string(), feed.clone());
+        std::thread::spawn(move || {
+            let wait = Duration::from_secs(SIDE_TIMEOUT_SECONDS.into());
+            let types = this.aside(wait, |side| {
+                let mut client = side.client.lock().ok()?;
+                Some(describe_columns(&mut client, &sql))
+            });
+            feed.describe(
+                types
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|column| column.type_name)
+                    .collect(),
+            );
+        });
+    }
+
+    /// Stop the statement in flight now that it has passed the row limit, if
+    /// that undoes nothing: `true` when it was signalled.
+    ///
+    /// Only a statement that has written nothing, outside any transaction the
+    /// user opened. A cancel aborts the transaction it lands in, so stopping
+    /// one inside `BEGIN` would throw the user's open work away, and stopping
+    /// a write would leave it half done. In the implicit transaction of a
+    /// lone statement, `xact_start` is `query_start` to the microsecond.
+    ///
+    /// Checked and signalled in one statement on the side session, so the
+    /// check cannot go stale before the cancel, and no new socket is opened
+    /// for it -- a cancel request is a connection of its own, which through a
+    /// proxy to a remote server costs a full handshake. The wait for the side
+    /// session is bounded, because this session's lock is held through it and
+    /// a describe there can be stuck behind a lock the user's own transaction
+    /// holds, which only this session can release; still busy, the rows past
+    /// the limit are drained.
+    ///
+    /// The process is the one this session was given at connect. Behind a
+    /// transaction pooler -- PgBouncer, Supavisor -- that process serves other
+    /// clients between this one's transactions, and a lone read of theirs
+    /// passes every check above, so it must also be running this statement's
+    /// exact text. `query` is cut at `track_activity_query_size` (1 kB by
+    /// default), so a longer statement never matches and is drained. Another
+    /// client running byte-for-byte the same lone read on that process at
+    /// that moment would still be stopped (known limitation).
+    fn stop_at_limit(&self, sql: &str) -> bool {
+        let Some(pid) = self.pid else {
+            return false;
+        };
+        // `E''`, so it reads the same whatever `standard_conforming_strings` is.
+        let text = format!("E'{}'", sql.replace('\\', r"\\").replace('\'', "''"));
+        let wait = Duration::from_secs(SIDE_TIMEOUT_SECONDS.into());
+        let signalled = self.aside(wait, |side| {
+            let result = side
+                .internal_query(&format!(
+                    "SELECT pg_catalog.pg_cancel_backend(pid)
+                     FROM pg_catalog.pg_stat_activity
+                     WHERE pid = {pid} AND state = 'active' AND query = {text}
+                       AND xact_start = query_start AND backend_xid IS NULL"
+                ))
+                .ok()?;
+            Some(result.rows.first()?.get(0) == Some("t"))
+        });
+        signalled == Some(true)
+    }
+
     pub fn databases(&self) -> Result<super::Databases, DbError> {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
@@ -696,7 +1173,7 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server, self.tunnel.clone())?;
+        let side = Self::connect(&self.server(), self.tunnel.clone())?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -735,9 +1212,10 @@ impl Connection {
         let view = match kind {
             RelationKind::View => Some("VIEW"),
             RelationKind::MaterializedView => Some("MATERIALIZED VIEW"),
-            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-                None
-            }
+            RelationKind::Table
+            | RelationKind::PartitionedTable
+            | RelationKind::ForeignTable
+            | RelationKind::Dictionary => None,
         };
         if let Some(view) = view {
             let result = self.internal_query(&format!(
@@ -747,9 +1225,9 @@ impl Connection {
                  WHERE class.oid = {}::regclass",
                 Engine::Postgres.quote_literal(&name)
             ))?;
-            let row = result.rows.first().map(Vec::as_slice).unwrap_or_default();
-            let definition = required_cell(&result, row, "definition")?;
-            let options = match optional_cell(&result, row, "options") {
+            let row = result.rows.first().cloned().unwrap_or_default();
+            let definition = required_cell(&result, &row, "definition")?;
+            let options = match optional_cell(&result, &row, "options") {
                 Some(options) if !options.is_empty() => format!(" WITH ({options})"),
                 _ => String::new(),
             };
@@ -771,7 +1249,7 @@ impl Connection {
         if storage.rows.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        let first = storage.rows.first().map(Vec::as_slice).unwrap_or_default();
+        let first = &storage.rows.first().cloned().unwrap_or_default();
         let (head, tail) = match (
             optional_cell(&storage, first, "partition_key"),
             optional_cell(&storage, first, "foreign_server"),
@@ -842,7 +1320,10 @@ struct ProbedColumn {
 /// why the ask has to come after the statement ran.
 fn describe_columns(client: &mut Client, sql: &str) -> Vec<ProbedColumn> {
     client
-        .prepare(sql)
+        .driver
+        .block_on(client.client.prepare(sql))
+        .ok()
+        .and_then(Result::ok)
         .map(|statement| {
             statement
                 .columns()
@@ -956,6 +1437,7 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
             })
             .collect(),
         keys,
+        ..Default::default()
     })
 }
 
@@ -969,79 +1451,189 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
         )
 }
 
-/// The result, plus the number of statements the server completed -- one
-/// `CommandComplete` each, which is cheaper and more truthful than re-parsing
-/// the SQL to count them.
-fn assemble(
-    messages: Vec<SimpleQueryMessage>,
-    elapsed: Duration,
-) -> Result<(QueryResult, usize), DbError> {
-    let mut result = QueryResult {
-        elapsed,
-        ..Default::default()
-    };
-    let mut commands = 0;
+/// A result read off the wire, held across the reads [`Connection::run`]
+/// splits it into. Rows are taken as they arrive, so one past the limit is
+/// dropped as soon as it is counted rather than held until the last one lands.
+struct Assembly<'a> {
+    sql: &'a str,
+    fetch: Fetch<'a>,
+    result: QueryResult,
+    /// Statements the server completed -- one `CommandComplete` each, which is
+    /// cheaper and more truthful than re-parsing the SQL to count them.
+    commands: usize,
+    /// The current set's rows, kept or not, and kept: a fed row is not in
+    /// `result.rows` to be counted.
+    returned: usize,
+    kept: usize,
+    /// A cancel went out for the rows past the limit, so the error the
+    /// statement ends in is the limit's doing and not the statement's.
+    stopping: bool,
+    /// Result sets begun. The describe behind the feed's spatial columns
+    /// is of the first statement, so it says nothing about any after it.
+    sets: usize,
+    /// Which of the first set's columns are spatial, once the feed knows.
+    spatial: Option<Vec<bool>>,
+    row: RowBuilder,
+    started: Instant,
+    /// How long the kept rows took, once there were as many as the limit.
+    filled: Option<Duration>,
+}
 
-    for message in messages {
-        match message {
-            // One selection can carry several statements, and the grid shows
-            // one result set -- so each new description starts the kept set
-            // over and the last statement wins. Accumulating across statements
-            // would put one statement's rows under another's column names.
-            SimpleQueryMessage::RowDescription(columns) => {
-                result.columns = columns
-                    .iter()
-                    .map(|column| Column {
-                        name: column.name().to_string(),
-                        data_type: None,
-                    })
-                    .collect();
-                result.rows.clear();
-                result.bytes = 0;
-                result.rows_affected = None;
-            }
-            SimpleQueryMessage::Row(row) => {
-                // A row arriving with no description before it is not a path
-                // the driver takes today; without this the grid would render
-                // headerless and drop every value it was handed.
-                if result.columns.is_empty() {
-                    result.columns = row
-                        .columns()
-                        .iter()
-                        .map(|column| Column {
-                            name: column.name().to_string(),
-                            data_type: None,
-                        })
-                        .collect();
-                }
-
-                // `get` panics on a value the driver cannot decode as UTF-8,
-                // and it would panic here holding the client mutex — poisoning
-                // it and taking the process down with it. A database whose
-                // encoding is SQL_ASCII can return such bytes for ordinary text.
-                let cells: Vec<Cell> = (0..row.len())
-                    .map(|index| {
-                        row.try_get(index)
-                            .map(|cell| cell.map(str::to_string))
-                            .map_err(|_| non_utf8_error(&result.columns, index))
-                    })
-                    .collect::<Result<_, _>>()?;
-
-                result.bytes += cells
-                    .iter()
-                    .filter_map(|cell| cell.as_ref().map(String::len))
-                    .sum::<usize>();
-                result.rows.push(cells);
-            }
-            SimpleQueryMessage::CommandComplete(count) => {
-                result.rows_affected = Some(count);
-                commands += 1;
-            }
-            _ => {}
+impl<'a> Assembly<'a> {
+    fn new(sql: &'a str, fetch: Fetch<'a>, started: Instant) -> Self {
+        Self {
+            sql,
+            fetch,
+            result: QueryResult::default(),
+            commands: 0,
+            returned: 0,
+            kept: 0,
+            stopping: false,
+            sets: 0,
+            spatial: None,
+            row: RowBuilder::default(),
+            started,
+            filled: None,
         }
     }
 
-    Ok((result, commands))
+    fn begin(&mut self, columns: Vec<Column>) {
+        self.sets += 1;
+        if let Some(feed) = self.fetch.feed {
+            feed.begin(columns.clone());
+        }
+        self.result.columns = columns;
+    }
+
+    /// Read until the statement is done or, with `pause`, until the first row
+    /// past the limit, which is counted and dropped like every one after it.
+    /// `true` when it paused.
+    async fn read(
+        &mut self,
+        messages: &mut Pin<Box<SimpleQueryStream>>,
+        pause: bool,
+    ) -> Result<bool, DbError> {
+        while let Some(message) = messages.next().await {
+            let message = match message {
+                Ok(message) => message,
+                Err(error) if self.stopping && error.code() == Some(&SqlState::QUERY_CANCELED) => {
+                    self.result.stopped = Some(Stopped::AtLimit);
+                    return Ok(false);
+                }
+                Err(error) => return Err(query_error(&error, self.sql)),
+            };
+            match message {
+                // One selection can carry several statements, and the grid
+                // shows one result set -- so each new description starts the
+                // kept set over and the last statement wins. Accumulating
+                // across statements would put one statement's rows under
+                // another's column names.
+                SimpleQueryMessage::RowDescription(columns) => {
+                    self.begin(
+                        columns
+                            .iter()
+                            .map(|column| Column {
+                                name: column.name().to_string(),
+                                data_type: None,
+                            })
+                            .collect(),
+                    );
+                    self.result.rows.clear();
+                    self.result.bytes = 0;
+                    self.result.rows_affected = None;
+                    (self.returned, self.kept) = (0, 0);
+                    self.filled = None;
+                }
+                SimpleQueryMessage::Row(row) => {
+                    self.returned += 1;
+                    if self.fetch.limit.is_some_and(|limit| self.kept >= limit) {
+                        if pause && self.returned == self.kept + 1 {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    self.kept += 1;
+                    if self.fetch.limit == Some(self.kept) {
+                        self.filled = Some(self.started.elapsed());
+                        if let Some(feed) = self.fetch.feed {
+                            feed.fill();
+                        }
+                    }
+                    // A row arriving with no description before it is not a
+                    // path the driver takes today; without this the grid would
+                    // render headerless and drop every value it was handed.
+                    if self.result.columns.is_empty() {
+                        self.begin(
+                            row.columns()
+                                .iter()
+                                .map(|column| Column {
+                                    name: column.name().to_string(),
+                                    data_type: None,
+                                })
+                                .collect(),
+                        );
+                    }
+
+                    // `get` panics on a value the driver cannot decode as
+                    // UTF-8, and it would panic here holding the client mutex
+                    // — poisoning it and taking the process down with it. A
+                    // database whose encoding is SQL_ASCII can return such
+                    // bytes for ordinary text.
+                    let spatial = match self.fetch.feed {
+                        Some(feed) if self.sets == 1 => {
+                            if self.spatial.is_none() {
+                                self.spatial = feed.types().map(|types| {
+                                    types.iter().map(|name| is_spatial(name)).collect()
+                                });
+                            }
+                            self.spatial.as_deref()
+                        }
+                        _ => None,
+                    };
+                    for index in 0..row.len() {
+                        let cell = row
+                            .try_get(index)
+                            .map_err(|_| non_utf8_error(&self.result.columns, index))?;
+                        self.result.bytes += cell.map_or(0, str::len);
+                        let wkt = cell
+                            .filter(|_| {
+                                spatial.is_some_and(|spatial| spatial.get(index) == Some(&true))
+                            })
+                            .and_then(render_spatial);
+                        self.row.push(wkt.as_deref().or(cell));
+                    }
+                    let cells = self.row.finish()?;
+                    match self.fetch.feed {
+                        Some(feed) => feed.push(cells),
+                        None => self.result.rows.push(cells),
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(count) => {
+                    self.result.rows_affected = Some(count);
+                    self.commands += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    /// The result, plus the number of statements the server completed.
+    ///
+    /// Timed to the last kept row when rows past the limit came after it:
+    /// what follows, stopping the statement or draining it, is not the wait
+    /// for these rows.
+    fn finish(mut self) -> (QueryResult, usize) {
+        let past_limit = self.returned > self.kept || self.result.stopped.is_some();
+        self.result.elapsed = match self.filled {
+            Some(filled) if past_limit => filled,
+            _ => self.started.elapsed(),
+        };
+        // A stopped statement's count is only what had arrived, not its size.
+        self.result.capped_from =
+            (self.result.stopped.is_none() && self.returned > self.kept).then_some(self.returned);
+        (self.result, self.commands)
+    }
 }
 
 /// Matched by position, and only when the two agree on how many columns there
@@ -1058,29 +1650,44 @@ fn apply_types(columns: &mut [Column], probed: &[ProbedColumn]) {
 }
 
 fn format_spatial_cells(result: &mut QueryResult) {
-    let spatial_columns = result
+    let spatial = result
         .columns
         .iter()
-        .map(|column| matches!(column.data_type.as_deref(), Some("geometry" | "geography")))
+        .map(|column| is_spatial(column.data_type.as_deref().unwrap_or_default()))
         .collect::<Vec<_>>();
-
-    for row in &mut result.rows {
-        for (cell, spatial) in row.iter_mut().zip(&spatial_columns) {
-            if !spatial {
-                continue;
-            }
-            let Some(value) = cell else {
-                continue;
-            };
-            let Ok(bytes) = hex::decode(&*value) else {
-                continue;
-            };
-            let Ok(wkt) = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()) else {
-                continue;
-            };
-            *value = readable_wkt(&wkt);
-        }
+    if !spatial.contains(&true) {
+        return;
     }
+    for row in &mut result.rows {
+        format_spatial_row(row, &spatial);
+    }
+}
+
+pub(super) fn is_spatial(type_name: &str) -> bool {
+    matches!(type_name, "geometry" | "geography")
+}
+
+/// A value that is not hex EWKB is left alone, which is what lets rows already
+/// rendered as they streamed in go through this a second time.
+pub(super) fn format_spatial_row(row: &mut Row, spatial: &[bool]) {
+    let wkt: Vec<(usize, String)> = (0..row.len())
+        .filter(|&col| spatial.get(col) == Some(&true))
+        .filter_map(|col| Some((col, render_spatial(row.get(col)?)?)))
+        .collect();
+    if !wkt.is_empty() {
+        let edits: Vec<_> = wkt
+            .iter()
+            .map(|(col, wkt)| (*col, Some(wkt.as_str())))
+            .collect();
+        row.replace(&edits);
+    }
+}
+
+/// Hex EWKB as WKT, or `None` for anything else -- WKT already, among others.
+pub(super) fn render_spatial(value: &str) -> Option<String> {
+    let bytes = hex::decode(value).ok()?;
+    let wkt = Ewkb(bytes).to_wkt_ndim(CoordDimensions::xyzm()).ok()?;
+    Some(readable_wkt(&wkt))
 }
 
 fn readable_wkt(wkt: &str) -> String {
@@ -1102,7 +1709,7 @@ fn readable_wkt(wkt: &str) -> String {
     readable
 }
 
-fn connect_error(error: &postgres::Error, server: &ServerConfig) -> DbError {
+fn connect_error(error: &tokio_postgres::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing
     // about what the user should do -- we cannot see their machine.
@@ -1124,10 +1731,10 @@ fn connect_error(error: &postgres::Error, server: &ServerConfig) -> DbError {
     }
 }
 
-fn query_error(error: &postgres::Error, sql: &str) -> DbError {
+fn query_error(error: &tokio_postgres::Error, sql: &str) -> DbError {
     let position = error.as_db_error().and_then(|db| match db.position() {
         // Postgres reports a 1-based character position into the statement.
-        Some(postgres::error::ErrorPosition::Original(p)) => {
+        Some(tokio_postgres::error::ErrorPosition::Original(p)) => {
             character_position_to_byte_offset(sql, *p)
         }
         _ => None,
@@ -1149,7 +1756,7 @@ fn character_position_to_byte_offset(sql: &str, position: u32) -> Option<usize> 
 
 /// Prefer the server's own message. It is written for humans and already says
 /// the useful part; the driver's wrapper text mostly repeats "db error".
-fn describe(error: &postgres::Error) -> String {
+fn describe(error: &tokio_postgres::Error) -> String {
     if let Some(db) = error.as_db_error() {
         let mut message = db.message().to_string();
         if let Some(detail) = db.detail() {
@@ -1176,7 +1783,7 @@ fn describe(error: &postgres::Error) -> String {
 
 /// The last link in an error's source chain, which is where the driver's
 /// wrappers finally give way to what actually went wrong.
-fn root_cause(error: &postgres::Error) -> Option<String> {
+fn root_cause(error: &tokio_postgres::Error) -> Option<String> {
     let mut source = std::error::Error::source(error);
     let mut deepest = None;
     while let Some(current) = source {
@@ -1186,7 +1793,7 @@ fn root_cause(error: &postgres::Error) -> Option<String> {
     deepest
 }
 
-fn io_source(error: &postgres::Error) -> Option<&std::io::Error> {
+fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
     let mut source = std::error::Error::source(error);
     while let Some(current) = source {
         if let Some(io) = current.downcast_ref::<std::io::Error>() {
@@ -1200,7 +1807,7 @@ fn io_source(error: &postgres::Error) -> Option<&std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKey, RelationKind, RoutineKind, SslMode, result};
+    use crate::db::{ForeignKey, IndexKind, RelationKind, RoutineKind, SslMode, result, rows};
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -1213,6 +1820,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         }
     }
 
@@ -1232,6 +1840,7 @@ mod tests {
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            schema: None,
         }
     }
 
@@ -1313,6 +1922,203 @@ mod tests {
     }
 
     #[test]
+    fn an_active_schema_is_never_a_startup_option_a_pooler_would_refuse() {
+        let schema = Some("Sales".to_string());
+        let string = connection_string(&ServerConfig {
+            schema: schema.clone(),
+            ..config()
+        });
+        assert!(!string.contains("options="), "{string}");
+        let string = connection_string(&ServerConfig {
+            schema,
+            statement_timeout: 30,
+            ..config()
+        });
+        assert!(
+            string.contains(&format!("options={}", quote("-c statement_timeout=30000"))),
+            "{string}"
+        );
+    }
+
+    #[test]
+    fn the_active_schema_is_quoted_then_escaped_into_the_literal() {
+        assert!(set_search_path_sql("Sales").contains(r#"E'"Sales"'"#));
+        assert!(
+            set_search_path_sql(r#"it's "odd" \here"#).contains(r#"E'"it''s ""odd"" \\here"'"#)
+        );
+    }
+
+    /// Run again in a child process, `PGPASSFILE` set before it starts: a
+    /// `set_var` here would race every other test thread reading the
+    /// environment. The file sits in a directory only this user can enter,
+    /// since it holds the live password.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_blank_password_signs_in_from_the_password_file() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+        const CHILD: &str = "DBDELVE_PGPASS_CHILD";
+        let name = "db::postgres::tests::live_a_blank_password_signs_in_from_the_password_file";
+        if std::env::var_os(CHILD).is_none() {
+            let directory =
+                std::env::temp_dir().join(format!("dbdelve-pgpass-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .expect("the private directory should create");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--include-ignored", "--nocapture"])
+                .env(CHILD, "1")
+                .env("PGPASSFILE", directory.join("pgpass"))
+                .status()
+                .expect("the child test should run");
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(status.success());
+            return;
+        }
+
+        let config = live_config();
+        let file = std::path::PathBuf::from(std::env::var_os("PGPASSFILE").unwrap());
+        let field = |value: &str| value.replace('\\', r"\\").replace(':', r"\:");
+        let write = |password: &str, mode: u32| {
+            let line = format!(
+                "# rotated nightly\n{}:{}:*:{}:{}\n",
+                field(&config.host),
+                config.port.unwrap_or(DEFAULT_PORT),
+                field(&config.user),
+                field(password)
+            );
+            std::fs::write(&file, line).expect("the password file should write");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode))
+                .expect("the password file should chmod");
+        };
+        let blank = ServerConfig {
+            password: String::new(),
+            ..config.clone()
+        };
+        let failure = || {
+            Connection::open(&blank)
+                .err()
+                .expect("the connection should fail")
+                .message
+        };
+
+        write(&config.password, 0o600);
+        Connection::open(&blank).expect("the file's password should sign in");
+
+        write("rotated-away", 0o600);
+        let rejected = failure();
+        assert!(
+            rejected.ends_with(&format!("The password came from {}.", file.display())),
+            "{rejected}"
+        );
+
+        write("never-read", 0o644);
+        let skipped = failure();
+        assert!(skipped.contains("is readable by other users"), "{skipped}");
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_active_schema_leads_every_session_and_moves_the_open_ones() {
+        let shown = |connection: &Connection| {
+            connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                .map(|path| path.replace(", ", ","))
+        };
+        let connection = Connection::open(&ServerConfig {
+            schema: Some(r#"odd "schema" \here"#.into()),
+            ..live_config()
+        })
+        .expect("connection should open");
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""odd ""schema"" \here","$user",public"#)
+        );
+
+        // Recorded out of the order they apply in: the last recorded wins.
+        connection.set_schema(Some("first"));
+        connection.set_schema(Some("Other"));
+        connection.apply_schema().expect("the schema should set");
+        connection.apply_schema().expect("the schema should set");
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""Other","$user",public"#)
+        );
+        let fresh = connection
+            .alongside()
+            .expect("a second session should open");
+        assert_eq!(shown(&fresh).as_deref(), Some(r#""Other","$user",public"#));
+        connection.set_schema(Some("Third"));
+        let later = fresh.alongside().expect("a third session should open");
+        assert_eq!(shown(&later).as_deref(), Some(r#""Third","$user",public"#));
+
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("the transaction should open");
+        assert!(connection.apply_schema().is_err());
+        connection
+            .query("ROLLBACK", Fetch::default())
+            .expect("the transaction should close");
+        assert_eq!(
+            shown(&connection).as_deref(),
+            Some(r#""Other","$user",public"#)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_active_schema_keeps_the_roles_own_search_path_after_it() {
+        let admin = Connection::open(&live_config()).expect("connection should open");
+        let role = format!("dbdelve_schema_tail_{}", std::process::id());
+        let run = |sql: &str| {
+            admin
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+        };
+        run(&format!("DROP ROLE IF EXISTS {role}"));
+        run(&format!("CREATE ROLE {role} LOGIN PASSWORD 'tail'"));
+        run(&format!(
+            r#"ALTER ROLE {role} SET search_path = "$user", public, extra"#
+        ));
+        let opened = Connection::open(&ServerConfig {
+            user: role.clone(),
+            password: "tail".into(),
+            schema: Some("sales".into()),
+            ..live_config()
+        });
+        let shown = opened.map(|connection| {
+            connection.set_schema(Some("Other"));
+            let first = connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                .map(str::to_string);
+            connection.apply_schema().expect("the schema should set");
+            let second = connection
+                .internal_query("SHOW search_path")
+                .expect("search_path should show")
+                .rows[0]
+                .get(0)
+                .map(str::to_string);
+            (first, second)
+        });
+        run(&format!("DROP ROLE {role}"));
+        let (first, second) = shown.expect("the role should connect");
+        assert_eq!(first.as_deref(), Some(r#""sales", "$user", public, extra"#));
+        assert_eq!(
+            second.as_deref(),
+            Some(r#""Other", "$user", public, extra"#)
+        );
+    }
+
+    #[test]
     fn no_statement_timeout_says_nothing_rather_than_saying_zero() {
         // `statement_timeout=0` is how Postgres spells "no limit", so either
         // would work -- but a profile that never asked for one should connect
@@ -1345,7 +2151,7 @@ mod tests {
     #[test]
     fn a_tunnelled_connection_verifies_the_servers_name_and_dials_the_tunnel() {
         let string = tunnelled_string(&config(), "127.0.0.1:40000".parse().unwrap());
-        let parsed: postgres::Config = string.parse().expect("the driver should parse it");
+        let parsed: tokio_postgres::Config = string.parse().expect("the driver should parse it");
 
         assert_eq!(parsed.get_hosts(), [Host::Tcp("db.example.test".into())]);
         assert_eq!(
@@ -1410,6 +2216,7 @@ mod tests {
                 root_certificate: None,
                 statement_timeout: 0,
                 ssh: None,
+                schema: None,
             }
         );
     }
@@ -1515,7 +2322,7 @@ mod tests {
             // And it parses: this is the check that would have caught handing
             // the driver "verify-full".
             assert!(
-                string.parse::<::postgres::Config>().is_ok(),
+                string.parse::<tokio_postgres::Config>().is_ok(),
                 "{mode:?} produced an unparsable string: {string}"
             );
         }
@@ -1552,19 +2359,19 @@ mod tests {
                     data_type: Some("text".into()),
                 },
             ],
-            rows: vec![vec![Some(ewkb.into()), Some(ewkb.into())]],
+            rows: rows(vec![vec![Some(ewkb.into()), Some(ewkb.into())]]),
             ..Default::default()
         };
 
         format_spatial_cells(&mut result);
 
         assert_eq!(
-            result.rows[0][0].as_deref(),
+            result.rows[0].get(0),
             Some(
                 "POLYGON ((-98.533429 29.51536, -98.522614 29.509683, -98.533086 29.508787, -98.533429 29.51536))"
             )
         );
-        assert_eq!(result.rows[0][1].as_deref(), Some(ewkb));
+        assert_eq!(result.rows[0].get(1), Some(ewkb));
     }
 
     #[test]
@@ -1574,13 +2381,13 @@ mod tests {
                 name: "shape".into(),
                 data_type: Some("geometry".into()),
             }],
-            rows: vec![vec![Some("not ewkb".into())]],
+            rows: rows(vec![vec![Some("not ewkb".into())]]),
             ..Default::default()
         };
 
         format_spatial_cells(&mut result);
 
-        assert_eq!(result.rows[0][0].as_deref(), Some("not ewkb"));
+        assert_eq!(result.rows[0].get(0), Some("not ewkb"));
     }
 
     #[test]
@@ -1776,14 +2583,142 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should be cancelled");
         assert!(
             error.message.contains("cancel"),
             "the server's own words: {}",
             error.message
         );
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_runs_notices_come_back_with_it_and_only_with_it() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let raised = connection
+            .query(
+                "DO $$ BEGIN RAISE NOTICE 'made it'; \
+                 RAISE WARNING 'careful' USING HINT = 'look'; END $$",
+                Fetch::default(),
+            )
+            .expect("the block should run");
+        assert_eq!(
+            raised.messages,
+            ["NOTICE:  made it", "WARNING:  careful\nHINT:  look"]
+        );
+
+        let dropped = connection
+            .query("DROP TABLE IF EXISTS no_such_163", Fetch::default())
+            .expect("the drop should run");
+        assert_eq!(
+            dropped.messages,
+            [r#"NOTICE:  table "no_such_163" does not exist, skipping"#]
+        );
+
+        connection
+            .query(
+                "DO $$ BEGIN RAISE NOTICE 'left behind'; RAISE EXCEPTION 'boom'; END $$",
+                Fetch::default(),
+            )
+            .expect_err("the block should fail");
+        let plain = connection
+            .query("SELECT 1", Fetch::default())
+            .expect("the select should run");
+        assert!(plain.messages.is_empty(), "{:?}", plain.messages);
+    }
+
+    fn live_profile() -> super::super::Connection {
+        super::super::Connection::Postgres(
+            Connection::open(&live_config()).expect("connection should open"),
+        )
+    }
+
+    fn conformance_subject() -> crate::db::conformance::Subject {
+        use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
+        Subject {
+            connection: live_profile(),
+            engine: Engine::Postgres,
+            schema: "public",
+            relation: "conformance",
+            key: "id",
+            columns: &COLUMNS,
+            read: sql_read(Engine::Postgres, "public"),
+            endless: "SELECT generate_series(1, 500000000) AS n",
+            runaway: "SELECT pg_sleep(30)",
+            read_only_refusal: "read-only transaction",
+            fixture: Some(Fixture {
+                types: &[
+                    "int4",
+                    "text",
+                    "int8",
+                    "numeric",
+                    "float8",
+                    "bool",
+                    "date",
+                    "timestamp",
+                    "bytea",
+                ],
+                renders: &[
+                    ("flag", 0, "t"),
+                    ("flag", 1, "f"),
+                    ("bytes", 0, "\\x00ff"),
+                    ("bytes", 1, "\\xdeadbeef"),
+                ],
+                find: Box::new(|key| sql_find(Engine::Postgres, "public", key)),
+            }),
+            _guard: None,
+        }
+    }
+
+    crate::db::conformance::suite!(
+        live_conformance,
+        "requires a local Postgres server configured through PG*",
+        conformance_subject:
+        connects,
+        query_round_trip,
+        catalog_round_trip,
+        structure_round_trip,
+        types_render_as_expected,
+        cancel_stops_a_long_query,
+        row_limit_stops_an_eligible_read,
+        row_limit_drains_an_ineligible_read,
+        capped_read_keeps_the_users_transaction,
+        read_only_session_refuses_a_write,
+        generated_writes_round_trip,
+    );
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_reads_run_at_once_take_the_time_of_one() {
+        super::super::at_once::reads_overlap(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(1), 1",
+            "INSERT INTO accounts DEFAULT VALUES",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_stops_every_read_run_at_once() {
+        super::super::at_once::a_cancel_stops_them_all(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(30), 1",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_of_one_read_run_at_once_leaves_the_other_running() {
+        super::super::at_once::a_cancel_stops_only_its_own(
+            &live_profile(),
+            Engine::Postgres,
+            "SELECT pg_sleep(30), 1",
+            "SELECT pg_sleep(6), 1",
+        );
     }
 
     #[test]
@@ -1791,25 +2726,32 @@ mod tests {
     fn live_a_terminated_session_is_lost_and_a_failed_statement_is_not() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("BEGIN")
+            .query("BEGIN", Fetch::default())
             .expect("the transaction should open");
-        assert!(connection.query("SELECT broken").is_err());
+        assert!(connection.query("SELECT broken", Fetch::default()).is_err());
         assert!(
             !connection.is_lost(),
             "an aborted transaction is still a session"
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", Fetch::default())
             .expect("the session should still answer");
 
-        let pid = connection.query("SELECT pg_backend_pid()").unwrap().rows[0][0]
-            .clone()
-            .unwrap();
+        let pid = connection
+            .query("SELECT pg_backend_pid()", Fetch::default())
+            .unwrap()
+            .rows[0]
+            .get(0)
+            .unwrap()
+            .to_string();
         Connection::open(&live_config())
             .expect("a second connection should open")
-            .query(&format!("SELECT pg_terminate_backend({pid})"))
+            .query(
+                &format!("SELECT pg_terminate_backend({pid})"),
+                Fetch::default(),
+            )
             .expect("the terminate should run");
-        assert!(connection.query("SELECT 1").is_err());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_err());
         assert!(connection.is_lost());
     }
 
@@ -1819,7 +2761,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-bastion")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one")
+            .query("SELECT 1 AS one", Fetch::default())
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
         let sizes = connection
@@ -1834,7 +2776,7 @@ mod tests {
         let connection =
             Connection::open(&live_tunnelled("dbdelve-inner")).expect("connection should open");
         let result = connection
-            .query("SELECT 1 AS one")
+            .query("SELECT 1 AS one", Fetch::default())
             .expect("query should succeed");
         assert_eq!(result.rows, vec![vec![Some("1".into())]]);
     }
@@ -1869,10 +2811,10 @@ mod tests {
         });
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should be cancelled");
         assert!(error.message.contains("cancel"), "{}", error.message);
-        assert!(connection.query("SELECT 1").is_ok());
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
     #[test]
@@ -1885,7 +2827,7 @@ mod tests {
         .expect("connection should open");
 
         let error = connection
-            .query("SELECT pg_sleep(30)")
+            .query("SELECT pg_sleep(30)", Fetch::default())
             .expect_err("the statement should time out");
         assert!(error.message.contains("timeout"), "{}", error.message);
     }
@@ -1895,7 +2837,10 @@ mod tests {
     fn live_query_round_trip() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         let result = connection
-            .query("SELECT * FROM (VALUES (1, 'alpha'), (2, NULL)) AS sample(id, label)")
+            .query(
+                "SELECT * FROM (VALUES (1, 'alpha'), (2, NULL)) AS sample(id, label)",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["id", "label"]);
@@ -1912,6 +2857,322 @@ mod tests {
         );
         assert_eq!(result.bytes, 7);
         assert_eq!(result.rows_affected, Some(2));
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_row_limit_keeps_the_first_rows_and_counts_the_rest() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let capped = connection
+            .query(
+                "SELECT n FROM generate_series(1, 10) AS n",
+                Fetch {
+                    limit: Some(3),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        assert_eq!(
+            capped.rows,
+            vec![
+                vec![Some("1".into())],
+                vec![Some("2".into())],
+                vec![Some("3".into())]
+            ]
+        );
+        assert_eq!(capped.capped_from, Some(10));
+        assert_eq!(capped.total_rows(), 10);
+
+        // The cap is per result set: the last set is the one kept, and its
+        // count starts over rather than carrying the first one's.
+        let last = connection
+            .query(
+                "SELECT generate_series(1, 10); SELECT 1 AS one",
+                Fetch {
+                    limit: Some(3),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        assert_eq!(last.rows, vec![vec![Some("1".into())]]);
+        assert_eq!(last.capped_from, None);
+
+        // A statement after the capped one still ran: nothing was cut short.
+        let after = connection
+            .query("CREATE TEMP TABLE capped AS SELECT generate_series(1, 10) AS n; SELECT n FROM capped", Fetch { limit: Some(3), ..Fetch::default() })
+            .expect("query should succeed");
+        assert_eq!(after.capped_from, Some(10));
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_past_the_limit_is_stopped_rather_than_drained() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let started = Instant::now();
+        let result = connection
+            .query(
+                // Far more rows than a drain could get through in the time
+                // allowed below. In the select list, not `FROM`, where the
+                // whole series is built before the first row is sent.
+                "SELECT generate_series(1, 500000000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .expect("a stopped read is not an error");
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.capped_from, None);
+        // Described like any single statement, though it never completed.
+        assert_eq!(types(&result), vec![Some("int4")]);
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+
+        // The side session that answered is kept for the next run, not
+        // reopened.
+        let side_pid = |connection: &Connection| {
+            connection
+                .side
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|side| side.pid)
+        };
+        let first = side_pid(&connection).expect("the stop opened a side session");
+        connection
+            .query(
+                "SELECT generate_series(1, 500000000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(side_pid(&connection), Some(first));
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_inside_the_users_transaction_is_drained_not_stopped() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query("CREATE TEMP TABLE kept AS SELECT 1 AS n", Fetch::default())
+            .unwrap();
+        let result = connection
+            .query(
+                "SELECT n FROM generate_series(1, 1000) AS n",
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    ..Fetch::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.capped_from, Some(1000));
+        // A cancel would have aborted the transaction, and this with it.
+        assert!(
+            connection
+                .query("SELECT n FROM kept", Fetch::default())
+                .is_ok()
+        );
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_read_of_a_table_the_users_transaction_locked_is_drained_not_hung() {
+        let table = format!("dbdelve_locked_{}", std::process::id());
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .query(
+                &format!("CREATE TABLE {table} AS SELECT generate_series(1, 1000) AS n"),
+                Fetch::default(),
+            )
+            .unwrap();
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query(
+                &format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"),
+                Fetch::default(),
+            )
+            .unwrap();
+
+        // On a thread, so a regression fails the test instead of hanging it:
+        // the describe aside waits on the lock this transaction holds.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (reader, sql) = (connection.clone(), format!("SELECT n FROM {table}"));
+        std::thread::spawn(move || {
+            let feed = crate::db::Feed::default();
+            let result = reader.query(
+                &sql,
+                Fetch {
+                    limit: Some(3),
+                    reads_only: true,
+                    feed: Some(&feed),
+                    held: None,
+                },
+            );
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the read should not wait on the side session")
+            .unwrap();
+
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.capped_from, Some(1000));
+        connection.query("COMMIT", Fetch::default()).unwrap();
+        connection
+            .query(&format!("DROP TABLE {table}"), Fetch::default())
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_stop_leaves_another_clients_read_on_a_pooled_process_alone() {
+        let ours = Connection::open(&live_config()).expect("connection should open");
+        let theirs = Connection::open(&live_config()).expect("connection should open");
+        // What a transaction pooler does: the process this session was given
+        // at connect is now running someone else's lone read.
+        let pooled = Connection {
+            pid: theirs.pid,
+            ..ours.clone()
+        };
+        let sql = r"SELECT pg_sleep(3), 'it''s a \ '";
+        let reader = std::thread::spawn({
+            let theirs = theirs.clone();
+            move || theirs.query(sql, Fetch::default())
+        });
+        let active = format!(
+            "SELECT 1 FROM pg_catalog.pg_stat_activity
+             WHERE pid = {} AND state = 'active'",
+            theirs.pid.unwrap()
+        );
+        while ours
+            .query(&active, Fetch::default())
+            .unwrap()
+            .rows
+            .is_empty()
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(!pooled.stop_at_limit("SELECT n FROM generate_series(1, 10) AS n"));
+        // The same check does stop the process when the text is ours.
+        assert!(pooled.stop_at_limit(sql));
+        let error = reader.join().unwrap().expect_err("it was cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_the_first_rows_fed_are_typed_on_a_cold_side_session_and_beside_each_other() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        // Run at once, the two share one side session: the second describe
+        // waits its turn rather than being skipped.
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let lane = connection.alongside().expect("lane should open");
+                let feed = crate::db::Feed::default();
+                let fed = feed.clone();
+                let run = std::thread::spawn(move || {
+                    lane.query(
+                        "SELECT n FROM generate_series(1, 200000) AS n",
+                        Fetch {
+                            feed: Some(&fed),
+                            ..Fetch::default()
+                        },
+                    )
+                });
+                (feed, run)
+            })
+            .collect();
+        for (feed, run) in runs {
+            let first = loop {
+                let fed = feed.take();
+                if !fed.rows.is_empty() || run.is_finished() {
+                    break fed;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            run.join().unwrap().expect("query should succeed");
+            assert!(!first.rows.is_empty());
+            assert_eq!(first.columns[0].data_type.as_deref(), Some("int4"));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_fed_rows_are_shown_by_type_once_a_describe_aside_has_said() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let feed = crate::db::Feed::default();
+        connection
+            .query(
+                // The sleep holds every row back until the describe on the
+                // other connection has had time to answer.
+                "SELECT n, ST_MakePoint(n, n) AS p FROM generate_series(1, 3) AS n, pg_sleep(1)",
+                Fetch {
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        let types: Vec<_> = fed.columns.iter().map(|c| c.data_type.as_deref()).collect();
+        assert_eq!(types, vec![Some("int4"), Some("geometry")]);
+        assert!(
+            fed.rows[0]
+                .get(1)
+                .is_some_and(|cell| cell.starts_with("POINT")),
+            "{:?}",
+            fed.rows[0].get(1)
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a live PostgreSQL server; see live_config"]
+    fn live_a_fed_query_hands_its_kept_rows_to_the_feed_and_not_the_result() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let feed = crate::db::Feed::default();
+        let result = connection
+            .query(
+                "SELECT n FROM generate_series(1, 10) AS n",
+                Fetch {
+                    limit: Some(3),
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                },
+            )
+            .expect("query should succeed");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.capped_from, Some(10));
+        assert_eq!(fed.set, 1);
+        assert_eq!(
+            names(&QueryResult {
+                columns: fed.columns,
+                ..Default::default()
+            }),
+            vec!["n"]
+        );
+        assert_eq!(
+            fed.rows,
+            vec![
+                vec![Some("1".into())],
+                vec![Some("2".into())],
+                vec![Some("3".into())]
+            ]
+        );
     }
 
     #[test]
@@ -1949,10 +3210,12 @@ mod tests {
         // handles fine, and reported every later failure as "current
         // transaction is aborted" instead of its own cause.
         let connection = Connection::open(&live_config()).expect("connection should open");
-        connection.query("BEGIN").expect("BEGIN should succeed");
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("BEGIN should succeed");
 
         let result = connection
-            .query("SELECT 1 AS a; SELECT 2 AS b")
+            .query("SELECT 1 AS a; SELECT 2 AS b", Fetch::default())
             .expect("a multi-statement selection must survive an open transaction");
 
         assert_eq!(names(&result), vec!["b"]);
@@ -1960,7 +3223,7 @@ mod tests {
         assert_eq!(types(&result), vec![None]);
 
         let error = connection
-            .query("SELECT * FROM no_such_relation")
+            .query("SELECT * FROM no_such_relation", Fetch::default())
             .unwrap_err();
 
         assert!(
@@ -1969,7 +3232,7 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", Fetch::default())
             .expect("ROLLBACK should succeed");
     }
 
@@ -1983,7 +3246,10 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let result = connection
-            .query("SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d")
+            .query(
+                "SELECT 1 AS a, 2 AS b, 3 AS c; SELECT 4 AS d",
+                Fetch::default(),
+            )
             .expect("query should succeed");
 
         assert_eq!(names(&result), vec!["d"]);
@@ -1998,7 +3264,7 @@ mod tests {
 
         // A valid empty result still has to carry its headers.
         let empty = connection
-            .query("SELECT 1 AS id, 'x' AS label WHERE false")
+            .query("SELECT 1 AS id, 'x' AS label WHERE false", Fetch::default())
             .expect("query should succeed");
 
         assert_eq!(names(&empty), vec!["id", "label"]);
@@ -2013,7 +3279,7 @@ mod tests {
         // own names and the key's position among them.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, id FROM accounts")
+            .query("SELECT name, id FROM accounts", Fetch::default())
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -2033,7 +3299,10 @@ mod tests {
         // about the table, and an expression has no name in the table at all.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT id AS ident, upper(name) AS shouted, name FROM accounts")
+            .query(
+                "SELECT id AS ident, upper(name) AS shouted, name FROM accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed");
         let edit = result.edit.expect("accounts has a primary key");
 
@@ -2059,7 +3328,7 @@ mod tests {
         ] {
             assert!(
                 connection
-                    .query(sql)
+                    .query(sql, Fetch::default())
                     .expect("query should succeed")
                     .edit
                     .is_none(),
@@ -2074,7 +3343,7 @@ mod tests {
         // Nothing in this result set identifies which account a row is.
         let result = Connection::open(&live_config())
             .expect("connection should open")
-            .query("SELECT name, email FROM accounts")
+            .query("SELECT name, email FROM accounts", Fetch::default())
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2086,11 +3355,14 @@ mod tests {
         // There is no predicate that names one of two identical rows.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
-            .query("CREATE TEMP TABLE dbdelve_unkeyed (value integer, label text)")
+            .query(
+                "CREATE TEMP TABLE dbdelve_unkeyed (value integer, label text)",
+                Fetch::default(),
+            )
             .expect("the temporary table should be created");
 
         let result = connection
-            .query("SELECT value, label FROM dbdelve_unkeyed")
+            .query("SELECT value, label FROM dbdelve_unkeyed", Fetch::default())
             .expect("query should succeed");
 
         assert!(result.edit.is_none());
@@ -2128,12 +3400,13 @@ mod tests {
                  CREATE TABLE dbdelve_test_ddl (id bigint, note text DEFAULT 'x') \
                      PARTITION BY RANGE (id); \
                  CREATE INDEX dbdelve_test_ddl_note ON dbdelve_test_ddl (note)",
+                Fetch::default(),
             )
             .expect("the fixture table should be created");
         let partitioned =
             connection.ddl("public", "dbdelve_test_ddl", RelationKind::PartitionedTable);
         connection
-            .query("DROP TABLE dbdelve_test_ddl")
+            .query("DROP TABLE dbdelve_test_ddl", Fetch::default())
             .expect("the fixture table should be cleaned up");
         let table = connection
             .ddl("public", "accounts", RelationKind::Table)
@@ -2192,8 +3465,9 @@ mod tests {
         };
         let drop = "DROP TABLE IF EXISTS dbdelve_test_ddl_generated CASCADE";
         connection
-            .query(&format!(
-                "{drop}; \
+            .query(
+                &format!(
+                    "{drop}; \
                  CREATE TABLE dbdelve_test_ddl_generated (a int, \
                      twice int GENERATED ALWAYS AS (a * 2) STORED, \
                      CONSTRAINT dbdelve_test_ddl_generated_a CHECK (a > 0)); \
@@ -2203,16 +3477,18 @@ mod tests {
                  CREATE MATERIALIZED VIEW dbdelve_test_ddl_materialized AS \
                      SELECT a FROM dbdelve_test_ddl_generated; \
                  CREATE INDEX dbdelve_test_ddl_materialized_a ON dbdelve_test_ddl_materialized (a)"
-            ))
+                ),
+                Fetch::default(),
+            )
             .expect("the fixtures should be created");
         let written = ddl();
         let rerun = written.as_ref().map_err(Clone::clone).and_then(|written| {
-            connection.query(drop)?;
-            connection.query(&written.join("\n"))?;
+            connection.query(drop, Fetch::default())?;
+            connection.query(&written.join("\n"), Fetch::default())?;
             ddl()
         });
         connection
-            .query(drop)
+            .query(drop, Fetch::default())
             .expect("the fixtures should be cleaned up");
 
         let written = written.expect("the DDL should load");
@@ -2261,12 +3537,13 @@ mod tests {
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (0) TO (500); \
                  CREATE TABLE dbdelve_test_referencing_p2 \
                      PARTITION OF dbdelve_test_referencing FOR VALUES FROM (500) TO (1000)",
+                Fetch::default(),
             )
             .expect("the fixture tables should be created");
 
         let references = connection.references("public", "accounts");
         connection
-            .query("DROP TABLE dbdelve_test_referencing")
+            .query("DROP TABLE dbdelve_test_referencing", Fetch::default())
             .expect("the fixture tables should be cleaned up");
         let tables: Vec<String> = references
             .expect("references should load")
@@ -2290,11 +3567,15 @@ mod tests {
                     label text,
                     PRIMARY KEY (left_id, right_id)
                 )",
+                Fetch::default(),
             )
             .expect("the temporary table should be created");
 
         let edit = connection
-            .query("SELECT label, right_id, left_id FROM dbdelve_composite")
+            .query(
+                "SELECT label, right_id, left_id FROM dbdelve_composite",
+                Fetch::default(),
+            )
             .expect("query should succeed")
             .edit
             .expect("both key columns are in the result set");
@@ -2316,18 +3597,20 @@ mod tests {
         // inside whatever transaction the user has open. It must be as
         // harmless there as the type probe beside it.
         let connection = Connection::open(&live_config()).expect("connection should open");
-        connection.query("BEGIN").expect("BEGIN should succeed");
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("BEGIN should succeed");
 
         assert!(
             connection
-                .query("SELECT id FROM accounts")
+                .query("SELECT id FROM accounts", Fetch::default())
                 .expect("query should succeed")
                 .edit
                 .is_some()
         );
 
         let error = connection
-            .query("SELECT * FROM no_such_relation")
+            .query("SELECT * FROM no_such_relation", Fetch::default())
             .unwrap_err();
 
         assert!(
@@ -2336,15 +3619,15 @@ mod tests {
             error.message
         );
         connection
-            .query("ROLLBACK")
+            .query("ROLLBACK", Fetch::default())
             .expect("ROLLBACK should succeed");
     }
 
     #[test]
     #[ignore = "requires the repository development database configured through PG*"]
     fn live_structure_round_trip() {
-        let structure = Connection::open(&live_config())
-            .expect("connection should open")
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let structure = connection
             .structure("public", "accounts")
             .expect("structure should load");
 
@@ -2377,7 +3660,45 @@ mod tests {
                 .iter()
                 .any(|constraint| constraint.definition.starts_with("PRIMARY KEY"))
         );
-        assert!(!structure.indexes.is_empty(), "the primary key is an index");
+        let kinds: Vec<_> = structure
+            .indexes
+            .iter()
+            .map(|index| (index.name.as_str(), index.kind, index.columns.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "accounts_external_id_key",
+                    IndexKind::Unique,
+                    vec!["external_id".into()]
+                ),
+                ("accounts_pkey", IndexKind::Primary, vec!["id".into()]),
+            ]
+        );
+
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_indexes; \
+                 CREATE TABLE dbdelve_test_indexes (id bigint, email text, note text); \
+                 CREATE INDEX dbdelve_test_indexes_partial \
+                     ON dbdelve_test_indexes (lower(email), id DESC) INCLUDE (note) \
+                     WHERE coalesce(note, 'a, b') <> ''",
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let fixture = connection.structure("public", "dbdelve_test_indexes");
+        connection
+            .query("DROP TABLE dbdelve_test_indexes", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let index = &fixture.expect("structure should load").indexes[0];
+        assert_eq!(index.kind, IndexKind::Plain);
+        assert_eq!(index.columns, ["lower(email)", "id DESC"]);
+        assert_eq!(
+            index.predicate.as_deref(),
+            Some("COALESCE(note, 'a, b'::text) <> ''::text")
+        );
+        assert!(index.definition.contains("INCLUDE (note)"), "{index:?}");
     }
 
     #[test]
@@ -2443,6 +3764,7 @@ mod tests {
                  DROP TABLE IF EXISTS dbdelve_test_unanalyzed; \
                  CREATE TABLE dbdelve_test_unanalyzed (id integer NOT NULL); \
                  INSERT INTO dbdelve_test_unanalyzed (id) SELECT generate_series(1, 10)",
+                Fetch::default(),
             )
             .expect("the fixture tables should be created");
 
@@ -2479,7 +3801,10 @@ mod tests {
         );
 
         connection
-            .query("DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed")
+            .query(
+                "DROP TABLE dbdelve_test_partitioned; DROP TABLE dbdelve_test_unanalyzed",
+                Fetch::default(),
+            )
             .expect("the fixture tables should be cleaned up");
 
         catalog.set_sizes(&sizes);
@@ -2502,14 +3827,20 @@ mod tests {
         let connection = Connection::open(&live_config()).expect("connection should open");
 
         let items = connection
-            .query("SELECT count(*) AS rows_seeded FROM order_items")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM order_items",
+                Fetch::default(),
+            )
             .expect("query should succeed");
-        assert_eq!(items.rows[0][0].as_deref(), Some("3"));
+        assert_eq!(items.rows[0].get(0), Some("3"));
 
         let closed = connection
-            .query("SELECT count(*) AS rows_seeded FROM archive.closed_accounts")
+            .query(
+                "SELECT count(*) AS rows_seeded FROM archive.closed_accounts",
+                Fetch::default(),
+            )
             .expect("query should succeed");
-        assert_eq!(closed.rows[0][0].as_deref(), Some("2"));
+        assert_eq!(closed.rows[0].get(0), Some("2"));
     }
 
     #[test]

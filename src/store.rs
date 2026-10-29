@@ -3,9 +3,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::db::{Cell, EditTarget, RelationKind, SshTunnel};
+use crate::db::{EditTarget, Engine, ExplainMode, RelationKind, Row, SshTunnel};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -80,6 +81,11 @@ pub struct StoredProfile {
     /// profile off it. Absent until then, and for every other engine.
     #[serde(default)]
     pub login_database: Option<String>,
+    /// The schema unqualified names resolve in first, as picked in the
+    /// titlebar. Absent leaves the server's `search_path` as it is, which is
+    /// what every profile written before it could be picked connected with.
+    #[serde(default)]
+    pub schema: Option<String>,
     /// The editor's zoom, back when it was a per-profile setting. Read only:
     /// the live value is [`StoredSettings::editor_font_size`] now, and this is
     /// what the migration seeds it from for anyone upgrading -- dropping the
@@ -166,6 +172,9 @@ pub struct StoredObject {
     pub name: String,
     #[serde(default)]
     pub routine: bool,
+    /// A relation's structure tab rather than its rows.
+    #[serde(default)]
+    pub structure: bool,
     /// A relation's kind, which the catalog would otherwise be the only source
     /// of -- and waiting for it is what kept a restored relation out of the tab
     /// strip. Meaningless for a routine.
@@ -195,6 +204,12 @@ pub struct StoredObject {
     /// written before it was kept, the filter is re-derived from the bars.
     #[serde(default)]
     pub filter_engine: Option<String>,
+    /// A structure tab's way back to Data: the filter of the data tab that
+    /// switched to it, that tab's identity once ids are reassigned on restore.
+    /// Absent is a structure tab opened from the sidebar, or one written before
+    /// it was kept, and goes back to any data tab for the relation.
+    #[serde(default)]
+    pub origin: Option<String>,
     /// The filter bars [`Self::filter`] was derived from. The bars are the
     /// editable state and the expression is what runs, so both are kept:
     /// nothing here parses a `WHERE` back into controls. Last, because TOML
@@ -235,10 +250,15 @@ pub struct StoredFilter {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredGrid {
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Cell>>,
+    pub rows: Vec<Row>,
     /// The row count before [`GRID_ROW_CAP`] trimmed it, so the UI can say
     /// "5000 of N" for a result that did not fit whole.
     pub total_rows: usize,
+    /// Set when the statement was stopped before it finished, so
+    /// [`Self::total_rows`] is what had arrived and not what it would have
+    /// returned. Absent from a snapshot written before it was kept.
+    #[serde(default)]
+    pub stopped: Option<crate::db::Stopped>,
     #[serde(default)]
     pub sort: Vec<(usize, bool)>,
     /// A relation tab's `ORDER BY`, as expression and direction. [`Self::sort`]
@@ -255,10 +275,23 @@ pub struct StoredGrid {
     pub client_sort: Option<Vec<(String, bool)>>,
     #[serde(default)]
     pub widths: Vec<f32>,
+    /// Which of [`Self::widths`] the user dragged, and which the grid fitted
+    /// and may widen when the rows change. Absent from a snapshot written
+    /// before it was kept, whose widths are all taken as fitted.
+    #[serde(default)]
+    pub dragged: Vec<bool>,
+    /// Hidden columns, as name and which of the same-named columns it is.
+    #[serde(default)]
+    pub hidden: Vec<(String, usize)>,
+    /// Pinned columns in pinned order, keyed like [`Self::hidden`].
+    #[serde(default)]
+    pub pinned: Vec<(String, usize)>,
     #[serde(default)]
     pub active: Option<(usize, usize)>,
     #[serde(default)]
     pub last_query: Option<String>,
+    /// A relation tab's row limit, `0` for none: absent already means a
+    /// snapshot from before it was kept, which takes the Settings default.
     #[serde(default)]
     pub limit: Option<usize>,
     /// The relation tab's filter, so reopening dbdelve lands on the rows that
@@ -267,8 +300,6 @@ pub struct StoredGrid {
     /// what a tab is showing.
     #[serde(default)]
     pub filter: String,
-    #[serde(default)]
-    pub showing_structure: bool,
     #[serde(default)]
     pub captured: u64,
     /// Where the rows can be written back to, and each column's type -- the
@@ -282,6 +313,36 @@ pub struct StoredGrid {
     /// (`QueryResult::cell_types`): what tells a missing field from a null.
     #[serde(default)]
     pub cell_types: Vec<Vec<String>>,
+    /// The plan a query tab had beside these rows. Absent from a snapshot
+    /// written before plans were kept, which restores with none.
+    #[serde(default)]
+    pub plan: Option<StoredPlan>,
+    /// What the server said running the statement behind these rows -- or
+    /// behind no rows at all, which is the one reason a snapshot is written
+    /// with no columns.
+    #[serde(default)]
+    pub messages: Vec<String>,
+}
+
+/// What rebuilds a query tab's plan: the rows `explain::parse` read it from,
+/// never the parsed tree, so a parser that has learned more since reads them
+/// afresh.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredPlan {
+    pub mode: ExplainMode,
+    pub sql: String,
+    /// A typed `EXPLAIN`'s rows are the snapshot's own, and are not kept twice.
+    #[serde(default)]
+    pub typed: bool,
+    /// Whether the pane was turned to the plan rather than the rows.
+    #[serde(default)]
+    pub showing: bool,
+    /// The Explain command's answer, which never reaches the grid. Empty for a
+    /// typed plan.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub rows: Vec<Row>,
 }
 
 /// The three font families in use. App-level rather than per-profile: the face
@@ -309,12 +370,25 @@ pub struct StoredFonts {
 pub struct StoredSettings {
     #[serde(default)]
     pub theme: Option<String>,
+    /// Whether the theme follows the system between `light_theme` and
+    /// `dark_theme`. `theme` is still written while it does, as the one on
+    /// screen at the save, so an older build opens on that; the system
+    /// changing side alone saves nothing.
+    #[serde(default)]
+    pub match_system_appearance: Option<bool>,
+    #[serde(default)]
+    pub light_theme: Option<String>,
+    #[serde(default)]
+    pub dark_theme: Option<String>,
     #[serde(default)]
     pub chrome_font_size: Option<f32>,
     #[serde(default)]
     pub editor_font_size: Option<f32>,
     #[serde(default)]
     pub grid_font_size: Option<f32>,
+    /// The row limit a new tab starts with, `0` for none and absent for the
+    /// default. A number either way: anything else fails an older build's
+    /// decode of the whole file, which it reads as no profiles at all.
     #[serde(default)]
     pub preview_rows: Option<usize>,
     #[serde(default)]
@@ -325,6 +399,10 @@ pub struct StoredSettings {
     pub color_titlebar: Option<bool>,
     #[serde(default)]
     pub client_sort: Option<bool>,
+    /// Whether the first-run greeting has played. Absent in a file written
+    /// before there was one.
+    #[serde(default)]
+    pub welcomed: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -334,6 +412,16 @@ pub struct StoredSettings {
     /// below the scalars.
     #[serde(default)]
     pub theme_opacity: Option<HashMap<String, f32>>,
+}
+
+impl StoredSettings {
+    pub fn row_limit(&self) -> Option<usize> {
+        match self.preview_rows {
+            Some(0) => None,
+            Some(rows) if rows <= crate::explorer::MAX_ROW_LIMIT => Some(rows),
+            _ => Some(crate::explorer::PREVIEW_ROW_LIMIT),
+        }
+    }
 }
 
 /// A named collection of connections. A connection is listed by at most one
@@ -349,15 +437,75 @@ pub struct StoredProject {
 }
 
 /// A decoded profile file: the profiles, the id of the one that was in front,
-/// the fonts, the settings and the projects. Named because it is five things
-/// and a bare tuple in the signature reads as none of them.
-type Restored = (
-    Vec<StoredProfile>,
-    Option<String>,
-    Option<StoredFonts>,
-    Option<StoredSettings>,
-    Vec<StoredProject>,
-);
+/// the fonts, the settings and the projects. No `Default`, so whoever writes
+/// one names every field.
+#[derive(Debug, PartialEq)]
+pub struct ProfileList {
+    pub profiles: Vec<StoredProfile>,
+    pub active: Option<String>,
+    pub fonts: Option<StoredFonts>,
+    pub settings: Option<StoredSettings>,
+    pub projects: Vec<StoredProject>,
+    /// Profiles on an engine this build cannot read, held as they were read
+    /// so a save writes them back. Empty for every file without one.
+    pub unavailable: Vec<UnavailableProfile>,
+}
+
+/// A profile whose engine this build cannot read: one written by a newer
+/// build, or for a plugin that is not installed. It is never decoded into a
+/// [`StoredProfile`], since the keys it needs may be ones this build has
+/// never heard of; only what the palette shows is read out of its table, and
+/// the table is written back as it was read (its keys sorted).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnavailableProfile {
+    pub id: String,
+    pub name: String,
+    /// The tag as written, or a tag that is not a string as TOML writes it.
+    pub engine: String,
+    /// The supported profiles above it in the file, nearest last, each as its
+    /// id and how many above it share that id: what [`interleaved`] puts it
+    /// back after.
+    follows: Vec<(String, usize)>,
+    table: toml::Table,
+}
+
+impl UnavailableProfile {
+    fn from_table(table: toml::Table, follows: Vec<(String, usize)>) -> Result<Self, String> {
+        let text = |key: &str| {
+            table
+                .get(key)
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        };
+        let id = text("id").ok_or("a profile on an engine this build cannot read has no id")?;
+        let name =
+            text("name").ok_or("a profile on an engine this build cannot read has no name")?;
+        let engine = match table.get("engine") {
+            Some(toml::Value::String(engine)) => engine.clone(),
+            Some(engine) => engine.to_string(),
+            None => String::new(),
+        };
+        Ok(Self {
+            id,
+            name,
+            engine,
+            follows,
+            table,
+        })
+    }
+
+    /// The SSH key its tunnel names, which removing another profile must not
+    /// delete from under it.
+    pub fn identity_file(&self) -> Option<&str> {
+        self.table.get("ssh")?.get("identity_file")?.as_str()
+    }
+}
+
+impl Serialize for UnavailableProfile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.table.serialize(serializer)
+    }
+}
 
 /// Field order is load-bearing here too: `active` is a scalar, so it has to
 /// precede every table, and `fonts` and `settings` are tables, so both have to
@@ -391,7 +539,7 @@ pub struct LoadFailure {
 /// file is the first run, and reads as an empty list. Every other failure is
 /// reported, an unreachable data directory included -- `save_profiles` refuses
 /// on that too, and an empty list here is what the next save writes back.
-pub fn load_profiles() -> Result<Restored, LoadFailure> {
+pub fn load_profiles() -> Result<ProfileList, LoadFailure> {
     let path = dbdelve_directory()
         .map_err(|message| LoadFailure {
             message,
@@ -427,52 +575,309 @@ pub fn load_profiles() -> Result<Restored, LoadFailure> {
 
 /// The profile file without `load_profiles`' moving it aside on a failure,
 /// for a read that only peeks, ahead of the one that reports.
-pub fn peek_profiles() -> Option<Restored> {
+pub fn peek_profiles() -> Option<ProfileList> {
     read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE)).ok()
 }
 
 /// A failure is what could not be read -- `" as TOML"` for a file that could
 /// -- and why.
-fn read_profiles(path: &Path) -> Result<Restored, (&'static str, String)> {
+fn read_profiles(path: &Path) -> Result<ProfileList, (&'static str, String)> {
     match fs::read_to_string(path) {
         Ok(text) => decode_profiles(&text).map_err(|error| (" as TOML", error)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Ok((Vec::new(), None, None, None, Vec::new()))
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProfileList {
+            profiles: Vec::new(),
+            active: None,
+            fonts: None,
+            settings: None,
+            projects: Vec::new(),
+            unavailable: Vec::new(),
+        }),
         Err(error) => Err(("", error.to_string())),
     }
 }
 
-fn decode_profiles(text: &str) -> Result<Restored, String> {
+pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
+    // Only the engine tags: a file this pass cannot read goes to the plain
+    // decode below, which reports it in its own words.
+    let unavailable: Vec<bool> = toml::from_str::<Tags>(text)
+        .map(|tags| {
+            tags.profiles
+                .iter()
+                .map(|tag| !readable(tag.engine.as_ref()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // A file with an unavailable profile that the mixed reader cannot hold
+    // takes the plain decode too, so no file an earlier build read is newly
+    // refused.
+    if unavailable.contains(&true)
+        && !names_a_private_key(text)
+        && let Ok(list) = decode_mixed(text, &unavailable)
+    {
+        return Ok(list);
+    }
     toml::from_str::<ProfileFile>(text)
-        .map(|file| {
-            (
-                file.profiles,
-                file.active,
-                file.fonts,
-                file.settings,
-                file.projects,
-            )
+        .map(|file| ProfileList {
+            profiles: file.profiles,
+            active: file.active,
+            fonts: file.fonts,
+            settings: file.settings,
+            projects: file.projects,
+            unavailable: Vec::new(),
         })
         .map_err(|error| error.to_string())
 }
 
-pub fn save_profiles(
-    profiles: &[StoredProfile],
-    active: Option<&str>,
-    fonts: &StoredFonts,
-    settings: &StoredSettings,
-    projects: &[StoredProject],
-) -> Result<(), String> {
-    let text = toml::to_string_pretty(&ProfileFile {
-        active: active.map(str::to_string),
-        fonts: Some(fonts.clone()),
-        settings: Some(settings.clone()),
-        projects: projects.to_vec(),
-        profiles: profiles.to_vec(),
-    })
-    .map_err(|error| format!("Could not encode the profile list: {error}"))?;
-    write_file(&dbdelve_directory()?.join(PROFILES_FILE), &text)
+pub(crate) fn encode_profiles(list: &ProfileList) -> Result<String, String> {
+    if list.unavailable.is_empty() {
+        toml::to_string_pretty(&ProfileFile {
+            active: list.active.clone(),
+            fonts: list.fonts.clone(),
+            settings: list.settings.clone(),
+            projects: list.projects.clone(),
+            profiles: list.profiles.clone(),
+        })
+    } else {
+        toml::to_string_pretty(&MixedFileOut {
+            active: &list.active,
+            fonts: &list.fonts,
+            settings: &list.settings,
+            projects: &list.projects,
+            profiles: interleaved(&list.profiles, &list.unavailable),
+        })
+    }
+    .map_err(|error| format!("Could not encode the profile list: {error}"))
+}
+
+/// Whether any key in the document, as toml reads it once unescaped, is one
+/// of toml's private markers. `Value` reads a table whose first key is the
+/// datetime marker as a datetime and drops every other key in it, and a key
+/// can spell the marker with escapes the text never shows. A real datetime is
+/// its own kind of value here, never a table, so only a key can be mistaken.
+/// A document this cannot parse counts too: the mixed reader is not for it.
+fn names_a_private_key(text: &str) -> bool {
+    fn in_table(table: &toml::de::DeTable) -> bool {
+        table.iter().any(|(key, value)| {
+            key.get_ref().contains("__toml_private") || in_value(value.get_ref())
+        })
+    }
+    fn in_value(value: &toml::de::DeValue) -> bool {
+        match value {
+            toml::de::DeValue::Table(table) => in_table(table),
+            toml::de::DeValue::Array(array) => array.iter().any(|item| in_value(item.get_ref())),
+            _ => false,
+        }
+    }
+    toml::de::DeTable::parse(text).map_or(true, |document| in_table(document.get_ref()))
+}
+
+/// Each profile's engine tag and nothing else; every other key is skipped
+/// unread.
+#[derive(Deserialize)]
+struct Tags {
+    #[serde(default)]
+    profiles: Vec<Tag>,
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    #[serde(default)]
+    engine: Option<toml::Value>,
+}
+
+/// No tag is a profile written before there was a second engine, and reads as
+/// Postgres; a tag that is not a string is not one any build wrote for an
+/// engine this one has.
+fn readable(tag: Option<&toml::Value>) -> bool {
+    match tag {
+        None => true,
+        Some(toml::Value::String(engine)) => Engine::parse(engine).is_ok(),
+        Some(_) => false,
+    }
+}
+
+enum Entry {
+    Supported(Box<StoredProfile>),
+    Unavailable(toml::Table),
+}
+
+fn decode_mixed(text: &str, unavailable: &[bool]) -> Result<ProfileList, String> {
+    let (file, entries) = toml::Deserializer::parse(text)
+        .and_then(|deserializer| MixedFile(unavailable).deserialize(deserializer))
+        .map_err(|error| error.to_string())?;
+    let mut list = ProfileList {
+        profiles: Vec::new(),
+        active: file.active,
+        fonts: file.fonts,
+        settings: file.settings,
+        projects: file.projects,
+        unavailable: Vec::new(),
+    };
+    for entry in entries {
+        match entry {
+            Entry::Supported(profile) => list.profiles.push(*profile),
+            Entry::Unavailable(table) => {
+                let follows = list
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(at, profile)| {
+                        let before = list.profiles[..at]
+                            .iter()
+                            .filter(|earlier| earlier.id == profile.id)
+                            .count();
+                        (profile.id.clone(), before)
+                    })
+                    .collect();
+                list.unavailable
+                    .push(UnavailableProfile::from_table(table, follows)?);
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// The profile file the way `ProfileFile`'s derive reads it, but with its
+/// profiles read by [`Entries`]. The slice says which `[[profiles]]` index is
+/// unavailable.
+struct MixedFile<'a>(&'a [bool]);
+
+impl<'de> DeserializeSeed<'de> for MixedFile<'_> {
+    type Value = (ProfileFile, Vec<Entry>);
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_struct(
+            "ProfileFile",
+            &["active", "fonts", "settings", "projects", "profiles"],
+            self,
+        )
+    }
+}
+
+impl<'de> Visitor<'de> for MixedFile<'_> {
+    type Value = (ProfileFile, Vec<Entry>);
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("struct ProfileFile")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut file = ProfileFile::default();
+        let mut entries = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "active" => file.active = map.next_value()?,
+                "fonts" => file.fonts = map.next_value()?,
+                "settings" => file.settings = map.next_value()?,
+                "projects" => file.projects = map.next_value()?,
+                "profiles" => entries = map.next_value_seed(Entries(self.0))?,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok((file, entries))
+    }
+}
+
+/// A supported entry goes through `StoredProfile::deserialize` on the very
+/// element deserializer a `Vec<StoredProfile>` is handed, so it reads exactly
+/// as it would in a file with no unavailable profile. An unavailable one is
+/// read as a `Table` straight off toml's deserializer, which keeps a datetime
+/// a `Datetime` rather than its string.
+struct Entries<'a>(&'a [bool]);
+
+impl<'de> DeserializeSeed<'de> for Entries<'_> {
+    type Value = Vec<Entry>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Entries<'_> {
+    type Value = Vec<Entry>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a sequence of profiles")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        loop {
+            let entry = if self.0.get(entries.len()) == Some(&true) {
+                seq.next_element::<toml::Table>()?.map(Entry::Unavailable)
+            } else {
+                seq.next_element::<StoredProfile>()?
+                    .map(|profile| Entry::Supported(Box::new(profile)))
+            };
+            match entry {
+                Some(entry) => entries.push(entry),
+                None => return Ok(entries),
+            }
+        }
+    }
+}
+
+/// `ProfileFile` borrowed, for a file with an unavailable profile; the same
+/// load-bearing field order.
+#[derive(Serialize)]
+struct MixedFileOut<'a> {
+    active: &'a Option<String>,
+    fonts: &'a Option<StoredFonts>,
+    settings: &'a Option<StoredSettings>,
+    projects: &'a [StoredProject],
+    profiles: Vec<ProfileEntry<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProfileEntry<'a> {
+    Supported(&'a StoredProfile),
+    Unavailable(&'a UnavailableProfile),
+}
+
+/// Each unavailable profile goes back after the nearest profile above it in
+/// the file that is still there -- the same occurrence of its id, when ids
+/// repeat -- or with none left, at the start. The supported order is only
+/// ever pushed to or removed from, so this needs no bookkeeping, and every
+/// unavailable profile has exactly one place, so none is written twice.
+fn interleaved<'a>(
+    profiles: &'a [StoredProfile],
+    unavailable: &'a [UnavailableProfile],
+) -> Vec<ProfileEntry<'a>> {
+    let anchors = unavailable
+        .iter()
+        .map(|gone| {
+            gone.follows.iter().rev().find_map(|(id, before)| {
+                profiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, profile)| &profile.id == id)
+                    .nth(*before)
+                    .map(|(at, _)| at)
+            })
+        })
+        .collect::<Vec<_>>();
+    let after = |anchor: Option<usize>| {
+        unavailable
+            .iter()
+            .zip(&anchors)
+            .filter(move |(_, at)| **at == anchor)
+            .map(|(gone, _)| ProfileEntry::Unavailable(gone))
+    };
+    after(None)
+        .chain(profiles.iter().enumerate().flat_map(|(index, profile)| {
+            std::iter::once(ProfileEntry::Supported(profile)).chain(after(Some(index)))
+        }))
+        .collect()
+}
+
+pub fn save_profiles(list: &ProfileList) -> Result<(), String> {
+    write_file(
+        &dbdelve_directory()?.join(PROFILES_FILE),
+        &encode_profiles(list)?,
+    )
 }
 
 pub fn profile_id(name: &str, existing: &[String]) -> String {
@@ -589,7 +994,56 @@ pub fn delete_queries(profile_id: &str) -> Result<(), String> {
 
 pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     let path = query_path(profile_id, name)?;
-    fs::remove_file(&path).map_err(|error| format!("Could not delete {}: {error}", path.display()))
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete {}: {error}", path.display())),
+    }
+}
+
+/// Write `sql` as `name`, moving the query's file there first when this
+/// renames `previous`.
+///
+/// The text is written under the old name before a rename, so a move that
+/// fails leaves it where it was. New saves and renames install their target
+/// atomically without replacing another file: directory enumeration is only
+/// an early name-conflict check, not protection against an unseen target.
+/// The native rename also handles case-only changes when both names address
+/// the same entry, without treating case variants as interchangeable files.
+pub fn save_query_as(
+    profile_id: &str,
+    previous: Option<&str>,
+    name: &str,
+    sql: &str,
+) -> Result<(), String> {
+    if let Some(taken) = saved_queries(profile_id)
+        .into_iter()
+        .find(|taken| Some(taken.as_str()) != previous && same_query_name(taken, name))
+    {
+        return Err(format!("A query named {taken} already exists."));
+    }
+    match previous {
+        Some(previous) if previous != name => {
+            write_query(profile_id, previous, sql)?;
+            let from = query_path(profile_id, previous)?;
+            let to = query_path(profile_id, name)?;
+            rename_query(&from, &to).map_err(|error| {
+                format!(
+                    "Could not rename {} to {}: {error}",
+                    from.display(),
+                    to.display()
+                )
+            })
+        }
+        Some(_) => write_query(profile_id, name, sql),
+        None => write_file_with(&query_path(profile_id, name)?, sql, rename_query),
+    }
+}
+
+/// Whether two query names would name one file on a filesystem that ignores
+/// case, which macOS's and Windows's do by default.
+pub fn same_query_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 
 pub fn validate_query_name(name: &str) -> Result<(), String> {
@@ -743,19 +1197,24 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             columns: grid.columns.clone(),
             rows: grid.rows[..GRID_ROW_CAP].to_vec(),
             total_rows: grid.total_rows,
+            stopped: grid.stopped,
             sort: grid.sort.clone(),
             order_by: grid.order_by.clone(),
             client_sort: grid.client_sort.clone(),
             widths: grid.widths.clone(),
+            dragged: grid.dragged.clone(),
+            hidden: grid.hidden.clone(),
+            pinned: grid.pinned.clone(),
             active: grid.active,
             last_query: grid.last_query.clone(),
             limit: grid.limit,
             filter: grid.filter.clone(),
-            showing_structure: grid.showing_structure,
             captured: grid.captured,
             edit: grid.edit.clone(),
             data_types: grid.data_types.clone(),
             cell_types: grid.cell_types.iter().take(GRID_ROW_CAP).cloned().collect(),
+            plan: grid.plan.clone(),
+            messages: grid.messages.clone(),
         };
         &capped
     } else {
@@ -1005,27 +1464,151 @@ fn read_file(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+    write_file_with(path, contents, |from, to| fs::rename(from, to))
+}
+
+fn write_file_with(
+    path: &Path,
+    contents: &str,
+    install: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, contents)
-        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
-    // Set before the rename, not after: the rename is what makes this the file
-    // at `path`, so a mode applied afterward would leave it world-readable for
-    // however long the two steps are apart.
-    let written = secure(&temporary).and_then(|()| {
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("Could not replace {}: {error}", path.display()))
-    });
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+    // Each writer owns its staging file, even across application instances.
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("Could not create {}: {error}", temporary.display()))?;
+    let written = file
+        .write_all(contents.as_bytes())
+        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))
+        .and_then(|()| secure(&temporary))
+        .and_then(|()| {
+            drop(file);
+            install(&temporary, path)
+                .map_err(|error| format!("Could not replace {}: {error}", path.display()))
+        });
     if written.is_err() {
         // Nothing reads a leftover temporary, and every failed write would
         // otherwise leave one behind for good.
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// The filesystem, not a preceding existence check, decides whether the
+/// destination is free or is the source entry under different casing.
+fn rename_query(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both paths are valid NUL-terminated strings for this call.
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+        let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both paths are NUL-terminated; omitting REPLACE_EXISTING
+        // makes the move refuse an occupied destination.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "An atomic no-overwrite query rename is unavailable on this platform.",
+        ))
+    }
+}
+
+/// Where the theme files a user drops in, and the themes imported from other
+/// apps, are read from at startup.
+pub(crate) fn theme_directory() -> Result<PathBuf, String> {
+    Ok(dbdelve_directory()?.join("themes"))
+}
+
+/// Zed's own themes directory, as Zed's `paths::themes_dir` places it. On
+/// macOS that is `~/.config/zed` whatever `XDG_CONFIG_HOME` says.
+pub(crate) fn zed_theme_directory() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?.join(".config/zed/themes"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(data_root()?.join("Zed").join("themes"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            Some(config_home) => PathBuf::from(config_home),
+            None => home()?.join(".config"),
+        };
+        Ok(config.join("zed").join("themes"))
+    }
+}
+
+/// Where Zed installs extensions, each one a directory that may carry a
+/// `themes/` of its own. Unlike the config, Windows keeps these under the local
+/// profile rather than the roaming one.
+pub(crate) fn zed_extension_directory() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    let root = data_root()?.join("Zed");
+    #[cfg(target_os = "windows")]
+    let root = match std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+        Some(local) => PathBuf::from(local),
+        None => home()?.join("AppData").join("Local"),
+    }
+    .join("Zed");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let root = data_root()?.join("zed");
+    Ok(root.join("extensions").join("installed"))
 }
 
 /// Where a private key another client kept in its own store is written, since
@@ -1095,7 +1678,559 @@ fn secure(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::db::rows;
     use crate::theme::ConnectionColor;
+
+    /// The save path's own decode-then-encode, so the golden is what it writes.
+    fn resaved(text: &str) -> String {
+        encode_profiles(&decode_profiles(text).expect("the fixture loads"))
+            .expect("the fixture encodes")
+    }
+
+    #[test]
+    fn every_engines_profile_saves_back_as_it_did() {
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        // Saving what was saved changes nothing.
+        assert_eq!(resaved(golden), golden);
+    }
+
+    /// `decode_profiles` as it was before any profile could be unavailable:
+    /// the reference every file with no unavailable profile must still match.
+    fn decoded_as_before(text: &str) -> Result<ProfileList, String> {
+        toml::from_str::<ProfileFile>(text)
+            .map(|file| ProfileList {
+                profiles: file.profiles,
+                active: file.active,
+                fonts: file.fonts,
+                settings: file.settings,
+                projects: file.projects,
+                unavailable: Vec::new(),
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn supported_stub(engine: Option<&str>, extra: &str) -> String {
+        let engine = engine.map_or(String::new(), |engine| format!("engine = \"{engine}\"\n"));
+        format!(
+            "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\n{engine}{extra}\n"
+        )
+    }
+
+    #[test]
+    fn every_engine_spelling_decodes_as_it_does_today() {
+        let mut engines = vec![None];
+        for (spelling, _) in Engine::schemes() {
+            engines.extend([
+                Some(spelling.to_string()),
+                Some(spelling.to_uppercase()),
+                // A basic-string tab, which Engine::parse's trim reads past.
+                Some(format!("  {spelling}\\t")),
+            ]);
+        }
+        for engine in engines {
+            let text = supported_stub(engine.as_deref(), "");
+            let now = decode_profiles(&text);
+            assert_eq!(now, decoded_as_before(&text), "{text}");
+            assert_eq!(
+                now.expect("a supported profile loads").profiles.len(),
+                1,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_edges_decode_as_they_do_today() {
+        for extra in [
+            "port = 0",
+            "port = 65535",
+            "port = 65536",
+            "port = -1",
+            "statement_timeout = 0",
+            "statement_timeout = 4294967295",
+            "statement_timeout = 4294967296",
+            "next_query_id = 0",
+            "next_query_id = 9223372036854775807",
+            "next_query_id = 18446744073709551615",
+            "next_query_id = 18446744073709551616",
+            "next_query_id = -1",
+            "editor_font_size = 14",
+            "editor_font_size = 15.5",
+            "srv = 1",
+        ] {
+            let text = supported_stub(Some("postgres"), extra);
+            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+        }
+        // Today reads a u64 above i64::MAX, which a detour through toml::Value
+        // would refuse ("u64 value was too large"): the new reader must not take one.
+        assert_eq!(
+            decoded_as_before(&supported_stub(
+                None,
+                "next_query_id = 18446744073709551615"
+            ))
+            .unwrap()
+            .profiles[0]
+                .next_query_id,
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn the_every_engine_file_decodes_as_it_does_today() {
+        // Nested ssh, open_queries, open_objects and bars, the legacy entry, the alias.
+        for text in [
+            include_str!("testdata/every-engine.toml"),
+            include_str!("testdata/every-engine.resaved.toml"),
+        ] {
+            assert_eq!(decode_profiles(text), decoded_as_before(text));
+        }
+        // Ids were never checked for uniqueness, and a repeated one still loads.
+        let twice = supported_stub(Some("postgres"), "") + &supported_stub(Some("sqlite"), "");
+        assert_eq!(decode_profiles(&twice), decoded_as_before(&twice));
+        assert_eq!(decode_profiles(&twice).unwrap().profiles.len(), 2);
+        // And what fails today fails with today's words.
+        for broken in [
+            "host = ",
+            "[[profiles]]\nid = 'a'\n",
+            "profiles = 3",
+            "[[profiles]]\nport = 'x'\n",
+        ] {
+            assert_eq!(
+                decode_profiles(broken),
+                decoded_as_before(broken),
+                "{broken}"
+            );
+            assert!(decode_profiles(broken).is_err(), "{broken}");
+        }
+    }
+
+    /// A plugin profile as a later build would write it: no host, user or
+    /// database, nested tabs, a datetime, keys this build has never heard of.
+    const PLUGIN: &str = r#"
+[[profiles]]
+id = "ch"
+name = "Oracle prod"
+engine = "plugin:oracle"
+speaks = "oracle"
+created = 2026-10-01T09:00:00Z
+statement_timeout = 30
+
+[profiles.fields]
+host = "ch.internal"
+port = "9440"
+
+[[profiles.open_queries]]
+id = 0
+active = true
+
+[[profiles.open_objects]]
+schema = "default"
+name = "events"
+
+[[profiles.open_objects.bars]]
+column = "ts"
+value = "1"
+operator = "greater"
+later = "kept"
+"#;
+
+    #[test]
+    fn a_profile_on_an_engine_this_build_lacks_comes_back_whole() {
+        let list = decode_profiles(PLUGIN).expect("one unreadable engine must not fail the file");
+        assert!(
+            list.profiles.is_empty(),
+            "never decoded as a profile, so never restored"
+        );
+        let gone = &list.unavailable[0];
+        assert_eq!(
+            (gone.id.as_str(), gone.name.as_str(), gone.engine.as_str()),
+            ("ch", "Oracle prod", "plugin:oracle")
+        );
+        // Table equality, so the datetime must come back a Datetime, not its string.
+        let before: toml::Table = toml::from_str(PLUGIN).unwrap();
+        let after: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
+        assert_eq!(after["profiles"], before["profiles"]);
+        // And as text, so the check does not lean on the reader under test:
+        // every nested key, its value and the bare datetime, keys sorted.
+        assert_eq!(
+            encode_profiles(&list).unwrap(),
+            r#"projects = []
+
+[[profiles]]
+created = 2026-10-01T09:00:00Z
+engine = "plugin:oracle"
+id = "ch"
+name = "Oracle prod"
+speaks = "oracle"
+statement_timeout = 30
+
+[profiles.fields]
+host = "ch.internal"
+port = "9440"
+
+[[profiles.open_objects]]
+name = "events"
+schema = "default"
+
+[[profiles.open_objects.bars]]
+column = "ts"
+later = "kept"
+operator = "greater"
+value = "1"
+
+[[profiles.open_queries]]
+active = true
+id = 0
+"#
+        );
+    }
+
+    #[test]
+    fn a_file_spelling_tomls_datetime_marker_decodes_as_it_does_today() {
+        // Read into a Table, `keep` would be dropped beside the marker.
+        let marked = stub("a", "postgres")
+            + &PLUGIN.replace(
+                "[profiles.fields]\n",
+                "[profiles.fields]\nodd = { \"$__toml_private_datetime\" = \"2026-10-01T09:00:00Z\", keep = \"lost\" }\n",
+            );
+        assert!(marked.contains("keep = \"lost\""));
+        assert_eq!(decode_profiles(&marked), decoded_as_before(&marked));
+        // Spelled with escapes, with either string kind for the key, in any
+        // place, nested in an array of tables, or after another key.
+        for key in [
+            "\"$\\u005F_toml_private_datetime\"",
+            "\"$_\\U0000005Ftoml_private_datetime\"",
+            "\"$__toml_private_datetime\"",
+            "'$__toml_private_datetime'",
+            "\"$__toml_private_Datetime\"",
+        ] {
+            let table = format!("{{ {key} = \"2026-10-01T09:00:00Z\", keep = \"lost\" }}");
+            for place in [
+                format!("odd = {table}\n"),
+                format!("odd = [{table}]\n"),
+                format!("odd = {{ first = 1, inner = {table} }}\n"),
+            ] {
+                let text = stub("a", "postgres")
+                    + &stub("x", "y").replace("engine = 'y'\n", &format!("engine = true\n{place}"));
+                assert!(decoded_as_before(&text).is_err(), "{text}");
+                assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+            }
+        }
+        // In a value it is only text: the profile is held back, and kept.
+        let quoted =
+            stub("a", "postgres") + &stub("x", "plugin:t") + "note = '$__toml_private_datetime'\n";
+        let list = decode_profiles(&quoted).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        assert!(
+            encode_profiles(&list)
+                .unwrap()
+                .contains("note = \"$__toml_private_datetime\"")
+        );
+    }
+
+    #[test]
+    fn every_kind_of_datetime_comes_back_in_an_unavailable_profile() {
+        let kinds = "offset = 1979-05-27T07:32:00-08:00\n\
+                     fraction = 1979-05-27T00:32:00.999999Z\n\
+                     local = 1979-05-27T07:32:00\n\
+                     day = 1979-05-27\n\
+                     time = 07:32:00\n\
+                     [profiles.nested]\nat = [1979-05-27, 07:32:00]\n";
+        let text = stub("a", "postgres") + &stub("x", "plugin:t") + kinds;
+        let list = decode_profiles(&text).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        let saved = encode_profiles(&list).unwrap();
+        for line in [
+            "offset = 1979-05-27T07:32:00-08:00\n",
+            "fraction = 1979-05-27T00:32:00.999999Z\n",
+            "local = 1979-05-27T07:32:00\n",
+            "day = 1979-05-27\n",
+            "time = 07:32:00\n",
+            "at = [\n    1979-05-27,\n    07:32:00,\n]\n",
+        ] {
+            assert!(saved.contains(line), "{line} in {saved}");
+        }
+        assert_eq!(decode_profiles(&saved).unwrap(), list);
+    }
+
+    #[test]
+    fn engine_tags_that_are_not_strings_hold_the_profile_back_whole() {
+        for (tag, written) in [
+            ("[1, 'a']", "[1, \"a\"]"),
+            ("{ name = 'odbc' }", "{ name = \"odbc\" }"),
+            ("3", "3"),
+            ("true", "true"),
+        ] {
+            let text = stub("a", "postgres")
+                + &stub("x", "y").replace("engine = 'y'", &format!("engine = {tag}"));
+            // Before, the file would not load at all and was moved aside.
+            assert!(decoded_as_before(&text).is_err(), "{tag}");
+            let list = decode_profiles(&text).expect("held back, not failed");
+            assert_eq!(
+                (list.profiles.len(), list.unavailable.len()),
+                (1, 1),
+                "{tag}"
+            );
+            assert_eq!(list.unavailable[0].engine, written, "{tag}");
+            let again = decode_profiles(&encode_profiles(&list).unwrap()).unwrap();
+            assert_eq!(again, list, "{tag}");
+        }
+    }
+
+    #[test]
+    fn odd_top_level_shapes_decode_as_they_do_today() {
+        let plugin = "{ id = 'x', name = 'X', engine = 'plugin:t' }";
+        for text in [
+            String::new(),
+            "profiles = 3".to_string(),
+            "profiles = 'plugin:t'".to_string(),
+            format!("profiles = [1, {plugin}]"),
+            format!("profiles = [{plugin}, 'a']"),
+            "profiles = [[1]]".to_string(),
+            "[profiles]\nid = 'x'\nname = 'X'\nengine = 'plugin:t'\n".to_string(),
+            format!("profiles = {plugin}"),
+            "unknown = 1\n".to_string() + &supported_stub(Some("postgres"), ""),
+            "[elsewhere]\nengine = 'plugin:t'\n".to_string() + &supported_stub(None, ""),
+        ] {
+            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+        }
+        // An unknown top-level key beside an unavailable profile is skipped,
+        // as it is beside supported ones, and not written back.
+        let extra = "unknown = 1\n".to_string() + &stub("a", "postgres") + &stub("x", "plugin:t");
+        let list = decode_profiles(&extra).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        assert!(!encode_profiles(&list).unwrap().contains("unknown"));
+    }
+
+    #[test]
+    fn an_unavailable_profile_keeps_its_place_and_the_file_is_not_moved_aside() {
+        with_home(|| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\nengine = 'postgres'\n\
+                 {}\n[[profiles]]\nid = 'b'\nname = 'B'\nhost = ''\ndatabase = ''\nuser = ''\nengine = 'sqlite'\npath = '/b.db'\n",
+                PLUGIN.replace("[[profiles]]\nid = \"ch\"", "[[profiles]]\nid = \"x\"")
+            );
+            let path = dbdelve_directory().unwrap().join(PROFILES_FILE);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &text).unwrap();
+
+            let list = load_profiles().expect("a mixed file loads");
+            assert!(
+                !path
+                    .with_file_name(format!("{PROFILES_FILE}.broken"))
+                    .exists()
+            );
+            save_profiles(&list).unwrap();
+
+            let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let ids: Vec<_> = saved["profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, ["a", "x", "b"]);
+        });
+    }
+
+    fn stub(id: &str, engine: &str) -> String {
+        format!(
+            "[[profiles]]\nid = '{id}'\nname = '{id}'\nhost = ''\ndatabase = ''\nuser = ''\nengine = '{engine}'\n"
+        )
+    }
+
+    /// The ids `interleaved` writes, an unavailable one marked `*`.
+    fn written(profiles: &[StoredProfile], unavailable: &[UnavailableProfile]) -> Vec<String> {
+        interleaved(profiles, unavailable)
+            .iter()
+            .map(|entry| match entry {
+                ProfileEntry::Supported(profile) => profile.id.clone(),
+                ProfileEntry::Unavailable(gone) => format!("{}*", gone.id),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unavailable_profiles_go_back_beside_the_profiles_they_followed() {
+        // z above everything, x after a, y after a and b.
+        let file = [
+            ("z", "plugin:t"),
+            ("a", "postgres"),
+            ("x", "plugin:t"),
+            ("b", "postgres"),
+            ("y", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let list = decode_profiles(&file).unwrap();
+        let c = decode_profiles(&stub("c", "postgres")).unwrap().profiles;
+        let order = |keep: &[&str]| {
+            let profiles: Vec<_> = list
+                .profiles
+                .iter()
+                .chain(&c)
+                .filter(|profile| keep.contains(&profile.id.as_str()))
+                .cloned()
+                .collect();
+            written(&profiles, &list.unavailable)
+        };
+        assert_eq!(order(&["a", "b"]), ["z*", "a", "x*", "b", "y*"]);
+        // a removed: x had nothing else above it.
+        assert_eq!(order(&["b"]), ["z*", "x*", "b", "y*"]);
+        // b removed: y falls back to a, after x.
+        assert_eq!(order(&["a"]), ["z*", "a", "x*", "y*"]);
+        // A new profile goes last.
+        assert_eq!(order(&["a", "b", "c"]), ["z*", "a", "x*", "b", "y*", "c"]);
+    }
+
+    #[test]
+    fn an_unavailable_profile_is_written_once_when_ids_repeat() {
+        // A hand-edited file: a twice, and an unavailable profile that is also a.
+        let file = [
+            ("a", "postgres"),
+            ("x", "plugin:t"),
+            ("a", "sqlite"),
+            ("a", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let list = decode_profiles(&file).expect("repeated ids load, as they do today");
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (2, 2));
+        // Each goes after the same occurrence of its nearest id, and only once.
+        assert_eq!(
+            written(&list.profiles, &list.unavailable),
+            ["a", "x*", "a", "a*"]
+        );
+        // With the first a gone, occurrences count from the a that is left:
+        // x is after it, and a*, whose second a is gone, falls back to it too.
+        assert_eq!(
+            written(&list.profiles[1..], &list.unavailable),
+            ["a", "x*", "a*"]
+        );
+    }
+
+    #[test]
+    fn a_save_that_changes_nothing_keeps_every_place_when_ids_repeat() {
+        let file = [
+            ("a", "postgres"),
+            ("b", "postgres"),
+            ("x", "plugin:t"),
+            ("a", "sqlite"),
+            ("y", "plugin:t"),
+        ]
+        .map(|(id, engine)| stub(id, engine))
+        .concat();
+        let ids = |text: &str| -> Vec<String> {
+            toml::from_str::<toml::Table>(text).unwrap()["profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = decode_profiles(&file).unwrap();
+        let saved = encode_profiles(&list).unwrap();
+        assert_eq!(ids(&saved), ["a", "b", "x", "a", "y"]);
+        let again = decode_profiles(&saved).unwrap();
+        assert_eq!(again, list);
+        assert_eq!(encode_profiles(&again).unwrap(), saved);
+    }
+
+    #[test]
+    fn an_alias_or_no_engine_is_still_a_supported_profile() {
+        let file = stub("a", "postgresql")
+            + &stub("b", " MySQL ")
+            + &stub("c", "x").replace("engine = 'x'\n", "");
+        let list = decode_profiles(&file).unwrap();
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (3, 0));
+    }
+
+    #[test]
+    fn an_engine_tag_that_is_not_a_string_is_an_unavailable_profile() {
+        let list = decode_profiles(&stub("a", "x").replace("engine = 'x'", "engine = 3")).unwrap();
+        assert_eq!(list.unavailable[0].engine, "3");
+    }
+
+    #[test]
+    fn a_supported_profile_that_will_not_decode_still_fails_the_file() {
+        let text = stub("a", "postgres") + "port = 'x'\n" + &stub("x", "plugin:t");
+        assert!(decode_profiles(&text).is_err());
+        assert_eq!(
+            decode_profiles(&text),
+            decoded_as_before(&text),
+            "today's words"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_profile_needs_an_id_and_a_name() {
+        assert!(decode_profiles(&PLUGIN.replace("id = \"ch\"\n", "")).is_err());
+        assert!(decode_profiles(&PLUGIN.replace("name = \"Oracle prod\"\n", "")).is_err());
+    }
+
+    #[test]
+    fn a_mixed_files_supported_profiles_decode_as_they_would_alone() {
+        let alone = include_str!("testdata/every-engine.toml")
+            .replace("next_query_id = 3", "next_query_id = 18446744073709551615");
+        let mixed = format!("{alone}\n{PLUGIN}");
+        let (now, before) = (
+            decode_profiles(&mixed).unwrap(),
+            decoded_as_before(&alone).unwrap(),
+        );
+        assert_eq!(now.profiles, before.profiles);
+        assert_eq!(
+            (now.active, now.fonts, now.settings, now.projects),
+            (
+                before.active,
+                before.fonts,
+                before.settings,
+                before.projects
+            )
+        );
+        assert_eq!(now.unavailable.len(), 1);
+    }
+
+    #[test]
+    fn a_mixed_file_saves_its_supported_profiles_as_a_plain_file_would() {
+        let mixed = format!("{}\n{PLUGIN}", include_str!("testdata/every-engine.toml"));
+        let mut saved: toml::Table =
+            toml::from_str(&encode_profiles(&decode_profiles(&mixed).unwrap()).unwrap()).unwrap();
+        saved["profiles"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["id"].as_str() != Some("ch"));
+        assert_eq!(
+            saved,
+            toml::from_str::<toml::Table>(include_str!("testdata/every-engine.resaved.toml"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_file_the_mixed_reader_cannot_hold_reads_as_it_does_today() {
+        // A toml::Table cannot hold a u64 above i64::MAX, so the mixed pass fails
+        // and the file falls back to today's decode: an unknown engine is a profile again
+        // (restore reads it as Postgres with its notice, as today).
+        let text = stub("a", "postgres")
+            + &stub("c", "zz-unknown")
+            + "next_query_id = 18446744073709551615\n";
+        assert_eq!(decode_profiles(&text), decoded_as_before(&text));
+        assert!(decode_profiles(&text).unwrap().unavailable.is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_profiles_identity_file_is_read_from_its_tunnel() {
+        let tunnel = format!("{PLUGIN}\n[profiles.ssh]\nhost = 'j'\nidentity_file = '/k/key'\n");
+        assert_eq!(
+            decode_profiles(&tunnel).unwrap().unavailable[0].identity_file(),
+            Some("/k/key")
+        );
+        assert_eq!(
+            decode_profiles(PLUGIN).unwrap().unavailable[0].identity_file(),
+            None
+        );
+    }
 
     #[test]
     fn a_leading_tilde_is_the_home_directory() {
@@ -1214,7 +2349,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             let profile = &profiles[0];
             assert_eq!(profile.mode, None);
             assert!(profile.confirmed.is_empty());
@@ -1251,7 +2386,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             assert_eq!(profiles.len(), 2);
             // Kept raw here; `restore_profile` is where an unreadable slug
             // becomes a mode, and where it decides which way to fail.
@@ -1281,6 +2416,7 @@ user = "shayan"
                 srv: None,
                 options: None,
                 login_database: None,
+                schema: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
                 next_query_id: Some(1),
@@ -1293,16 +2429,17 @@ user = "shayan"
                 open_objects: Vec::new(),
             };
 
-            save_profiles(
-                std::slice::from_ref(&stored),
-                Some(&stored.id),
-                &StoredFonts::default(),
-                &StoredSettings::default(),
-                &[],
-            )
+            save_profiles(&ProfileList {
+                profiles: vec![stored.clone()],
+                active: Some(stored.id.clone()),
+                fonts: Some(StoredFonts::default()),
+                settings: Some(StoredSettings::default()),
+                projects: Vec::new(),
+                unavailable: Vec::new(),
+            })
             .unwrap();
 
-            let (profiles, ..) = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles().unwrap();
             assert_eq!(profiles[0], stored);
         });
     }
@@ -1329,6 +2466,7 @@ user = "shayan"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1343,9 +2481,11 @@ user = "shayan"
                     schema: "public".into(),
                     name: "accounts".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::MaterializedView,
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: true,
                     bars: Vec::new(),
@@ -1354,9 +2494,11 @@ user = "shayan"
                     schema: "public".into(),
                     name: "total(integer)".into(),
                     routine: true,
+                    structure: false,
                     kind: RelationKind::default(),
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -1379,12 +2521,29 @@ user = "shayan"
     }
 
     #[test]
+    fn a_row_limit_reads_back_from_a_plain_number_with_zero_for_none() {
+        let limit = |settings: &str| {
+            toml::from_str::<ProfileFile>(&format!("[settings]\n{settings}"))
+                .expect("settings must decode")
+                .settings
+                .expect("settings were written")
+                .row_limit()
+        };
+        // What every build before "No limit" wrote.
+        assert_eq!(limit("preview_rows = 500"), Some(500));
+        assert_eq!(limit(""), Some(crate::explorer::PREVIEW_ROW_LIMIT));
+        assert_eq!(limit("preview_rows = 0"), None);
+    }
+
+    #[test]
     fn a_profile_written_before_a_field_existed_still_loads() {
         // Every field added after the first release is `serde(default)`, and this
         // is the file already on disk for anyone who has run dbdelve before. A
         // decode error here reads as "no profiles", which is what the next save
         // would then write back.
-        let (profiles, active, ..) = decode_profiles(
+        let ProfileList {
+            profiles, active, ..
+        } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -1411,6 +2570,8 @@ open_objects = []
         assert_eq!(profile.statement_timeout, None);
         // A profile predating tunnels connected directly, and still does.
         assert_eq!(profile.ssh, None);
+        // And on the server's own search_path.
+        assert_eq!(profile.schema, None);
     }
 
     /// A minimal profile the SSH tunnel tests vary just the `ssh` field of.
@@ -1433,6 +2594,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1497,6 +2659,30 @@ open_objects = []
     }
 
     #[test]
+    fn an_active_schema_survives_the_round_trip_through_toml_beside_a_tunnel() {
+        let profile = StoredProfile {
+            schema: Some(r#"Sales "EU""#.into()),
+            ssh: Some(SshTunnel {
+                host: "dbdelve-bastion".into(),
+                ..SshTunnel::default()
+            }),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
     fn no_tunnel_is_not_written_as_an_empty_section() {
         let file = ProfileFile {
             fonts: None,
@@ -1533,6 +2719,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -1546,9 +2733,11 @@ open_objects = []
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1604,6 +2793,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
             next_query_id: Some(7),
@@ -1617,9 +2807,11 @@ open_objects = []
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1661,6 +2853,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: Some(60),
             next_query_id: Some(1),
@@ -1690,7 +2883,7 @@ open_objects = []
     fn an_object_written_before_the_kind_existed_loads_as_a_table() {
         // A relation's tab is opened from what is on disk now, so a profile
         // written before the kind was stored has to name a kind anyway.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -1722,7 +2915,7 @@ active = true
         // Every profile on disk before a second engine existed has no `engine`
         // key at all, and must load as Postgres -- which is what it was
         // connecting as -- rather than fail to decode.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -1767,6 +2960,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -1780,9 +2974,11 @@ open_objects = []
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -1837,6 +3033,9 @@ open_objects = []
             }),
             settings: Some(StoredSettings {
                 theme: Some("Dark".into()),
+                match_system_appearance: Some(true),
+                light_theme: Some("GitHub Light".into()),
+                dark_theme: Some("Dark".into()),
                 chrome_font_size: Some(14.0),
                 editor_font_size: Some(18.0),
                 grid_font_size: Some(12.0),
@@ -1845,6 +3044,7 @@ open_objects = []
                 check_for_updates: Some(false),
                 color_titlebar: Some(false),
                 client_sort: Some(true),
+                welcomed: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -1880,6 +3080,7 @@ open_objects = []
                     srv: None,
                     options: None,
                     login_database: None,
+                    schema: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
                     next_query_id: Some(2),
@@ -1909,6 +3110,7 @@ open_objects = []
                     srv: None,
                     options: None,
                     login_database: None,
+                    schema: None,
                     editor_font_size: None,
                     statement_timeout: None,
                     next_query_id: None,
@@ -1933,8 +3135,9 @@ open_objects = []
         // A file written before `settings` existed has no `[settings]` table
         // at all, and that is what is on disk for everyone running dbdelve
         // today -- it has to keep reading as `None`, not as the defaults.
-        let (.., missing, _) =
-            decode_profiles("active = \"dev\"\n").expect("a file predating settings must load");
+        let missing = decode_profiles("active = \"dev\"\n")
+            .expect("a file predating settings must load")
+            .settings;
         assert_eq!(missing, None);
     }
 
@@ -1945,7 +3148,14 @@ open_objects = []
         assert!(decode_profiles("host = ").is_err());
         assert_eq!(
             decode_profiles(""),
-            Ok((Vec::new(), None, None, None, Vec::new()))
+            Ok(ProfileList {
+                profiles: Vec::new(),
+                active: None,
+                fonts: None,
+                settings: None,
+                projects: Vec::new(),
+                unavailable: Vec::new(),
+            })
         );
     }
 
@@ -2171,6 +3381,165 @@ open_objects = []
     }
 
     #[test]
+    fn the_saved_queries_are_every_query_file_and_no_scratch_buffer() {
+        // The sidebar lists this whether or not a tab is open, so a scratch
+        // file beside the queries must never read as one of them.
+        with_home(|| {
+            write_query("dev", "signups", "SELECT 2").expect("a query must write");
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            write_scratch("dev", 3, "SELECT 3").expect("tab 3 must write");
+
+            assert_eq!(saved_queries("dev"), ["daily", "signups"]);
+
+            delete_query("dev", "daily").expect("a query must delete");
+            assert_eq!(saved_queries("dev"), ["signups"]);
+            assert_eq!(read_scratch("dev", 3), Ok(Some("SELECT 3".to_string())));
+        });
+    }
+
+    /// Make `name`'s file unwritable and undeletable as a file, by putting
+    /// a directory where it would go.
+    fn block(profile_id: &str, file: &str) {
+        let path = query_directory(profile_id)
+            .expect("the id must be safe")
+            .join(file);
+        fs::create_dir_all(path.join("held")).expect("the blocker must be creatable");
+    }
+
+    #[test]
+    fn deleting_a_query_already_removed_outside_the_app_succeeds() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            fs::remove_file(query_path("dev", "daily").unwrap()).unwrap();
+            assert_eq!(delete_query("dev", "daily"), Ok(()));
+            assert_eq!(saved_queries("dev"), Vec::<String>::new());
+        });
+    }
+
+    #[test]
+    fn deleting_an_undeletable_query_reports_the_failure() {
+        with_home(|| {
+            block("dev", "daily.sql");
+            assert!(delete_query("dev", "daily").is_err());
+            assert_eq!(saved_queries("dev"), ["daily"]);
+        });
+    }
+
+    #[test]
+    fn a_rename_moves_the_file_and_a_failed_one_changes_nothing() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            assert_eq!(
+                save_query_as("dev", Some("daily"), "nightly", "SELECT 1 -- edited"),
+                Ok(())
+            );
+            assert_eq!(saved_queries("dev"), ["nightly"]);
+            assert_eq!(
+                read_query("dev", "nightly"),
+                Ok(Some("SELECT 1 -- edited".to_string()))
+            );
+
+            // An old name that will not take the text stops the rename.
+            block("dev", "held.sql");
+            assert!(save_query_as("dev", Some("held"), "kept", "SELECT 2").is_err());
+            assert_eq!(read_query("dev", "kept"), Ok(None));
+        });
+    }
+
+    #[test]
+    fn a_rename_that_only_changes_case_keeps_the_text() {
+        // On a case-insensitive filesystem the two names are one file: a
+        // write under the new name and a delete of the old one deletes both.
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+
+            assert_eq!(
+                save_query_as("dev", Some("daily"), "Daily", "SELECT 1"),
+                Ok(())
+            );
+
+            assert_eq!(saved_queries("dev"), ["Daily"]);
+            assert_eq!(read_query("dev", "Daily"), Ok(Some("SELECT 1".to_string())));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_or_renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").unwrap();
+            write_query("dev", "other", "SELECT 2").unwrap();
+            let directory = query_directory("dev").unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o300)).unwrap();
+            let hidden = fs::read_dir(&directory).is_err();
+            let saved = save_query_as("dev", None, "daily", "SELECT 9");
+            let renamed = save_query_as("dev", Some("other"), "daily", "SELECT 3");
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(saved.is_err());
+            assert!(renamed.is_err());
+            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".into())));
+            if hidden {
+                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 3".into())));
+            }
+        });
+    }
+
+    #[test]
+    fn racing_new_query_writes_install_only_one_complete_buffer() {
+        with_home(|| {
+            let path = query_path("dev", "daily").unwrap();
+            let ready = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let writers: Vec<_> = ["SELECT 1", "SELECT 2"]
+                    .into_iter()
+                    .map(|sql| {
+                        let path = &path;
+                        let ready = &ready;
+                        scope.spawn(move || {
+                            let result = write_file_with(path, sql, |from, to| {
+                                ready.wait();
+                                rename_query(from, to)
+                            });
+                            (sql, result)
+                        })
+                    })
+                    .collect();
+                writers
+                    .into_iter()
+                    .map(|writer| writer.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let winners: Vec<_> = results
+                .iter()
+                .filter(|(_, result)| result.is_ok())
+                .collect();
+            assert_eq!(winners.len(), 1);
+            assert_eq!(fs::read_to_string(&path).unwrap(), winners[0].0);
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        });
+    }
+
+    #[test]
+    fn a_name_another_query_has_in_another_case_is_refused() {
+        with_home(|| {
+            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            write_query("dev", "weekly", "SELECT 7").expect("a query must write");
+
+            assert!(save_query_as("dev", Some("daily"), "WEEKLY", "SELECT 1").is_err());
+            assert!(save_query_as("dev", None, "Weekly", "SELECT 9").is_err());
+
+            assert_eq!(
+                read_query("dev", "weekly"),
+                Ok(Some("SELECT 7".to_string()))
+            );
+            assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".to_string())));
+        });
+    }
+
+    #[test]
     fn deleting_one_tabs_scratch_leaves_the_others() {
         with_home(|| {
             write_scratch("dev", 0, "SELECT 0").expect("tab 0 must write");
@@ -2217,7 +3586,7 @@ open_objects = []
     fn a_profile_written_before_open_queries_existed_keeps_its_open_query() {
         // The file on disk for anyone running dbdelve today: one buffer, named in
         // `open_query`. Dropping either the field or the decode loses it.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -2262,6 +3631,7 @@ open_objects = []
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -2288,9 +3658,11 @@ open_objects = []
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
+                structure: false,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
+                origin: None,
                 filters: Vec::new(),
                 active: true,
                 bars: Vec::new(),
@@ -2325,21 +3697,26 @@ open_objects = []
         with_home(|| {
             let grid = StoredGrid {
                 columns: vec!["n".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
+                messages: Vec::new(),
             };
             let live_query = query_grid_key(0);
             let live_object = object_grid_key("public", "accounts", "");
@@ -2373,26 +3750,32 @@ open_objects = []
         with_home(|| {
             let small = StoredGrid {
                 columns: vec!["id".into(), "name".into()],
-                rows: vec![vec![Some("1".into()), None]],
+                rows: rows(vec![vec![Some("1".into()), None]]),
                 total_rows: 1,
+                stopped: None,
                 sort: vec![(0, true)],
                 order_by: vec![("created_at".into(), false)],
                 client_sort: Some(vec![("\"name\"".into(), false)]),
                 widths: vec![80.0, 160.0],
+                dragged: Vec::new(),
+                hidden: vec![("name".into(), 1)],
+                pinned: vec![("id".into(), 0)],
                 active: Some((0, 1)),
                 last_query: Some("select * from accounts".into()),
                 limit: Some(1_000),
                 filter: String::new(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: Some(EditTarget {
                     schema: "public".into(),
                     table: "accounts".into(),
                     columns: vec![Some("id".into()), None],
                     keys: vec![0],
+                    ..Default::default()
                 }),
                 data_types: vec![Some("int4".into()), None],
                 cell_types: Vec::new(),
+                plan: None,
+                messages: Vec::new(),
             };
             let key = query_grid_key(9);
             write_grid("dev", &key, &small).expect("a small grid must write");
@@ -2406,23 +3789,30 @@ open_objects = []
             // says the rest existed.
             let oversized = StoredGrid {
                 columns: vec!["n".into()],
-                rows: (0..GRID_ROW_CAP + 10)
-                    .map(|n| vec![Some(n.to_string())])
-                    .collect(),
+                rows: rows(
+                    (0..GRID_ROW_CAP + 10)
+                        .map(|n| vec![Some(n.to_string())])
+                        .collect(),
+                ),
                 total_rows: GRID_ROW_CAP + 10,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: Vec::new(),
                 client_sort: Some(Vec::new()),
                 widths: Vec::new(),
+                dragged: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
                 filter: String::new(),
-                showing_structure: false,
                 captured: 0,
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
+                messages: Vec::new(),
             };
             let big_key = query_grid_key(10);
             write_grid("dev", &big_key, &oversized).expect("an oversized grid must write");
@@ -2457,21 +3847,26 @@ open_objects = []
         with_home(|| {
             let filtered = StoredGrid {
                 columns: vec!["id".into()],
-                rows: vec![vec![Some("1".into())]],
+                rows: rows(vec![vec![Some("1".into())]]),
                 total_rows: 1,
+                stopped: None,
                 sort: Vec::new(),
                 order_by: vec![("\"id\"".into(), true)],
                 client_sort: None,
                 widths: Vec::new(),
+                dragged: Vec::new(),
+                hidden: Vec::new(),
+                pinned: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: Some(1_000),
                 filter: r#""state" = 'ok'"#.into(),
-                showing_structure: false,
                 captured: 1_700_000_000,
                 edit: None,
                 data_types: Vec::new(),
                 cell_types: Vec::new(),
+                plan: None,
+                messages: Vec::new(),
             };
             let key = object_grid_key("public", "accounts", "");
             write_grid("dev", &key, &filtered).expect("a filtered grid must write");
@@ -2509,6 +3904,7 @@ open_objects = []
 
         assert_eq!(grid.edit, None);
         assert!(grid.data_types.is_empty());
+        assert_eq!(grid.plan, None);
         assert_eq!(grid.rows, vec![vec![Some("1".to_string()), None]]);
     }
 
@@ -2516,7 +3912,7 @@ open_objects = []
     fn a_stored_object_written_before_filters_reads_back_unfiltered() {
         // The tab this profile had open was showing the whole relation, and
         // absent has to mean that rather than fail the decode.
-        let (profiles, ..) = decode_profiles(
+        let ProfileList { profiles, .. } = decode_profiles(
             "\
 [[profiles]]
 id = \"dbdelve-dev\"
@@ -2544,6 +3940,35 @@ name = \"accounts\"
     }
 
     #[test]
+    fn a_structure_tab_keeps_the_data_tab_it_came_from() {
+        let object = StoredObject {
+            schema: "public".into(),
+            name: "customers".into(),
+            routine: false,
+            structure: true,
+            kind: RelationKind::Table,
+            filter: String::new(),
+            filter_engine: None,
+            origin: Some(r#""id" = '42'"#.into()),
+            filters: Vec::new(),
+            active: false,
+            bars: Vec::new(),
+        };
+
+        let text = toml::to_string(&object).expect("an object must encode");
+        let decoded: StoredObject = toml::from_str(&text).expect("an object must decode");
+        assert_eq!(decoded, object);
+
+        let older = text
+            .lines()
+            .filter(|line| !line.starts_with("origin"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let decoded: StoredObject = toml::from_str(&older).expect("an older object must decode");
+        assert_eq!(decoded.origin, None);
+    }
+
+    #[test]
     fn two_tabs_on_one_relation_survive_the_round_trip_as_two() {
         // The whole point of the filter being stored: a restart that collapsed
         // these two into one would lose whichever tab it dropped.
@@ -2565,6 +3990,7 @@ name = \"accounts\"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -2579,9 +4005,11 @@ name = \"accounts\"
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::Table,
                     filter: String::new(),
                     filter_engine: None,
+                    origin: None,
                     filters: Vec::new(),
                     active: false,
                     bars: Vec::new(),
@@ -2590,9 +4018,11 @@ name = \"accounts\"
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
+                    structure: false,
                     kind: RelationKind::Table,
                     filter: r#""id" = '42'"#.into(),
                     filter_engine: Some("postgres".into()),
+                    origin: None,
                     filters: Vec::new(),
                     active: true,
                     bars: vec![StoredFilter {
@@ -2628,9 +4058,11 @@ name = \"accounts\"
             schema: "public".into(),
             name: "customers".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::Table,
             filter: r#"("state" = 'it''s ok') OR ("tier" LIKE '%2%' ESCAPE '\')"#.into(),
             filter_engine: Some("postgres".into()),
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -2668,6 +4100,7 @@ name = \"accounts\"
             srv: None,
             options: None,
             login_database: None,
+            schema: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),

@@ -7,13 +7,15 @@
 //! Everything here was a free function or a plain data type at the crate root.
 //! They moved out whole; nothing changed but their visibility.
 
+use std::rc::Rc;
+
 use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{CompletionProvider, EditorState, InputEvent};
 use serde::Deserialize;
 
 use crate::{
     Workspace, db,
-    db::{Engine, Syntax},
+    db::{Engine, EngineSpec, RegexMatch, SubstringMatch, Syntax},
     explorer::preview_sql,
     sql,
     sql::SortKey,
@@ -77,7 +79,7 @@ impl Operator {
     /// What the bar's own button shows: the SQL shape rather than the English,
     /// because the bar is read beside the statement it writes.
     pub(crate) fn symbol(self, engine: Engine) -> &'static str {
-        if engine.syntax() == Syntax::Mongo {
+        if engine.syntax() != Syntax::Sql {
             return self.mongo_symbol();
         }
         match self {
@@ -102,8 +104,8 @@ impl Operator {
         }
     }
 
-    /// MongoDB's filter documents have no `LIKE`: the same operators read as
-    /// the English they compile from.
+    /// MongoDB's filter documents and Redis's patterns have no `LIKE`: the
+    /// same operators read as the English they compile from.
     fn mongo_symbol(self) -> &'static str {
         match self {
             Self::Equals => "=",
@@ -130,7 +132,7 @@ impl Operator {
     /// What the dropdown row reads: the symbol and the English for it, so the
     /// list can be scanned by either.
     pub(crate) fn label(self, engine: Engine) -> &'static str {
-        if engine.syntax() == Syntax::Mongo {
+        if engine.syntax() != Syntax::Sql {
             return match self {
                 Self::Equals => "= equals",
                 Self::NotEquals => "!= not equals",
@@ -180,11 +182,22 @@ impl Operator {
     }
 
     /// Whether this engine can express the operator at all. Only the regex
-    /// match cannot: SQLite ships no `REGEXP` implementation, so the operator is
-    /// a syntax error until an application registers the function (spec §7).
-    /// SQL Server has none before 2025. MongoDB has `$regex`.
+    /// match cannot, on a SQL engine with no spelling for it
+    /// ([`RegexMatch::None`]). MongoDB has `$regex`.
     pub(crate) fn on(self, engine: Engine) -> bool {
-        self != Self::Regex || !matches!(engine, Engine::Sqlite | Engine::SqlServer)
+        self != Self::Regex
+            || engine.syntax() != Syntax::Sql
+            || engine.spec().sql.regex != RegexMatch::None
+    }
+
+    /// Whether the bar offers the operator on `column`, or on a bar with no
+    /// column picked yet. Everywhere but Redis that is [`Operator::on`]: a
+    /// `SCAN` narrows a key's name by glob and its type only exactly.
+    pub(crate) fn offered(self, engine: Engine, column: Option<&str>) -> bool {
+        match engine.syntax() {
+            Syntax::Redis => crate::redis_cmd::browse::offers(column, self),
+            Syntax::Sql | Syntax::Mongo => self.on(engine),
+        }
     }
 
     /// How the operator is written to disk. A name rather than an index, so
@@ -259,8 +272,9 @@ impl Conjunction {
 /// every predicate is derived from and the shape that goes to disk.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct FilterBar {
-    /// `None` until the dropdown has been used, which is a bar that narrows
-    /// nothing. Unread on a raw bar.
+    /// The column picked from the dropdown. `None` on a bar that never had
+    /// one, which narrows nothing unless it is raw, as a new bar starts out.
+    /// Unread on a raw bar.
     pub(crate) column: Option<String>,
     pub(crate) operator: Operator,
     pub(crate) conjunction: Conjunction,
@@ -271,13 +285,16 @@ pub(crate) struct FilterBar {
     pub(crate) value: String,
 }
 
-/// One filter bar on screen: [`FilterBar`] with its value in an input.
+/// One filter bar on screen: [`FilterBar`] with its value in an editor.
+///
+/// A code editor rather than an input, drawn one line tall, because only an
+/// editor highlights and completes, and a raw bar is SQL being written.
 pub(crate) struct FilterRow {
     pub(crate) column: Option<String>,
     pub(crate) operator: Operator,
     pub(crate) conjunction: Conjunction,
     pub(crate) raw: bool,
-    pub(crate) value: Entity<InputState>,
+    pub(crate) value: Entity<EditorState>,
     /// The value as of this bar's last Enter, which is all that reaches a
     /// statement or the file. The input's own text can be anything typed
     /// since, and changing another bar or reopening the tab must not run it.
@@ -286,18 +303,31 @@ pub(crate) struct FilterRow {
 
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
 /// that ran on every keystroke would put a half-typed predicate on the wire.
+///
+/// `completions` is what the bar offers while it is raw
+/// (`Session::filter_completions`).
 pub(crate) fn filter_row(
     engine: Engine,
     id: u64,
     bar: FilterBar,
+    completions: Option<Rc<dyn CompletionProvider>>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> FilterRow {
-    let placeholder = value_placeholder(engine, bar.raw, bar.operator);
     let applied = bar.value.clone();
+    let (raw, operator) = (bar.raw, bar.operator);
     let input = cx.new(|cx| {
-        let mut state = InputState::new(window, cx).placeholder(placeholder);
+        let mut state = EditorState::new(window, cx)
+            .line_number(false)
+            .folding(false)
+            .indent_guides(false)
+            .searchable(false)
+            .soft_wrap(false)
+            // Plain Enter goes to an open completion popup first, and is the
+            // apply otherwise.
+            .submit_on_enter(true);
         state.set_value(bar.value, window, cx);
+        shape_value(&mut state, engine, raw, operator, completions, window, cx);
         state
     });
     cx.subscribe(&input, move |workspace, input, event: &InputEvent, cx| {
@@ -316,11 +346,46 @@ pub(crate) fn filter_row(
     }
 }
 
+/// Dress a bar's value box for the shape the bar has. Raw, it is written in
+/// the engine's own language, highlighted and completed as the query editor
+/// is; a column's bar holds a value to compare against, where a keyword's
+/// colour or a column offered would only be noise.
+pub(crate) fn shape_value(
+    state: &mut EditorState,
+    engine: Engine,
+    raw: bool,
+    operator: Operator,
+    completions: Option<Rc<dyn CompletionProvider>>,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    state.set_highlighter(value_language(engine, raw), cx);
+    state.set_placeholder(value_placeholder(engine, raw, operator), window, cx);
+    state.lsp_mut().completion_provider = completions.filter(|_| raw);
+}
+
+/// The grammar a bar's value is highlighted with, `"text"` being none.
+pub(crate) fn value_language(engine: Engine, raw: bool) -> &'static str {
+    match (raw, engine.syntax()) {
+        (true, Syntax::Sql | Syntax::Mongo) => engine.syntax().highlighter(),
+        // A `MATCH` glob, which a shell grammar would only colour wrongly.
+        (true, Syntax::Redis) | (false, _) => "text",
+    }
+}
+
 pub(crate) fn value_placeholder(engine: Engine, raw: bool, operator: Operator) -> &'static str {
     match raw {
         true => engine.raw_filter_placeholder(),
         false => operator.placeholder(),
     }
+}
+
+/// Pasted text on one line, or `None` when it already is. A bar is one row
+/// tall, so a second line would sit out of sight; a space keeps the words
+/// apart where the line break did, which a raw predicate reads the same.
+pub(crate) fn one_line(text: &str) -> Option<String> {
+    text.contains(['\n', '\r'])
+        .then(|| text.replace("\r\n", " ").replace(['\n', '\r'], " "))
 }
 
 /// Every bar as last applied, unfinished ones included.
@@ -335,6 +400,15 @@ pub(crate) fn filter_bars(filters: &[FilterRow]) -> Vec<FilterBar> {
             value: row.applied.clone(),
         })
         .collect()
+}
+
+/// Whether a bar may compare `column` at all. A Redis key's name and type are
+/// what `SCAN` can narrow by; every column of the others is.
+pub(crate) fn filters_on(engine: Engine, column: &str) -> bool {
+    match engine.syntax() {
+        Syntax::Redis => crate::redis_cmd::browse::filters_on(column),
+        Syntax::Sql | Syntax::Mongo => true,
+    }
 }
 
 /// The bars that narrow anything, which is the same question as whether a bar
@@ -370,16 +444,12 @@ pub(crate) fn derived_filter(
         };
         folded = Some(match folded {
             None => predicate,
-            Some(left) => match engine {
-                Engine::MongoDb => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
-                Engine::Postgres
-                | Engine::MySql
-                | Engine::MariaDb
-                | Engine::Sqlite
-                | Engine::Snowflake
-                | Engine::SqlServer => {
-                    format!("({left}) {} ({predicate})", bar.conjunction.as_str())
+            Some(left) => match engine.syntax() {
+                Syntax::Mongo => crate::mql::browse::joined(bar.conjunction, &left, &predicate),
+                Syntax::Redis => {
+                    crate::redis_cmd::browse::joined(bar.conjunction, &left, &predicate)
                 }
+                Syntax::Sql => format!("({left}) {} ({predicate})", bar.conjunction.as_str()),
             },
         });
     }
@@ -399,18 +469,16 @@ pub(crate) fn bar_predicate(
         // Verbatim, and checked as a whole statement by `is_generated_select`
         // rather than inspected here: a filter dbdelve does not understand is
         // exactly what the gate is for (spec §2.3).
-        return (!value.is_empty()).then(|| match engine {
-            Engine::MongoDb => crate::mql::browse::raw_filter(value),
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::Sqlite
-            | Engine::Snowflake
-            | Engine::SqlServer => value.to_string(),
+        return (!value.is_empty()).then(|| match engine.syntax() {
+            Syntax::Mongo => crate::mql::browse::raw_filter(value),
+            Syntax::Redis => crate::redis_cmd::browse::raw_filter(value),
+            Syntax::Sql => value.to_string(),
         });
     }
     let column = bar.column.as_deref()?;
-    if !bar.operator.on(engine) || (bar.operator.takes_value() && value.is_empty()) {
+    if !bar.operator.offered(engine, Some(column))
+        || (bar.operator.takes_value() && value.is_empty())
+    {
         return None;
     }
     let data_type = columns
@@ -439,7 +507,7 @@ pub(crate) fn changed_filter(filter: &mut String, offset: &mut usize, typed: &st
 /// One column against one value under one operator, quoted the way the server
 /// will read it. `None` where the value does not add up to a predicate.
 ///
-/// A SQL-generating call site (`AGENTS.md`, engine divergences), and the only
+/// A SQL-generating call site (`docs/agents/engines.md`), and the only
 /// place a filter bar becomes SQL -- every operator composes here, through
 /// `quote_identifier` and `quote_value`, so there is one place a quote can be
 /// got wrong rather than one per operator.
@@ -450,19 +518,23 @@ pub(crate) fn filter_predicate(
     operator: Operator,
     value: &str,
 ) -> Option<String> {
-    match engine {
-        Engine::MongoDb => {
-            return crate::mql::browse::filter_predicate(column, data_type, operator, value);
-        }
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+    match engine.syntax() {
+        Syntax::Mongo => crate::mql::browse::filter_predicate(column, data_type, operator, value),
+        Syntax::Redis => crate::redis_cmd::browse::filter_predicate(column, operator, value),
+        Syntax::Sql => sql_predicate(engine.spec(), column, data_type, operator, value),
     }
-    let name = engine.quote_identifier(column);
-    let literal = |value: &str| engine.quote_value(value, data_type);
+}
+
+/// [`filter_predicate`] for a SQL engine, written from its spec alone.
+pub(crate) fn sql_predicate(
+    spec: &EngineSpec,
+    column: &str,
+    data_type: Option<&str>,
+    operator: Operator,
+    value: &str,
+) -> Option<String> {
+    let name = spec.quote_identifier(column);
+    let literal = |value: &str| spec.quote_value(value, data_type);
     let comparison = |symbol: &str| Some(format!("{name} {symbol} {}", literal(value)));
     // `<>` rather than `!=` on both of the negations, because it is the
     // spelling all three engines agree on; the dropdown says `!=` because that
@@ -479,7 +551,7 @@ pub(crate) fn filter_predicate(
         Operator::IsEmpty => Some(format!("{name} = {}", literal(""))),
         Operator::IsNotEmpty => Some(format!("{name} <> {}", literal(""))),
         Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith => {
-            Some(substring(engine, &name, data_type, operator, value))
+            Some(substring(spec, &name, data_type, operator, value))
         }
         Operator::InList | Operator::NotInList => {
             let items: Vec<_> = value
@@ -516,21 +588,29 @@ pub(crate) fn filter_predicate(
         // in the grammar the gate parses with, so the function form it has had
         // since 8.0.4 goes out instead. SQLite has no regex at all, which
         // `Operator::on` is what refuses (spec §7).
-        Operator::Regex => match engine {
-            Engine::Postgres => comparison("~"),
-            Engine::MySql => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
+        Operator::Regex => match spec.sql.regex {
+            RegexMatch::Tilde => comparison("~"),
+            RegexMatch::RegexpLike => Some(format!("REGEXP_LIKE({name}, {})", literal(value))),
             // MariaDB has no `REGEXP_LIKE`, and its infix `REGEXP` is not in
             // the grammar; `REGEXP_INSTR` is a plain function that matches
             // anywhere in the value.
-            Engine::MariaDb => Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value))),
-            // SQL Server has no regex before 2025's `REGEXP_LIKE`.
-            Engine::Sqlite | Engine::SqlServer => None,
+            RegexMatch::RegexpInstr => {
+                Some(format!("REGEXP_INSTR({name}, {}) > 0", literal(value)))
+            }
+            // Matches anywhere in the value, as `~` does; `regexp_full_match`
+            // would anchor it to the whole of it.
+            RegexMatch::RegexpMatches => Some(format!(
+                "regexp_matches(CAST({name} AS VARCHAR), {})",
+                literal(value)
+            )),
             // Not `REGEXP_LIKE`: Snowflake's anchors the pattern to the whole
             // value, where the other two match anywhere in it. Counting matches
             // asks the question the dropdown's entry has always meant.
-            Engine::Snowflake => Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value))),
-            // Written by `mql::browse::filter_predicate`, above.
-            Engine::MongoDb => None,
+            RegexMatch::RegexpCount => {
+                Some(format!("REGEXP_COUNT({name}, {}) > 0", literal(value)))
+            }
+            RegexMatch::Match => Some(format!("match(toString({name}), {})", literal(value))),
+            RegexMatch::None => None,
         },
     }
 }
@@ -539,28 +619,35 @@ pub(crate) fn filter_predicate(
 ///
 /// `LIKE` where the engine has an escape character for the wildcards the user's
 /// own value may hold, and exact substring arithmetic where it does not. Two
-/// engine divergences meet here (`AGENTS.md`, and spec §7):
+/// engine divergences meet here (`docs/agents/engines.md`, and spec §7):
 ///
 /// The escape is the engine's **default** rather than an `ESCAPE` clause naming
 /// it, because `tree_sitter_sequel` does not parse one and `is_generated_select`
 /// would refuse every `LIKE` this writes. Postgres and MySQL both default to
 /// the backslash, which is what [`like_pattern`] escapes with.
 ///
-/// **SQLite has no default escape character at all**, so a pattern is the wrong
-/// tool there: a value holding `%` or `_` would silently widen the match, which
-/// is the one failure this exists to prevent. `instr` and `substr` ask the same
-/// question with no pattern to escape. They are case-sensitive where SQLite's
-/// `LIKE` is not, which is the cost of the trade and is smaller than answering
-/// a question nobody asked.
+/// **SQLite has no default escape character at all**, and neither has DuckDB,
+/// so a pattern is the wrong tool there: a value holding `%` or `_` would
+/// silently widen the match, which is the one failure this exists to prevent.
+/// `instr` and `substr` ask the same question with no pattern to escape. They
+/// are case-sensitive where SQLite's `LIKE` is not, which is the cost of the
+/// trade and is smaller than answering a question nobody asked.
 pub(crate) fn substring(
-    engine: Engine,
+    spec: &EngineSpec,
     name: &str,
     data_type: Option<&str>,
     operator: Operator,
     value: &str,
 ) -> String {
-    let literal = engine.quote_literal(value);
-    if engine == Engine::Sqlite {
+    let literal = spec.quote_literal(value);
+    if matches!(
+        spec.sql.substring,
+        SubstringMatch::Instr | SubstringMatch::InstrCast
+    ) {
+        let name = match spec.sql.substring {
+            SubstringMatch::InstrCast => format!("CAST({name} AS VARCHAR)"),
+            _ => name.to_string(),
+        };
         return match operator {
             Operator::NotContains => format!("instr({name}, {literal}) = 0"),
             Operator::StartsWith => format!("instr({name}, {literal}) = 1"),
@@ -575,7 +662,7 @@ pub(crate) fn substring(
     }
     // No default escape here either, but there are exact functions for the
     // job, so there is no arithmetic to do. Case-sensitive, like SQLite's arm.
-    if engine == Engine::Snowflake {
+    if spec.sql.substring == SubstringMatch::Contains {
         let function = match operator {
             Operator::StartsWith => "STARTSWITH",
             Operator::EndsWith => "ENDSWITH",
@@ -590,8 +677,8 @@ pub(crate) fn substring(
     // T-SQL's `LIKE` has no default escape either, but a bracket makes any
     // character literal, so `[%]` is a percent sign -- and `[` itself has to be
     // bracketed, since it opens a character class there.
-    let escaped = match engine {
-        Engine::SqlServer => value
+    let escaped = match spec.sql.substring {
+        SubstringMatch::LikeBracketEscape => value
             .chars()
             .map(|character| match character {
                 '%' | '_' | '[' => format!("[{character}]"),
@@ -599,6 +686,10 @@ pub(crate) fn substring(
             })
             .collect(),
         _ => like_pattern(value),
+    };
+    let name = match spec.sql.substring {
+        SubstringMatch::LikeToString => format!("toString({name})"),
+        _ => name.to_string(),
     };
     let pattern = match operator {
         Operator::StartsWith => format!("{escaped}%"),
@@ -611,7 +702,7 @@ pub(crate) fn substring(
             Operator::NotContains => "NOT ",
             _ => "",
         },
-        engine.quote_value(&pattern, data_type)
+        spec.quote_value(&pattern, data_type)
     )
 }
 
@@ -735,7 +826,7 @@ pub(crate) fn relation_sql(
     relation: &str,
     filter: &str,
     sort: &[SortKey],
-    limit: usize,
+    limit: Option<usize>,
     offset: usize,
 ) -> String {
     let preview = preview_sql(engine, schema, relation, filter, limit, offset);
@@ -753,15 +844,12 @@ pub(crate) fn sort_expression(
     column: usize,
 ) -> Option<String> {
     let name = &columns.get(column)?.name;
-    match engine {
+    match engine.syntax() {
         // A document's fields are unique, and a position names nothing there.
-        Engine::MongoDb => return crate::mql::browse::sort_field(name),
-        Engine::Postgres
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Sqlite
-        | Engine::Snowflake
-        | Engine::SqlServer => {}
+        Syntax::Mongo => return crate::mql::browse::sort_field(name),
+        // Never written into a command: a key of the sort in memory, which is
+        // the only one Redis has (`Engine::sorts_on_server`).
+        Syntax::Redis | Syntax::Sql => {}
     }
     let unique = columns.iter().filter(|other| &other.name == name).count() == 1;
 
@@ -814,6 +902,15 @@ pub(crate) fn sort_columns(
 mod tests {
     use super::*;
     use crate::{db, db::RelationKind, explorer, explorer::PREVIEW_ROW_LIMIT, sql};
+
+    #[test]
+    fn a_pasted_predicate_lands_on_one_line_with_its_words_apart() {
+        assert_eq!(
+            one_line("id > 5\nAND name IS NULL\r\nOR x\ry").as_deref(),
+            Some("id > 5 AND name IS NULL OR x y")
+        );
+        assert_eq!(one_line("id > 5"), None);
+    }
 
     #[test]
     fn mongo_operators_read_as_english_not_like() {
@@ -1139,7 +1236,7 @@ mod tests {
             "t",
             &sql("hash", Operator::Equals, "0x00FF"),
             &[],
-            10,
+            Some(10),
             0,
         );
         assert!(
@@ -1222,7 +1319,8 @@ mod tests {
             r#""state" IS NOT NULL"#,
             r#""state" <> ''"#,
         ] {
-            let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, 100, 0);
+            let sql =
+                explorer::preview_sql(Engine::Postgres, "public", "accounts", filter, Some(100), 0);
             println!(
                 "{} {filter}",
                 sql::is_generated_select(Engine::Postgres, &sql)
@@ -1236,14 +1334,25 @@ mod tests {
         // is refused before it runs, which would make an operator unusable
         // rather than unsafe. Checked per engine, because the quoting differs.
         for engine in Engine::ALL {
-            for operator in Operator::ALL.into_iter().filter(|o| o.on(engine)) {
+            // The column Redis's bar compares by glob.
+            let column = if engine == Engine::Redis {
+                "key"
+            } else {
+                "state"
+            };
+            for operator in Operator::ALL
+                .into_iter()
+                .filter(|o| o.offered(engine, Some(column)))
+            {
                 let value = match operator {
                     Operator::Between => "1..9",
                     Operator::InList | Operator::NotInList => "a, b",
                     _ => "ok",
                 };
-                let filter = predicate(engine, operator, value).expect("applied");
-                let sql = explorer::preview_sql(engine, "public", "accounts", &filter, 100, 0);
+                let filter = bar_predicate(engine, &bar(Some(column), operator, value), &[])
+                    .expect("applied");
+                let sql =
+                    explorer::preview_sql(engine, "public", "accounts", &filter, Some(100), 0);
                 assert!(
                     sql::is_generated_select(engine, &sql),
                     "{} was refused: {sql}",
@@ -1347,7 +1456,7 @@ mod tests {
                 &key.referenced_schema,
                 &key.referenced_table,
                 &filter,
-                100,
+                Some(100),
                 0,
             );
             assert!(sql::is_generated_select(engine, &sql), "{sql} was refused");
@@ -1363,7 +1472,14 @@ mod tests {
             followed(Engine::Postgres, &key, Some("1'; DROP TABLE accounts --")).expect("a value");
         assert_eq!(filter, r#""id" = '1''; DROP TABLE accounts --'"#);
 
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1499,7 +1615,14 @@ mod tests {
             ],
         );
         assert_eq!(filter, r#"(("a" = '1') OR (id > 5)) AND ("c" = '3')"#);
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was refused"
@@ -1518,7 +1641,14 @@ mod tests {
                 ..FilterBar::default()
             }],
         );
-        let sql = explorer::preview_sql(Engine::Postgres, "public", "accounts", &filter, 100, 0);
+        let sql = explorer::preview_sql(
+            Engine::Postgres,
+            "public",
+            "accounts",
+            &filter,
+            Some(100),
+            0,
+        );
         assert!(
             !sql::is_generated_select(Engine::Postgres, &sql),
             "{sql} was admitted"
@@ -1556,9 +1686,11 @@ mod tests {
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::default(),
             filter: String::new(),
             filter_engine: None,
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1606,9 +1738,11 @@ mod tests {
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::default(),
             filter: r#"("state" ~ '^a') AND ("tier" = '2')"#.into(),
             filter_engine: None,
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![
@@ -1648,9 +1782,11 @@ mod tests {
             schema: "dbo".into(),
             name: "blobs_by_hash".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::default(),
             filter: r#""hash" = 0x00FF"#.into(),
             filter_engine: Some("mssql".into()),
+            origin: None,
             filters: Vec::new(),
             active: true,
             bars: vec![store::StoredFilter {
@@ -1685,9 +1821,11 @@ mod tests {
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
+            structure: false,
             kind: RelationKind::default(),
             filter: r#""state" = 'ok'"#.into(),
             filter_engine: None,
+            origin: None,
             filters: vec![("state".into(), "ok".into())],
             active: true,
             bars: Vec::new(),
@@ -1835,7 +1973,15 @@ mod tests {
     #[test]
     fn a_preview_asks_for_the_rows_its_tab_was_set_to() {
         assert_eq!(
-            relation_sql(Engine::Postgres, "public", "accounts", "", &[], 100, 0),
+            relation_sql(
+                Engine::Postgres,
+                "public",
+                "accounts",
+                "",
+                &[],
+                Some(100),
+                0
+            ),
             r#"SELECT * FROM "public"."accounts" LIMIT 100"#
         );
         // A raised limit still keeps the sort ahead of it, or the rows would be
@@ -1847,7 +1993,7 @@ mod tests {
                 "accounts",
                 "",
                 &[SortKey::new(r#""id""#, true)],
-                100_000,
+                Some(100_000),
                 0
             ),
             r#"SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 100000"#
@@ -1866,7 +2012,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1890,7 +2036,7 @@ mod tests {
             "accounts",
             r#""state" = 'ok'"#,
             &[SortKey::new(r#""id""#, true)],
-            100,
+            Some(100),
             200,
         );
 
@@ -1914,7 +2060,7 @@ mod tests {
             "accounts",
             "",
             &[SortKey::new(r#""id""#, false)],
-            PREVIEW_ROW_LIMIT,
+            Some(PREVIEW_ROW_LIMIT),
             0,
         );
 
@@ -1950,7 +2096,7 @@ mod tests {
                 "accounts",
                 &predicate,
                 &[SortKey::new(engine.quote_identifier("id"), true)],
-                100,
+                Some(100),
                 200,
             );
             assert!(

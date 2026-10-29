@@ -290,12 +290,19 @@ fn listed(text: &str, stage: Range<usize>) -> Option<Range<usize>> {
 /// A collection's page, as an object tab runs it: `explorer::preview_sql`'s
 /// Mongo arm. `filter` is a filter document's text, empty for every document.
 /// A zero offset is left out, as the SQL previews leave out `OFFSET 0`.
-pub(crate) fn find_preview(collection: &str, filter: &str, limit: usize, offset: usize) -> String {
+pub(crate) fn find_preview(
+    collection: &str,
+    filter: &str,
+    limit: Option<usize>,
+    offset: usize,
+) -> String {
     let mut statement = format!("{}.find({})", handle(collection), or_all(filter));
     if offset > 0 {
         statement.push_str(&format!(".skip({offset})"));
     }
-    statement.push_str(&format!(".limit({limit})"));
+    if let Some(limit) = limit {
+        statement.push_str(&format!(".limit({limit})"));
+    }
     statement
 }
 
@@ -378,12 +385,13 @@ fn paged_find(collection: &str, filter: &str, chain: &[Call<CursorMethod>]) -> O
         [skip, limit]
             if skip.method == CursorMethod::Skip && limit.method == CursorMethod::Limit =>
         {
-            (count(skip)?, count(limit)?)
+            (count(skip)?, Some(count(limit)?))
         }
-        [limit] if limit.method == CursorMethod::Limit => (0, count(limit)?),
+        [limit] if limit.method == CursorMethod::Limit => (0, Some(count(limit)?)),
+        [] => (0, None),
         _ => return None,
     };
-    if limit == 0 {
+    if limit == Some(0) {
         return None;
     }
     let preview = find_preview(collection, filter, limit, offset);
@@ -842,12 +850,16 @@ mod tests {
     #[test]
     fn a_preview_pages_with_skip_and_limit_and_counts_under_the_same_filter() {
         assert_eq!(
-            find_preview("events", "", 100, 0),
+            find_preview("events", "", Some(100), 0),
             r#"db.getCollection("events").find({}).limit(100)"#
         );
         assert_eq!(
-            find_preview("my \"odd\".coll", " {a: 1} ", 100, 200),
+            find_preview("my \"odd\".coll", " {a: 1} ", Some(100), 200),
             r#"db.getCollection("my \"odd\".coll").find({a: 1}).skip(200).limit(100)"#
+        );
+        assert_eq!(
+            find_preview("events", "", None, 0),
+            r#"db.getCollection("events").find({})"#
         );
         assert_eq!(
             count_documents("events", ""),
@@ -862,11 +874,13 @@ mod tests {
     #[test]
     fn every_generated_statement_passes_the_gate_and_reads() {
         for statement in [
-            find_preview("events", "", 100, 0),
-            find_preview("system.views", "{a: {$gt: 1}}", 1, 5),
-            find_preview("db", "{$or: [{a: 1}, {b: /x/i}]}", 500, 0),
+            find_preview("events", "", Some(100), 0),
+            find_preview("system.views", "{a: {$gt: 1}}", Some(1), 5),
+            find_preview("db", "{$or: [{a: 1}, {b: /x/i}]}", Some(500), 0),
+            find_preview("events", "{a: 1}", None, 0),
+            sorted(&find_preview("c", "", None, 0), &[key("a", false)]),
             sorted(
-                &find_preview("c", "{a: 1}", 100, 300),
+                &find_preview("c", "{a: 1}", Some(100), 300),
                 &[key("a", false), key("b c", true)],
             ),
             count_documents("events", ""),
@@ -889,10 +903,10 @@ mod tests {
             // A raw bar that was not one document, quoted into a string.
             r#"db.getCollection("c").find({"$and": ["{}).limit(1", {"a": 1}]}).limit(100)"#,
             r#"db.getCollection("c").find("{}").limit(100)"#,
-            // Unbounded: a limit of zero is none to the server, and no limit
-            // is none at all.
+            // A limit of zero is none to the server, which the builders
+            // spell by writing no limit.
             r#"db.getCollection("c").find({}).limit(0)"#,
-            r#"db.getCollection("c").find({})"#,
+            r#"db.getCollection("c").find({}).skip(5)"#,
             // Anything beyond the shape: a projection, another cursor method,
             // another database, a skip of zero, an order the builders do not
             // write, another spelling, a second statement.
@@ -924,7 +938,7 @@ mod tests {
     }
 
     fn filtered(filter: &str) -> String {
-        find_preview("c", filter, 100, 0)
+        find_preview("c", filter, Some(100), 0)
     }
 
     #[test]

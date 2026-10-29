@@ -8,23 +8,31 @@ mod commands;
 #[cfg(test)]
 mod e2e;
 mod editing;
+mod files;
 mod filters;
 mod forms;
+mod import_dialog;
+mod import_rows;
 mod modes;
 mod objects;
 mod profiles;
 mod projects;
 mod queries;
 mod tabs;
+mod welcome;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_component::menu::DropdownMenu;
 
+pub(crate) use import_dialog::PreviewGrid;
+pub(crate) use profiles::unavailable_reason;
+pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
 use crate::connection_form::{Origin, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
+use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
 use crate::*;
@@ -36,7 +44,7 @@ pub(crate) struct Settings {
     pub(crate) chrome_font_size: f32,
     pub(crate) editor_font_size: f32,
     pub(crate) grid_font_size: f32,
-    pub(crate) preview_rows: usize,
+    pub(crate) row_limit: Option<usize>,
     /// How much of the window the desktop shows through, for themes with no
     /// entry in `theme_opacity`. Nothing writes it any more; it is what a
     /// single shared value from before per-theme opacity restores as.
@@ -44,6 +52,12 @@ pub(crate) struct Settings {
     /// Opacity per theme, keyed by theme name: light glass starts at its own
     /// default, so one shared value painted a different look on each.
     pub(crate) theme_opacity: HashMap<String, f32>,
+    /// Whether the theme follows the system between `light_theme` and
+    /// `dark_theme`. The theme on screen is still the global; these name the
+    /// one put on when the system changes side.
+    pub(crate) match_system_appearance: bool,
+    pub(crate) light_theme: String,
+    pub(crate) dark_theme: String,
     /// One request to GitHub at launch. Off switch because local-first users
     /// get to say no to the only request DBDelve makes on its own.
     pub(crate) check_for_updates: bool,
@@ -54,6 +68,8 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// Whether the first-run greeting has played on the welcome surface.
+    pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -75,12 +91,20 @@ impl Default for Settings {
             chrome_font_size: layout::BODY_FONT_SIZE,
             editor_font_size: EDITOR_FONT_SIZE_DEFAULT,
             grid_font_size: layout::BODY_FONT_SIZE,
-            preview_rows: PREVIEW_ROW_LIMIT,
+            row_limit: Some(PREVIEW_ROW_LIMIT),
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
+            match_system_appearance: false,
+            light_theme: theme::starting_theme(theme::Appearance::Light)
+                .name
+                .to_string(),
+            dark_theme: theme::starting_theme(theme::Appearance::Dark)
+                .name
+                .to_string(),
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            welcomed: false,
             custom_keybindings: HashMap::new(),
         }
     }
@@ -94,6 +118,56 @@ impl Settings {
     pub(crate) fn set_opacity_for(&mut self, theme: &Theme, opacity: f32) {
         let opacity = opacity.clamp(theme::OPACITY_MIN, theme::OPACITY_MAX);
         self.theme_opacity.insert(theme.name.to_string(), opacity);
+    }
+
+    pub(crate) fn theme_for(&self, side: theme::Appearance) -> &str {
+        match side {
+            theme::Appearance::Light => &self.light_theme,
+            theme::Appearance::Dark => &self.dark_theme,
+        }
+    }
+
+    pub(crate) fn set_theme_for(&mut self, side: theme::Appearance, name: &str) {
+        let slot = match side {
+            theme::Appearance::Light => &mut self.light_theme,
+            theme::Appearance::Dark => &mut self.dark_theme,
+        };
+        *slot = name.to_string();
+    }
+
+    /// `None` while the theme does not match the system. A name nothing
+    /// answers to any more is that side's starting theme.
+    pub(crate) fn system_theme(&self, system: theme::Appearance) -> Option<Theme> {
+        self.match_system_appearance
+            .then(|| restored_theme(Some(self.theme_for(system)), system))
+    }
+
+    /// The side a theme list opens for, asked again whenever one opens: a
+    /// list waiting on an import scan may find matching turned on or off
+    /// since it was asked for.
+    pub(crate) fn list_side(
+        &self,
+        asked: Option<theme::Appearance>,
+        system: theme::Appearance,
+    ) -> Option<theme::Appearance> {
+        self.match_system_appearance
+            .then(|| asked.unwrap_or(system))
+    }
+
+    /// Where a theme picked from a list for `side` goes: the light or dark
+    /// slot it fills, if any, and whether it goes on screen now. A list that
+    /// outlived a change to matching still takes effect: a side's pick shows
+    /// once nothing is matched, and a plain pick while matching fills the
+    /// system's side, or the next change would take it off again.
+    pub(crate) fn pick_target(
+        &self,
+        side: Option<theme::Appearance>,
+        system: theme::Appearance,
+    ) -> (Option<theme::Appearance>, bool) {
+        let matching = self.match_system_appearance;
+        let slot = side.or(matching.then_some(system));
+        let shows = side.is_none_or(|side| !matching || side == system);
+        (slot, shows)
     }
 }
 
@@ -114,16 +188,6 @@ pub(crate) fn opacity_for(
     })
 }
 
-/// Which section of the Settings modal is in front. Transient like
-/// `sidebar_hidden` -- which tab was open is not a preference worth
-/// remembering across launches.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SettingsTab {
-    #[default]
-    General,
-    Keybindings,
-}
-
 /// Connections read from another client, held while the user picks the
 /// project they go into.
 pub(crate) struct PendingImport {
@@ -137,41 +201,48 @@ pub(crate) struct PendingImport {
 
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
+    /// Profiles on an engine this build cannot open, held as they were read
+    /// and written back by `remember_profiles`; never restored.
+    pub(crate) unavailable: Vec<store::UnavailableProfile>,
     pub(crate) settings: Settings,
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
-    pub(crate) switcher_open: bool,
-    /// The switcher's search field, there while the switcher is open.
-    pub(crate) connection_search: Option<Entity<InputState>>,
-    pub(crate) connection_search_needs_focus: bool,
-    /// Which of the search's matches up and down have moved to, and Enter
-    /// opens.
-    pub(crate) search_selection: usize,
+    /// Whether the menu bar last set lists Import Rows.
+    menu_imports_rows: bool,
     pub(crate) projects: Vec<store::StoredProject>,
-    /// The switcher's project name field, while a project is being named.
+    /// The welcome surface's project name field, while a project is being
+    /// named there.
     pub(crate) project_name: Option<Entity<InputState>>,
     /// The project that field renames; `None` while it names a new one.
     pub(crate) renaming_project: Option<String>,
     pub(crate) project_name_needs_focus: bool,
+    /// The field a row-limit menu turned into after Custom…, and whose limit
+    /// it sets. One at a time: it closes the moment it loses focus.
+    pub(crate) custom_limit: Option<(LimitTarget, Entity<InputState>)>,
+    pub(crate) custom_limit_needs_focus: bool,
     /// The project whose delete button has been clicked once and is waiting
     /// for the second.
     pub(crate) pending_project_deletion: Option<String>,
-    /// The groups expanded in the switcher, `None` being No project, in the
-    /// order they were expanded. Looking inside a group switches nothing, so
-    /// this is apart from the group of the connection in front.
-    pub(crate) expanded_groups: Vec<Option<String>>,
-    /// The connection whose "Add to a project" choices are unfolded in the
-    /// switcher, by id.
-    pub(crate) assigning_project: Option<String>,
-    /// Whether the settings modal is up. On the workspace rather than a
+    /// Whether the settings panel is up. On the workspace rather than a
     /// session, because nothing it changes belongs to one connection.
     pub(crate) settings_open: bool,
-    /// Which tab the settings modal is showing. Not persisted -- see
+    /// Which category the settings panel is showing. Not persisted -- see
     /// [`SettingsTab`].
     pub(crate) settings_tab: SettingsTab,
-    /// The action id currently listening for its next keystroke, if the
-    /// Keybindings tab has one mid-capture. Not persisted: a capture in
-    /// progress does not survive the modal closing, let alone a relaunch.
+    pub(crate) settings_search: Entity<InputState>,
+    /// What the settings search finds, worked out as it is typed into rather
+    /// than every frame. `None` while it is empty.
+    pub(crate) settings_matches: Option<Vec<SettingMatch>>,
+    /// The panel's own focus, so zoom can tell the panel being read from the
+    /// pane beside it.
+    pub(crate) settings_focus: FocusHandle,
+    pub(crate) settings_search_needs_focus: bool,
+    /// Whether the palette was opened from inside the settings panel -- a
+    /// theme or a font being picked -- and so hands the keyboard back there.
+    pub(crate) palette_from_settings: bool,
+    /// The action id currently listening for its next keystroke, if a
+    /// keyboard row has one mid-capture. Not persisted: a capture in progress
+    /// does not survive the panel closing, let alone a relaunch.
     pub(crate) rebinding: Option<&'static str>,
     /// Whether the explorer column is folded away. Not persisted: a hidden
     /// sidebar is a thing done for the next minute, not a preference.
@@ -204,7 +275,6 @@ pub(crate) struct Workspace {
     /// tick the way `row_panel.copied` does. One flag rather than a keyed
     /// slot: only one plan pane is ever on screen at a time.
     pub(crate) plan_copied: bool,
-    pub(crate) pending_removal: Option<String>,
     /// An import's read is still out, so a second click doesn't start another
     /// round of Keychain prompts whose summary would say all were duplicates.
     pub(crate) importing: bool,
@@ -215,6 +285,9 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    /// Statements written for data files opened before their profile had
+    /// connected: profile id, query tab, statement. Run once it has.
+    pub(crate) runs_on_connect: Vec<(String, u64, String)>,
     /// Why the welcome surface's name field refused what was typed: a line
     /// of its own, so a refusal never covers the notice, which may be the
     /// only word that the profiles file failed to load.
@@ -222,6 +295,16 @@ pub(crate) struct Workspace {
     /// The welcome surface's half of `editor_needs_focus`: set when whatever
     /// held focus over it has gone, applied on the next frame.
     pub(crate) welcome_needs_focus: bool,
+    /// The welcome surface's connection URL field. Kept rather than built
+    /// with the surface: a fresh one every frame would lose what was typed.
+    pub(crate) welcome_url: Entity<InputState>,
+    /// When the welcome surface last came on screen, and whether it was
+    /// greeting a first run. `None` while something else is in front, so it
+    /// enters again the next time it is shown.
+    pub(crate) welcome_entrance: Option<welcome::Entrance>,
+    /// A column a structure tab asked to see, waiting for its data tab's rows:
+    /// the tab's id and the column's name.
+    pub(crate) reveal_on_rows: Option<(u64, String)>,
     /// Whether `store::load_profiles` failed and could not move the file it
     /// failed on aside. Set once at startup and never cleared: the file is
     /// still sitting there, and a session that never saw it must not be the
@@ -232,22 +315,79 @@ pub(crate) struct Workspace {
     /// snapshot of what the catalog held and which tab was in front, and both
     /// can move underneath it — so it is thrown away on the way out rather
     /// than kept and refreshed.
-    pub(crate) palette: Option<Entity<ListState<Palette>>>,
+    pub(crate) palette: Option<Entity<Palette>>,
+    /// The rows last confirmed in the palette, by scope and label, newest
+    /// first, for its Recent group. Kept for the session only.
+    pub(crate) palette_recents: Vec<(Scope, String)>,
+    /// The projects folded in the palette's Connections scope, by name. Kept
+    /// for the session only, and never the one in front as a palette opens.
+    pub(crate) collapsed_projects: HashSet<String>,
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
-    /// The opacity field in the settings modal. Kept here rather than built
+    /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
     pub(crate) opacity_input: Entity<InputState>,
     /// The window's own focus, for the moments when nothing inside it can hold
     /// any. See [`Focus::Window`].
     pub(crate) focus: FocusHandle,
+    /// The dialogs' own, so `enter` answers the one in front instead of
+    /// editing the buffer or the grid it covers.
+    pub(crate) dialog_focus: FocusHandle,
+    /// Which dialog was in front last frame, so a change of it moves the
+    /// keyboard to the one now there.
+    pub(crate) dialog_in_front: std::cell::Cell<Option<&'static str>>,
+    /// The button `enter` presses in it, counted from the right.
+    pub(crate) dialog_choice: std::cell::Cell<usize>,
+    /// What held the keyboard when the first dialog went up.
+    pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
 impl Workspace {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let row_panel_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Filter columns and values…")
+                .clean_on_escape()
+        });
+        cx.subscribe(
+            &row_panel_search,
+            |workspace, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    if let Some((_, _, filter)) = workspace.active_row_panel() {
+                        *filter = value;
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        let settings_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        cx.subscribe(&settings_search, |workspace, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                workspace.search_settings(cx);
+            }
+        })
+        .detach();
+        let welcome_url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Paste a connection URL")
+                .clean_on_escape()
+        });
+        cx.subscribe_in(
+            &welcome_url,
+            window,
+            |workspace, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => workspace.submit_welcome_url(window, cx),
+                _ => {}
+            },
+        )
+        .detach();
         let opacity_input = cx.new(|cx| InputState::new(window, cx));
         // With the window, because committing reinstalls the theme. Enter and
         // blur both count as done: a percentage is short enough that clicking
@@ -262,25 +402,32 @@ impl Workspace {
             },
         )
         .detach();
+        cx.observe_window_appearance(window, |workspace, window, cx| {
+            workspace.follow_system_appearance(window, cx);
+        })
+        .detach();
 
         let mut workspace = Self {
             profiles: Vec::new(),
+            unavailable: Vec::new(),
             settings: Settings::default(),
             active: 0,
             form: None,
-            switcher_open: false,
-            connection_search: None,
-            connection_search_needs_focus: false,
-            search_selection: 0,
+            menu_imports_rows: false,
             projects: Vec::new(),
             project_name: None,
             renaming_project: None,
             project_name_needs_focus: false,
+            custom_limit: None,
+            custom_limit_needs_focus: false,
             pending_project_deletion: None,
-            expanded_groups: Vec::new(),
-            assigning_project: None,
             settings_open: false,
             settings_tab: SettingsTab::default(),
+            settings_search,
+            settings_matches: None,
+            settings_focus: cx.focus_handle(),
+            settings_search_needs_focus: false,
+            palette_from_settings: false,
             rebinding: None,
             sidebar_hidden: false,
             chrome_zoom: 100,
@@ -296,9 +443,14 @@ impl Workspace {
             row_panel: views::RowPanel {
                 on_screen: Default::default(),
                 copied: None,
+                search: row_panel_search,
+                searched: Default::default(),
+                inputs: None,
+                focus_input: false,
+                typing: None,
+                revealed: Default::default(),
             },
             plan_copied: false,
-            pending_removal: None,
             importing: false,
             pending_import: None,
             importable: crate::import::Source::ALL
@@ -306,20 +458,37 @@ impl Workspace {
                 .filter(|source| source.found())
                 .collect(),
             welcome_notice: None,
+            runs_on_connect: Vec::new(),
             project_name_error: None,
             welcome_needs_focus: true,
+            welcome_url,
+            welcome_entrance: None,
+            reveal_on_rows: None,
             store_unreadable: false,
             next_generation: 0,
             palette: None,
+            palette_recents: Vec::new(),
+            collapsed_projects: HashSet::new(),
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
+            dialog_focus: cx.focus_handle(),
+            dialog_in_front: std::cell::Cell::default(),
+            dialog_choice: std::cell::Cell::default(),
+            focus_before_dialog: std::cell::RefCell::default(),
             newer_release: None,
         };
 
         let mut load_failure = None;
         match store::load_profiles() {
-            Ok((profiles, active, stored_fonts, stored_settings, projects)) => {
+            Ok(store::ProfileList {
+                profiles,
+                active,
+                fonts: stored_fonts,
+                settings: stored_settings,
+                projects,
+                unavailable,
+            }) => {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let stored_settings = stored_settings.unwrap_or_default();
@@ -342,7 +511,22 @@ impl Workspace {
                     .flatten()
                     .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
                     .collect();
-                let restored = restored_theme(stored_settings.theme.as_deref());
+                let system = theme::Appearance::of_system(window.appearance());
+                workspace.settings.match_system_appearance =
+                    stored_settings.match_system_appearance.unwrap_or(false);
+                // Through the list, so a theme gone since is named as the one
+                // it falls back to rather than as nothing at all.
+                for (side, stored) in [
+                    (theme::Appearance::Light, &stored_settings.light_theme),
+                    (theme::Appearance::Dark, &stored_settings.dark_theme),
+                ] {
+                    let name = restored_theme(stored.as_deref(), side).name;
+                    workspace.settings.set_theme_for(side, name);
+                }
+                let restored = workspace
+                    .settings
+                    .system_theme(system)
+                    .unwrap_or_else(|| restored_theme(stored_settings.theme.as_deref(), system));
                 install_theme(
                     restored.with_opacity(workspace.settings.opacity_for(&restored)),
                     window,
@@ -362,22 +546,22 @@ impl Workspace {
                             .and_then(|stored| stored.editor_font_size)
                     }),
                 );
-                // A hand-edited value outside the choices the controls offer
-                // is unreachable by the controls that set it, and leaves no
-                // chip highlighted either -- so it is rejected rather than
-                // clamped.
-                workspace.settings.preview_rows = stored_settings
-                    .preview_rows
-                    .filter(|rows| explorer::ROW_LIMITS.contains(rows))
-                    .unwrap_or(PREVIEW_ROW_LIMIT);
+                workspace.settings.row_limit = stored_settings.row_limit();
                 workspace.settings.check_for_updates =
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.welcomed = welcome::welcomed(
+                    stored_settings.welcomed,
+                    !profiles.is_empty() || !unavailable.is_empty(),
+                );
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
                     .unwrap_or_default();
+                // Ahead of the restore, which must not prune grids an
+                // unavailable profile under the same id still owns.
+                workspace.unavailable = unavailable;
                 for stored in profiles {
                     workspace.restore_profile(stored, window, cx);
                 }
@@ -396,6 +580,7 @@ impl Workspace {
                     .profiles
                     .iter()
                     .map(|profile| profile.id.as_str())
+                    .chain(workspace.unavailable.iter().map(|gone| gone.id.as_str()))
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
             }
@@ -462,55 +647,49 @@ impl Workspace {
             .detach();
         }
 
-        // The settings modal owns the keyboard while it is up, and an
-        // interceptor is the only place that can give it to it: GPUI matches a
+        // A rebind capture takes the next keystroke whatever it is, and an
+        // interceptor is the only place that can give it one: GPUI matches a
         // keystroke against the keymap and dispatches the action *before* any
-        // element listener runs, so a capture handler on the modal would see
-        // `cmd+enter` only after it had already run the query underneath. It is
-        // also the only place early enough to read back a chord the app already
-        // has bound, which is most of what a rebind is for.
+        // element listener runs, so a capture handler on the row would see
+        // `cmd+enter` only after it had already run the query. It is also the
+        // only place early enough to read back a chord the app already has
+        // bound, which is most of what a rebind is for. With no capture in
+        // progress the panel is just another surface, and keys go where focus
+        // sends them.
         let this = cx.weak_entity();
         cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = event.keystroke.clone();
             this.update(cx, |workspace, cx| {
-                // The palette opens over the modal (a font is picked from it) and
-                // holds the keyboard while it does.
-                if !workspace.settings_open
-                    || workspace.palette.is_some()
-                    || keybindings::is_modifier(&keystroke.key)
+                // The palette opens over the panel and holds the keyboard
+                // while it does, as the connection form does in its place.
+                let Some(id) = workspace.rebinding.filter(|_| {
+                    workspace.settings_open
+                        && workspace.palette.is_none()
+                        && workspace.form.is_none()
+                }) else {
+                    return;
+                };
+                // Starting a capture puts focus in the panel, so focus
+                // anywhere else is a click elsewhere: a change of mind, and
+                // the key is for whatever took focus. A window focused on
+                // nothing is not elsewhere: that is a button pressed from the
+                // keyboard and unmounted, which `on_focus_lost` hands back to
+                // the panel.
+                if window.focused(cx).is_some()
+                    && !workspace.settings_focus.contains_focused(window, cx)
                 {
+                    workspace.cancel_rebind(cx);
                     return;
                 }
-                match (workspace.rebinding, keystroke.key.as_str()) {
-                    // Passed on: with nothing mid-capture, escape is what
-                    // closes the modal.
-                    (None, "escape") => return,
-                    (Some(_), "escape") => workspace.cancel_rebind(cx),
-                    // `unparse`, not `to_string` -- the latter is the glyphs a
-                    // menu draws, and nothing reads those back.
-                    (Some(id), _) => workspace.apply_rebind(id, keystroke.unparse(), cx),
-                    // Owning the keyboard was written when nothing in the
-                    // modal could be typed into, and a field that cannot see
-                    // a keystroke is a field nobody can fill. A capture in
-                    // progress still outranks it -- that is the arm above.
-                    //
-                    // Only what the field can actually consume, though: every
-                    // chord the app binds is `secondary-`, so passing those on
-                    // too would close the tab behind the modal on `cmd-w`. The
-                    // clipboard keys are the exception -- the input binds them
-                    // in its own context, which dispatch reaches before
-                    // anything global.
-                    (None, _)
-                        if workspace.opacity_input.focus_handle(cx).is_focused(window)
-                            && (!keystroke.modifiers.secondary()
-                                || matches!(
-                                    keystroke.key.as_str(),
-                                    "a" | "c" | "v" | "x" | "z"
-                                )) =>
-                    {
-                        return;
-                    }
-                    (None, _) => {}
+                if keybindings::is_modifier(&keystroke.key) {
+                    return;
+                }
+                if keystroke.key == "escape" {
+                    workspace.cancel_rebind(cx);
+                } else {
+                    // `unparse`, not `to_string` -- the latter is the glyphs
+                    // a menu draws, and nothing reads those back.
+                    workspace.apply_rebind(id, keystroke.unparse(), cx);
                 }
                 cx.stop_propagation();
             })
@@ -518,16 +697,28 @@ impl Workspace {
         })
         .detach();
 
-        // Buffers are otherwise written only when one is swapped for another,
-        // so without this everything typed since the last swap dies with the
-        // process -- which is the one moment a person expects it to be kept.
+        // A button pressed from the keyboard holds focus, and in the settings
+        // panel one can be gone the next frame -- Reset once there is nothing
+        // left to reset, Edit while its row waits for a key, a row the search
+        // no longer finds. A window focused on nothing has every binding dead,
+        // so the panel takes the keyboard back for it.
+        cx.on_focus_lost(window, |workspace, window, cx| {
+            if workspace.settings_open
+                && window.focus_lost_restore_target(cx).as_ref() == Some(&workspace.settings_focus)
+            {
+                workspace.settings_focus.focus(window, cx);
+            }
+        })
+        .detach();
+
+        // Finish writes synchronously: the process is going, and nothing
+        // would wait for background work to finish.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             async {}
         })
         .detach();
-        // Closing the window does not quit the application, so without this the
-        // red button is a way to lose everything typed since the last swap.
+        // Window release also persists when the window closes without Quit.
         cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
             .detach();
 
@@ -696,9 +887,12 @@ impl Workspace {
     /// one holds focus, a cell being edited included, and the chrome
     /// everywhere else.
     fn zoom_target(&self, window: &Window, cx: &App) -> FontSlot {
-        // Settings and the palette float over the panes, and what is being
-        // read then is them, whichever pane kept focus underneath.
-        if self.settings_open || self.palette.is_some() {
+        // The palette floats over the panes, and what is being read then is
+        // it, whichever pane kept focus underneath. The settings panel sits
+        // beside them, and counts only while it holds the keyboard.
+        if self.palette.is_some()
+            || (self.settings_open && self.settings_focus.contains_focused(window, cx))
+        {
             return FontSlot::Chrome;
         }
         let Some(session) = self.profile().map(|profile| &profile.session) else {
@@ -755,11 +949,11 @@ impl Workspace {
     /// reason the zoom is, and deliberately not applied to the tabs already
     /// open: their row count is a property of those rows, and changing a
     /// default must never re-run a query nobody asked to re-run.
-    pub(crate) fn set_preview_rows(&mut self, rows: usize, cx: &mut Context<Self>) {
-        if self.settings.preview_rows == rows {
+    pub(crate) fn set_default_row_limit(&mut self, rows: Option<usize>, cx: &mut Context<Self>) {
+        if self.settings.row_limit == rows {
             return;
         }
-        self.settings.preview_rows = rows;
+        self.settings.row_limit = rows;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -783,7 +977,7 @@ impl Workspace {
     }
 
     /// The sorting a new tab starts with. Not applied to the tabs already
-    /// open, for the reason `set_preview_rows` is not: each holds its own.
+    /// open, for the reason `set_default_row_limit` is not: each holds its own.
     pub(crate) fn set_client_sort(&mut self, client: bool, cx: &mut Context<Self>) {
         if self.settings.client_sort == client {
             return;
@@ -871,27 +1065,76 @@ impl Workspace {
             }
         });
     }
+
+    /// The surface under the titlebar, with the settings panel docked beside
+    /// it while open. Beside rather than over: the surface narrows, so a
+    /// setting is changed with what it changes still in view. The sidebar
+    /// keeps its width through that: its panel is `flex_none`, so the content
+    /// beside it is what gives way, and `settle_sidebar` puts it back at
+    /// `sidebar_width` if a squeeze ever moved it, and on a window too narrow
+    /// for both what does not fit is cut off rather than drawn under the
+    /// panel's frost.
+    fn beside_settings(&self, surface: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(surface),
+            )
+            .children(self.settings_open.then(|| render_settings_panel(self, cx)))
+            .into_any_element()
+    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
-        self.settle_sidebar(window, cx);
-        self.row_panel.on_screen.set(false);
-        // Every way the switcher closes ends here, so this is the one place
-        // its name field is put away -- before the focus handoff below. The
-        // welcome surface has the field too, and keeps it while in front.
-        if !self.switcher_open {
-            if !(self.profiles.is_empty() && self.form.is_none()) {
-                self.drop_project_name();
-            }
-            self.drop_connection_search();
+        let imports_rows = self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .active_object()
+                .is_some_and(|tab| tab.takes_imports(profile.config.engine()))
+        });
+        if imports_rows != self.menu_imports_rows {
+            self.menu_imports_rows = imports_rows;
+            cx.set_menus(crate::app_menus(imports_rows));
         }
-        // Deferred to render for the `&mut Window` a background task does not
-        // have: the catalog that names these tabs resolves off-thread, and a
-        // grid cannot be built without a window.
+        self.settle_sidebar(window, cx);
+        self.reveal_landed_column(window, cx);
+        if !self.row_panel.on_screen.get() {
+            self.row_panel.revealed.take();
+        }
+        self.row_panel.on_screen.set(false);
+        self.row_panel.searched.set(false);
+        // The name field is the welcome surface's, and whatever replaces that
+        // surface ends here, so this is the one place it is put away --
+        // before the focus handoff below.
+        if !(self.profiles.is_empty() && self.form.is_none()) {
+            self.drop_project_name();
+        }
+        // Every way the connection form opens ends here too. Its branch below
+        // returns before painting the panel, so one left open would come back
+        // when the form closes, a capture in progress still listening.
+        // Dropped rather than closed: the form takes the keyboard.
+        if self.form.is_some() && self.settings_open {
+            self.drop_settings(window, cx);
+        }
+        // Both deferred to render for the `&mut Window` a background task
+        // does not have: a connect finds the picked database gone, and the
+        // catalog that names these tabs resolves, off-thread, and neither a
+        // tab can be closed nor a grid built without a window.
+        self.leave_database_left_behind(window, cx);
         self.restore_objects(window, cx);
         self.sync_page_input(window, cx);
+        self.sync_row_panel_filter(window, cx);
+        self.sync_row_panel_inputs(window, cx);
+        self.sync_import_sql(window, cx);
         // Where a query tab that reached the front without `activate_tab` gets
         // its snapshot read. `session.active` is written in three places --
         // `Session::new`, `activate_tab` and `escape` -- and the first and last
@@ -913,7 +1156,16 @@ impl Render for Workspace {
 
         // Deferred for the same reason plus one: an element has to be mounted
         // before it can take focus.
+        //
+        // Never while the form is up, which is drawn in the tab's place: the
+        // form's field is focused first, and the tab's focus after it would
+        // take it -- which is what closing the palette asks for just before a
+        // row of it opens the form. The ask waits for the form to close.
+        let form_open = self.form.is_some();
         let take_focus = self.profile_mut().and_then(|profile| {
+            if form_open {
+                return None;
+            }
             if profile.session.naming {
                 let wanted = profile.session.save_name_needs_focus;
                 return wanted.then(|| {
@@ -934,12 +1186,16 @@ impl Render for Workspace {
                 .iter()
                 .position(|key| profile.session.tab_of(key) == Some(profile.session.active))
             {
-                crate::scroller::scroll_to("tab-strip", index, cx);
+                crate::scroller::scroll_to("tab-strip", "", index, cx);
             }
             // Whatever the surface in front is: a keystroke reaches the
             // workspace along the focused element's dispatch path, so a
             // surface with nothing focused makes every keybinding dead.
             let focus = match profile.session.active {
+                // Under the import dialog, which only stops the mouse: a
+                // buffer or grid holding focus there would take keys for a
+                // surface nobody can see.
+                _ if profile.session.import_rows.is_some() => Focus::Window,
                 // No tab at all is still a surface: the window holds focus
                 // for the bindings that open one.
                 Tab::Query(id) => match profile.session.query_tab(id) {
@@ -955,10 +1211,12 @@ impl Render for Workspace {
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
                     // A routine's tab is read: nothing in it takes a
-                    // keystroke. The window still has to hold focus, or the
+                    // keystroke; a structure tab's grid takes focus on a click. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
+                    Some(ObjectBody::Routine(_) | ObjectBody::Structure { .. }) | None => {
+                        Focus::Window
+                    }
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -977,15 +1235,15 @@ impl Render for Workspace {
             && self.profiles.is_empty()
             && std::mem::take(&mut self.welcome_needs_focus)
         {
-            self.focus.focus(window, cx);
+            self.welcome_url.focus_handle(cx).focus(window, cx);
         }
-        if std::mem::take(&mut self.project_name_needs_focus)
-            && let Some(input) = &self.project_name
+        if std::mem::take(&mut self.custom_limit_needs_focus)
+            && let Some((_, input)) = &self.custom_limit
         {
             input.focus_handle(cx).focus(window, cx);
         }
-        if std::mem::take(&mut self.connection_search_needs_focus)
-            && let Some(input) = &self.connection_search
+        if std::mem::take(&mut self.project_name_needs_focus)
+            && let Some(input) = &self.project_name
         {
             input.focus_handle(cx).focus(window, cx);
         }
@@ -997,17 +1255,40 @@ impl Render for Workspace {
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
+        // After the tab's own focus, which a context menu closing over the
+        // sidebar can ask for in the same frame the row's field opens.
+        if let Some(profile) = self.profile_mut()
+            && std::mem::take(&mut profile.session.query_rename_needs_focus)
+            && let Some(rename) = &profile.session.query_rename
+        {
+            let input = rename.input.clone();
+            input.focus_handle(cx).focus(window, cx);
+            input.update(cx, |input, cx| input.select_all(window, cx));
+        }
+        if std::mem::take(&mut self.settings_search_needs_focus) && self.settings_open {
+            self.settings_search.focus_handle(cx).focus(window, cx);
+        }
 
         // Last, and unconditionally: the palette is modal, and it holds the
         // keyboard against anything above that just claimed it. One a modal
         // cannot be typed into is one that cannot be dismissed either.
-        if let Some(list) = &self.palette {
-            let handle = list.focus_handle(cx);
+        if let Some(palette) = &self.palette {
+            let handle = palette.focus_handle(cx);
             if !handle.is_focused(window) {
                 handle.focus(window, cx);
             }
         }
 
+        if let Some(form) = &mut self.form {
+            // Opened from the welcome surface, whose contours are already up.
+            form.backdrop_shown |= self.welcome_entrance.is_some();
+            form.sync_placeholders(window, cx);
+        }
+        if self.form.is_some() || self.profile().is_some() {
+            self.welcome_entrance = None;
+        } else {
+            self.begin_welcome(cx);
+        }
         if self.form.is_some() {
             return div()
                 .id("connection-form")
@@ -1016,6 +1297,7 @@ impl Render for Workspace {
                 // has: without it the form's bindings dispatch nowhere the
                 // moment no field holds focus.
                 .track_focus(&self.focus)
+                .key_context("ConnectionForm")
                 // Chrome, so the form's card is the raised plane on it.
                 .text_color(t.text)
                 .text_size(px(layout::chrome(layout::TEXT_MD)))
@@ -1023,8 +1305,7 @@ impl Render for Workspace {
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
-                .on_action(cx.listener(Self::palette_next))
-                .on_action(cx.listener(Self::palette_previous))
+                .on_action(cx.listener(Self::submit_connection))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
@@ -1037,14 +1318,20 @@ impl Render for Workspace {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .child(self.render_connection_form(cx)),
+                        .child(self.render_connection_form(window, cx)),
                 )
-                .children(self.render_import_choice(cx))
-                .children(self.render_palette(cx));
+                .children(self.dialog_layer(
+                    [("import-choice", self.render_import_choice(cx))],
+                    window,
+                    cx,
+                ))
+                .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
             return div()
                 .id("welcome")
+                // A data file dropped anywhere on the window opens in DuckDB.
+                .on_drop(cx.listener(Self::drop_data_files))
                 .size_full()
                 .track_focus(&self.focus)
                 .text_color(t.text)
@@ -1053,20 +1340,23 @@ impl Render for Workspace {
                 .flex_col()
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
-                .on_action(cx.listener(Self::palette_next))
-                .on_action(cx.listener(Self::palette_previous))
                 .on_action(cx.listener(Self::open_connection_form))
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(cx.listener(Self::set_default_row_limit_action))
+                .on_action(cx.listener(Self::custom_row_limit))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
-                .child(div().flex_1().min_h_0().child(self.render_welcome(cx)))
-                .children(self.settings_open.then(|| views::render_settings(self, cx)))
-                .children(self.render_import_choice(cx))
-                .children(self.render_palette(cx));
+                .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
+                .children(self.dialog_layer(
+                    [("import-choice", self.render_import_choice(cx))],
+                    window,
+                    cx,
+                ))
+                .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {
@@ -1083,7 +1373,8 @@ impl Render for Workspace {
                     _ => profile.config.endpoint(),
                 }
             }
-            ProfileState::Failed(message) => message.clone(),
+            // Postgres puts its DETAIL and HINT on lines of their own.
+            ProfileState::Failed(message) => one_line(message),
         };
 
         // The rows the grid actually holds, which is fewer than the result had
@@ -1092,6 +1383,10 @@ impl Render for Workspace {
             .session
             .active_results()
             .map(|results| results.read(cx).delegate().result().rows.len());
+        let stopped = profile
+            .session
+            .active_results()
+            .and_then(|results| results.read(cx).delegate().result().stopped);
         let column_count = profile
             .session
             .active_results()
@@ -1113,8 +1408,24 @@ impl Render for Workspace {
                     .as_deref()
                     .is_some_and(|sql| sql::rerunnable(profile.config.engine(), sql))
             });
-        let paging = views::render_paging(profile, cx);
+        // A query tab's own slot rather than the result in front: a queue run
+        // in turn can be showing a statement that finished while the next one
+        // runs. Run at once, the slot only holds the run open, and each
+        // statement streams into its own entry, so the one in front is read.
+        let running = match profile.session.active_query_tab() {
+            Some(tab) if tab.queue.as_ref().is_some_and(|queue| queue.at_once()) => {
+                let (state, results) = tab.shown();
+                views::render_running(state, Some(results), cx)
+            }
+            Some(tab) => views::render_running(&tab.query, Some(&tab.results), cx),
+            None => profile.session.active_query().and_then(|query| {
+                views::render_running(query, profile.session.active_results(), cx)
+            }),
+        };
+        let paging =
+            running.or_else(|| views::render_paging(profile, self.custom_limit.as_ref(), cx));
         let view_sorting = views::render_view_sorting(profile, cx);
+        let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
             .active_object()
@@ -1125,7 +1436,6 @@ impl Render for Workspace {
                     query,
                     limit,
                     offset,
-                    showing_structure: false,
                     ..
                 } => Some((tab, count, filter, query, *limit, *offset)),
                 _ => None,
@@ -1139,8 +1449,11 @@ impl Render for Workspace {
                 }
                 _ => None,
             };
-            let whole =
-                offset == 0 && matches!(query, QueryState::Complete { rows, .. } if *rows < limit);
+            let whole = offset == 0
+                && matches!(
+                    query,
+                    QueryState::Complete { rows, .. } if limit.is_none_or(|limit| *rows < limit)
+                );
             session::relation_rows(count, filter, estimate, engine.exact_row_estimates(), whole)
         });
         // The way to an exact number, which is never run unasked. Its tooltip
@@ -1198,9 +1511,14 @@ impl Render for Workspace {
             }) => {
                 // The rows on screen, unless the relation's own count or
                 // estimate is beside the stats already.
-                let count = relation_rows
-                    .is_none()
-                    .then(|| row_readout(showing.unwrap_or(*rows), *rows));
+                let count = relation_rows.is_none().then(|| {
+                    let count = row_readout(showing.unwrap_or(*rows), *rows);
+                    match stopped {
+                        Some(db::Stopped::Cancelled) => format!("{count}, cancelled"),
+                        Some(db::Stopped::AtLimit) => format!("{count}, stopped at limit"),
+                        None => count,
+                    }
+                });
                 let joined = |rest: String| match count {
                     Some(count) => format!("{count} \u{b7} {rest}"),
                     None => rest,
@@ -1224,7 +1542,7 @@ impl Render for Workspace {
             // the grid, so the count beside them still belongs to whatever ran
             // last. What the run itself is worth saying is how long the server
             // spent answering.
-            Some(QueryState::Explained { elapsed, mode }) => {
+            Some(QueryState::Explained { elapsed, mode, .. }) => {
                 Some(format!("{} · {elapsed:.1?}", mode.label()))
             }
             _ => None,
@@ -1276,17 +1594,26 @@ impl Render for Workspace {
         let newer_release = self.newer_release.clone();
         let pending_count = self.pending_edit_count(cx);
         let has_pending = pending_count > 0;
-        let grid_shown = !profile.session.active_object().is_some_and(|tab| {
-            matches!(
-                tab.body,
-                ObjectBody::Relation {
-                    showing_structure: true,
-                    ..
-                }
-            )
-        });
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
+        // A structure tab's in place of the rows' copy and export: the
+        // relation's own definition, and a statement to fill it with.
+        let structure_copies = profile.session.active_object().and_then(|tab| {
+            let ObjectBody::Structure { structure, .. } = &tab.body
+            else {
+                return None;
+            };
+            let ObjectKind::Relation(kind) = tab.kind else {
+                return None;
+            };
+            let connected = matches!(profile.state, ProfileState::Connected(_));
+            let insert = engine.syntax() == db::Syntax::Sql
+                && matches!(structure, StructureState::Loaded(loaded) if !loaded.columns.is_empty());
+            Some((
+                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind)),
+                insert,
+            ))
+        });
         let apply_workspace = cx.entity().downgrade();
         let discard_workspace = apply_workspace.clone();
         let previous_workspace = apply_workspace.clone();
@@ -1295,6 +1622,8 @@ impl Render for Workspace {
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
         let refresh_workspace = apply_workspace.clone();
+        let ddl_workspace = apply_workspace.clone();
+        let insert_workspace = apply_workspace.clone();
 
         // Chrome for content, not a fixture of the window: with no tab open
         // every field below is empty, and an empty bar is a background and a
@@ -1305,9 +1634,11 @@ impl Render for Workspace {
             || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
+            || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
             || has_results
+            || structure_copies.is_some()
             || has_pending;
 
         let results_status = bar_has_content.then(|| {
@@ -1332,6 +1663,7 @@ impl Render for Workspace {
                         .items_center()
                         .gap(px(layout::SPACE_SM))
                         .children(view_sorting)
+                        .children(hidden_columns)
                         .children(left_stats.map(|stats| {
                             div()
                                 .flex_shrink_0()
@@ -1347,7 +1679,7 @@ impl Render for Workspace {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(notice)
+                                .child(one_line(&notice))
                         })),
                 )
                 // Between two sides that share the free space equally, so
@@ -1436,6 +1768,46 @@ impl Render for Workspace {
                                 });
                             })
                         }))
+                        .children(structure_copies.map(|(ddl, insert)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_SM))
+                                .children(ddl.map(|(schema, relation, kind)| {
+                                    button(
+                                        "copy-create",
+                                        "Copy CREATE",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let (schema, relation) =
+                                                (schema.clone(), relation.clone());
+                                            _ = ddl_workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                            });
+                                        },
+                                    )
+                                }))
+                                .children(insert.then(|| {
+                                    button(
+                                        "copy-insert",
+                                        "Copy INSERT",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = insert_workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_insert_template(cx);
+                                            });
+                                        },
+                                    )
+                                }))
+                        }))
                         // A tinted cell scrolled out of view is an edit
                         // nobody knows is about to be written.
                         .children(has_pending.then(|| {
@@ -1449,11 +1821,6 @@ impl Render for Workspace {
                                     "{pending_count} pending {}",
                                     if pending_count == 1 { "edit" } else { "edits" }
                                 ));
-                            // Behind Structure the grid is not drawn, and a
-                            // walk over it would move a ring nobody sees.
-                            if !grid_shown {
-                                return label.into_any_element();
-                            }
                             div()
                                 .min_w_0()
                                 .flex()
@@ -1534,9 +1901,22 @@ impl Render for Workspace {
                 &self.row_panel,
                 self.plan_copied,
                 &self.tab_strip,
+                self.custom_limit.as_ref(),
                 cx,
             )))
             .children(results_status);
+        // Only now, with the frame built, is it known whether the panel's
+        // field went away -- folded, closed, or emptied by a run -- and the
+        // handoff above has already run, so it lands on the next frame.
+        if !self.row_panel.searched.get()
+            && (self.row_panel.search.focus_handle(cx).is_focused(window)
+                || self.row_input_focused(window, cx))
+        {
+            cx.defer_in(window, |workspace, _, cx| {
+                workspace.refocus_front();
+                cx.notify();
+            });
+        }
         // The strip's chips glide for as long as the render above found one
         // still on its way.
         self.tab_strip.shift.drive(window);
@@ -1584,42 +1964,22 @@ impl Render for Workspace {
 
         div()
             .id("workspace")
+            // A data file dropped anywhere on the window opens in DuckDB.
+            .on_drop(cx.listener(Self::drop_data_files))
             .relative()
             // The floor under the focus, so a surface with nothing focusable
             // on it still has a dispatch path for the workspace's own
             // bindings. An inner element that can take focus claims it first
             // and stops this one from taking it back.
             .track_focus(&self.focus)
-            .on_action(cx.listener(Self::run_query))
-            .on_action(cx.listener(Self::explain_query))
-            .on_action(cx.listener(Self::format_query))
-            .on_action(cx.listener(Self::toggle_comment))
             .on_action(cx.listener(Self::choose_mode))
             .on_action(cx.listener(Self::reset_confirmations))
-            .on_action(cx.listener(Self::cancel_query))
-            .on_action(cx.listener(Self::apply_edits))
-            .on_action(cx.listener(Self::discard_edits))
-            .on_action(cx.listener(Self::next_edit))
-            .on_action(cx.listener(Self::previous_edit))
-            .on_action(cx.listener(Self::sort_column))
-            .on_action(cx.listener(Self::set_row_limit))
-            .on_action(cx.listener(Self::refresh_active_relation))
+            .on_action(cx.listener(Self::set_default_row_limit_action))
             .on_action(cx.listener(Self::refresh_connection))
-            .on_action(cx.listener(Self::next_page))
-            .on_action(cx.listener(Self::previous_page))
-            .on_action(cx.listener(Self::clear_filter))
-            .on_action(cx.listener(Self::add_filter))
-            .on_action(cx.listener(Self::remove_filter))
-            .on_action(cx.listener(Self::set_filter_column))
-            .on_action(cx.listener(Self::set_filter_raw))
-            .on_action(cx.listener(Self::set_filter_operator))
-            .on_action(cx.listener(Self::toggle_filter_join))
-            .on_action(cx.listener(Self::toggle_next_join))
-            .on_action(cx.listener(Self::new_row))
+            .on_action(cx.listener(Self::import_rows))
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_database))
-            .on_action(cx.listener(Self::save_query))
             .on_action(cx.listener(Self::new_query))
             .on_action(cx.listener(Self::next_profile))
             .on_action(cx.listener(Self::previous_profile))
@@ -1631,15 +1991,49 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::zoom_editor_in))
             .on_action(cx.listener(Self::zoom_editor_out))
             .on_action(cx.listener(Self::reset_editor_zoom))
-            .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::fuzzy_open))
             .on_action(cx.listener(Self::command_palette))
-            .on_action(cx.listener(Self::palette_next))
-            .on_action(cx.listener(Self::palette_previous))
+            .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::cycle_mode))
+            .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::toggle_sidebar))
-            .on_action(cx.listener(Self::toggle_row_panel))
-            .on_action(cx.listener(Self::accept_completion))
             .on_action(cx.listener(Self::open_settings))
+            // Unregistered under the import dialog, which stops only the
+            // mouse: these act on the tab it covers, out of sight, and their
+            // menu items grey out with them.
+            .when(profile.session.import_rows.is_none(), |root| {
+                root.on_action(cx.listener(Self::run_query))
+                    .on_action(cx.listener(Self::explain_query))
+                    .on_action(cx.listener(Self::format_query))
+                    .on_action(cx.listener(Self::toggle_comment))
+                    .on_action(cx.listener(Self::cancel_query))
+                    .on_action(cx.listener(Self::apply_edits))
+                    .on_action(cx.listener(Self::discard_edits))
+                    .on_action(cx.listener(Self::next_edit))
+                    .on_action(cx.listener(Self::previous_edit))
+                    .on_action(cx.listener(Self::sort_column))
+                    .on_action(cx.listener(Self::set_row_limit))
+                    .on_action(cx.listener(Self::set_query_limit))
+                    .on_action(cx.listener(Self::custom_row_limit))
+                    .on_action(cx.listener(Self::refresh_active_relation))
+                    .on_action(cx.listener(Self::next_page))
+                    .on_action(cx.listener(Self::previous_page))
+                    .on_action(cx.listener(Self::clear_filter))
+                    .on_action(cx.listener(Self::add_filter))
+                    .on_action(cx.listener(Self::remove_filter))
+                    .on_action(cx.listener(Self::set_filter_column))
+                    .on_action(cx.listener(Self::set_filter_raw))
+                    .on_action(cx.listener(Self::set_filter_operator))
+                    .on_action(cx.listener(Self::toggle_filter_join))
+                    .on_action(cx.listener(Self::toggle_next_join))
+                    .on_action(cx.listener(Self::new_row))
+                    .on_action(cx.listener(Self::save_query))
+                    .on_action(cx.listener(Self::close_tab))
+                    .on_action(cx.listener(Self::go_to_column))
+                    .on_action(cx.listener(Self::toggle_row_panel))
+                    .on_action(cx.listener(Self::toggle_row_edit))
+                    .on_action(cx.listener(Self::toggle_structure))
+            })
             .size_full()
             // The shell is the frost: titlebar, sidebar and status bar paint
             // nothing of their own, they are the glass the window root already
@@ -1707,7 +2101,7 @@ impl Render for Workspace {
                         .into_any_element()
                 }))
                 .collect(),
-                vec![
+                [
                     icon_button(
                         "toggle-sidebar",
                         icon::SIDEBAR,
@@ -1719,8 +2113,11 @@ impl Render for Workspace {
                         workspace.toggle_sidebar(&ToggleSidebar, window, cx);
                     }))
                     .into_any_element(),
-                    self.render_profile_switcher(cx),
-                ],
+                    self.render_connection_name(cx),
+                ]
+                .into_iter()
+                .chain(self.render_breadcrumb(cx))
+                .collect(),
                 vec![
                     icon_button(
                         "open-settings",
@@ -1736,16 +2133,22 @@ impl Render for Workspace {
                     .into_any_element(),
                 ],
             ))
-            .child(div().flex_1().min_h_0().child(main_pane))
-            .children(self.render_apply_review(cx))
-            .children(self.render_close_confirmation(cx))
-            .children(self.render_discard_confirmation(cx))
-            .children(self.render_pending_run(cx))
-            .children(self.render_queue_failure(cx))
-            .children(self.render_stale_edit(cx))
-            .children(self.settings_open.then(|| views::render_settings(self, cx)))
-            .children(self.render_import_choice(cx))
-            .children(self.render_palette(cx))
+            .child(self.beside_settings(main_pane, cx))
+            .children(self.dialog_layer(
+                [
+                    ("apply-review", self.render_apply_review(cx)),
+                    ("import-rows", self.render_import_rows(window, cx)),
+                    ("delete", self.render_delete_confirmation(cx)),
+                    ("discard", self.render_discard_confirmation(cx)),
+                    ("pending-run", self.render_pending_run(cx)),
+                    ("queue-failure", self.render_queue_failure(cx)),
+                    ("stale-edit", self.render_stale_edit(cx)),
+                    ("import-choice", self.render_import_choice(cx)),
+                ],
+                window,
+                cx,
+            ))
+            .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
 }
@@ -1775,6 +2178,21 @@ pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 /// chrome stops at 17 because the titlebar does not grow with it: the window
 /// buttons are placed against it once, when the window opens, and past 17 the
 /// controls in it would touch its edges.
+/// Blocking work on a thread of its own, for the background executor to await
+/// without holding one of its threads: on Linux it has only as many as there
+/// are cores, and a run parked on the server for each of them would stall
+/// everything else spawned there, a Cancel included.
+pub(crate) async fn on_own_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || sender.send(work()));
+    // Dropped unsent only by a panic on that thread, which is a panic here.
+    receiver
+        .await
+        .expect("the thread running blocking work panicked")
+}
+
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
     match slot {
         FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
@@ -1928,7 +2346,9 @@ mod tests {
 
     #[test]
     fn opacity_is_stored_per_theme() {
-        let [first, second, ..] = Theme::all();
+        let [first, second, ..] = Theme::all()[..] else {
+            unreachable!()
+        };
         let mut settings = Settings::default();
         settings.set_opacity_for(&first, 0.9);
         assert_eq!(settings.opacity_for(&first), 0.9);
@@ -1936,6 +2356,39 @@ mod tests {
         settings.set_opacity_for(&second, 0.6);
         assert_eq!(settings.opacity_for(&first), 0.9);
         assert_eq!(settings.opacity_for(&second), 0.6);
+    }
+
+    #[test]
+    fn matching_the_system_wears_the_theme_picked_for_its_side() {
+        use theme::Appearance::{Dark, Light};
+        let mut settings = Settings::default();
+        settings.set_theme_for(Light, "GitHub Light");
+        settings.set_theme_for(Dark, "Dracula");
+        assert!(settings.system_theme(Dark).is_none());
+        settings.match_system_appearance = true;
+        let worn = |settings: &Settings, side| settings.system_theme(side).map(|theme| theme.name);
+        assert_eq!(worn(&settings, Light), Some("GitHub Light"));
+        assert_eq!(worn(&settings, Dark), Some("Dracula"));
+        settings.set_theme_for(Dark, "Deleted Since");
+        assert_eq!(worn(&settings, Dark), Some("DBDelve Black"));
+    }
+
+    #[test]
+    fn a_list_that_outlived_a_change_to_matching_still_takes_effect() {
+        use theme::Appearance::{Dark, Light};
+        let mut settings = Settings::default();
+        assert_eq!(settings.list_side(Some(Dark), Light), None);
+        assert_eq!(settings.pick_target(Some(Dark), Light), (Some(Dark), true));
+        assert_eq!(settings.pick_target(None, Light), (None, true));
+        settings.match_system_appearance = true;
+        assert_eq!(settings.list_side(None, Light), Some(Light));
+        assert_eq!(settings.list_side(Some(Dark), Light), Some(Dark));
+        assert_eq!(settings.pick_target(None, Light), (Some(Light), true));
+        assert_eq!(settings.pick_target(Some(Dark), Light), (Some(Dark), false));
+        assert_eq!(
+            settings.pick_target(Some(Light), Light),
+            (Some(Light), true)
+        );
     }
 
     #[test]

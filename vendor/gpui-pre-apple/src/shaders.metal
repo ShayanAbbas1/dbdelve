@@ -1277,3 +1277,58 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// dbdelve patch: backdrop blur, ported from zui. The renderer has already
+// snapshotted the drawable beneath the blur and gaussian-blurred it on the GPU
+// (MPSImageGaussianBlur); this pass paints it back inside the rounded bounds.
+
+struct BackdropBlurVertexOutput {
+  float4 position [[position]];
+  uint blur_id [[flat]];
+  float clip_distance [[clip_distance]][4];
+};
+
+struct BackdropBlurFragmentInput {
+  float4 position [[position]];
+  uint blur_id [[flat]];
+};
+
+vertex BackdropBlurVertexOutput backdrop_blur_vertex(
+    uint unit_vertex_id [[vertex_id]], uint blur_id [[instance_id]],
+    constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
+    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(BackdropBlurInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  BackdropBlur blur = blurs[blur_id];
+  float4 device_position =
+      to_device_position(unit_vertex, blur.bounds, viewport_size);
+  float4 clip_distance = distance_from_clip_rect(unit_vertex, blur.bounds,
+                                                 blur.content_mask.bounds);
+  return BackdropBlurVertexOutput{
+      device_position,
+      blur_id,
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+}
+
+fragment float4 backdrop_blur_fragment(
+    BackdropBlurFragmentInput input [[stage_in]],
+    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
+    constant float4 &source_rect [[buffer(BackdropBlurInputIndex_SourceRect)]],
+    texture2d<float> source_texture
+    [[texture(BackdropBlurInputIndex_SourceTexture)]]) {
+  constexpr sampler source_sampler(coord::normalized, address::clamp_to_edge,
+                                   filter::linear);
+  BackdropBlur blur = blurs[input.blur_id];
+
+  // Blending is off on this pipeline, since the blur replaces the region, so
+  // fragments outside the rounded rect must be discarded rather than return 0.
+  float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
+  if (distance > 0.) {
+    discard_fragment();
+  }
+
+  // The snapshot covers only source_rect (x, y, w, h) of the drawable.
+  float2 uv = (input.position.xy - source_rect.xy) / source_rect.zw;
+  return source_texture.sample(source_sampler, uv);
+}

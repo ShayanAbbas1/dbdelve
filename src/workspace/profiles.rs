@@ -6,7 +6,7 @@
 use super::*;
 use gpui_component::menu::PopupMenuItem;
 
-use crate::connection_form::{ConnectionTest, duplicate_profile_name};
+use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
 use crate::import::{self, Source};
 use crate::session::STALE_ROWS;
 use crate::sql::{Destructive, Mode};
@@ -41,24 +41,29 @@ impl Workspace {
                     .name
                     .to_string(),
             ),
+            match_system_appearance: Some(self.settings.match_system_appearance),
+            light_theme: Some(self.settings.light_theme.clone()),
+            dark_theme: Some(self.settings.dark_theme.clone()),
             chrome_font_size: Some(self.settings.chrome_font_size),
             editor_font_size: Some(self.settings.editor_font_size),
             grid_font_size: Some(self.settings.grid_font_size),
-            preview_rows: Some(self.settings.preview_rows),
+            preview_rows: Some(self.settings.row_limit.unwrap_or(0)),
             opacity: Some(self.settings.opacity),
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
+            welcomed: Some(self.settings.welcomed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
-        if let Err(message) = store::save_profiles(
-            &profiles,
-            active.as_deref(),
-            &fonts,
-            &settings,
-            &self.projects,
-        ) {
+        if let Err(message) = store::save_profiles(&store::ProfileList {
+            profiles,
+            active,
+            fonts: Some(fonts),
+            settings: Some(settings),
+            projects: self.projects.clone(),
+            unavailable: self.unavailable.clone(),
+        }) {
             self.note(message, cx);
         }
     }
@@ -81,10 +86,11 @@ impl Workspace {
             },
         };
         // No engine at all is a profile written before dbdelve had a second one,
-        // and Postgres is what it was. An engine this build cannot read is a
-        // profile written by a build that has one this one does not, so it is
-        // read as Postgres and says so rather than connecting somewhere the
-        // user did not ask for without mentioning it.
+        // and Postgres is what it was. An engine this build cannot read is held
+        // back by `decode_profiles` as an `UnavailableProfile`, so the `Err` arm
+        // is reached only by a file the mixed reader fell back on: it is read
+        // as Postgres and says so rather than connecting somewhere the user did
+        // not ask for without mentioning it.
         let (engine, unreadable_engine) = match stored.engine.as_deref() {
             None => (Engine::Postgres, None),
             Some(stored) => match Engine::parse(stored) {
@@ -92,53 +98,7 @@ impl Workspace {
                 Err(message) => (Engine::Postgres, Some(message)),
             },
         };
-        let config = match engine {
-            Engine::Sqlite => ConnectionConfig::Sqlite {
-                path: stored.path.unwrap_or_default(),
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-            },
-            Engine::Postgres
-            | Engine::MySql
-            | Engine::MariaDb
-            | Engine::SqlServer
-            | Engine::MongoDb => {
-                let server = ServerConfig {
-                    host: stored.host,
-                    port: stored.port,
-                    database: stored.database,
-                    user: stored.user,
-                    // Never on disk. Read from the Keychain when connecting.
-                    password: String::new(),
-                    sslmode,
-                    root_certificate: stored.root_certificate,
-                    statement_timeout: stored.statement_timeout.unwrap_or_default(),
-                    ssh: stored.ssh,
-                };
-                match engine {
-                    Engine::MySql => ConnectionConfig::MySql(server),
-                    Engine::MariaDb => ConnectionConfig::MariaDb(server),
-                    Engine::SqlServer => ConnectionConfig::SqlServer(server),
-                    Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
-                        server,
-                        srv: stored.srv.unwrap_or_default(),
-                        options: stored.options.unwrap_or_default(),
-                        login_database: stored.login_database,
-                    }),
-                    _ => ConnectionConfig::Postgres(server),
-                }
-            }
-            Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
-                account: stored.account.unwrap_or_default(),
-                // Blank on disk is the derived host, the same as absent.
-                host: Some(stored.host).filter(|host| !host.is_empty()),
-                user: stored.user,
-                private_key: stored.private_key.unwrap_or_default(),
-                database: stored.database,
-                warehouse: stored.warehouse,
-                role: stored.role,
-                statement_timeout: stored.statement_timeout.unwrap_or_default(),
-            }),
-        };
+        let config = stored_config(&stored, engine, sslmode);
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -161,7 +121,12 @@ impl Workspace {
                     store::object_grid_key(&object.schema, &object.name, &object.filter)
                 }))
                 .collect();
-        store::prune_grids(&stored.id, &live_grids);
+        // The grid directory is the id's, so when an unavailable profile holds
+        // the id too, its tabs' snapshots are in there as well, and none of
+        // them can be told apart as stale.
+        if !held_by_unavailable(&stored.id, &self.unavailable) {
+            store::prune_grids(&stored.id, &live_grids);
+        }
         let mut session = Session::new(
             stored.id.clone(),
             stored_queries,
@@ -169,6 +134,7 @@ impl Workspace {
             stored.open_objects,
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -183,6 +149,7 @@ impl Workspace {
         if let Some(message) = notice {
             session.notice = Some(message);
         }
+        let id = stored.id.clone();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -211,10 +178,15 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
+            left_database: false,
             session,
         });
+        // The saved queries are listed before anything has connected.
+        self.refresh_explorer(&id, cx);
     }
 
     // Eight, because a connection is eight things and a struct holding them for
@@ -230,10 +202,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> usize {
+        // An unavailable profile's id is taken too: reusing it would hand the
+        // new profile its keychain entry and saved queries.
         let existing = self
             .profiles
             .iter()
             .map(|profile| profile.id.clone())
+            .chain(self.unavailable.iter().map(|gone| gone.id.clone()))
             .collect::<Vec<_>>();
         let id = store::profile_id(&name, &existing);
         let session = Session::new(
@@ -243,6 +218,7 @@ impl Workspace {
             Vec::new(),
             config.engine(),
             Sorting::new(self.settings.client_sort),
+            self.settings.row_limit,
             window,
             cx,
         );
@@ -257,8 +233,11 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
+            in_transaction: false,
+            session_changed: false,
             catalog: CatalogState::Loading,
             databases: Databases::default(),
+            left_database: false,
             session,
         });
         if let Some(password) = password
@@ -290,8 +269,6 @@ impl Workspace {
                 .map(|profile| profile.name.clone())
                 .collect::<Vec<_>>(),
         );
-        self.switcher_open = false;
-        cx.notify();
 
         let password_task = {
             let id = id.clone();
@@ -301,7 +278,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let password = password_task.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
-                // Removed from the switcher while the Keychain answered --
+                // Removed while the Keychain answered --
                 // nothing left to seed a form from.
                 let Some(profile) = workspace.profiles.iter().find(|profile| profile.id == id)
                 else {
@@ -316,22 +293,30 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn apply_connection_url(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(form) = &self.form else {
+    /// Fills the open form from the URL in its URL field. Shared by the form's
+    /// own field, pasted into or entered, and the welcome surface's, so a URL
+    /// given to either lands the same way.
+    pub(crate) fn fill_from_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
             return;
         };
         let url = form.url.read(cx).value();
-        let config = match ConnectionConfig::from_url(url.trim()) {
+        form.last_url = url.clone();
+        let text = url.trim();
+        let parsed = match super::welcome::recognise(text) {
+            super::welcome::Recognised::File(Engine::DuckDb) => {
+                Ok(ConnectionConfig::duckdb(text.to_string(), 0))
+            }
+            super::welcome::Recognised::File(_) => Ok(ConnectionConfig::Sqlite {
+                path: text.to_string(),
+                statement_timeout: 0,
+            }),
+            _ => ConnectionConfig::from_url(text),
+        };
+        let config = match parsed {
             Ok(config) => config,
             Err(error) => {
-                if let Some(form) = &mut self.form {
-                    form.error = Some(error);
-                }
+                form.error = Some(error);
                 cx.notify();
                 return;
             }
@@ -341,7 +326,9 @@ impl Workspace {
         // throw away a half-typed connection to a different database, which the
         // user never asked to lose by pasting a URL.
         let filled = match &config {
-            ConnectionConfig::Sqlite { path, .. } => vec![
+            ConnectionConfig::Sqlite { path, .. }
+            | ConnectionConfig::Turso { path, .. }
+            | ConnectionConfig::DuckDb { path, .. } => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.path, path.clone()),
             ],
@@ -349,6 +336,8 @@ impl Workspace {
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server)
+            | ConnectionConfig::ClickHouse(server)
+            | ConnectionConfig::Redis(server)
             | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
                 (&form.name, default_profile_name(&config)),
                 (&form.host, server.host.clone()),
@@ -383,7 +372,9 @@ impl Workspace {
         let sslmode = config.server().map(|server| server.sslmode);
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
-            form.engine = engine;
+            // A URL for another kind of engine unmounts the field it was
+            // pasted into, and `set_engine` hands focus on.
+            form.set_engine(engine);
             form.srv = srv;
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
@@ -395,7 +386,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A dropdown on the connection form: `pick` writes the choice into it.
+    /// An edit to the connection form's URL field. A URL that arrives whole
+    /// fills the fields at once; one typed a character at a time waits for
+    /// Enter, or every keystroke would fill them from half a URL.
+    pub(crate) fn url_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let now = form.url.read(cx).value();
+        let before = std::mem::replace(&mut form.last_url, now.clone());
+        if pasted_url(&before, &now) {
+            self.fill_from_url(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A compact dropdown at the end of a row of the connection form: `pick`
+    /// writes the choice into it.
     pub(crate) fn form_dropdown<T: Clone + PartialEq + 'static>(
         id: &'static str,
         selected: T,
@@ -405,13 +412,17 @@ impl Workspace {
         pick: impl Fn(&mut ConnectionForm, T) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        Self::dropdown(
-            id,
+        let t = popup_theme(cx);
+        let trigger = ui::picker(id, label(&selected), t)
+            .border_1()
+            .border_color(t.border);
+        Self::with_menu(
+            trigger,
             selected,
             groups,
             label,
             marker,
-            move |workspace, option| {
+            move |workspace, option, _, _| {
                 if let Some(form) = &mut workspace.form {
                     pick(form, option);
                 }
@@ -420,24 +431,14 @@ impl Workspace {
         )
     }
 
-    /// A field-shaped button that opens a menu of `groups` of options, with a
-    /// separator between groups: the pickers on the connection form and the
-    /// import's project. `pick` makes the choice; `marker` is what is drawn
-    /// before a label, if anything.
-    pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
-        id: &'static str,
-        selected: T,
-        groups: Vec<Vec<T>>,
-        label: impl Fn(&T) -> gpui::SharedString + 'static,
-        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
-        pick: impl Fn(&mut Self, T) + 'static,
+    /// The face of a field-shaped picker: its current choice and a chevron.
+    fn field_trigger(
+        id: impl Into<gpui::ElementId>,
+        marker: Option<AnyElement>,
+        label: gpui::SharedString,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui_component::button::Button {
         let t = *theme(cx);
-        let workspace = cx.entity().downgrade();
-        let label = Rc::new(label);
-        let marker = Rc::new(marker);
-        let pick = Rc::new(pick);
         ui::control(id, Tone::Quiet, Control::Standard)
             .w_full()
             .px(px(layout::SPACE_SM))
@@ -451,7 +452,7 @@ impl Workspace {
                     .gap(px(layout::SPACE_XS))
                     .text_size(px(layout::chrome(layout::TEXT_MD)))
                     .text_color(t.text)
-                    .children(marker(&selected))
+                    .children(marker)
                     .child(
                         div()
                             .flex_1()
@@ -459,10 +460,44 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(label(&selected)),
+                            .child(label),
                     )
                     .child(row_icon(t, icon::CHEVRON_DOWN)),
             )
+    }
+
+    /// A field-shaped button that opens a menu of `groups` of options, with a
+    /// separator between groups: the pickers on the connection form and the
+    /// import's project. `pick` makes the choice; `marker` is what is drawn
+    /// before a label, if anything.
+    pub(crate) fn dropdown<T: Clone + PartialEq + 'static>(
+        id: impl Into<gpui::ElementId>,
+        selected: T,
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let trigger = Self::field_trigger(id, marker(&selected), label(&selected), cx);
+        Self::with_menu(trigger, selected, groups, label, marker, pick, cx)
+    }
+
+    /// The menu of `groups` hung off `trigger`, whatever it is dressed as.
+    fn with_menu<T: Clone + PartialEq + 'static>(
+        trigger: gpui_component::button::Button,
+        selected: T,
+        groups: Vec<Vec<T>>,
+        label: impl Fn(&T) -> gpui::SharedString + 'static,
+        marker: impl Fn(&T) -> Option<AnyElement> + 'static,
+        pick: impl Fn(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace = cx.entity().downgrade();
+        let label = Rc::new(label);
+        let marker = Rc::new(marker);
+        let pick = Rc::new(pick);
+        trigger
             .dropdown_menu(move |menu, _, _| {
                 groups.iter().enumerate().fold(
                     menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
@@ -485,9 +520,9 @@ impl Workspace {
                                         .child(label(&shown))
                                 })
                                 .checked(checked)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     _ = workspace.update(cx, |workspace, cx| {
-                                        pick(workspace, option.clone());
+                                        pick(workspace, option.clone(), window, cx);
                                         cx.notify();
                                     });
                                 }),
@@ -499,108 +534,25 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The engine decides which fields the form even has, so it is the first
-    /// thing on it.
-    pub(crate) fn engine_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "engine",
-            form.engine,
-            vec![Engine::ALL.to_vec()],
-            |engine| engine.label().into(),
-            |_| None,
-            |form, engine| {
-                // Only when the field set actually changes: Postgres and
-                // MySQL show the same fields, so switching between them
-                // takes nothing away and must not take focus either.
-                if form.engine.fields() != engine.fields() {
-                    form.needs_focus = Some(match engine.fields() {
-                        Fields::Server => form.host.clone(),
-                        Fields::File => form.path.clone(),
-                        Fields::Account => form.account.clone(),
-                    });
-                }
-                form.engine = engine;
-                // Both belonged to the fields that just left the screen.
-                form.error = None;
-                form.test = None;
-            },
-            cx,
-        )
-    }
-
-    /// Weakest first.
-    ///
-    /// Read only while a connection already exists: past creation,
-    /// `Workspace::set_mode` is the one door a mode changes through, and it
-    /// pushes the change into that connection's live grids -- something a
-    /// profile still being typed into has none of yet. `render_connection_form`
-    /// draws this only when there is no `editing` id, for exactly that reason.
-    pub(crate) fn mode_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "mode",
-            form.mode,
-            vec![Mode::ALL.to_vec()],
-            |mode| mode.label().into(),
-            |_| None,
-            |form, mode| {
-                form.mode = mode;
-                // A pass without the Read-only hold did not test it.
-                form.test = None;
-            },
-            cx,
-        )
-    }
-
-    /// The colour only ever labels a connection, so nothing here can make the
-    /// form invalid and nothing has to move focus.
-    pub(crate) fn color_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = self.form.as_ref().expect("drawn only on the form");
-        Self::form_dropdown(
-            "color",
-            form.color,
-            vec![
-                std::iter::once(None)
-                    .chain(ConnectionColor::ALL.map(Some))
-                    .collect(),
-            ],
-            |color| color.map_or("None", ConnectionColor::label).into(),
-            |color| {
-                color.map(|color| {
-                    div()
-                        .size(px(layout::SPACE_SM))
-                        .rounded_full()
-                        .bg(color.swatch())
-                        .into_any_element()
-                })
-            },
-            |form, color| form.color = color,
-            cx,
-        )
-    }
-
     /// The project is made when the form is saved, so "New project…" only
     /// swaps the list for a field to name it in.
     pub(crate) fn project_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = *theme(cx);
+        let t = popup_theme(cx);
         let form = self.form.as_ref().expect("drawn only on the form");
         if form.naming_project {
             return div()
                 .flex()
-                .gap(px(layout::SPACE_SM))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&form.project_name).w_full()),
-                )
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .child(div().w(px(layout::FORM_PROJECT_NAME_WIDTH)).child(
+                    gpui_component::Sizable::small(Input::new(&form.project_name)),
+                ))
                 .child(
                     icon_button(
                         "choose-project",
                         icon::CLOSE,
                         Tone::Quiet,
-                        Control::Standard,
+                        Control::Compact,
                         t,
                     )
                     .tooltip("Choose an existing project")
@@ -650,42 +602,26 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn sslmode_chip(&self, mode: SslMode, cx: &mut Context<Self>) -> AnyElement {
-        let t = *theme(cx);
-        let selected = self.form.as_ref().is_some_and(|form| form.sslmode == mode);
-        div()
-            .id(mode.as_str())
-            .flex()
-            .items_center()
-            .h(px(layout::chrome(24.)))
-            .px(px(layout::SPACE_SM))
-            .rounded(px(layout::RADIUS_CONTROL))
-            .text_size(px(layout::chrome(layout::TEXT_SM)))
-            .whitespace_nowrap()
-            .map(|chip| {
-                if selected {
-                    chip.bg(t.element_active).text_color(t.text)
-                } else {
-                    chip.text_color(t.text_muted)
-                        .hover(|style| style.bg(t.element_hover))
-                }
-            })
-            .child(mode.label())
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-                if let Some(form) = &mut workspace.form {
-                    // Stepping down from a verifying mode unmounts the
-                    // certificate field, which may be the one holding focus.
-                    if form.sslmode.checks_certificate() && !mode.checks_certificate() {
-                        form.needs_focus = Some(form.password.clone());
-                    }
-                    form.sslmode = mode;
-                    cx.notify();
-                }
-            }))
-            .into_any_element()
+    pub(crate) fn connect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_form(window, cx);
     }
 
-    pub(crate) fn connect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// The form's Connect, or its Save when editing, from the keyboard.
+    pub(crate) fn submit_connection(
+        &mut self,
+        _: &SubmitConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The engine and project pickers open over the form, inside its key
+        // context, and do not take the chord themselves.
+        if self.palette.is_some() {
+            return;
+        }
+        self.save_form(window, cx);
+    }
+
+    fn save_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &self.form else {
             return;
         };
@@ -697,7 +633,7 @@ impl Workspace {
             .then(|| form.project_name.read(cx).value().to_string());
         let project =
             projects::chosen_project(typed.as_deref(), form.project.as_deref(), &self.projects);
-        let ((name, config), project) = match form
+        let ((name, mut config), project) = match form
             .config(cx)
             .and_then(|profile| project.map(|project| (profile, project)))
         {
@@ -710,7 +646,27 @@ impl Workspace {
                 return;
             }
         };
+        if let Some(editing) = editing.as_deref()
+            && let Some(profile) = self.profiles.iter().find(|profile| profile.id == editing)
+        {
+            keep_schema(&mut config, &profile.config);
+        }
 
+        if let Some(running) = editing.as_deref().and_then(|id| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .filter(|profile| profile.config.needs_reconnect(&config))
+                .and_then(|_| self.running_import_into(id))
+        }) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(format!(
+                    "An import into {running} is running on this connection. Save once it ends."
+                ));
+            }
+            cx.notify();
+            return;
+        }
         self.form = None;
         if let Some(project) = &project {
             self.project_named(project);
@@ -812,7 +768,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Removed from the switcher while the form sat open: there is nothing
+        // Removed while the form sat open: there is nothing
         // left to save onto, and the id is the only handle the form kept.
         let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
             cx.notify();
@@ -850,6 +806,18 @@ impl Workspace {
     /// nothing answers on, and one that was down at connect leaves `Failed`
     /// with nothing that tries again.
     pub(crate) fn reconnect(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
+            return;
+        };
+        if let Some(running) = self.running_import_into(&id) {
+            self.note(
+                format!(
+                    "An import into {running} is running, so the connection was not refreshed."
+                ),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -904,7 +872,7 @@ impl Workspace {
         let (id, generation) = (profile.id.clone(), profile.generation);
         let fetch = cx
             .background_executor()
-            .spawn(async move { connection.databases() });
+            .spawn(async move { connection.databases(engine) });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -934,15 +902,8 @@ impl Workspace {
         .detach();
     }
 
-    /// Move the profile in front onto another database on its server.
-    ///
-    /// Object tabs go, and their grid snapshots with them: both are keyed by
-    /// schema and name within the profile, with no database in the key, so
-    /// one left open would name a relation that may not exist here and a
-    /// relation of the same name would read the old one's rows back. Query
-    /// tabs keep their SQL, which is the user's to run wherever they like, but
-    /// drop their results: those rows belong to the database left behind, and
-    /// an edit staged on them would be applied to this one.
+    /// Move the profile in front onto another database on its server, leaving
+    /// behind what it held of this one ([`Self::leave_database`]).
     pub(crate) fn set_database(
         &mut self,
         name: String,
@@ -950,17 +911,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
+        if let Some(running) = self
+            .profile()
+            .and_then(|profile| self.running_import_into(&profile.id))
+        {
+            self.note(
+                format!("An import into {running} is running, so the database was not switched."),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };
-        let Some(server) = profile.config.server() else {
+        let Some(configured) = profile.config.database() else {
             return;
         };
-        if already_on(
-            &server.database,
-            profile.databases.current.as_deref(),
-            &name,
-        ) {
+        // As the profile would store it: Redis lists `db3` and stores `3`.
+        let mut asked = profile.config.clone();
+        asked.set_database(name.clone());
+        let unmoved = asked.database() == Some(configured);
+        if unmoved || already_on(configured, profile.databases.current.as_deref(), &name) {
             return;
         }
         let session = &profile.session;
@@ -986,12 +957,60 @@ impl Workspace {
             return;
         }
 
+        self.leave_database(window, cx);
+
+        let index = self.active;
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        // The database a DuckDB file opens as is held as none picked, so the
+        // profile still opens on it once the file is renamed.
+        let opened = profile
+            .connection()
+            .and_then(|connection| connection.current_database().map(str::to_string));
+        let left = (
+            profile.config.database().unwrap_or_default().to_string(),
+            profile.config.schema().map(str::to_string),
+        );
+        profile
+            .config
+            .set_database(match opened.as_deref() == Some(name.as_str()) {
+                true => String::new(),
+                false => name,
+            });
+        let in_session = profile.config.engine().switches_database_in_session();
+        self.remember_profiles(cx);
+        match in_session {
+            true => self.use_database(index, left, cx),
+            false => self.reconnect(index, cx),
+        }
+    }
+
+    /// Close what the profile in front holds of the database it is leaving.
+    ///
+    /// Object tabs go, and their grid snapshots with them: both are keyed by
+    /// schema and name within the profile, with no database in the key, so
+    /// one left open would name a relation that may not exist here and a
+    /// relation of the same name would read the old one's rows back. Query
+    /// tabs keep their SQL, which is the user's to run wherever they like, but
+    /// drop their results and a New row form open on one: those rows belong
+    /// to the database left behind, and an edit staged on them, or a row
+    /// added beside them, would be applied to this one.
+    fn leave_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let session = &profile.session;
         let active = session.active;
         let mut closing = session.objects.iter().map(|tab| tab.id).collect::<Vec<_>>();
         // The tab in front closes last, so the one it hands the front to is a
         // query tab that stays rather than a sibling about to close too.
         closing.sort_by_key(|id| Tab::Object(*id) == active);
         let queries = session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let profile_id = profile.id.clone();
+        // Not running, which a switch refuses and a connect cannot have: the
+        // dialog names a table of the database being left.
+        self.abandon_import(&profile_id, cx);
         for id in closing {
             self.close_object(id, window, cx);
         }
@@ -1001,7 +1020,6 @@ impl Workspace {
             self.stop_run(Tab::Query(id), cx);
         }
 
-        let index = self.active;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -1022,19 +1040,190 @@ impl Workspace {
                 tab.query = QueryState::Idle;
             }
             tab.queue = None;
+            // The slot just replaced is the one a loan would give back.
+            tab.lent = None;
             tab.queued_results = 0;
             tab.last_query = None;
             tab.sent_from = None;
             tab.ran_from = None;
             tab.plan = None;
             tab.showing_plan = false;
+            tab.showing_messages = false;
         }
         profile.session.clear_prompts();
         profile.session.apply_review = None;
+        profile.session.insert_form = None;
         profile.databases = Databases::default();
-        profile.config.set_database(name);
+    }
+
+    /// The connect's half of [`Self::leave_database`], for a profile whose
+    /// picked database was gone when it opened.
+    pub(crate) fn leave_database_left_behind(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile_mut().filter(|profile| profile.left_database) else {
+            return;
+        };
+        profile.left_database = false;
+        self.leave_database(window, cx);
         self.remember_profiles(cx);
-        self.reconnect(index, cx);
+    }
+
+    /// Move the open connection onto the database the profile at `index` now
+    /// names, where that is a `USE` and not a new connection
+    /// ([`Engine::switches_database_in_session`]). The catalog is read again
+    /// under a new generation, as a connect would; a `USE` that fails puts
+    /// the profile back on `left`, the database and schema it was on.
+    fn use_database(
+        &mut self,
+        index: usize,
+        left: (String, Option<String>),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.profiles.get(index).and_then(Profile::connection) else {
+            // Opening applies the pick.
+            self.reconnect(index, cx);
+            return;
+        };
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return;
+        };
+        profile.generation = generation;
+        profile.catalog = CatalogState::Loading;
+        profile.session.structure_requests.clear();
+        let id = profile.id.clone();
+        connection.set_database(profile.config.database_name().as_deref());
+        let applying = connection.clone();
+        let set = on_own_thread(move || applying.apply_schema());
+        self.refresh_explorer(&id, cx);
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            let result = set.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                if let Err(error) = result {
+                    let (database, schema) = left;
+                    profile.config.set_database(database);
+                    profile.config.set_schema(schema);
+                    connection.set_database(profile.config.database_name().as_deref());
+                    connection.set_schema(profile.config.schema());
+                    profile.session.notice = Some(error.message);
+                    workspace.remember_profiles(cx);
+                }
+                workspace.load_catalog(&id, generation, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Offer the schemas the catalog already holds, to pick the active one.
+    pub(crate) fn select_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        if !profile.config.engine().picks_schema() {
+            return;
+        }
+        let unready = match (&profile.state, &profile.catalog) {
+            (ProfileState::Connected(_), CatalogState::Loaded(..)) => None,
+            (ProfileState::Connected(_), CatalogState::Loading) => {
+                Some("The schemas are still loading.")
+            }
+            (ProfileState::Connected(_), CatalogState::Failed(_)) => {
+                Some("The catalog did not load, so there are no schemas to pick from.")
+            }
+            _ => Some("The connection is not open."),
+        };
+        match unready {
+            Some(message) => self.note(message.into(), cx),
+            None => self.open_palette(PaletteMode::Schema, window, cx),
+        }
+    }
+
+    /// Make `name` the profile's active schema, on the sessions it has open
+    /// and the ones it opens later, without a reconnect: tabs, results and
+    /// staged edits all stay. A statement running holds the session, so the
+    /// `SET` waits for it rather than cancelling it.
+    pub(crate) fn set_schema(&mut self, name: String, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        // Not `active_schema`: picking the one shown while none is stored
+        // still pins it, whatever the role's own `search_path` says.
+        if profile.config.schema() == Some(name.as_str()) {
+            return;
+        }
+        // A connect in flight was handed the config before this, and the
+        // reconnect that would hand it the new one can be refused.
+        if matches!(profile.state, ProfileState::Connecting) {
+            self.note(
+                "The connection is still opening, so the schema was not switched.".into(),
+                cx,
+            );
+            return;
+        }
+        // A `SET` inside the user's transaction is undone by their ROLLBACK,
+        // which would leave the titlebar naming a schema the session left.
+        // Snowflake's rides on each request instead, out of a ROLLBACK's reach.
+        // The session checks again once a statement still running lets go.
+        if profile.in_transaction
+            && profile
+                .config
+                .engine()
+                .schema_switch_waits_for_transaction()
+        {
+            self.note(
+                "A transaction is open on this connection, so the schema was not switched.".into(),
+                cx,
+            );
+            return;
+        }
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let previous = profile.config.schema().map(str::to_string);
+        profile.config.set_schema(Some(name.clone()));
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let connection = profile.connection();
+        self.remember_profiles(cx);
+        cx.notify();
+        let Some(connection) = connection else {
+            return;
+        };
+        // Recorded here, in the order the switches were made, so that
+        // whichever thread applies last applies the latest.
+        connection.set_schema(Some(&name));
+        let applying = connection.clone();
+        let set = on_own_thread(move || applying.apply_schema());
+        cx.spawn(async move |workspace, cx| {
+            let Err(error) = set.await else {
+                return;
+            };
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                // A later switch already holds the config, and is its own to
+                // report.
+                if profile.config.schema() == Some(name.as_str()) {
+                    profile.config.set_schema(previous.clone());
+                    connection.set_schema(previous.as_deref());
+                }
+                profile.session.notice = Some(error.message);
+                workspace.remember_profiles(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn open_connection_form(
@@ -1058,10 +1247,22 @@ impl Workspace {
         form.project = project;
         self.form = Some(form);
         self.pending_project_deletion = None;
-        self.switcher_open = false;
-        // The form branch of `Render` returns before painting the modal, so a
-        // flag left set would reappear the moment the form closes.
-        self.settings_open = false;
+        cx.notify();
+    }
+
+    /// Opens the form over a saved connection, in its own project.
+    pub(crate) fn edit_profile(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profiles.get(index) else {
+            return;
+        };
+        let mut form = ConnectionForm::editing(profile, window, cx);
+        form.project = self.group_of(&profile.id).map(str::to_string);
+        self.form = Some(form);
         cx.notify();
     }
 
@@ -1112,7 +1313,6 @@ impl Workspace {
                 // The question takes the reading line's place, as a summary
                 // would.
                 workspace.clear_notice();
-                workspace.switcher_open = false;
                 workspace.pending_import = Some(PendingImport {
                     source,
                     report,
@@ -1237,11 +1437,22 @@ impl Workspace {
         };
         profile.generation = generation;
         profile.state = ProfileState::Connecting;
+        profile.in_transaction = false;
+        profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
+        // Every structure still out was asked on the old generation, and
+        // `issued_to` drops its answer. A structure tab counts an entry here as
+        // asked and waits on it, so one caught mid-load would sit on Loading
+        // with nothing coming; forgetting them makes its next visit ask again,
+        // as `stale` does for a relation tab's rows.
+        profile.session.structure_requests.clear();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
         let mode = profile.mode;
+        // The sidebar draws the tree whenever there are saved queries, so the
+        // old catalog's rows have to leave it with the catalog.
+        self.refresh_explorer(&id, cx);
         cx.notify();
 
         let connection_task = cx.background_executor().spawn({
@@ -1273,6 +1484,7 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| error.message)?;
                 }
+                connection.warm();
                 Ok(connection)
             }
         });
@@ -1284,20 +1496,40 @@ impl Workspace {
                     let Some(profile) = workspace.issued_to(&id, generation) else {
                         return;
                     };
+                    // A picked database or schema that is gone opens where
+                    // nothing is picked, and the profile follows it there.
+                    let unpicked = result.as_ref().ok().and_then(Connection::unpicked).cloned();
+                    if let Some(unpicked) = &unpicked {
+                        match unpicked.database {
+                            true => {
+                                profile.config.set_database(String::new());
+                                profile.left_database = true;
+                            }
+                            false => profile.config.set_schema(None),
+                        }
+                        profile.session.notice = Some(unpicked.message.clone());
+                    }
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
+                    if unpicked.is_some() {
+                        workspace.remember_profiles(cx);
+                    }
                     workspace.load_catalog(&id, generation, cx);
+                    workspace.load_import_columns(&id, cx);
                     // The tab in front is already being looked at, so a
-                    // reconnect has no later visit to re-run it on.
-                    let active = workspace
-                        .profile()
-                        .filter(|profile| profile.id == id && profile.connection().is_some());
+                    // reconnect has no later visit to re-run it on -- unless
+                    // it names a relation of a database the connection is
+                    // not on, and is about to close.
+                    let active = workspace.profile().filter(|profile| {
+                        profile.id == id && profile.connection().is_some() && !profile.left_database
+                    });
                     if let Some(Tab::Object(object)) = active.map(|profile| profile.session.active)
                     {
                         workspace.load_relation(object, cx);
                     }
+                    workspace.run_waiting_files(&id, cx);
                     cx.notify();
                 })
                 .ok();
@@ -1317,6 +1549,8 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            self.refresh_explorer(id, cx);
+            self.catalog_landed(id, cx);
             return;
         };
         let catalog_task = cx
@@ -1356,6 +1590,7 @@ impl Workspace {
                     profile.session.completion_columns.borrow_mut().clear();
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
+                    workspace.catalog_landed(&id, cx);
                     cx.notify();
                     workspace.load_routines(&id, generation, cx);
                     workspace.load_sizes(&id, generation, cx);
@@ -1416,6 +1651,7 @@ impl Workspace {
                     }
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
+                    workspace.catalog_landed(&id, cx);
                     cx.notify();
                 })
                 .ok();
@@ -1536,46 +1772,95 @@ impl Workspace {
     }
 
     pub(crate) fn install_completions(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        let provider = match &profile.catalog {
+        let engine = profile.config.engine();
+        profile.session.completions = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
-                profile.config.engine().syntax(),
+                engine.syntax(),
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 cx.weak_entity(),
-            )) as Rc<dyn CompletionProvider>),
+            ))),
             _ => None,
         };
+        let session = &profile.session;
+        let provider = session
+            .completions
+            .clone()
+            .map(|provider| provider as Rc<dyn CompletionProvider>);
 
         // Every buffer, not just the one in front: a tab switch must not be a
         // moment where completion quietly stops working.
-        for tab in &profile.session.queries {
+        for tab in &session.queries {
             tab.editor.update(cx, |editor, _| {
                 editor.lsp_mut().completion_provider = provider.clone();
             });
         }
+        // And every raw filter bar, which completes from the same catalog.
+        for tab in &session.objects {
+            let ObjectBody::Relation { filters, .. } = &tab.body else {
+                continue;
+            };
+            let completions = session.filter_completions(engine, &tab.schema, &tab.name);
+            for row in filters.iter().filter(|row| row.raw) {
+                row.value.update(cx, |editor, _| {
+                    editor.lsp_mut().completion_provider = completions.clone();
+                });
+            }
+        }
     }
 
     pub(crate) fn refresh_explorer(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, false, cx);
+    }
+
+    /// The sidebar again after only the saved queries changed. The catalog's
+    /// rows are the same rows under the same ids, so what the user folded,
+    /// opened and selected among them is put back rather than reset.
+    pub(crate) fn refresh_query_library(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_explorer(id, true, cx);
+    }
+
+    fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
         let filter = profile.session.explorer_filter.read(cx).value();
-        let explorer = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => build_explorer_tree(catalog, &filter),
-            _ => explorer::ExplorerTree {
-                items: Vec::new(),
-                leaves: HashMap::new(),
-            },
-        };
+        let mut explorer = explorer::queries(&profile.session.saved_queries, &filter);
+        if let CatalogState::Loaded(catalog, _) = &profile.catalog {
+            explorer.extend(build_explorer_tree(catalog, &filter));
+        }
         let tree = profile.session.explorer_tree.clone();
+        let (items, selected) = match keep {
+            true => {
+                let state = tree.read(cx);
+                let roots: Vec<_> = (0..)
+                    .map_while(|ix| state.entry(ix))
+                    .filter(|entry| entry.depth() == 0)
+                    .map(|entry| entry.item().clone())
+                    .collect();
+                let selected = state.selected_item().map(|item| item.id.clone());
+                (
+                    explorer::with_folds(explorer.items, &explorer::folds(&roots)),
+                    selected,
+                )
+            }
+            false => (explorer.items, None),
+        };
 
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
+            profile.session.explorer_highlights = Arc::new(explorer.highlights);
         }
-        tree.update(cx, |tree, cx| tree.set_items(explorer.items, cx));
+        tree.update(cx, |tree, cx| {
+            tree.set_items(items, cx);
+            if let Some(selected) = selected {
+                let at = tree.index_of(&selected);
+                tree.set_selected_index(at, cx);
+            }
+        });
     }
 
     pub(crate) fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1587,8 +1872,6 @@ impl Workspace {
         }
         self.active = index;
         self.form = None;
-        self.switcher_open = false;
-        self.pending_removal = None;
         // Written here rather than at quit, so the profile in front survives a
         // crash as well as a close.
         self.remember_profiles(cx);
@@ -1597,6 +1880,12 @@ impl Workspace {
             profile.session.clear_prompts();
         }
         self.connect_active(cx);
+        // A connect that landed while this profile was behind another one ran
+        // nothing on its tab in front, which may still be a restored snapshot
+        // waiting for its first run.
+        if let Some(Tab::Object(object)) = self.profile().map(|profile| profile.session.active) {
+            self.load_relation(object, cx);
+        }
         cx.notify();
     }
 
@@ -1626,17 +1915,13 @@ impl Workspace {
         self.cycle_profile(-1, cx);
     }
 
+    /// Asked about first, in the palette's confirmation (`Mode::Confirm`).
     pub(crate) fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.get(index) else {
             return;
         };
         let id = profile.id.clone();
         let name = profile.name.clone();
-        if self.pending_removal.as_deref() != Some(&id) {
-            self.pending_removal = Some(id);
-            cx.notify();
-            return;
-        }
         if index == self.active
             && let Err(message) = self.persist_buffer(cx)
         {
@@ -1644,9 +1929,18 @@ impl Workspace {
             return;
         }
 
+        // An unavailable profile under the same id owns everything filed
+        // under it, and gets it back in a build that can read it.
+        let shared = held_by_unavailable(&id, &self.unavailable);
         // Counted before the directory goes, because afterwards there is
         // nothing left to count and the number is what the note reports.
-        let queries = store::saved_queries(&id).len();
+        let queries = if shared {
+            0
+        } else {
+            store::saved_queries(&id).len()
+        };
+
+        let stopped = self.abandon_import(&id, cx);
 
         let removed = self.profiles.remove(index);
         if let Some(key) = identity_file(&removed.config)
@@ -1656,27 +1950,71 @@ impl Workspace {
                 &directory,
                 self.profiles
                     .iter()
-                    .filter_map(|profile| identity_file(&profile.config)),
+                    .filter_map(|profile| identity_file(&profile.config))
+                    .chain(
+                        self.unavailable
+                            .iter()
+                            .filter_map(store::UnavailableProfile::identity_file),
+                    ),
             )
         {
             let _ = std::fs::remove_file(key);
         }
-        store::delete_password(&id);
-        let removed_queries = store::delete_queries(&id);
-        let _ = store::delete_grids(&id);
-        self.pending_removal = None;
-        for project in &mut self.projects {
-            project.connections.retain(|member| member != &id);
-        }
+        let removed_queries = if shared {
+            Ok(())
+        } else {
+            store::delete_password(&id);
+            let removed_queries = store::delete_queries(&id);
+            let _ = store::delete_grids(&id);
+            for project in &mut self.projects {
+                project.connections.retain(|member| member != &id);
+            }
+            removed_queries
+        };
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
-        // The switcher lives in a titlebar the welcome surface does not have.
         if self.profiles.is_empty() {
-            self.switcher_open = false;
             self.refocus_front();
         }
         self.connect_active(cx);
-        self.note(removal_note(&name, queries, removed_queries.err()), cx);
+        let note = removal_note(&name, queries, removed_queries.err());
+        self.note(
+            match stopped {
+                Some(stopped) => format!("{note} {stopped}"),
+                None => note,
+            },
+            cx,
+        );
+    }
+
+    /// Removes a profile this build cannot open, asked about first like
+    /// [`Self::remove_profile`].
+    pub(crate) fn remove_unavailable(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at >= self.unavailable.len() {
+            return;
+        }
+        let removed = self.unavailable.remove(at);
+        // Ids are not unique in a hand-edited file, and what is filed under
+        // one belongs to every profile holding it.
+        let shared = self.profiles.iter().any(|profile| profile.id == removed.id)
+            || held_by_unavailable(&removed.id, &self.unavailable);
+        let note = if shared {
+            removal_note(&removed.name, 0, None)
+        } else {
+            let queries = store::saved_queries(&removed.id).len();
+            store::delete_password(&removed.id);
+            let removed_queries = store::delete_queries(&removed.id);
+            let _ = store::delete_grids(&removed.id);
+            for project in &mut self.projects {
+                project.connections.retain(|member| member != &removed.id);
+            }
+            removal_note(&removed.name, queries, removed_queries.err())
+        };
+        self.remember_profiles(cx);
+        if self.profiles.is_empty() {
+            self.refocus_front();
+        }
+        self.note(note, cx);
     }
 }
 
@@ -1686,6 +2024,78 @@ enum ProjectChoice {
     /// An existing project, or `None` for No project.
     In(Option<String>),
     New,
+}
+
+/// The connection a stored profile describes, on `engine` and `sslmode` as
+/// [`Workspace::restore_profile`] read them.
+fn stored_config(
+    stored: &store::StoredProfile,
+    engine: Engine,
+    sslmode: SslMode,
+) -> ConnectionConfig {
+    match engine {
+        Engine::Sqlite => ConnectionConfig::Sqlite {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+        },
+        Engine::Turso => ConnectionConfig::Turso {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+        },
+        Engine::DuckDb => ConnectionConfig::DuckDb {
+            path: stored.path.clone().unwrap_or_default(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            database: stored.database.clone(),
+            schema: stored.schema.clone(),
+        },
+        Engine::Postgres
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::SqlServer
+        | Engine::ClickHouse
+        | Engine::MongoDb
+        | Engine::Redis => {
+            let server = ServerConfig {
+                host: stored.host.clone(),
+                port: stored.port,
+                database: stored.database.clone(),
+                user: stored.user.clone(),
+                // Never on disk. Read from the Keychain when connecting.
+                password: String::new(),
+                sslmode,
+                root_certificate: stored.root_certificate.clone(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssh: stored.ssh.clone(),
+                schema: stored.schema.clone(),
+            };
+            match engine {
+                Engine::MySql => ConnectionConfig::MySql(server),
+                Engine::MariaDb => ConnectionConfig::MariaDb(server),
+                Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                Engine::ClickHouse => ConnectionConfig::ClickHouse(server),
+                Engine::Redis => ConnectionConfig::Redis(server),
+                Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {
+                    server,
+                    srv: stored.srv.unwrap_or_default(),
+                    options: stored.options.clone().unwrap_or_default(),
+                    login_database: stored.login_database.clone(),
+                }),
+                _ => ConnectionConfig::Postgres(server),
+            }
+        }
+        Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
+            account: stored.account.clone().unwrap_or_default(),
+            // Blank on disk is the derived host, the same as absent.
+            host: Some(stored.host.clone()).filter(|host| !host.is_empty()),
+            user: stored.user.clone(),
+            private_key: stored.private_key.clone().unwrap_or_default(),
+            database: stored.database.clone(),
+            warehouse: stored.warehouse.clone(),
+            role: stored.role.clone(),
+            statement_timeout: stored.statement_timeout.unwrap_or_default(),
+            schema: stored.schema.clone(),
+        }),
+    }
 }
 
 /// Whether picking `name` would leave the profile where it is. A blank
@@ -1726,6 +2136,22 @@ pub(crate) fn is_unshared_imported_key<'a>(
                     .is_ok_and(|directory| directory == parent)
             })
         && !others.into_iter().any(|other| other == key)
+}
+
+/// Why a profile on `engine` cannot be opened: a plugin it names that is not
+/// installed, or an engine only a newer build has.
+pub(crate) fn unavailable_reason(engine: &str) -> String {
+    match engine.strip_prefix("plugin:") {
+        Some(plugin) if !plugin.is_empty() => format!("Needs the {plugin} plugin"),
+        _ => format!("Made by a newer DBDelve (engine `{engine}`)"),
+    }
+}
+
+/// Whether a profile this build cannot read holds `id`. Ids are not unique in
+/// a hand-edited file, and the keychain entry, saved queries, grid snapshots
+/// and project membership are filed by id, so they are that profile's too.
+fn held_by_unavailable(id: &str, unavailable: &[store::UnavailableProfile]) -> bool {
+    unavailable.iter().any(|gone| gone.id == id)
 }
 
 /// What a removal took with it. The count is named because saved queries are
@@ -1771,9 +2197,158 @@ fn stored_buffers(
     }
 }
 
+/// Whether an edit to the URL field brought a URL in whole -- pasted rather
+/// than typed -- that names an engine the fields can be filled for. Read off
+/// what the edit inserted rather than the length, so a paste over a selection
+/// counts and deleting part of a URL does not.
+pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
+    let before: Vec<char> = before.chars().collect();
+    let after_chars: Vec<char> = after.chars().collect();
+    let prefix = before
+        .iter()
+        .zip(&after_chars)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after_chars[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let inserted = after_chars.len() - prefix - suffix;
+    let fills = match super::welcome::recognise(after) {
+        super::welcome::Recognised::Url(engine) => engine.fields() != Fields::Account,
+        super::welcome::Recognised::File(_) => true,
+        _ => false,
+    };
+    inserted > 1 && fills
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn restored_configs(text: &str) -> String {
+        let store::ProfileList { profiles, .. } =
+            store::decode_profiles(text).expect("the fixture loads");
+        profiles
+            .iter()
+            .map(|stored| {
+                let engine = Engine::parse(stored.engine.as_deref().unwrap_or("postgres"))
+                    .expect("a known engine");
+                let sslmode = stored
+                    .sslmode
+                    .as_deref()
+                    .map_or(Ok(SslMode::default()), SslMode::parse)
+                    .expect("a known sslmode");
+                format!(
+                    "{} {:#?}\n",
+                    stored.id,
+                    stored_config(stored, engine, sslmode)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_engines_profile_restores_the_connection_it_did() {
+        assert_eq!(
+            restored_configs(include_str!("../testdata/every-engine.toml")),
+            include_str!("../testdata/every-engine.configs.txt")
+        );
+    }
+
+    /// A supported `pg` and, hand-edited to the same id, one on a plugin.
+    const SHARED_ID: &str = "[[profiles]]\nid = 'pg'\nname = 'Postgres'\nhost = 'h'\n\
+        database = 'd'\nuser = 'u'\nengine = 'postgres'\n\n\
+        [[profiles]]\nid = 'pg'\nname = 'ODBC'\nengine = 'plugin:odbc'\n";
+
+    #[test]
+    fn an_unavailable_profile_says_what_it_is_missing() {
+        assert_eq!(unavailable_reason("plugin:odbc"), "Needs the odbc plugin");
+        assert_eq!(
+            unavailable_reason("zz-unknown"),
+            "Made by a newer DBDelve (engine `zz-unknown`)"
+        );
+        // No id to name: not a plugin anyone could install.
+        assert_eq!(
+            unavailable_reason("plugin:"),
+            "Made by a newer DBDelve (engine `plugin:`)"
+        );
+    }
+
+    #[test]
+    fn a_restore_prunes_no_grids_while_an_unavailable_profile_holds_the_id() {
+        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        assert_eq!((list.profiles.len(), list.unavailable.len()), (1, 1));
+        assert!(held_by_unavailable(&list.profiles[0].id, &list.unavailable));
+        // A file with no unavailable profile prunes every profile's grids, as before.
+        let alone = store::decode_profiles(include_str!("../testdata/every-engine.toml")).unwrap();
+        assert!(alone.unavailable.is_empty());
+        assert!(
+            alone
+                .profiles
+                .iter()
+                .all(|stored| !held_by_unavailable(&stored.id, &alone.unavailable))
+        );
+    }
+
+    #[test]
+    fn removing_a_profile_keeps_what_an_unavailable_one_under_its_id_still_owns() {
+        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        assert!(held_by_unavailable("pg", &list.unavailable));
+        // Only the id decides: another id's keychain entry, queries, grids and
+        // project membership go with it as before.
+        assert!(!held_by_unavailable("odbc", &list.unavailable));
+        assert!(!held_by_unavailable("pg", &[]));
+    }
+
+    #[test]
+    fn a_duckdb_profiles_picked_database_and_schema_survive_a_restart() {
+        let mut picked = ConnectionConfig::duckdb("/data/dev.duckdb".into(), 30);
+        picked.set_database("other".into());
+        picked.set_schema(Some("analytics".into()));
+        let file = |fields: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = ''\nuser = ''\nengine = 'duckdb'\n\
+                 path = '/data/dev.duckdb'\n{fields}"
+            ))
+            .expect("a profile")
+        };
+        // The two fields `Profile::stored` writes from the config.
+        let stored = file(&format!(
+            "statement_timeout = 30\ndatabase = '{}'\nschema = '{}'",
+            picked.database().unwrap(),
+            picked.schema().unwrap()
+        ));
+        assert_eq!(
+            stored_config(&stored, Engine::DuckDb, SslMode::default()),
+            picked
+        );
+        // Written before either could be picked: the file's own database.
+        assert_eq!(
+            stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
+            ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
+        );
+    }
+
+    #[test]
+    fn only_a_recognised_url_arriving_whole_fills_the_form() {
+        let url = "postgresql://ada@db.internal:5432/orders";
+        assert!(pasted_url("", url));
+        // Pasted over another URL, or over a selection in one.
+        assert!(pasted_url("mysql://root@localhost/shop", url));
+        assert!(pasted_url("postgresql://ada@/orders", url));
+        assert!(pasted_url("", "~/data/app.sqlite"));
+        // Typed a character at a time, it waits for Enter.
+        assert!(!pasted_url("postgresql://ada@db.internal:5432/order", url));
+        // Cutting part of one away is not a URL arriving.
+        assert!(!pasted_url(url, "postgresql://ada@db.internal:5432"));
+        // Not a URL, or one with no fields here to fill.
+        assert!(!pasted_url("", "hello world"));
+        assert!(!pasted_url("", "nope://db/app"));
+        assert!(!pasted_url("", "snowflake://acme-prod"));
+    }
 
     #[test]
     fn a_database_switch_is_a_no_op_only_onto_the_configured_one() {

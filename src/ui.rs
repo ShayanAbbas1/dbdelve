@@ -7,26 +7,28 @@
 //! up looking like two different applications.
 
 use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, Keystroke, ParentElement, Styled,
-    div, prelude::FluentBuilder, px,
+    AnyElement, Div, FontWeight, HighlightStyle, InteractiveElement, IntoElement, Keystroke,
+    ParentElement, SharedString, Styled, StyledText, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    InteractiveElementExt,
-    button::{Button, ButtonVariants},
+    InteractiveElementExt, POPOVER_BLUR,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
+    highlighter::{HighlightTheme, SyntaxHighlighter},
+    input::{Input, InputState, Rope},
     kbd::Kbd,
 };
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, ops::Range};
 
 use crate::{
     actions::RefreshConnection,
-    db::{RelationKind, RoutineKind},
+    db::{Engine, RelationKind, RoutineKind, Syntax},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
     session::ProfileState,
     sql::Mode,
-    theme::{self, ConnectionColor, Theme, layout},
+    theme::{self, ConnectionColor, Theme, color::Srgb, layout},
 };
 
 /// The icon a sidebar row carries: a grid for a table, layers for one split
@@ -40,9 +42,114 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
         ObjectKind::Relation(RelationKind::View) => icon::VIEW,
         ObjectKind::Relation(RelationKind::MaterializedView) => icon::MATERIALIZED_VIEW,
         ObjectKind::Relation(RelationKind::ForeignTable) => icon::FOREIGN_TABLE,
+        ObjectKind::Relation(RelationKind::Dictionary) => icon::TABLE,
         ObjectKind::Routine(RoutineKind::Function) => icon::FUNCTION,
         ObjectKind::Routine(RoutineKind::Procedure) => icon::PROCEDURE,
     }
+}
+
+/// `text` with the byte `ranges` a filter matched drawn in the accent, bolder.
+pub(crate) fn highlighted(
+    text: impl Into<SharedString>,
+    ranges: &[Range<usize>],
+    t: Theme,
+) -> StyledText {
+    let style = HighlightStyle {
+        color: Some(t.accent.into()),
+        font_weight: Some(FontWeight::SEMIBOLD),
+        ..Default::default()
+    };
+    let text = StyledText::new(text);
+    if ranges.is_empty() {
+        return text;
+    }
+    text.with_highlights(ranges.iter().map(|range| (range.clone(), style)))
+}
+
+/// What a piece of code is to its grammar, which reads an expression on its
+/// own as a broken statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Code {
+    Statement,
+    Expression,
+}
+
+thread_local! {
+    // Building one compiles the grammar's highlight query, which is far too
+    // slow to pay for every expression on every frame it is drawn.
+    static HIGHLIGHTERS: RefCell<HashMap<&'static str, SyntaxHighlighter>> =
+        RefCell::default();
+}
+
+/// `text` highlighted as the editor would highlight it in `syntax`. An SQL
+/// expression is parsed behind a `SELECT `; what the grammar still cannot read
+/// is left unstyled, never dropped.
+pub(crate) fn code_highlights(
+    text: &str,
+    syntax: Syntax,
+    code: Code,
+    theme: &HighlightTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let (prefix, suffix) = match (syntax, code) {
+        // A bare `{` opens a block, so a document is read as the object it is.
+        (Syntax::Mongo, _) => ("(", ")"),
+        (Syntax::Sql, Code::Expression) => ("SELECT ", ""),
+        _ => ("", ""),
+    };
+    let wrapped = format!("{prefix}{text}{suffix}");
+    let grammar = syntax.highlighter();
+    HIGHLIGHTERS
+        .with_borrow_mut(|highlighters| {
+            let highlighter = highlighters
+                .entry(grammar)
+                .or_insert_with(|| SyntaxHighlighter::new(grammar));
+            highlighter.update(None, &Rope::from_str(&wrapped), None);
+            highlighter.styles(&(prefix.len()..prefix.len() + text.len()), theme)
+        })
+        .into_iter()
+        .map(|(range, style)| {
+            (
+                range.start.saturating_sub(prefix.len())..range.end.saturating_sub(prefix.len()),
+                style,
+            )
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect()
+}
+
+/// A statement as the editor colours it, one run per line: a single run
+/// carrying newlines is one line to the layout.
+pub(crate) fn code_lines(text: &str, syntax: Syntax, theme: &HighlightTheme) -> Vec<StyledText> {
+    split_highlights(text, &code_highlights(text, syntax, Code::Statement, theme))
+        .into_iter()
+        .map(|(line, runs)| StyledText::new(line.to_string()).with_highlights(runs))
+        .collect()
+}
+
+type Highlights = Vec<(Range<usize>, HighlightStyle)>;
+
+/// `highlights` over `text` cut at its line breaks, each run re-based onto
+/// its own line, so a comment or string spanning lines keeps its colour on
+/// every one.
+fn split_highlights<'a>(
+    text: &'a str,
+    highlights: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(&'a str, Highlights)> {
+    text.lines()
+        .map(|line| {
+            let start = line.as_ptr() as usize - text.as_ptr() as usize;
+            let end = start + line.len();
+            let runs = highlights
+                .iter()
+                .filter_map(|(range, style)| {
+                    let clipped = range.start.max(start)..range.end.min(end);
+                    (!clipped.is_empty())
+                        .then(|| (clipped.start - start..clipped.end - start, *style))
+                })
+                .collect();
+            (line, runs)
+        })
+        .collect()
 }
 
 /// One column of icons down the sidebar, so every label starts at the same x
@@ -69,27 +176,66 @@ pub(crate) fn kind_color(path: &str) -> Option<ConnectionColor> {
 }
 
 /// `row_icon`, in a connection's own colour. Without one it is `row_icon`
-/// exactly, so an uncoloured connection is drawn the way it always was.
+/// exactly, so an uncoloured connection is drawn the way it always was. An
+/// engine's logo without one wears its brand; with one, the colour the user
+/// chose wins, since it is how they tell production from the rest.
 pub(crate) fn row_icon_tinted(
     t: Theme,
     path: &'static str,
     color: Option<ConnectionColor>,
 ) -> impl IntoElement {
+    let brand = || {
+        Engine::ALL
+            .into_iter()
+            .find(|engine| engine.logo() == path)
+            .map_or(t.text_faint, |engine| {
+                theme::engine_brand(engine, t, &t.logo_planes())
+            })
+    };
     icon(path)
         .size(px(layout::chrome(layout::ICON_SIZE)))
-        .text_color(color.map_or(t.text_faint, ConnectionColor::swatch))
+        .text_color(color.map_or_else(brand, ConnectionColor::swatch))
+}
+
+/// An engine's logo in its brand hue, at a lightness that stands off every
+/// one of `planes`: for a surface whose colour is not the theme's own.
+pub(crate) fn engine_logo(t: Theme, engine: Engine, planes: &[Srgb]) -> impl IntoElement {
+    icon(engine.logo())
+        .size(px(layout::chrome(layout::ICON_SIZE)))
+        .text_color(theme::engine_brand(engine, t, planes))
+}
+
+/// A connection's state, apart from the connection itself, for a list built
+/// once and drawn after.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Status {
+    Idle,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+impl From<&ProfileState> for Status {
+    fn from(state: &ProfileState) -> Self {
+        match state {
+            ProfileState::Idle => Status::Idle,
+            ProfileState::Connecting => Status::Connecting,
+            ProfileState::Connected(_) => Status::Connected,
+            ProfileState::Failed(_) => Status::Failed,
+        }
+    }
 }
 
 /// A connection's state as one dot, the same in the status bar and the
-/// switcher: faint idle, muted while connecting, green connected, red failed
+/// palette: faint idle, muted while connecting, green connected, red failed
 /// or lost. Never the connection's own colour: a red one would read as lost,
 /// and a gray one as idle.
-pub(crate) fn status_dot(t: Theme, state: &ProfileState) -> Div {
-    let fill = match state {
-        ProfileState::Idle => t.text_faint,
-        ProfileState::Connecting => t.text_muted,
-        ProfileState::Connected(_) => t.success,
-        ProfileState::Failed(_) => t.danger,
+pub(crate) fn status_dot(t: Theme, status: impl Into<Status>) -> Div {
+    let fill = match status.into() {
+        Status::Idle => t.text_faint,
+        Status::Connecting => t.text_muted,
+        Status::Connected => t.success,
+        Status::Failed => t.danger,
     };
     div()
         .flex_shrink_0()
@@ -289,11 +435,69 @@ pub(crate) fn dialog(t: Theme) -> gpui::Div {
         .flex()
         .flex_col()
         .gap(px(layout::SPACE_MD))
-        .bg(t.overlay_glass())
         .border_1()
         .border_color(t.border_strong)
         .rounded(px(layout::RADIUS_PANEL))
-        .shadow_lg()
+        .map(|card| raised_card(card, t))
+}
+
+/// A floating card's fill, frosted when it lets the window through. Decided by
+/// the fill, as gpui-component decides for its own popups, rather than by
+/// `is_glass`: a glass theme whose text only a solid card can hold gets a solid
+/// one, and it is drawn the way every menu beside it is.
+pub(crate) fn frosted_card<E: Styled>(card: E, t: Theme) -> E {
+    let fill = t.overlay_glass();
+    let card = card.bg(fill);
+    if frosts(fill) {
+        card.backdrop_blur(POPOVER_BLUR)
+    } else {
+        card
+    }
+}
+
+/// [`frosted_card`], with a shadow when it is solid. None under frost: GPUI
+/// paints a drop shadow as a filled rect under the whole card, so through the
+/// tint it would darken the frost itself.
+pub(crate) fn raised_card<E: Styled>(card: E, t: Theme) -> E {
+    let card = frosted_card(card, t);
+    if frosts(t.overlay_glass()) {
+        card
+    } else {
+        card.shadow_lg()
+    }
+}
+
+fn frosts(fill: theme::color::Rgba) -> bool {
+    fill.a < 1.0
+}
+
+/// The big field a floating card leads with: the palette's search, and the
+/// welcome surface's connection URL. An icon, a bare input in the large text
+/// size, and a hairline under it; the caller adds whatever sits at its end.
+pub(crate) fn search_field(
+    leading: impl IntoElement,
+    input: &gpui::Entity<InputState>,
+    t: Theme,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_MD))
+        .min_h(px(layout::chrome(layout::PALETTE_INPUT_HEIGHT)))
+        .px(px(layout::SPACE_LG))
+        .border_b_1()
+        .border_color(t.border)
+        .child(leading)
+        .child(
+            div().flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .p_0()
+                    // After the input's own size, which would set the
+                    // library's text size.
+                    .text_size(px(layout::chrome(layout::TEXT_LG))),
+            ),
+        )
 }
 
 /// What a button's fill says. Colour is state here as everywhere else: a dbdelve
@@ -429,6 +633,317 @@ pub(crate) fn control(id: impl Into<gpui::ElementId>, tone: Tone, size: Control)
         .h(px(size.height()))
 }
 
+/// One choice of a segmented toggle, dressed as the preview's Data and
+/// Structure tabs so every either-or reads the same. The caller adds the click.
+pub(crate) fn segment(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    selected: bool,
+    t: Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(layout::chrome(24.)))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .whitespace_nowrap()
+        .map(|segment| {
+            if selected {
+                segment.bg(t.element_active).text_color(t.text)
+            } else {
+                segment
+                    .text_color(t.text_muted)
+                    .hover(|style| style.bg(t.element_hover))
+            }
+        })
+        .child(label)
+}
+
+/// Rows set into the surface they sit on rather than raised off it, a
+/// hairline between each two: a settings group, a section of the connection
+/// form.
+pub(crate) fn well(t: Theme, rows: impl IntoIterator<Item = AnyElement>) -> Div {
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .rounded(px(layout::RADIUS_WELL))
+        .border_1()
+        .border_color(t.border)
+        .bg(t.element_hover);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            card = card.child(div().mx(px(layout::SPACE_LG)).h(px(1.)).bg(t.border));
+        }
+        card = card.child(row);
+    }
+    card
+}
+
+/// One choice in a well: its title, what it does under that, and its control
+/// beside them or, when the two do not fit across, under them.
+pub(crate) fn option_row(
+    title: impl IntoElement,
+    description: Option<SharedString>,
+    control: impl IntoElement,
+    t: Theme,
+) -> Div {
+    let height = if description.is_some() {
+        layout::SETTINGS_ROW_HEIGHT
+    } else {
+        layout::SETTINGS_ROW_COMPACT_HEIGHT
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(layout::SPACE_LG))
+        .gap_y(px(layout::SPACE_SM))
+        .min_h(px(layout::chrome(height)))
+        .px(px(layout::SPACE_LG))
+        .py(px(layout::SPACE_MD))
+        .child(
+            option_text(title, description, t)
+                .flex_1()
+                .min_w(px(layout::SETTINGS_TEXT_MIN_WIDTH)),
+        )
+        .child(div().min_w_0().flex().items_center().child(control))
+}
+
+/// An [`option_row`] whose control always sits under its title and
+/// description. For a control whose width follows what it shows -- a font
+/// row's picker carries the family's name -- so that sibling rows do not
+/// each decide differently whether it fits beside them.
+pub(crate) fn stacked_option_row(
+    title: impl IntoElement,
+    description: Option<SharedString>,
+    control: impl IntoElement,
+    t: Theme,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(layout::SPACE_SM))
+        .px(px(layout::SPACE_LG))
+        .py(px(layout::SPACE_MD))
+        .child(option_text(title, description, t))
+        .child(div().min_w_0().flex().items_center().child(control))
+}
+
+fn option_text(title: impl IntoElement, description: Option<SharedString>, t: Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(div().font_weight(FontWeight::MEDIUM).child(title))
+        .children(description.map(|description| {
+            div()
+                .mt(px(layout::SETTINGS_DESCRIPTION_GAP))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_muted)
+                .child(description)
+        }))
+}
+
+/// An on/off choice. Drawn here rather than taken from gpui-component, whose
+/// switch springs its thumb across: nothing in DBDelve moves on a click (see
+/// docs/agents/ui.md, "Animation"). A button underneath, so Tab reaches it and Space
+/// or Enter flips it.
+pub(crate) fn switch(id: impl Into<gpui::ElementId>, on: bool, t: Theme) -> Button {
+    let width = layout::chrome(layout::SWITCH_WIDTH);
+    let height = layout::chrome(layout::SWITCH_HEIGHT);
+    let thumb = layout::chrome(layout::SWITCH_THUMB_SIZE);
+    let inset = (height - thumb) / 2.;
+    control(id, Tone::Quiet, Control::Inline)
+        .flex_shrink_0()
+        .w(px(width))
+        .h(px(height))
+        .p_0()
+        .rounded_full()
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .rounded_full()
+                .bg(if on {
+                    t.accent.opaque()
+                } else {
+                    t.border_strong
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(inset))
+                        .left(px(if on { width - thumb - inset } else { inset }))
+                        .size(px(thumb))
+                        .rounded_full()
+                        .bg(if on { t.on_accent } else { t.text_muted }),
+                ),
+        )
+}
+
+/// A choice made from a list somewhere else -- the palette, a menu -- dressed
+/// as the row limit's menu button, so every picker reads alike. The one
+/// control in a row that gives way when the row is too narrow, its label cut
+/// short: a long family name at a large chrome scale.
+pub(crate) fn picker(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    t: Theme,
+) -> Button {
+    button(id, label, Tone::Quiet, Control::Compact, t)
+        .min_w_0()
+        .flex_initial()
+        .child(
+            icon(icon::CHEVRON_DOWN)
+                .flex_none()
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.text_faint),
+        )
+}
+
+/// A track of segments, one picked: either-or-or that reads as one control.
+/// Hold [`segmented_choice`]s.
+pub(crate) fn segmented(t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .p(px(layout::SEGMENT_INSET))
+        .rounded(px(layout::RADIUS_CONTROL + layout::SEGMENT_INSET))
+        .bg(t.element_hover)
+}
+
+/// One segment of a [`segmented`] track. A button underneath, so Tab reaches
+/// it and Space or Enter picks it; the caller adds the click.
+pub(crate) fn segmented_choice(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    selected: bool,
+    t: Theme,
+) -> Button {
+    control(id, Tone::Quiet, Control::Compact)
+        .p_0()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .px(px(layout::SPACE_MD))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .whitespace_nowrap()
+                .map(|segment| {
+                    if selected {
+                        segment
+                            .bg(t.element_active)
+                            .text_color(t.text)
+                            .font_weight(FontWeight::MEDIUM)
+                    } else {
+                        segment.text_color(t.text_muted)
+                    }
+                })
+                .child(label),
+        )
+}
+
+/// A connection colour as a dot to pick, or None as a struck-out ring; the
+/// one picked is ringed in the text colour. A button underneath, so Tab
+/// reaches it and Space or Enter picks it; the caller adds the click.
+pub(crate) fn swatch(
+    id: impl Into<gpui::ElementId>,
+    color: Option<ConnectionColor>,
+    selected: bool,
+    t: Theme,
+) -> Button {
+    let dot = layout::chrome(layout::SWATCH_SIZE);
+    let ring = dot + 2. * (layout::SWATCH_RING_GAP + 1.);
+    control(id, Tone::Quiet, Control::Inline)
+        .size(px(ring))
+        .p_0()
+        .rounded_full()
+        .tooltip(color.map_or("None", ConnectionColor::label))
+        .child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(if selected {
+                    t.text.opaque()
+                } else {
+                    t.text.alpha(0.)
+                })
+                .child(match color {
+                    Some(color) => div()
+                        .size(px(dot))
+                        .rounded_full()
+                        .bg(color.swatch())
+                        .into_any_element(),
+                    None => icon(icon::NO_COLOR)
+                        .size(px(dot))
+                        .text_color(t.border_strong)
+                        .into_any_element(),
+                }),
+        )
+}
+
+/// The one action a surface exists to take, in the accent: the connection
+/// form's Connect. Everywhere else the primary button is the neutral control
+/// tone (see [`Tone`]).
+pub(crate) fn accent_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    t: Theme,
+    cx: &gpui::App,
+) -> Button {
+    let size = Control::Standard;
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(t.accent.into())
+                .foreground(t.on_accent.into())
+                .hover(t.accent.alpha(layout::ACCENT_HOVER).into())
+                .active(t.accent.alpha(layout::ACCENT_PRESSED).into()),
+        )
+        // A custom variant rests at a 20% wash of its colour
+        // (`mix_oklab(transparent, 0.2)`), which leaves the on-accent label
+        // unreadable. The caller's style is applied after the variant's, so this
+        // fills it; hover and press still layer over it.
+        .bg(t.accent)
+        .h(px(size.height()))
+        .px(px(size.padding()))
+        .min_w(px(layout::CONTROL_MIN_WIDTH))
+        .child(
+            div()
+                .whitespace_nowrap()
+                .line_height(gpui::relative(1.))
+                .text_size(px(size.text_size()))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(t.on_accent)
+                .child(label.into()),
+        )
+}
+
+/// [`keycaps`], for a chord drawn on the accent.
+pub(crate) fn keycaps_on_accent(chord: &str, t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::KEYCAP_GAP))
+        .children(keycap_parts(chord).into_iter().map(|key| {
+            key_chip(key, t)
+                .border_color(t.on_accent.alpha(0.))
+                .bg(t.on_accent.alpha(layout::KEYCAP_ON_ACCENT))
+                .text_color(t.on_accent)
+        }))
+}
+
 /// The quietest thing on screen: small, uppercase, and dim enough that the
 /// names under it are what the eye lands on first.
 pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {
@@ -443,13 +958,6 @@ pub(crate) fn section_label(t: Theme, label: &str) -> impl IntoElement {
 /// GPUI's binding syntax so the hint and the binding cannot drift apart.
 pub(crate) fn keycap(stroke: &'static str) -> Kbd {
     Kbd::new(Keystroke::parse(stroke).expect("keycap strokes are compile-time constants"))
-}
-
-/// The same keycap for a stroke only known at runtime -- a rebound chord read
-/// back off disk, which [`keycap`]'s constant cannot cover. One GPUI cannot
-/// parse draws nothing rather than a cap with garbage on it.
-pub(crate) fn keycap_for(stroke: &str) -> Option<Kbd> {
-    Keystroke::parse(stroke).ok().map(Kbd::new)
 }
 
 /// The same cap as plain text, for the readouts that run as a sentence rather
@@ -480,6 +988,85 @@ pub(crate) fn chord_hint(id: &str, overrides: &HashMap<String, String>) -> Strin
         .unwrap_or_default()
 }
 
+/// The chord bound to an action today, as GPUI writes it -- an override if the
+/// user set one, else the shipped default -- or `None` for an unbound action.
+pub(crate) fn chord_for(id: &str, overrides: &HashMap<String, String>) -> Option<String> {
+    keybindings::REGISTRY
+        .iter()
+        .find(|spec| spec.id == id)
+        .and_then(|spec| keybindings::chords_for(spec, overrides).first().copied())
+        .map(str::to_string)
+}
+
+/// A chord as the keys a hand presses, one label per keycap: the modifiers in
+/// the platform's order, then the key. A two-stroke chord is both strokes'
+/// keys in turn.
+pub(crate) fn keycap_parts(chord: &str) -> Vec<gpui::SharedString> {
+    chord
+        .split_whitespace()
+        .filter_map(|stroke| Keystroke::parse(stroke).ok())
+        .flat_map(|stroke| {
+            let held = stroke.modifiers;
+            let modifiers = [
+                (held.control, "⌃", "Ctrl"),
+                (held.alt, "⌥", "Alt"),
+                (held.shift, "⇧", "Shift"),
+                (held.platform, "⌘", "Super"),
+                (held.function, "fn", "Fn"),
+            ];
+            let mut parts: Vec<gpui::SharedString> = modifiers
+                .into_iter()
+                .filter(|(down, _, _)| *down)
+                .map(|(_, mac, other)| {
+                    if cfg!(target_os = "macos") {
+                        mac
+                    } else {
+                        other
+                    }
+                    .into()
+                })
+                .collect();
+            let bare = Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                ..stroke
+            };
+            parts.push(Kbd::format(&bare).into());
+            parts
+        })
+        .collect()
+}
+
+/// One key of a shortcut, as a small cap.
+pub(crate) fn key_chip(label: impl Into<gpui::SharedString>, t: Theme) -> Div {
+    let height = layout::chrome(layout::KEYCAP_HEIGHT);
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(height))
+        .min_w(px(height))
+        .px(px(layout::SPACE_XS))
+        .rounded(px(layout::RADIUS_KEYCAP))
+        .border_1()
+        .border_color(t.border)
+        .bg(t.element_hover)
+        .text_size(px(layout::chrome(layout::TEXT_XS)))
+        .line_height(gpui::relative(1.))
+        .text_color(t.text_muted)
+        .child(label.into())
+}
+
+/// A chord as a keycap per key, the way the platform draws one in a menu.
+pub(crate) fn keycaps(chord: &str, t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::KEYCAP_GAP))
+        .children(keycap_parts(chord).into_iter().map(|key| key_chip(key, t)))
+}
+
 /// A shortcut hint and what it does, in the app face rather than the editor's
 /// monospace -- these are sentences about the UI, not query output.
 pub(crate) fn key_hint(
@@ -504,6 +1091,14 @@ pub(crate) fn compact_count(rows: usize) -> String {
         true => format!("{}K", rows / 1_000),
         false => rows.to_string(),
     }
+}
+
+/// Text for a row one line tall, however many lines it came in. A line break
+/// breaks the line whether or not the row is `whitespace_nowrap`, and the text
+/// is then laid out over several lines and centred, so the row shows whichever
+/// of them falls in the middle instead of its start.
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `1234567` → `1,234,567`. Row counts are read at a glance, and groups are
@@ -573,6 +1168,108 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn code_is_highlighted_within_itself_whatever_it_holds() {
+        let syntax = HighlightTheme::default_dark();
+        for (text, grammar, code) in [
+            (
+                "((status)::text = 'paid'::text)",
+                Syntax::Sql,
+                Code::Expression,
+            ),
+            ("(o.account_id = a.id)", Syntax::Sql, Code::Expression),
+            ("a.created_at DESC", Syntax::Sql, Code::Expression),
+            ("", Syntax::Sql, Code::Expression),
+            ("é ' ( ;; \u{1F600}", Syntax::Sql, Code::Expression),
+            (
+                "CREATE INDEX a ON t (b) WHERE c",
+                Syntax::Sql,
+                Code::Statement,
+            ),
+            ("é ' ( ;; \u{1F600}", Syntax::Mongo, Code::Statement),
+            (r#"{"a":1} unique"#, Syntax::Mongo, Code::Statement),
+        ] {
+            for (range, _) in code_highlights(text, grammar, code, &syntax) {
+                assert!(range.end <= text.len(), "{text:?} {range:?}");
+                assert!(text.is_char_boundary(range.start));
+                assert!(text.is_char_boundary(range.end));
+            }
+        }
+
+        let color = |name: &str| {
+            syntax
+                .style
+                .syntax
+                .style(name)
+                .and_then(|style| style.color)
+        };
+        let styled = |text: &str, grammar, code, token: &str| {
+            code_highlights(text, grammar, code, &syntax)
+                .into_iter()
+                .find(|(range, _)| &text[range.clone()] == token)
+                .and_then(|(_, style)| style.color)
+        };
+        assert!(color("keyword").is_some());
+        assert_eq!(
+            styled(
+                "(balance > 100) AND (name = 'x')",
+                Syntax::Sql,
+                Code::Expression,
+                "AND"
+            ),
+            color("keyword")
+        );
+        // A partial filter is a document, not the block a bare `{` would open.
+        assert_eq!(
+            styled(
+                r#"{"active":true}"#,
+                Syntax::Mongo,
+                Code::Expression,
+                "true"
+            ),
+            color("boolean")
+        );
+    }
+
+    #[test]
+    fn a_run_across_a_line_break_colours_both_lines() {
+        let style = HighlightStyle::default();
+        let text = "SELECT 'a\nb' FROM t\r\n\nx";
+        let split =
+            super::split_highlights(text, &[(0..6, style), (7..12, style), (22..23, style)]);
+        let lines: Vec<_> = split
+            .iter()
+            .map(|(line, runs)| {
+                let ranges: Vec<_> = runs
+                    .iter()
+                    .map(|(range, _)| (range.start, range.end))
+                    .collect();
+                (*line, ranges)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("SELECT 'a", vec![(0, 6), (7, 9)]),
+                ("b' FROM t", vec![(0, 2)]),
+                ("", vec![]),
+                ("x", vec![(0, 1)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chord_reads_as_a_cap_per_key_with_the_modifiers_in_platform_order() {
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &["⇧", "⌘", "P"]
+        } else {
+            &["Ctrl", "Shift", "P"]
+        };
+        assert_eq!(keycap_parts("secondary-shift-p"), expected);
+        assert_eq!(keycap_parts("g g").len(), 2);
+    }
+
     use super::*;
     use crate::explorer;
 
@@ -601,6 +1298,20 @@ mod tests {
         for rows in explorer::ROW_LIMITS {
             assert!(compact_count(rows).len() <= 4, "{rows} is a wide label");
         }
+    }
+
+    #[test]
+    fn a_multi_line_error_reads_from_its_start() {
+        // The shape `postgres::describe` builds: message, DETAIL, HINT.
+        let error = "role \"dbdelve\" is not permitted to log in\n\
+                     Role has no LOGIN attribute.\n\
+                     Grant it with ALTER ROLE.";
+        assert_eq!(
+            one_line(error),
+            "role \"dbdelve\" is not permitted to log in Role has no LOGIN attribute. \
+             Grant it with ALTER ROLE."
+        );
+        assert_eq!(one_line("one\r\n\r\n  two  "), "one two");
     }
 
     #[test]

@@ -260,6 +260,27 @@ END$$
 
 DELIMITER ;
 
+-- The engine conformance suite's fixture (src/db/conformance.rs): one table,
+-- the same shape in every seed. `whole` is above 2^53 on purpose. Ids 900 and
+-- up belong to the suite's write scenarios.
+
+CREATE TABLE conformance (
+    id INT PRIMARY KEY,
+    label VARCHAR(100) NOT NULL,
+    whole BIGINT,
+    fraction DECIMAL(10, 2),
+    ratio DOUBLE,
+    flag BOOLEAN,
+    day DATE,
+    moment DATETIME,
+    bytes VARBINARY(16)
+) DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO conformance (id, label, whole, fraction, ratio, flag, day, moment, bytes) VALUES
+    (1, 'alpha', 9007199254740993, 12.50, 0.5, TRUE, '2024-02-29', '2024-02-29 12:34:56', 0x00FF),
+    (2, 'Zoë 李 🐉 ''quoted''', -42, -0.01, -1.25, FALSE, '1999-12-31', '1999-12-31 23:59:59', 0xDEADBEEF),
+    (3, 'nulls', NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
 -- A million rows and two hundred columns: the fixtures the grid's paging and
 -- horizontal scrolling are measured against, not the hand-written rows above.
 

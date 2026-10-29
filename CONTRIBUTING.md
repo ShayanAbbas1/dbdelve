@@ -34,10 +34,14 @@ docker compose up -d
 cargo run
 ```
 
-`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server and MongoDB dev databases (see
+`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB, Redis and ClickHouse dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
-`dev/ssh/.generated/` (gitignored). With nothing configured, DBDelve opens the
+`dev/ssh/.generated/` (gitignored). `compose.yaml` pins the project name to
+`dbdelve`, so `docker compose up` from a git worktree recreates the main
+checkout's stack with the `./dev` mounts and the bastion key taken from that
+worktree; after removing the worktree, run `docker compose up -d --wait` and
+`dev/ssh/setup.sh` from the main checkout again. With nothing configured, DBDelve opens the
 connection form; the repository-owned databases accept:
 
 ```text
@@ -45,17 +49,38 @@ postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+redis://dbdelve:dbdelve@127.0.0.1:56379/0
+clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
 ```
 
 The MongoDB service is `mongo` in `compose.yaml`, on port 57017; its seed is
 `dev/mongo/init/001-dbdelve-demo.js`, which `mongod` runs only on an empty data
 volume. After editing it, `docker compose down -v` to apply it.
 
+The Redis service is `redis` in `compose.yaml` (the `redis:8` image, which ships
+JSON and Search), on port 56379, moved with `DBDELVE_REDIS_PORT`. Its ACL user
+and seed are in `dev/redis/`; nothing is persisted, so every start seeds afresh
+and the healthcheck passes only once the seed finished.
+
+The ClickHouse service is `clickhouse` in `compose.yaml` (the `clickhouse-server:26.8`
+image built from `dev/clickhouse/`), on port 58123, moved with `DBDELVE_CLICKHOUSE_PORT`.
+The seed in `dev/clickhouse/init/` is baked into the image and runs only on an empty data
+volume, ending with `type_gallery`, whose rows the healthcheck counts. Its HTTP bodies
+recorded for the unit tests are in `dev/clickhouse/fixtures/`.
+
 SQLite has no server to start — build the file once and point the form at its
 absolute path:
 
 ```sh
 sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
+```
+
+DuckDB is the same: build the file once and give the form its absolute path.
+The `duckdb` CLI comes from `brew install duckdb` or [duckdb.org](https://duckdb.org/install).
+The seed expects a fresh file, so remove the old one first:
+
+```sh
+rm -f dev/dbdelve_dev.duckdb && duckdb dev/dbdelve_dev.duckdb < dev/duckdb/001-dbdelve-demo.sql
 ```
 
 ## Running tests
@@ -83,6 +108,8 @@ export PGPASSWORD=dbdelve
 export dbdelve_MYSQL_URL=mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 export dbdelve_MARIADB_URL=mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 export dbdelve_MONGO_URL=mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
+export dbdelve_REDIS_URL=redis://dbdelve:dbdelve@127.0.0.1:56379/0
+export dbdelve_CLICKHOUSE_URL='clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable'
 export dbdelve_SQLITE_PATH=$(pwd)/dev/dbdelve_dev.db
 
 cargo test -- --include-ignored
@@ -100,6 +127,9 @@ run them alone with:
 cargo test db::mongo -- --include-ignored
 ```
 
+The Redis live tests are in `src/db/redis.rs` and read `dbdelve_REDIS_URL`;
+run them alone with `cargo test db::redis -- --include-ignored`.
+
 The SSH tunnel's own tests (`live_ssh_*`, in `ssh.rs` and each engine module)
 need the dev bastions `docker compose up` already started, plus the config
 `dev/ssh/setup.sh` generates for them:
@@ -113,6 +143,26 @@ cargo test -- --include-ignored
 `dbdelve_SSH_CONFIG` is what points the tunnel at that generated config (`ssh
 -F`) instead of your real `~/.ssh/config`; without it, `live_ssh_*` tests
 panic asking for it rather than silently skipping.
+
+## Load testing
+
+The seed keeps `events` narrow. To see how far DBDelve gets with a wide one,
+`dev/load.sh` rebuilds `events` in the running Postgres: the same rows, key and
+indexes, plus about a hundred columns of every type Postgres has, several JSON
+columns (up to a couple of KB a row) and geometry.
+
+```sh
+dev/load.sh                  # a million rows
+ROWS=100000 dev/load.sh      # fewer rows
+```
+
+Keep the default million if you'll run the live tests afterwards; they count
+on it. Expect a few minutes and about 3 GB. `COMPOSE_PROJECT_NAME` points it at
+another stack. CI never runs it. To get the default seed back:
+
+```sh
+docker compose down -v && docker compose up -d --wait
+```
 
 ## Before opening a PR
 
@@ -156,11 +206,68 @@ This is an "open an issue first" change. Roughly: a new module under
 `Engine` enum in `src/db/mod.rs`. It needs the same test coverage the
 existing engines have — unit tests plus `live_*` integration tests marked
 `#[ignore]`, run against `docker compose` if the engine can run in a
-container, or a documented external instance if it can't. Read "Engine
-divergences" in `AGENTS.md` first: it lists where the three engines already
+container, or a documented external instance if it can't. Read
+`docs/agents/engines.md` first: it lists where the engines already
 disagree (transaction bracketing, filter operators, timeouts, cancellation),
 so a fourth engine's differences land in those same places rather than
 scattered through the UI layer.
+
+## Commit messages and PR titles
+
+PRs are squash-merged, so the PR title becomes the commit on `main`. Write it,
+and any commit you push, as `type(scope): summary`:
+
+```text
+feat(grid): hide or pin columns in the result grid
+fix(editor): put the appended statement's terminator before a trailing comment
+perf(grid): hold result rows packed, one buffer per row
+feat(turso): add Turso support
+chore(release): bump version to 0.3.8
+```
+
+**Type** — what kind of change it is:
+
+| Type       | Use for                                                       |
+| ---------- | ------------------------------------------------------------- |
+| `feat`     | Something a user can now do or see that they couldn't before  |
+| `fix`      | Behaviour that was wrong and now isn't                        |
+| `perf`     | Same behaviour, measurably faster or lighter (say by how much) |
+| `refactor` | Code moves or reshapes with no change in behaviour            |
+| `test`     | Tests only                                                    |
+| `docs`     | README, CONTRIBUTING, AGENTS.md, doc comments                 |
+| `ci`       | `.github/workflows/`                                          |
+| `chore`    | Everything else: dependency pins, version bumps, dev scripts  |
+
+**Scope** — the part of the app it touches. Use one of these:
+
+| Scope         | Covers                                                                  |
+| ------------- | ----------------------------------------------------------------------- |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb`, `clickhouse` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
+| `ssh`         | SSH tunnels                                                             |
+| `connections` | Connection form, profiles, TLS                                          |
+| `explorer`    | The schema/object tree                                                  |
+| `editor`      | Query editor, SQL handling, completion                                  |
+| `grid`        | Result grid, row panel, structure grid, filters, sorting                |
+| `editing`     | Row edits and the write gate                                            |
+| `explain`     | The plan pane                                                           |
+| `tabs`        | Tabs, sessions, restore at startup                                      |
+| `palette`     | Command palette, actions, keybindings                                   |
+| `theme`       | Themes and theme import                                                 |
+| `import`      | Importing connections from other tools                                  |
+| `export`      | Exporting results                                                       |
+| `update`      | The in-app updater                                                      |
+| `settings`    | The settings panel                                                      |
+| `release`     | Packaging and release scripts                                           |
+| `dev`         | `compose.yaml`, seeds and scripts under `dev/`                          |
+
+Change crosses two scopes? Name the one the user would notice. Truly
+app-wide? Leave the scope off: `refactor: split ui.rs`. If a new area doesn't
+fit any of these, add a row here in the same PR.
+
+The summary is lowercase, imperative, no trailing full stop, and says what
+changes for the user rather than which function moved — "keep the keyboard on
+the grid after going to a column", not "update focus handler".
 
 ## PR guidelines
 
@@ -175,5 +282,5 @@ desktop UI; reviewers need to see the change, not just read the diff.
 
 ## License
 
-By contributing, you agree your contribution is licensed under the MIT
-License, same as the rest of the project.
+By contributing, you agree your contribution is licensed under the GNU
+General Public License v3.0, same as the rest of the project.

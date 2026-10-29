@@ -1,0 +1,81 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[redis] hash
+  |HDEL h "f g"|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] hash no field
+  (none)
+
+[redis] hash unspelled table
+  (none)
+
+[redis] list
+  |WATCH l|
+  |LPOS l "a b" COUNT 0 MAXLEN 4|
+  |MULTI|
+  |LSET l 3 dbdelve:deleted:<32 hex>|
+  |LREM l 1 dbdelve:deleted:<32 hex>|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] list index 0
+  |WATCH l|
+  |LPOS l v COUNT 0 MAXLEN 1|
+  |MULTI|
+  |LSET l 0 dbdelve:deleted:<32 hex>|
+  |LREM l 1 dbdelve:deleted:<32 hex>|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] list large index
+  |WATCH l|
+  |LPOS l v COUNT 0 MAXLEN 4294967297|
+  |MULTI|
+  |LSET l 4294967296 dbdelve:deleted:<32 hex>|
+  |LREM l 1 dbdelve:deleted:<32 hex>|
+  |EXEC|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] list index x
+  (none)
+
+[redis] list no value
+  (none)
+
+[redis] set
+  |SREM s m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] set no member
+  (none)
+
+[redis] zset
+  |ZREM z m|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] zset no member
+  (none)
+
+[redis] string
+  |UNLINK s|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] string unspelled table
+  (none)
+
+[redis] keys
+  |UNLINK k|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] keys binary
+  |UNLINK "\\x00\\xff k"|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true other:false
+
+[redis] keys other table
+  (none)
+
+[redis] keys no key
+  (none)

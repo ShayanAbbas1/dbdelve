@@ -10,7 +10,8 @@
 //! the next, an open transaction included, and the API refuses a `USE` outright
 //! ("Command not supported by SQL API: USE") rather than running one it would
 //! then forget. That is the engine's behaviour and dbdelve does not paper over
-//! it: names are qualified, or resolve against the profile's database.
+//! it: names are qualified, or resolve against the profile's database and
+//! active schema, which ride on every request as fields instead.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -22,16 +23,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::{
-    CancelToken, Cancelling, Catalog, Cell, Column, DbError, Engine, ForeignKey, NamedDefinition,
-    QueryResult, RelationKind, Structure, assemble_catalog, assemble_structure, plain_error,
-    terminated,
+    CancelToken, Cancelling, Catalog, Column, Databases, DbError, Engine, Fetch, ForeignKey,
+    NamedDefinition, QueryResult, RelationKind, Row, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_structure, plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
 ///
 /// Its own struct rather than a `ServerConfig`: there is no port, no password
 /// and no `sslmode` -- the API is HTTPS and always verified, so there is
-/// nothing to weaken (hard rule 7, satisfied by having no field to set).
+/// nothing to weaken (hard rule 6, satisfied by having no field to set).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnowflakeConfig {
     /// The account identifier, which the token names regardless of which host
@@ -56,6 +57,27 @@ pub struct SnowflakeConfig {
     /// Seconds, or 0 for the account's own limit. Sent as a field of each
     /// request, never as SQL.
     pub statement_timeout: u32,
+    /// The schema unqualified names in the user's statements resolve in, as
+    /// the catalog stores its name. None leaves the server to pick.
+    pub schema: Option<String>,
+}
+
+/// Whether `name` can be written without quotes, which the server then folds
+/// to upper case.
+fn bare(name: &str) -> bool {
+    name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
+}
+
+/// `name`, as the catalog stores it, spelled to reach it from a request field:
+/// bare where the server's folding gives it back, quoted otherwise.
+fn spelled(name: &str) -> String {
+    match bare(name) && name == name.to_ascii_uppercase() {
+        true => name.to_string(),
+        false => Engine::Snowflake.quote_identifier(name),
+    }
 }
 
 /// The domain an account's own host is under, when the profile names no other.
@@ -111,18 +133,27 @@ impl SnowflakeConfig {
     /// `analytics` and `ANALYTICS` are one database there, and would be two
     /// here without the same folding. A name that could not be written bare
     /// was necessarily created quoted, and is taken as it is.
-    fn stored_database(&self) -> String {
-        let bare = self
-            .database
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_$".contains(character))
-            && !self
-                .database
-                .starts_with(|first: char| first.is_ascii_digit());
-        match bare {
+    ///
+    /// One written quoted, as [`Self::set_database`] writes a name that only
+    /// quotes reach, is the name inside the quotes.
+    pub(super) fn stored_database(&self) -> String {
+        match bare(&self.database) {
             true => self.database.to_ascii_uppercase(),
-            false => self.database.clone(),
+            false => Engine::Snowflake.unquote_identifier(&self.database),
         }
+    }
+
+    /// Move onto `name`, as `SHOW DATABASES` lists it. A name already in force
+    /// keeps the spelling it was typed in. Otherwise it is written bare where
+    /// that folds back to it, so the form shows `ANALYTICS` and not
+    /// `"ANALYTICS"`, and quoted where only quotes reach it. Schemas belong to
+    /// one database, so the active one doesn't carry over.
+    pub fn set_database(&mut self, name: String) {
+        if self.stored_database() == name {
+            return;
+        }
+        self.database = spelled(&name);
+        self.schema = None;
     }
 
     /// The host requests go to. The derived name is the service's documented
@@ -414,7 +445,10 @@ fn render(value: &str, row_type: &RowType) -> String {
 ///
 /// Everything here is a field of the request and none of it is SQL: the
 /// statement goes out exactly as it was written (hard rule 1).
-fn request_body(config: &SnowflakeConfig, sql: &str) -> Value {
+///
+/// `schema` is the catalog's stored name, so it is quoted unless sending it
+/// bare folds back to the same name.
+fn request_body(config: &SnowflakeConfig, sql: &str, schema: Option<&str>) -> Value {
     let mut body = json!({
         "statement": sql,
         "database": config.database,
@@ -430,6 +464,9 @@ fn request_body(config: &SnowflakeConfig, sql: &str) -> Value {
     }
     if config.statement_timeout > 0 {
         body["timeout"] = json!(config.statement_timeout);
+    }
+    if let Some(schema) = schema {
+        body["schema"] = json!(spelled(schema));
     }
     body
 }
@@ -452,7 +489,7 @@ enum Reply {
 }
 
 /// The server's own words where it sent any, and the status where it did not
-/// -- a proxy's HTML error page has no `message` to quote (hard rule 6).
+/// -- a proxy's HTML error page has no `message` to quote.
 fn reply(host: &str, status: u16, body: &Value) -> Result<Reply, DbError> {
     match status {
         200 => Ok(Reply::Finished),
@@ -531,17 +568,18 @@ fn partition_count(body: &Value) -> usize {
 
 /// One partition's rows, rendered. A JSON `null` is SQL NULL and stays
 /// distinct from the empty string.
-fn rows(body: &Value, row_types: &[RowType]) -> Vec<Vec<Cell>> {
+fn rows(body: &Value, row_types: &[RowType]) -> Result<Vec<Row>, DbError> {
     let Some(data) = body["data"].as_array() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     data.iter()
         .filter_map(Value::as_array)
         .map(|row| {
-            row.iter()
-                .zip(row_types)
-                .map(|(cell, row_type)| cell.as_str().map(|value| render(value, row_type)))
-                .collect()
+            Row::new(
+                row.iter()
+                    .zip(row_types)
+                    .map(|(cell, row_type)| cell.as_str().map(|value| render(value, row_type))),
+            )
         })
         .collect()
 }
@@ -570,8 +608,12 @@ fn rows_affected(body: &Value) -> Option<u64> {
 /// serialise -- a catalog load does not queue behind a slow query here.
 #[derive(Clone)]
 pub struct Connection {
+    /// Fixed at connect, with its `schema` moved out into [`Self::schema`].
     config: Arc<SnowflakeConfig>,
     agent: ureq::Agent,
+    /// The active schema, shared between clones so a switch on one reaches
+    /// every tab's statements from then on.
+    schema: Arc<Mutex<Option<String>>>,
 }
 
 /// Takes a handle back out of its run's list however `query` leaves.
@@ -608,13 +650,36 @@ impl Connection {
             .build()
             .into();
         let connection = Self {
-            config: Arc::new(config.clone()),
+            config: Arc::new(SnowflakeConfig {
+                schema: None,
+                ..config.clone()
+            }),
             agent,
+            schema: Arc::new(Mutex::new(config.schema.clone())),
         };
         // Connecting is the connection test. This needs no warehouse, so it
         // proves the key, the account and the network without starting one.
         connection.query("SELECT CURRENT_VERSION()")?;
         Ok(connection)
+    }
+
+    /// The user's statements resolve in `schema` from here on. dbdelve's own
+    /// are qualified and never sent one.
+    pub fn set_schema(&self, schema: Option<&str>) {
+        *self
+            .schema
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = schema.map(str::to_string);
+    }
+
+    /// `SHOW` rather than `INFORMATION_SCHEMA`, which would need a warehouse.
+    /// No session means no current database to ask the server for: it is the
+    /// one every request names.
+    pub fn databases(&self) -> Result<Databases, DbError> {
+        Ok(Databases {
+            current: Some(self.config.stored_database()),
+            ..assemble_databases(&self.internal_query("SHOW DATABASES")?)?
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -732,13 +797,41 @@ impl Connection {
     /// and the handle is what Cancel needs from the first moment. Measured at
     /// 885ms against 315ms for three `SELECT 1`s, and that is the price of the
     /// button working on the statement that needs it.
+    ///
+    /// Outside the active schema, so one dropped since it was picked fails the
+    /// user's statements in the server's words rather than the connect, and
+    /// another can still be picked from the catalog.
     pub fn query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.query_with(sql, &CancelToken::default())
+        let cancel = CancelToken::default();
+        self.submit(sql, Cancellable::Yes(&cancel), Fetch::default(), None)
     }
 
-    /// The same, stoppable by a [`Connection::cancel`] given `cancel`.
-    pub fn query_with(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::Yes(cancel))
+    /// The same in the active schema, stoppable by a [`Connection::cancel`]
+    /// given `cancel`, keeping what `fetch` asks for of its rows; see
+    /// [`super::Connection::query`].
+    pub fn query_with(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        let schema = self
+            .schema
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.submit(sql, Cancellable::Yes(cancel), fetch, schema.as_deref())
+    }
+
+    /// [`Self::query_with`] outside the active schema, for a statement dbdelve
+    /// wrote for the user to run: a relation's preview or an applied edit.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, Cancellable::Yes(cancel), fetch, None)
     }
 
     /// The same, for a statement dbdelve wrote and the user cannot see.
@@ -748,13 +841,19 @@ impl Connection {
     /// buys. A structure load is four of these, so it is most of a second each
     /// time a relation is opened.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.submit(sql, Cancellable::No)
+        self.submit(sql, Cancellable::No, Fetch::default(), None)
     }
 
-    fn submit(&self, sql: &str, cancellable: Cancellable) -> Result<QueryResult, DbError> {
+    fn submit(
+        &self,
+        sql: &str,
+        cancellable: Cancellable,
+        fetch: Fetch,
+        schema: Option<&str>,
+    ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
         let host = self.config.host();
-        let body = request_body(&self.config, sql);
+        let body = request_body(&self.config, sql, schema);
 
         // A synchronous submit answers with the result itself, and only hands
         // back a handle when the statement outlives the API's own 45-second
@@ -828,35 +927,86 @@ impl Connection {
         }
 
         let row_types = row_types(&finished)?;
+        let columns: Vec<Column> = row_types
+            .iter()
+            .map(|row_type| Column {
+                name: row_type.name.clone(),
+                data_type: Some(data_type(row_type)),
+            })
+            .collect();
+        if let Some(feed) = fetch.feed {
+            feed.begin(columns.clone());
+        }
         let mut result = QueryResult {
-            columns: row_types
-                .iter()
-                .map(|row_type| Column {
-                    name: row_type.name.clone(),
-                    data_type: Some(data_type(row_type)),
-                })
-                .collect(),
-            rows: rows(&finished, &row_types),
+            columns,
             rows_affected: rows_affected(&finished),
             ..Default::default()
         };
-        // The whole result is fetched before any of it is shown, which is the
-        // ceiling the Postgres path has too.
-        for partition in 1..partition_count(&finished) {
-            let (status, body) =
+        // The statement is over before its first partition arrives, and the
+        // server has already counted its rows: a partition past the limit is
+        // simply not downloaded, which undoes nothing even for a write.
+        let total = finished["resultSetMetaData"]["numRows"]
+            .as_u64()
+            .and_then(|total| usize::try_from(total).ok());
+        let partitions = partition_count(&finished);
+        let full = |kept: usize| fetch.limit.is_some_and(|limit| kept >= limit);
+        let (mut returned, mut kept) = (0, 0);
+        let mut filled = None;
+        let mut partition = 0;
+        let mut body = finished;
+        loop {
+            for cells in rows(&body, &row_types)? {
+                returned += 1;
+                if full(kept) {
+                    continue;
+                }
+                kept += 1;
+                if full(kept) {
+                    filled = Some(started.elapsed());
+                    if let Some(feed) = fetch.feed {
+                        feed.fill();
+                    }
+                }
+                result.bytes += cells.text_len();
+                match fetch.feed {
+                    Some(feed) => feed.push(cells),
+                    None => result.rows.push(cells),
+                }
+            }
+            partition += 1;
+            if partition >= partitions || full(kept) {
+                break;
+            }
+            // The statement is over, so there is no handle to stop: the cancel
+            // is honoured by not fetching what is left.
+            if let Cancellable::Yes(CancelToken(running)) = cancellable
+                && running.lock().is_ok_and(|running| running.asked)
+            {
+                return Err(plain_error("Cancelled.".into()));
+            }
+            let (status, next) =
                 self.fetch(&self.url(&format!("/{handle}?partition={partition}")))?;
-            reply(&host, status, &body)?;
-            result.rows.extend(rows(&body, &row_types));
+            reply(&host, status, &next)?;
+            body = next;
         }
 
-        result.bytes = result
-            .rows
-            .iter()
-            .flatten()
-            .flatten()
-            .map(String::len)
-            .sum();
-        result.elapsed = started.elapsed();
+        let returned = if partition < partitions {
+            total
+        } else {
+            Some(returned)
+        };
+        match returned {
+            Some(returned) => result.capped_from = (returned > kept).then_some(returned),
+            // Partitions went undownloaded and the server did not say how
+            // many rows they held.
+            None => result.stopped = Some(Stopped::AtLimit),
+        }
+        // Timed to the last kept row when rows past the limit followed it.
+        let past_limit = result.capped_from.is_some() || result.stopped.is_some();
+        result.elapsed = match filled {
+            Some(filled) if past_limit => filled,
+            _ => started.elapsed(),
+        };
         Ok(result)
     }
 
@@ -975,9 +1125,10 @@ impl Connection {
         );
         let kind = match kind {
             RelationKind::View | RelationKind::MaterializedView => "VIEW",
-            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
-                "TABLE"
-            }
+            RelationKind::Table
+            | RelationKind::PartitionedTable
+            | RelationKind::ForeignTable
+            | RelationKind::Dictionary => "TABLE",
         };
         let result = self.internal_query(&format!(
             "SELECT GET_DDL('{kind}', {})",
@@ -986,7 +1137,7 @@ impl Connection {
         result
             .rows
             .first()
-            .and_then(|row| row.first()?.as_deref())
+            .and_then(|row| row.get(0))
             .map(terminated)
             .ok_or_else(|| plain_error(format!("{name} has no definition to show.")))
     }
@@ -1080,10 +1231,12 @@ fn strip_signature_parens(mut result: QueryResult) -> QueryResult {
         return result;
     };
     for row in &mut result.rows {
-        if let Some(value) = row.get_mut(index).and_then(|cell| cell.as_mut())
-            && let Some(stripped) = value.strip_prefix('(').and_then(|v| v.strip_suffix(')'))
+        if let Some(stripped) = row
+            .get(index)
+            .and_then(|value| value.strip_prefix('(')?.strip_suffix(')'))
         {
-            *value = stripped.to_string();
+            let stripped = stripped.to_string();
+            row.replace(&[(index, Some(&stripped))]);
         }
     }
     result
@@ -1126,16 +1279,16 @@ WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}
 ORDER BY ORDINAL_POSITION"#;
 
 /// A cell of a `SHOW` result by its column's fixed name.
-fn shown<'a>(result: &'a QueryResult, row: &'a [Cell], name: &str) -> Option<&'a str> {
+fn shown<'a>(result: &'a QueryResult, row: &'a Row, name: &str) -> Option<&'a str> {
     let index = result
         .columns
         .iter()
         .position(|column| column.name == name)?;
-    row.get(index)?.as_deref()
+    row.get(index)
 }
 
 /// The rows of a key `SHOW` that belong to `relation`, in key order.
-fn key_rows<'a>(result: &'a QueryResult, table_column: &str, relation: &str) -> Vec<&'a Vec<Cell>> {
+fn key_rows<'a>(result: &'a QueryResult, table_column: &str, relation: &str) -> Vec<&'a Row> {
     let mut rows: Vec<_> = result
         .rows
         .iter()
@@ -1167,7 +1320,7 @@ fn key_definitions(
         "column_name"
     };
 
-    let mut constraints = std::collections::BTreeMap::<&str, Vec<&Vec<Cell>>>::new();
+    let mut constraints = std::collections::BTreeMap::<&str, Vec<&Row>>::new();
     for row in key_rows(result, table_column, relation) {
         let name = shown(result, row, name_column).unwrap_or_default();
         constraints.entry(name).or_default().push(row);
@@ -1460,7 +1613,7 @@ mod tests {
         // Odd spacing, a trailing comment and no semicolon: none of it is
         // dbdelve's to tidy.
         let sql = "select  1 -- one\n  ,2";
-        assert_eq!(request_body(&config("k"), sql)["statement"], sql);
+        assert_eq!(request_body(&config("k"), sql, None)["statement"], sql);
     }
 
     #[test]
@@ -1468,7 +1621,7 @@ mod tests {
         let mut config = config("k");
         config.database = "ANALYTICS".into();
         config.warehouse = Some(String::new());
-        let blank = request_body(&config, "select 1");
+        let blank = request_body(&config, "select 1", None);
         assert_eq!(blank["database"], "ANALYTICS");
         assert_eq!(blank["parameters"]["MULTI_STATEMENT_COUNT"], "0");
         for absent in ["warehouse", "role", "timeout"] {
@@ -1478,10 +1631,64 @@ mod tests {
         config.warehouse = Some("COMPUTE_WH".into());
         config.role = Some("ANALYST".into());
         config.statement_timeout = 30;
-        let filled = request_body(&config, "select 1");
+        let filled = request_body(&config, "select 1", None);
         assert_eq!(filled["warehouse"], "COMPUTE_WH");
         assert_eq!(filled["role"], "ANALYST");
         assert_eq!(filled["timeout"], 30);
+        assert!(filled.get("schema").is_none(), "no schema was asked for");
+    }
+
+    #[test]
+    fn an_active_schema_is_sent_bare_only_where_that_folds_back_to_it() {
+        let schema = |name| request_body(&config("k"), "select 1", Some(name))["schema"].clone();
+        assert_eq!(schema("PUBLIC"), "PUBLIC");
+        // Folded to `SALES` were it sent bare.
+        assert_eq!(schema("sales"), r#""sales""#);
+        assert_eq!(schema("$STAGE"), r#""$STAGE""#);
+        assert_eq!(schema("_STAGE"), "_STAGE");
+        assert_eq!(schema(r#"My "Odd" Schema"#), r#""My ""Odd"" Schema""#);
+    }
+
+    #[test]
+    fn a_picked_database_is_written_bare_only_where_that_folds_back_to_it() {
+        let moved = |from: &str, to: &str| {
+            let mut config = SnowflakeConfig {
+                database: from.into(),
+                schema: Some("STAGING".into()),
+                ..Default::default()
+            };
+            config.set_database(to.into());
+            (
+                config.database.clone(),
+                config.stored_database(),
+                config.schema,
+            )
+        };
+        assert_eq!(
+            moved("ANALYTICS", "SNOWFLAKE_SAMPLE_DATA"),
+            (
+                "SNOWFLAKE_SAMPLE_DATA".into(),
+                "SNOWFLAKE_SAMPLE_DATA".into(),
+                None
+            )
+        );
+        assert_eq!(
+            moved("ANALYTICS", "analytics"),
+            (r#""analytics""#.into(), "analytics".into(), None)
+        );
+        assert_eq!(
+            moved("ANALYTICS", r#"my "db""#),
+            (r#""my ""db""""#.into(), r#"my "db""#.into(), None)
+        );
+        // Already there: the typed spelling stays, and so does the schema.
+        assert_eq!(
+            moved("analytics", "ANALYTICS"),
+            (
+                "analytics".into(),
+                "ANALYTICS".into(),
+                Some("STAGING".into())
+            )
+        );
     }
 
     #[test]
@@ -1508,7 +1715,7 @@ mod tests {
         );
         // NULL and the empty string are different answers and stay different.
         assert_eq!(
-            rows(&finished, &types),
+            rows(&finished, &types).unwrap(),
             vec![
                 vec![
                     Some("1".into()),
@@ -1573,6 +1780,7 @@ mod tests {
         let running = Mutex::new(Cancelling {
             asked: false,
             handles: vec!["other".to_string()],
+            alongside: None,
         });
         let attempt = || -> Result<(), DbError> {
             running
@@ -1621,6 +1829,7 @@ mod tests {
             warehouse: optional("WAREHOUSE"),
             role: optional("ROLE"),
             statement_timeout: 0,
+            schema: None,
         }
     }
 
@@ -1700,7 +1909,9 @@ mod tests {
         let (waiting, run) = (connection.clone(), CancelToken::default());
         let token = run.clone();
         let started = Instant::now();
-        let query = std::thread::spawn(move || waiting.query_with("CALL SYSTEM$WAIT(60)", &token));
+        let query = std::thread::spawn(move || {
+            waiting.query_with("CALL SYSTEM$WAIT(60)", &token, Fetch::default())
+        });
         // Long enough for the submit to have returned its handle.
         std::thread::sleep(Duration::from_secs(3));
         connection.cancel(&run).expect("the cancel is accepted");
@@ -1721,6 +1932,27 @@ mod tests {
             .expect_err("stopped");
         println!("{error}");
         assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_the_databases_are_listed_and_a_schema_scopes_the_users_statements() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let databases = connection.databases().expect("listed");
+        println!("{databases:?}");
+        assert!(databases.names.contains(&"SNOWFLAKE".to_string()));
+        let current = databases.current.expect("the profile's own");
+        assert!(databases.names.contains(&current), "{current}");
+
+        connection.set_schema(Some("INFORMATION_SCHEMA"));
+        let shown = connection
+            .query_with(
+                "SELECT CURRENT_SCHEMA()",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("runs");
+        assert_eq!(shown.rows[0].get(0), Some("INFORMATION_SCHEMA"));
     }
 
     #[test]
@@ -2097,6 +2329,9 @@ mod tests {
         // Neither could have been created without quotes, so neither was folded.
         assert_eq!(named("my-db").stored_database(), "my-db");
         assert_eq!(named("1st").stored_database(), "1st");
+        assert_eq!(named("$db").stored_database(), "$db");
+        assert_eq!(named("").stored_database(), "");
+        assert_eq!(named("_raw").stored_database(), "_RAW");
     }
 
     /// The labels of the rows a filter bar's predicate keeps, out of four rows
@@ -2122,7 +2357,7 @@ mod tests {
             .query(&sql)?
             .rows
             .into_iter()
-            .filter_map(|row| row.into_iter().next().flatten())
+            .filter_map(|row| row.get(0).map(str::to_string))
             .collect())
     }
 
@@ -2261,6 +2496,32 @@ mod tests {
     }
 
     #[test]
+    fn a_schema_set_on_one_clone_scopes_every_users_statement_and_nothing_of_dbdelves() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        mock.answer(sql, "query");
+        let connection = connected(&mock);
+        connection.clone().set_schema(Some("Sales EU"));
+        connection
+            .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+        connection
+            .generated(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+
+        let requests = mock.requests();
+        let sent = |statement: &str| {
+            requests
+                .iter()
+                .filter(|request| request.body["statement"] == statement)
+                .map(|request| request.body["schema"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sent(sql), [json!(r#""Sales EU""#), Value::Null]);
+        assert_eq!(sent("SELECT CURRENT_VERSION()"), [Value::Null]);
+    }
+
+    #[test]
     fn a_statement_still_running_is_polled_until_it_finishes() {
         let mock = Mock::start();
         let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
@@ -2382,6 +2643,163 @@ mod tests {
         assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 1);
     }
 
+    const LARGE_SQL: &str = "SELECT SEQ4() AS N FROM TABLE(GENERATOR(ROWCOUNT => 20000))";
+
+    /// The recorded 20 000 rows: 12 288 in the poll's answer and the rest in
+    /// partition 1. Returns that partition's target, to count its downloads.
+    fn large(mock: &Mock) -> String {
+        let handle = mock.accept(LARGE_SQL, "large");
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::fixture(200, "large_poll.json.gz")],
+        );
+        let partition = format!("/{handle}?partition=1");
+        mock.on(
+            "GET",
+            &partition,
+            [Response::fixture(200, "large_partition_1.json.gz")],
+        );
+        partition
+    }
+
+    fn limited(limit: usize) -> Fetch<'static> {
+        Fetch {
+            limit: Some(limit),
+            ..Fetch::default()
+        }
+    }
+
+    #[test]
+    fn a_row_limit_is_kept_across_partitions_and_counts_every_row() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let result = connected(&mock)
+            .query_with(LARGE_SQL, &CancelToken::default(), limited(12_290))
+            .expect("runs");
+
+        assert_eq!(result.rows.len(), 12_290);
+        assert_eq!(result.rows[12_289], vec![Some("12289".to_string())]);
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(result.stopped, None);
+        assert_eq!(mock.hits("GET", &partition), 1);
+    }
+
+    #[test]
+    fn a_partition_past_the_limit_is_not_downloaded_and_its_rows_still_counted() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let result = connected(&mock)
+            .query_with(LARGE_SQL, &CancelToken::default(), limited(3))
+            .expect("runs");
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Some("0".to_string())],
+                vec![Some("1".to_string())],
+                vec![Some("2".to_string())]
+            ]
+        );
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(mock.hits("GET", &partition), 0);
+    }
+
+    #[test]
+    fn rows_past_the_limit_go_uncounted_only_where_the_server_did_not_count_them() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        let mut poll: Value =
+            serde_json::from_slice(&super::mock::fixture("query_poll.json")).expect("JSON");
+        let metadata = &mut poll["resultSetMetaData"];
+        metadata["numRows"] = Value::Null;
+        metadata["partitionInfo"] = json!([{ "rowCount": 1 }, { "rowCount": 1 }]);
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(200, &poll.to_string())],
+        );
+
+        let result = connected(&mock)
+            .query_with(sql, &CancelToken::default(), limited(1))
+            .expect("runs");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn an_empty_partition_list_fetches_no_further_partition() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let handle = mock.accept(sql, "query");
+        let mut poll: Value =
+            serde_json::from_slice(&super::mock::fixture("query_poll.json")).expect("JSON");
+        poll["resultSetMetaData"]["partitionInfo"] = json!([]);
+        mock.on(
+            "GET",
+            &format!("/{handle}"),
+            [Response::text(200, &poll.to_string())],
+        );
+
+        let result = connected(&mock)
+            .query_with(sql, &CancelToken::default(), Fetch::default())
+            .expect("runs");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(mock.hits("GET", &format!("/{handle}?partition=1")), 0);
+    }
+
+    #[test]
+    fn a_cancel_stops_the_download_between_partitions() {
+        let mock = Mock::start();
+        let partition = large(&mock);
+        let handle = partition.split('?').next().expect("a path").to_string();
+        mock.on(
+            "POST",
+            &format!("{handle}/cancel"),
+            [Response::fixture(200, "cancel.json")],
+        );
+        let connection = connected(&mock);
+        let run = CancelToken::default();
+        connection.cancel(&run).expect("nothing to cancel yet");
+
+        let error = connection
+            .query_with(LARGE_SQL, &run, Fetch::default())
+            .expect_err("a cancelled run is an error");
+        assert!(
+            crate::db::is_cancel(crate::db::Engine::Snowflake, &error),
+            "{}",
+            error.message
+        );
+        assert_eq!(mock.hits("GET", &partition), 0);
+    }
+
+    #[test]
+    fn a_fed_query_hands_its_typed_rows_to_the_feed() {
+        let mock = Mock::start();
+        large(&mock);
+        let feed = crate::db::Feed::default();
+        let result = connected(&mock)
+            .query_with(
+                LARGE_SQL,
+                &CancelToken::default(),
+                Fetch {
+                    feed: Some(&feed),
+                    ..limited(3)
+                },
+            )
+            .expect("runs");
+        let fed = feed.take();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.capped_from, Some(20_000));
+        assert_eq!(fed.rows.len(), 3);
+        assert_eq!(fed.columns[0].data_type.as_deref(), Some("number(10,0)"));
+        assert!(fed.filled.is_some());
+    }
+
     #[test]
     fn a_partition_cut_short_is_an_error_and_not_fewer_rows() {
         let mock = Mock::start();
@@ -2473,7 +2891,9 @@ mod tests {
 
         let (waiting, run) = (connection.clone(), CancelToken::default());
         let token = run.clone();
-        let query = std::thread::spawn(move || waiting.query_with("CALL SYSTEM$WAIT(60)", &token));
+        let query = std::thread::spawn(move || {
+            waiting.query_with("CALL SYSTEM$WAIT(60)", &token, Fetch::default())
+        });
         let started = Instant::now();
         while mock.hits("GET", &poll) == 0 {
             assert!(started.elapsed() < Duration::from_secs(10), "never polled");
@@ -2536,11 +2956,13 @@ mod tests {
         let my_run = CancelToken::default();
         let my_query = {
             let (connection, token) = (connection.clone(), my_run.clone());
-            std::thread::spawn(move || connection.query_with(mine_sql, &token))
+            std::thread::spawn(move || connection.query_with(mine_sql, &token, Fetch::default()))
         };
         let their_query = {
             let connection = connection.clone();
-            std::thread::spawn(move || connection.query_with(theirs_sql, &CancelToken::default()))
+            std::thread::spawn(move || {
+                connection.query_with(theirs_sql, &CancelToken::default(), Fetch::default())
+            })
         };
         for handle in [&background, &mine, &theirs] {
             until_polled(&mock, handle);
@@ -2594,7 +3016,7 @@ mod tests {
         for (sql, handle) in [(first_sql, &first), (second_sql, &second)] {
             let (connection, token) = (connection.clone(), run.clone());
             queries.push(std::thread::spawn(move || {
-                connection.query_with(sql, &token)
+                connection.query_with(sql, &token, Fetch::default())
             }));
             until_polled(&mock, handle);
         }
@@ -2634,7 +3056,7 @@ mod tests {
         let run = CancelToken::default();
         let query = {
             let (connection, token) = (connection.clone(), run.clone());
-            std::thread::spawn(move || connection.query_with(sql, &token))
+            std::thread::spawn(move || connection.query_with(sql, &token, Fetch::default()))
         };
         let started = Instant::now();
         // The version check's submit, then this one's, still unanswered.

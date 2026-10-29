@@ -25,6 +25,8 @@ use time::parsing::Parsed;
 use time::{Date, PrimitiveDateTime, Time, UtcOffset};
 use tree_sitter::{Node, Parser, Point, Tree};
 
+use crate::db::ExplainMode;
+use crate::import_rows::{Json, Value as ImportValue};
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql::{Destructive, Mode, Verdict};
 
@@ -1499,7 +1501,18 @@ const ISO_8601: &[BorrowedFormatItem] = format_description!(
 
 /// Milliseconds since 1970, and whether the text gives a time with no offset:
 /// UTC to `ISODate`, local time to JavaScript's `Date`.
-fn iso_millis(text: &str) -> Option<(i64, bool)> {
+pub(crate) fn iso_millis(text: &str) -> Option<(i64, bool)> {
+    let (at, offset, timed) = iso_parts(text)?;
+    let nanos = at
+        .assume_offset(offset.unwrap_or(UtcOffset::UTC))
+        .unix_timestamp_nanos();
+    let millis = i64::try_from(nanos.div_euclid(1_000_000)).ok()?;
+    Some((millis, timed && offset.is_none()))
+}
+
+/// The wall clock an ISO-8601 text gives (midnight for a bare date), its
+/// offset if it gives one (`Z` being UTC), and whether it gives a time.
+pub(crate) fn iso_parts(text: &str) -> Option<(PrimitiveDateTime, Option<UtcOffset>, bool)> {
     let mut parsed = Parsed::new();
     if !parsed
         .parse_items(text.as_bytes(), ISO_8601)
@@ -1519,17 +1532,16 @@ fn iso_millis(text: &str) -> Option<(i64, bool)> {
         .ok()?,
         None => Time::MIDNIGHT,
     };
-    let zoneless =
-        parsed.hour_24().is_some() && parsed.offset_hour().is_none() && !text.ends_with(['Z', 'z']);
     let offset = match parsed.offset_hour() {
-        Some(_) => UtcOffset::try_from(parsed).ok()?,
-        None => UtcOffset::UTC,
+        Some(_) => Some(UtcOffset::try_from(parsed).ok()?),
+        None if text.ends_with(['Z', 'z']) => Some(UtcOffset::UTC),
+        None => None,
     };
-    let nanos = PrimitiveDateTime::new(date, time)
-        .assume_offset(offset)
-        .unix_timestamp_nanos();
-    let millis = i64::try_from(nanos.div_euclid(1_000_000)).ok()?;
-    Some((millis, zoneless))
+    Some((
+        PrimitiveDateTime::new(date, time),
+        offset,
+        parsed.hour_24().is_some(),
+    ))
 }
 
 const WRAPPERS: [&str; 13] = [
@@ -1709,6 +1721,34 @@ pub(crate) fn explainable(text: &str) -> Result<(), String> {
         return Err("Only a statement that reads can be explained.".into());
     }
     Ok(())
+}
+
+/// The Explain mode of a lone statement the user ended in `.explain(…)`
+/// themselves. Any verbosity that runs the plan is Analyze, as `true` and
+/// `allPlansExecution` do alongside `executionStats`.
+pub(crate) fn typed_explain(text: &str) -> Option<ExplainMode> {
+    let statements = parse(text).ok()?;
+    let [
+        Statement {
+            target: Target::Collection { cursor, .. },
+            ..
+        },
+    ] = statements.as_slice()
+    else {
+        return None;
+    };
+    let explain = cursor
+        .last()
+        .filter(|call| call.method == CursorMethod::Explain)?;
+    Some(match explain.args.first().map(|arg| &arg.value) {
+        Some(Value::Bool(true)) => ExplainMode::Analyze,
+        Some(Value::String(verbosity))
+            if verbosity == "executionStats" || verbosity == "allPlansExecution" =>
+        {
+            ExplainMode::Analyze
+        }
+        _ => ExplainMode::Plan,
+    })
 }
 
 /// `None` for a statement whose effect cannot be read off it: a command not
@@ -1999,6 +2039,105 @@ pub(crate) fn insert_row(
     ))
 }
 
+/// One `insertMany` of an import chunk. A `None` leaves the field out of its
+/// document, where a `Value::Null` writes a null.
+pub(crate) fn insert_many(
+    table: &str,
+    columns: &[&str],
+    rows: &[Vec<Option<&ImportValue>>],
+) -> Result<String, String> {
+    if let Some(field) = columns.iter().find(|field| !writable_field(field)) {
+        return Err(unwritable_field(field));
+    }
+    let documents: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let fields = columns
+                .iter()
+                .zip(row)
+                .filter_map(|(&field, value)| {
+                    let value = imported(value.as_ref()?);
+                    Some(value.map(|value| (field.to_owned(), value)))
+                })
+                .collect::<Result<_, String>>()?;
+            Ok(spelled(&Value::Document(fields)))
+        })
+        .collect::<Result<_, String>>()?;
+    if documents.is_empty() {
+        return Err("There are no rows to insert.".into());
+    }
+    Ok(format!(
+        "{}.insertMany([{}])",
+        collection(table),
+        documents.join(",\n")
+    ))
+}
+
+/// The BSON an imported value becomes, or why none holds it exactly.
+pub(crate) fn imported(value: &ImportValue) -> Result<Value, String> {
+    Ok(match value {
+        ImportValue::Null => Value::Null,
+        ImportValue::Text(text) => Value::String(text.clone()),
+        ImportValue::Number(text) => exact_number(text)?,
+        ImportValue::Bool(b) => Value::Bool(*b),
+        ImportValue::Date { millis, .. } => Value::Date(*millis),
+        ImportValue::Json(json) => from_json(json)?,
+    })
+}
+
+/// A whole number that fits keeps its width, then a double where the double
+/// is the number as written, then a Decimal128, unlike `number` above, which
+/// is mongosh's rule for typed text (`1.0` is an Int32). A number none of them
+/// holds exactly is refused rather than rounded.
+fn exact_number(text: &str) -> Result<Value, String> {
+    if let Ok(n) = text.parse::<i64>() {
+        return Ok(i32::try_from(n).map_or(Value::Int64(n), Value::Int32));
+    }
+    let double = text.parse::<f64>().ok().filter(|d| d.is_finite());
+    if let Some(d) = double.filter(|d| significand(text) == significand(&format!("{d:e}"))) {
+        return Ok(Value::Double(d));
+    }
+    if significand(text).1.len() > 34 {
+        return Err(format!(
+            "`{text}` has more significant digits than a Decimal128 holds (34)"
+        ));
+    }
+    Ok(Value::Decimal128(text.to_owned()))
+}
+
+/// A decimal text's sign, its digits without leading or trailing zeros, and
+/// where the point falls among them, so `1.50`, `15e-1` and `1.5e0` compare equal.
+fn significand(text: &str) -> (bool, String, i64) {
+    let negative = text.starts_with('-');
+    let body = text.trim_start_matches(['-', '+']);
+    let (mantissa, exponent) = body.split_once(['e', 'E']).unwrap_or((body, "0"));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    let point = whole.len() as i64 - (digits.len() - significant.len()) as i64
+        + exponent.parse::<i64>().unwrap_or(0);
+    match significant.trim_end_matches('0') {
+        "" => (negative, String::new(), 0),
+        digits => (negative, digits.to_owned(), point),
+    }
+}
+
+fn from_json(json: &Json) -> Result<Value, String> {
+    Ok(match json {
+        Json::Null => Value::Null,
+        Json::Bool(b) => Value::Bool(*b),
+        Json::Number(text) => exact_number(text)?,
+        Json::String(text) => Value::String(text.clone()),
+        Json::Array(items) => Value::Array(items.iter().map(from_json).collect::<Result<_, _>>()?),
+        Json::Object(fields) => Value::Document(
+            fields
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), from_json(value)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+    })
+}
+
 /// One `deleteOne` naming the document by its key.
 pub(crate) fn delete_row(
     table: &str,
@@ -2023,7 +2162,7 @@ pub(crate) fn writable_field(field: &str) -> bool {
     !field.is_empty() && !field.contains('.') && !field.starts_with('$')
 }
 
-fn unwritable_field(field: &str) -> String {
+pub(crate) fn unwritable_field(field: &str) -> String {
     format!(
         "`{field}` is a field name DBDelve does not write: a `.` or a leading `$` would make it name another field or an operator."
     )
@@ -2259,13 +2398,14 @@ fn operator_free(value: &Value) -> bool {
 /// out of the parse rather than trusted because `update_batch`, `insert_row`
 /// or `delete_row` wrote it: `sql::is_generated_write` for MongoDB.
 ///
-/// Exactly one of three shapes, on a collection of the connected database,
+/// Exactly one of four shapes, on a collection of the connected database,
 /// with no options and no cursor:
 ///
 /// - one or more `updateOne`s on one collection, each filter exactly
 ///   `{_id: <literal>}` and each update exactly `{$set: {…}}` over distinct
 ///   plain field names;
 /// - one `insertOne` of a non-empty document;
+/// - one `insertMany` of a non-empty array of non-empty documents;
 /// - one `deleteOne` whose filter is exactly `{_id: <literal>}`.
 ///
 /// Every value is a literal with no `$`-named field anywhere inside it, so no
@@ -2297,8 +2437,11 @@ pub(crate) fn is_generated_write(text: &str) -> bool {
     }
     match calls.as_slice() {
         [(_, call)] if call.method == Method::InsertOne => {
-            matches!(arguments(call)[..], [document @ Value::Document(fields)]
-                if !fields.is_empty() && distinct(fields) && operator_free(document))
+            matches!(arguments(call)[..], [document] if literal_document(document))
+        }
+        [(_, call)] if call.method == Method::InsertMany => {
+            matches!(arguments(call)[..], [Value::Array(documents)]
+                if !documents.is_empty() && documents.iter().all(literal_document))
         }
         [(_, call)] if call.method == Method::DeleteOne => {
             matches!(arguments(call)[..], [filter] if names_by_id(filter))
@@ -2341,6 +2484,12 @@ pub(crate) fn delete_matches_key(text: &str, keys: &[&str]) -> bool {
         && fields
             .iter()
             .all(|(field, _)| keys.contains(&field.as_str()))
+}
+
+/// A non-empty document of distinct fields with no operator anywhere in it.
+fn literal_document(document: &Value) -> bool {
+    matches!(document, Value::Document(fields)
+        if !fields.is_empty() && distinct(fields) && operator_free(document))
 }
 
 /// `{_id: <value>}` alone, where the value is one an equality finds only
@@ -2439,6 +2588,33 @@ pub(crate) fn format(text: &str) -> Result<String, &'static str> {
         true => Ok(formatted),
         false => Err("Not formatting: the new layout would read as different statements."),
     }
+}
+
+/// Whether `at` falls strictly inside a comment, a string, a template, a regex
+/// or any other single token of `text`, rather than between two. Yes when the
+/// grammar does not load, so a selection is refused rather than guessed at.
+pub(crate) fn splits_a_token(text: &str, at: usize) -> bool {
+    let mut parser = Parser::new();
+    let Some(tree) = parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()
+        .and_then(|()| parser.parse(text, None))
+    else {
+        return true;
+    };
+    let mut node = tree.root_node().descendant_for_byte_range(at, at);
+    while let Some(inner) = node {
+        let token = inner.child_count() == 0
+            || matches!(
+                inner.kind(),
+                "string" | "template_string" | "regex" | "comment"
+            );
+        if token && inner.start_byte() < at && at < inner.end_byte() {
+            return true;
+        }
+        node = inner.parent();
+    }
+    false
 }
 
 /// How wide a bracket may stand on one line before its items go one per line.
@@ -4112,6 +4288,8 @@ mod tests {
                 .iter()
                 .map(|(field, alias)| (field.to_string(), alias.to_string()))
                 .collect(),
+            held: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -4391,12 +4569,13 @@ mod tests {
     }
 
     #[test]
-    fn the_write_gate_admits_the_three_generated_shapes_and_nothing_else() {
+    fn the_write_gate_admits_the_four_generated_shapes_and_nothing_else() {
         for admitted in [
             r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}})"#,
             r#"db.getCollection("c").updateOne({_id: 1}, {$set: {"a": 1}}); db.getCollection("c").updateOne({_id: "x"}, {$set: {b: {c: [1]}}});"#,
             r#"db.c.updateOne({_id: ObjectId('65a4f1c0ffffffffffffffff')}, {$set: {a: null}})"#,
             r#"db.getCollection("c").insertOne({"a": 1, b: {c: 2}})"#,
+            "db.c.insertMany([{a: 1}])",
             r#"db.getCollection("c").deleteOne({_id: {a: 1}}) // why"#,
         ] {
             assert!(is_generated_write(admitted), "{admitted}");
@@ -4440,7 +4619,6 @@ mod tests {
             "db.c.insertOne({a: 1}); db.c.insertOne({a: 2})",
             "db.c.insertOne({})",
             "db.c.insertOne({a: 1}, {writeConcern: {w: 0}})",
-            "db.c.insertMany([{a: 1}])",
             "db.c.deleteOne({_id: 1}); db.c.deleteOne({_id: 2})",
             "db.c.deleteOne({_id: 1}); db.c.drop()",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.drop()",
@@ -4450,6 +4628,30 @@ mod tests {
             "db.runCommand({delete: 'c', deletes: [{q: {}, limit: 0}]})",
             "show dbs",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}) db.c.drop()",
+        ] {
+            assert!(!is_generated_write(refused), "{refused} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_gate_admits_one_insert_many_of_literal_documents() {
+        assert!(is_generated_write(
+            r#"db.getCollection("c").insertMany([{"a": 1}, {"b": "x", "n": {"d": [1, 2]}}])"#
+        ));
+    }
+
+    #[test]
+    fn the_gate_refuses_an_insert_many_with_an_operator_or_anything_else() {
+        for refused in [
+            r#"db.getCollection("c").insertMany([{"$where": "1"}])"#,
+            r#"db.getCollection("c").insertMany([{"a": {"$gt": 1}}])"#,
+            r#"db.getCollection("c").insertMany([])"#,
+            r#"db.getCollection("c").insertMany([{}])"#,
+            r#"db.getCollection("c").insertMany([{"a": 1}], {ordered: false})"#,
+            r#"db.getCollection("c").insertMany([1])"#,
+            r#"db.getCollection("c").insertMany({"a": 1})"#,
+            r#"db.getCollection("c").insertMany([{"a": 1, "a": 2}])"#,
+            "db.getCollection(\"c\").insertMany([{\"a\": 1}]);\ndb.getCollection(\"c\").insertMany([{\"a\": 2}])",
         ] {
             assert!(!is_generated_write(refused), "{refused} passed the gate");
         }
@@ -4542,5 +4744,60 @@ mod tests {
         }
         // Valid JavaScript, but not a statement DBDelve reads.
         assert!(format("db.c.find().count()").is_err());
+    }
+
+    #[test]
+    fn an_imported_number_is_stored_exactly_or_refused() {
+        use crate::import_rows::Value as V;
+        let number = |text: &str| imported(&V::Number(text.into()));
+        assert_eq!(number("7"), Ok(Value::Int32(7)));
+        assert_eq!(number("12345678901"), Ok(Value::Int64(12_345_678_901)));
+        for double in ["0.1", "1.50", "-2.5e3", "1e22", "-0.0"] {
+            assert!(matches!(number(double), Ok(Value::Double(_))), "{double}");
+        }
+        for decimal in [
+            "12345678901234567890",
+            "0.12345678901234567890123",
+            "123456789012345678901234567890",
+            "1e400",
+        ] {
+            assert_eq!(number(decimal), Ok(Value::Decimal128(decimal.into())));
+        }
+        assert!(number("1234567890123456789012345678901234567").is_err());
+        let json: Json = serde_json::from_str("[12345678901234567890]").unwrap();
+        assert_eq!(
+            imported(&V::Json(json)),
+            Ok(Value::Array(vec![Value::Decimal128(
+                "12345678901234567890".into()
+            )]))
+        );
+    }
+
+    #[test]
+    fn insert_many_types_each_value_and_leaves_absent_fields_out() {
+        use crate::import_rows::Value as V;
+        let (n, d, j, b) = (
+            V::Number("2.5".into()),
+            V::Date {
+                text: "2024-02-29".into(),
+                millis: 1_709_164_800_000,
+            },
+            V::Json(serde_json::from_str(r#"{"k": [1]}"#).unwrap()),
+            V::Bool(true),
+        );
+        let s = insert_many(
+            "c",
+            &["n", "d", "j", "b"],
+            &[
+                vec![Some(&n), Some(&d), Some(&j), Some(&b)],
+                vec![None, None, None, Some(&V::Null)],
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            "db.getCollection(\"c\").insertMany([{\"n\": 2.5, \"d\": ISODate(\"2024-02-29T00:00:00.000Z\"), \"j\": {\"k\": [1]}, \"b\": true},\n{\"b\": null}])"
+        );
+        assert!(is_generated_write(&s));
     }
 }

@@ -20,12 +20,15 @@
 //! The window is vibrant, so every plane is also a glass: see [`Theme::frost`].
 
 pub mod color;
+pub mod user;
+mod vscode;
+mod zed;
 
 use gpui::{App, Window};
 
-use crate::store;
+use crate::{db::Engine, store};
 
-use color::{Oklch, Rgba, Srgb};
+use color::{Oklch, Rgba, Srgb, contrast_ratio};
 use gpui_component::{
     ThemeMode,
     highlighter::{HighlightTheme, HighlightThemeStyle, SyntaxColors},
@@ -59,6 +62,13 @@ pub mod layout {
     pub const RADIUS_CONTROL: f32 = 6.0;
     pub const RADIUS_PANEL: f32 = 10.0;
     pub const RADIUS_LARGE: f32 = 16.0;
+    /// The floating cards that hold a surface of their own: the palette and
+    /// the settings panel.
+    pub const RADIUS_CARD: f32 = 14.0;
+    pub const RADIUS_KEYCAP: f32 = 5.0;
+    /// The wells rows sit in: a settings group's, and each section of the
+    /// connection form's.
+    pub const RADIUS_WELL: f32 = 12.0;
 
     /// The three heights a button is drawn at. Standard is for the dialogs and
     /// the connection form, where it sits beside a field and is the thing the
@@ -106,17 +116,125 @@ pub mod layout {
     pub const INSPECTOR_MIN_WIDTH: f32 = 200.0;
     pub const INSPECTOR_MAX_WIDTH: f32 = 900.0;
     pub const SIDEBAR_DEFAULT_WIDTH: f32 = 220.0;
-    pub const SWITCHER_WIDTH: f32 = 320.0;
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
     /// A statement or an error shown on a modal, capped so a long one scrolls
     /// inside the card instead of pushing its buttons off the window.
     pub const DIALOG_TEXT_MAX_HEIGHT: f32 = 220.0;
-    /// The palette. Wide enough for a schema-qualified name and its kind, and
-    /// capped so a catalog of thousands scrolls rather than filling the window.
-    pub const PALETTE_WIDTH: f32 = 520.0;
-    pub const PALETTE_MAX_HEIGHT: f32 = 360.0;
+    /// Import Rows lays its options, mapping and preview side by side.
+    pub const IMPORT_DIALOG_WIDTH: f32 = 960.0;
+    pub const IMPORT_DIALOG_HEIGHT: f32 = 640.0;
+    /// The palette. Wide enough for a schema-qualified name, its kind and a
+    /// chord, and its list capped so a catalog of thousands scrolls rather than
+    /// filling the window.
+    pub const PALETTE_WIDTH: f32 = 640.0;
+    pub const PALETTE_MAX_HEIGHT: f32 = 400.0;
+    pub const PALETTE_MIN_HEIGHT: f32 = 120.0;
+    /// What the card holds besides its list -- the field, the scopes and the
+    /// footer -- kept clear of the window's bottom edge when the list is cut.
+    pub const PALETTE_CHROME_HEIGHT: f32 = 180.0;
+    pub const PALETTE_INPUT_HEIGHT: f32 = 52.0;
+    pub const PALETTE_ROW_HEIGHT: f32 = 40.0;
+    pub const PALETTE_HEADER_HEIGHT: f32 = 28.0;
+    pub const PALETTE_TILE_SIZE: f32 = 26.0;
+    pub const PALETTE_ACCENT_BAR_WIDTH: f32 = 3.0;
+    pub const PALETTE_ACCENT_BAR_HEIGHT: f32 = 16.0;
+    /// The settings panel, docked at the window's right edge. Not scaled with
+    /// the chrome: a row too narrow for its control puts it under the text.
+    /// The welcome surface. Its card is narrower than the palette's: it holds
+    /// a grid of short engine names, not long labels.
+    pub const WELCOME_WIDTH: f32 = 520.0;
+    pub const WELCOME_TOP: f32 = 104.0;
+    /// Less air above once projects are in the card, so their list starts
+    /// on screen on a laptop.
+    pub const WELCOME_TOP_WITH_PROJECTS: f32 = 64.0;
+    pub const WELCOME_MARK_SIZE: f32 = 44.0;
+    pub const WELCOME_MARK_GAP: f32 = 14.0;
+    pub const WELCOME_TITLE_SIZE: f32 = 20.0;
+    pub const WELCOME_TITLE_LINE: f32 = 26.0;
+    pub const WELCOME_TITLE_GAP: f32 = 22.0;
+    pub const WELCOME_FIELD_ICON: f32 = 18.0;
+    pub const WELCOME_SECTION_PADDING: f32 = 6.0;
+    pub const WELCOME_ITEM_GAP: f32 = 2.0;
+    pub const WELCOME_ITEM_INSET: f32 = 10.0;
+    /// Concentric with the card's corner: its radius less the padding between.
+    pub const WELCOME_ITEM_RADIUS: f32 = RADIUS_CARD - WELCOME_SECTION_PADDING;
+    pub const WELCOME_GRID_COLUMNS: u16 = 3;
+    /// A card narrower than this has no room for three engine names a row.
+    pub const WELCOME_NARROW: f32 = 420.0;
+
+    /// The connection form: one card, its sections set into it as wells.
+    pub const FORM_WIDTH: f32 = 600.0;
+    /// Its distance below the titlebar, and the most it scrolls its body
+    /// rather than come closer to the window's bottom edge.
+    pub const FORM_TOP: f32 = 44.0;
+    /// Its inset from the card's edge, the header's and the footer's alike.
+    pub const FORM_PADDING: f32 = 20.0;
+    pub const FORM_LOGO_TILE: f32 = 40.0;
+    pub const FORM_LOGO_SIZE: f32 = 20.0;
+    pub const FORM_TITLE_SIZE: f32 = 17.0;
+    pub const FORM_TITLE_LINE: f32 = 22.0;
+    pub const FORM_SECTION_GAP: f32 = 18.0;
+    /// A field's label, so every field in a section starts at the same x.
+    pub const FORM_LABEL_WIDTH: f32 = 120.0;
+    pub const FORM_ROW_HEIGHT: f32 = 44.0;
+    pub const FORM_PORT_WIDTH: f32 = 84.0;
+    pub const FORM_TIMEOUT_WIDTH: f32 = 104.0;
+    pub const FORM_PROJECT_NAME_WIDTH: f32 = 200.0;
+    /// A connection colour's dot, and the gap between it and the ring that
+    /// marks the one picked.
+    pub const SWATCH_SIZE: f32 = 18.0;
+    pub const SWATCH_RING_GAP: f32 = 2.0;
+    /// Between a segmented control's track and the segments inside it.
+    pub const SEGMENT_INSET: f32 = 2.0;
+    /// The accent button under the pointer and pressed: the accent, letting a
+    /// little of the card through.
+    pub const ACCENT_HOVER: f32 = 0.9;
+    pub const ACCENT_PRESSED: f32 = 0.8;
+    /// A keycap on the accent: its ink, faint.
+    pub const KEYCAP_ON_ACCENT: f32 = 0.16;
+
+    pub const SETTINGS_PANEL_WIDTH: f32 = 440.0;
+    /// The most of a narrow window's width the panel takes, so the window's
+    /// own edge never cuts it off.
+    pub const SETTINGS_PANEL_MAX_SHARE: f32 = 0.6;
+    pub const SETTINGS_HEADER_HEIGHT: f32 = 52.0;
+    pub const SETTINGS_TAB_SIZE: f32 = 32.0;
+    pub const SETTINGS_TAB_UNDERLINE_WIDTH: f32 = 16.0;
+    pub const SETTINGS_TAB_UNDERLINE_HEIGHT: f32 = 2.0;
+    pub const SETTINGS_ROW_HEIGHT: f32 = 56.0;
+    /// Between a settings row's title and the description under it.
+    pub const SETTINGS_DESCRIPTION_GAP: f32 = 2.0;
+    /// A row with no description under its title: the keyboard's, sixty of
+    /// them, which at the full height would be a list to scroll for ever.
+    pub const SETTINGS_ROW_COMPACT_HEIGHT: f32 = 44.0;
+    /// How narrow a row's title and description get before its control
+    /// wraps under them.
+    pub const SETTINGS_TEXT_MIN_WIDTH: f32 = 200.0;
+    pub const SWITCH_WIDTH: f32 = 32.0;
+    pub const SWITCH_HEIGHT: f32 = 18.0;
+    pub const SWITCH_THUMB_SIZE: f32 = 14.0;
+    pub const KEYCAP_HEIGHT: f32 = 20.0;
+    pub const KEYCAP_GAP: f32 = 2.0;
+    /// How far the window behind a modal surface is blurred.
+    pub const SCRIM_BLUR: f32 = 6.0;
+    /// The accent as a tint behind a selected pill, and as its edge.
+    pub const ACCENT_WASH: f32 = 0.14;
+    pub const ACCENT_EDGE: f32 = 0.45;
+    /// How much of `border` the welcome surface's contours keep.
+    pub const CONTOUR_SHARE: f32 = 0.8;
+    /// How much of the card's tone the light behind it carries.
+    pub const LIFT_ALPHA: f32 = 0.6;
+    /// The welcome backdrop is rasterised again only when the window crosses
+    /// one of these steps, not on every pixel of a resize.
+    pub const BACKDROP_STEP: f32 = 160.0;
+    /// The lift is a soft gradient, so it is rasterised this many times
+    /// smaller and scaled up: nothing in it needs the resolution.
+    pub const LIFT_DOWNSCALE: f32 = 8.0;
+    /// The contour asset's width over its height, which the backdrop keeps
+    /// whatever shape the window is.
+    pub const BACKDROP_ASPECT: f32 = 1200.0 / 780.0;
     /// An anchored menu, capped so a wide relation's column list scrolls rather
     /// than running off the window.
     pub const MENU_MAX_HEIGHT: f32 = 320.0;
@@ -159,6 +277,30 @@ pub enum Appearance {
     Light,
 }
 
+impl Appearance {
+    /// The system's light or dark, whatever its vibrancy.
+    pub fn of_system(appearance: gpui::WindowAppearance) -> Self {
+        match appearance {
+            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => Self::Light,
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Self::Dark,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn theme_label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark theme",
+            Self::Light => "Light theme",
+        }
+    }
+}
+
 impl gpui::Global for Theme {}
 
 impl Default for Theme {
@@ -171,6 +313,18 @@ impl Default for Theme {
 /// `cx.set_global` have run, which `main` does before opening the window.
 pub fn theme(cx: &gpui::App) -> &Theme {
     cx.global::<Theme>()
+}
+
+/// The active theme as [`Theme::for_popup`] sets it. Kept beside the theme by
+/// [`Theme::apply_to_components`] rather than derived where it is read: a
+/// preview grid or a palette list reading it once a row would search for the
+/// card once a row.
+struct PopupTheme(Theme);
+
+impl gpui::Global for PopupTheme {}
+
+pub fn popup_theme(cx: &gpui::App) -> Theme {
+    cx.global::<PopupTheme>().0
 }
 
 /// Which of the three faces a family is being set for. dbdelve's type does three
@@ -346,11 +500,23 @@ pub const OPACITY_MAX: f32 = 0.95;
 pub const OPACITY_STEP: f32 = 0.05;
 const PANEL_ALPHA: f32 = 0.14;
 const DATA_ALPHA: f32 = 0.14;
-/// A modal card's own transmission. Nowhere near the other three, and for the
-/// opposite reason: what is behind a modal is the app's own text, not the
-/// desktop. Enough to keep the card from reading as a slab cut out of the
-/// window, never enough to read a grid row through.
-const OVERLAY_ALPHA: f32 = 0.97;
+/// The least of its own tone a floating card is allowed on glass: Zeron's menu
+/// fill. A floor, not the fill — see [`Theme::overlay_glass`].
+const OVERLAY_ALPHA_FLOOR: f32 = 0.15;
+/// What a floating card's text holds against the worst backdrop the card can
+/// be shown over: WCAG AA for body text, `danger` included, since on a card it
+/// says what went wrong; and AA large for muted, faint and accent text, which
+/// on a card is a shortcut, a heading, a hint or a match beside the body
+/// rather than body.
+const POPUP_TEXT_CONTRAST: f32 = 4.5;
+const POPUP_MUTED_CONTRAST: f32 = 3.0;
+/// Muted and faint text on a glass card, as shares of the body text: Zeron's.
+const POPUP_MUTED_INK: f32 = 0.64;
+const POPUP_FAINT_INK: f32 = 0.48;
+/// How dark the window goes behind a modal surface. Lighter on a light theme,
+/// where the same black reads as a stain rather than a dim: Zeron's.
+const SCRIM_DARK: f32 = 0.35;
+const SCRIM_LIGHT: f32 = 0.19;
 
 fn neutral(lightness: f32) -> Srgb {
     Oklch::new(lightness, NEUTRAL_CHROMA, NEUTRAL_HUE).to_srgb()
@@ -477,6 +643,41 @@ impl ConnectionColor {
     }
 }
 
+/// An engine's logo colour on `planes`: its brand hue, not its brand
+/// lightness, since brands like SQLite's are near-black and would vanish on a
+/// dark theme. It takes the lightness closest to the swatches' that clears 3:1
+/// against every plane, trying the side away from the theme first on a tie, so
+/// an imported theme or a coloured titlebar gets a legible logo too. When no
+/// lightness clears, the best-contrasting one is the closest it can get.
+pub fn engine_brand(engine: Engine, theme: Theme, planes: &[Srgb]) -> Srgb {
+    let brand = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
+    let away = match theme.appearance {
+        Appearance::Dark => 1.0,
+        Appearance::Light => -1.0,
+    };
+    let worst = |color: Srgb| {
+        planes
+            .iter()
+            .map(|plane| color::contrast_ratio(color, *plane))
+            .fold(f32::INFINITY, f32::min)
+    };
+    let candidates = (0..=22)
+        .flat_map(|step| [away, -away].map(|side| SWATCH_LIGHTNESS + side * step as f32 * 0.02))
+        .filter(|lightness| (0.20..=0.95).contains(lightness))
+        .map(|lightness| Oklch::new(lightness, brand.c, brand.h).to_srgb());
+    let mut best = (f32::MIN, Srgb::from_hex(engine.brand()));
+    for color in candidates {
+        let contrast = worst(color);
+        if contrast >= 3.0 {
+            return color;
+        }
+        if contrast > best.0 {
+            best = (contrast, color);
+        }
+    }
+    best.1
+}
+
 const SWATCH_LIGHTNESS: f32 = 0.65;
 const BAND_LIGHTNESS_DARK: f32 = 0.35;
 const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
@@ -527,8 +728,8 @@ pub struct Theme {
     pub panel: Srgb,
     /// Chrome, furthest back: sidebar, titlebar, status bar, table headers.
     pub surface: Srgb,
-    /// The floating plane: the connection switcher and anything else that sits
-    /// over chrome. One step past `surface` in dark themes; in light themes it
+    /// The floating plane: the palette and anything else that sits over
+    /// chrome. One step past `surface` in dark themes; in light themes it
     /// stays white and earns its elevation from a border and shadow instead,
     /// because "lighter than white" does not exist.
     pub overlay: Srgb,
@@ -570,16 +771,33 @@ pub struct Theme {
     pub syntax_type: Srgb,
     pub syntax_variable: Srgb,
     pub syntax_operator: Srgb,
+
+    /// The card [`Theme::for_popup`] set this theme's inks for. Kept rather
+    /// than searched for again, because the search reads the theme's own muted
+    /// text, which gpui-component still paints on the card, and `for_popup`
+    /// has replaced it with one that can stand a thinner card.
+    popup_card: Option<Rgba>,
 }
 
 impl Theme {
-    /// Every theme dbdelve ships, in the order the theme picker lists them:
-    /// every dark theme, then every light one. The first is the default.
-    pub fn all() -> [Self; 29] {
+    /// Every theme in the order the theme picker lists them: the built-in
+    /// ones, then the user's own and the imported.
+    pub fn all() -> Vec<Self> {
+        let mut all = Self::built_in().to_vec();
+        all.extend(user::themes());
+        all
+    }
+
+    /// Every theme dbdelve ships: every dark theme, then every light one. A
+    /// first run starts on the first or on DBDelve Light, by the system's
+    /// appearance (`starting_theme`), and both are opaque: a blurred window
+    /// reads as noise among a desktop full of others, so glass is something to
+    /// pick, not a start.
+    fn built_in() -> [Self; 29] {
         [
-            Self::glass(),
             Self::black(),
             Self::dark(),
+            Self::glass(),
             Self::gruvbox_dark(),
             Self::gruvbox_dark().glassed("Gruvbox Dark Glass"),
             Self::catppuccin_mocha(),
@@ -644,12 +862,170 @@ impl Theme {
         self.bg.alpha(self.tint(DATA_ALPHA))
     }
 
-    /// A modal's card. The densest plane in the window by a long way — it
-    /// covers the work rather than sitting beside it, and what shows through
-    /// is that work, not the desktop — but not opaque: on a glass theme a
-    /// fully solid card is the one surface that stops being the same window.
+    /// The dim laid over the window behind a modal surface.
+    /// The depth contours behind the welcome card: the hairline, fainter,
+    /// since they are scenery rather than an edge.
+    pub fn contour(self) -> Rgba {
+        Rgba {
+            a: self.border.a * layout::CONTOUR_SHARE,
+            ..self.border
+        }
+    }
+
+    /// The glow the welcome card sits in: the card's own tone, thinned.
+    pub fn lift(self) -> Rgba {
+        self.overlay.alpha(layout::LIFT_ALPHA)
+    }
+
+    pub fn scrim(self) -> Rgba {
+        BLACK.alpha(match self.appearance {
+            Appearance::Dark => SCRIM_DARK,
+            Appearance::Light => SCRIM_LIGHT,
+        })
+    }
+
+    /// What an engine's logo is drawn on outside the titlebar: the panes, the
+    /// palette's card, and the tile a palette row holds its icon in, which is
+    /// the hover wash over the card, or over the selected row's. On glass the
+    /// card is frosted over [`Theme::popup_backdrop`], the worst its contents
+    /// are shown over.
+    pub fn logo_planes(self) -> [Srgb; 5] {
+        let card = self.overlay_glass().flatten(self.popup_backdrop());
+        let selected = self.element_active.flatten(card);
+        [
+            self.bg,
+            self.panel,
+            card,
+            self.element_hover.flatten(card),
+            self.element_hover.flatten(selected),
+        ]
+    }
+
+    /// Every floating card — a modal, the palette, and each
+    /// menu, select, tooltip and completion list gpui-component draws. On glass
+    /// it is a tint over a backdrop blur of the window beneath it, and that is
+    /// all it covers: the blur only sees what the window drew, and the desktop
+    /// shows through the card exactly as far as it shows through the window
+    /// there. So Zeron's menu fill is where the search starts, and the card
+    /// takes as much more of its own tone as it needs for its text to hold
+    /// [`POPUP_TEXT_CONTRAST`], and muted text [`POPUP_MUTED_CONTRAST`], over
+    /// [`Theme::popup_backdrop`].
+    ///
+    /// Searched for at this theme's opacity, not the floor's: the less of the
+    /// desktop the window lets through, the less a card has to shut out, and
+    /// every opacity change reinstalls the theme and so searches again.
+    /// Searched for rather than tabled per theme, because a theme imported from
+    /// Zed can ask for glass too.
     pub fn overlay_glass(self) -> Rgba {
-        self.overlay.alpha(self.tint(OVERLAY_ALPHA))
+        if let Some(card) = self.popup_card {
+            return card;
+        }
+        if !self.is_glass {
+            return self.overlay.opaque();
+        }
+        let backdrop = self.popup_backdrop();
+        // The theme's own muted as well as the card's: gpui-component paints
+        // its popups' secondary text in the theme's, and has no card to ask.
+        let card_muted = self.popup_ink(self.text_muted, POPUP_MUTED_INK);
+        let holds = |alpha: f32| {
+            let card = self.overlay.alpha(alpha).flatten(backdrop);
+            contrast_ratio(self.text, card) >= POPUP_TEXT_CONTRAST
+                && [self.text_muted, card_muted]
+                    .into_iter()
+                    .all(|muted| contrast_ratio(muted, card) >= POPUP_MUTED_CONTRAST)
+        };
+        let alpha = (0..=40)
+            .map(|step| OVERLAY_ALPHA_FLOOR + (1.0 - OVERLAY_ALPHA_FLOOR) * step as f32 / 40.0)
+            .find(|&alpha| holds(alpha))
+            .unwrap_or(1.0);
+        self.overlay.alpha(alpha)
+    }
+
+    /// The worst a glass card's text can be shown over: the brightest broad
+    /// fill the window paints under dark glass, and the darkest under light,
+    /// with the frost over the worst desktop there is — white under dark
+    /// glass, black under light. Broad because the blur is: at
+    /// [`gpui_component::POPOVER_BLUR`] a line of text or an icon is tone a few
+    /// levels off its plane, and only a fill that covers a good part of the
+    /// card survives it — a plane, a block of selected or edited rows, a
+    /// button. Not a titlebar band: a card opens below the titlebar, never
+    /// over it.
+    fn popup_backdrop(self) -> Srgb {
+        let desktop = match self.appearance {
+            Appearance::Dark => WHITE,
+            Appearance::Light => BLACK,
+        };
+        let chrome = self.frost().flatten(desktop);
+        let planes = [
+            chrome,
+            self.panel_glass().flatten(chrome),
+            self.data_glass().flatten(chrome),
+        ];
+        let washed = planes.into_iter().flat_map(|plane| {
+            [self.selection, self.edited, self.element_active].map(|wash| wash.flatten(plane))
+        });
+        let luminance = |c: &Srgb| c.relative_luminance();
+        let fills = planes.into_iter().chain(washed).chain([self.control]);
+        match self.appearance {
+            Appearance::Dark => fills.max_by(|a, b| luminance(a).total_cmp(&luminance(b))),
+            Appearance::Light => fills.min_by(|a, b| luminance(a).total_cmp(&luminance(b))),
+        }
+        .unwrap_or(desktop)
+    }
+
+    /// This theme as text is set on a floating card. On glass, muted and faint
+    /// may be Zeron's fixed shares of the body text instead of the theme's own
+    /// greys — see [`Theme::popup_ink`] — and each ink is moved in Oklch
+    /// lightness, away from the card, only as far as it takes to hold over
+    /// [`Theme::popup_backdrop`]. The inks move rather than the card: a thin
+    /// card is what makes it frosted, and a faint heading is not worth giving
+    /// that up for. Lightness only, so an error still reads red and a match
+    /// still reads as the accent. An opaque theme comes back unchanged.
+    pub fn for_popup(self) -> Self {
+        if !self.is_glass || self.popup_card.is_some() {
+            return self;
+        }
+        let fill = self.overlay_glass();
+        let card = fill.flatten(self.popup_backdrop());
+        let toward = match self.appearance {
+            Appearance::Dark => 1.0,
+            Appearance::Light => 0.0,
+        };
+        let legible = |ink: Srgb, minimum: f32| {
+            let own = Oklch::from_srgb(ink);
+            let moved = (1..=40).map(|step| {
+                let lightness = own.l + (toward - own.l) * step as f32 / 40.0;
+                Oklch::new(lightness, own.c, own.h).to_srgb()
+            });
+            std::iter::once(ink)
+                .chain(moved)
+                .find(|&ink| contrast_ratio(ink, card) >= minimum)
+                .unwrap_or(self.text)
+        };
+        let muted = self.popup_ink(self.text_muted, POPUP_MUTED_INK);
+        let faint = self.popup_ink(self.text_faint, POPUP_FAINT_INK);
+        Self {
+            text_muted: legible(muted, POPUP_MUTED_CONTRAST),
+            text_faint: legible(faint, POPUP_MUTED_CONTRAST),
+            accent: legible(self.accent, POPUP_MUTED_CONTRAST),
+            danger: legible(self.danger, POPUP_TEXT_CONTRAST),
+            popup_card: Some(fill),
+            ..self
+        }
+    }
+
+    /// The theme's own grey or Zeron's `share` of the body text, whichever
+    /// stands further off the card's own tone: most families' own muted
+    /// already reads better than Zeron's share does, and a card the backdrop
+    /// shows through is no place to give any of that up. Judged on the opaque
+    /// tone, since how much of it the card takes is searched for from this.
+    fn popup_ink(self, own: Srgb, share: f32) -> Srgb {
+        let share = self.text.alpha(share).flatten(self.overlay);
+        if contrast_ratio(share, self.overlay) > contrast_ratio(own, self.overlay) {
+            share
+        } else {
+            own
+        }
     }
 
     /// An opaque theme has no desktop behind it to let through, so every tint
@@ -675,129 +1051,119 @@ impl Theme {
     /// and `Workspace::new` sets it again from disk before the first frame.
     pub fn apply_to_components(self, cx: &mut gpui::App) {
         let fonts = fonts(cx).clone();
-        let component = gpui_component::Theme::global_mut(cx);
-        component.shadow = false;
-        component.radius = gpui::px(layout::RADIUS_CONTROL);
-        component.radius_lg = gpui::px(layout::RADIUS_LARGE);
-        // `Root` feeds this to `window.set_rem_size`, so it is the unit for
-        // every `rems()` dimension inside gpui-component -- not just a text
-        // size. dbdelve's own tree never reads it: every `text_size` here is an
-        // absolute `layout::TEXT_*`. The library's 16 at the default chrome
-        // size, so the widgets it draws for us keep the proportions they were
-        // designed at -- the completion popup in particular hardcodes
-        // `text_xs()`, which at 13 resolved to a 9.75px row -- and scaled with
-        // the chrome size, so its fields and menus grow with the labels beside
-        // them.
-        component.font_size = gpui::px(layout::chrome(16.0));
-        component.mono_font_size = gpui::px(layout::TEXT_MD);
-        component.font_family = fonts.chrome;
-        // Kept on the editor's family so that whatever inside gpui-component
-        // reads the mono slot renders in the face dbdelve is already using for
-        // code, rather than in a third one nobody picked.
-        component.mono_font_family = fonts.editor;
+        let popup = self.for_popup();
+        cx.set_global(PopupTheme(popup));
+        gpui_component::Theme::update(cx, |component| {
+            component.shadow = false;
+            component.radius = gpui::px(layout::RADIUS_CONTROL);
+            component.radius_lg = gpui::px(layout::RADIUS_LARGE);
+            // `Root` feeds this to `window.set_rem_size`, so it is the unit for
+            // every `rems()` dimension inside gpui-component -- not just a text
+            // size. dbdelve's own tree never reads it: every `text_size` here is an
+            // absolute `layout::TEXT_*`. The library's 16 at the default chrome
+            // size, so the widgets it draws for us keep the proportions they were
+            // designed at -- the completion popup in particular hardcodes
+            // `text_xs()`, which at 13 resolved to a 9.75px row -- and scaled with
+            // the chrome size, so its fields and menus grow with the labels beside
+            // them.
+            component.font_size = gpui::px(layout::chrome(16.0));
+            component.mono_font_size = gpui::px(layout::TEXT_MD);
+            component.font_family = fonts.chrome;
+            // Kept on the editor's family so that whatever inside gpui-component
+            // reads the mono slot renders in the face dbdelve is already using for
+            // code, rather than in a third one nobody picked.
+            component.mono_font_family = fonts.editor;
 
-        // The one plane painted below dbdelve's own tree, by `Root`. It is the
-        // frost, so removing a `bg` from a chrome element uncovers glass rather
-        // than a hole.
-        component.colors.background = self.frost().into();
-        component.colors.foreground = self.text.into();
-        component.colors.input = self.border.into();
-        component.colors.border = self.border.into();
-        component.colors.caret = self.cursor.into();
-        component.colors.selection = self.selection.into();
-        component.colors.ring = self.accent.into();
-        // Only the completion popup reads this, for the matched prefix of a
-        // suggestion. Left at the library default it is a blue belonging to no
-        // palette dbdelve ships.
-        component.colors.blue = self.accent.into();
-        component.colors.muted = self.surface.into();
-        component.colors.muted_foreground = self.text_muted.into();
-        component.colors.popover = self.overlay.into();
-        component.colors.popover_foreground = self.text.into();
-        // Both button variants are the same neutral: a dbdelve button is a grey
-        // that steps visibly brighter under the pointer, never a colour.
-        // Colour is reserved for state (selection, danger), not for controls.
-        let control_hover = self.element_active.flatten(self.control);
-        let control_active = self.element_active.flatten(control_hover);
-        component.colors.primary = self.control.into();
-        component.colors.primary_foreground = self.text.into();
-        component.colors.primary_hover = control_hover.into();
-        component.colors.primary_active = control_active.into();
-        // What a `Button::primary()` actually paints from in 0.6.4. Left unset
-        // it stays on the library's own near-black, which is a black slab in
-        // the light theme.
-        component.colors.button_primary = self.control.into();
-        component.colors.button_primary_foreground = self.text.into();
-        component.colors.button_primary_hover = control_hover.into();
-        component.colors.button_primary_active = control_active.into();
-        component.colors.secondary = self.control.into();
-        component.colors.secondary_foreground = self.text.into();
-        component.colors.secondary_hover = control_hover.into();
-        component.colors.secondary_active = control_active.into();
-        // One highlight for everything that lights up under the pointer, so a
-        // ghost button, a menu item and dbdelve's own chips agree: the library
-        // washes all of them with `accent` (a ghost button at half strength on
-        // dark themes), and dbdelve's own hovers are `element_hover`, so this
-        // is the gray wash and never the blue of a selection. The completion
-        // popup's selected row and a right-click menu's highlighted item take
-        // it too; `selection` stays what a selected row in the tree and the
-        // grid wears.
-        component.colors.accent = self.element_active.into();
-        component.colors.accent_foreground = self.text.into();
-        component.colors.danger = self.danger.into();
-        component.colors.danger_foreground = self.on_accent.into();
-        component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
-        component.colors.danger_active = self.element_active.flatten(self.danger).into();
-        // Same split as `button_primary`: left unset, a `Button::danger()` is
-        // the library's pale tint with `on_accent` ink, unreadable on either
-        // polarity.
-        component.colors.button_danger = component.colors.danger;
-        component.colors.button_danger_foreground = component.colors.danger_foreground;
-        component.colors.button_danger_hover = component.colors.danger_hover;
-        component.colors.button_danger_active = component.colors.danger_active;
-        component.colors.success = self.success.into();
-        component.colors.success_foreground = self.on_accent.into();
-        component.colors.success_hover = self.element_hover.flatten(self.success).into();
-        component.colors.success_active = self.element_active.flatten(self.success).into();
-        component.colors.list = self.surface.into();
-        component.colors.list_even = self.surface.into();
-        component.colors.list_head = self.surface.into();
-        component.colors.list_hover = self.element_hover.into();
-        component.colors.list_active = self.selection.into();
-        component.colors.list_active_border = self.accent.into();
-        component.colors.scrollbar = self.panel.into();
-        component.colors.scrollbar_thumb = self.border_strong.into();
-        component.colors.scrollbar_thumb_hover = self.element_active.into();
-        // The results pane already paints `data_glass` behind the grid, and a
-        // second tint over it would only stack toward opaque.
-        component.colors.table = TRANSPARENT.into();
-        component.colors.table_active = self.selection.into();
-        component.colors.table_active_border = self.accent.into();
-        component.colors.table_even = self.element_hover.into();
-        component.colors.table_head = self.panel_glass().into();
-        component.colors.table_head_foreground = self.text_muted.into();
-        component.colors.table_hover = self.element_hover.into();
-        // The hairline carries the rows. Stripes are off on glass: a 5% wash
-        // over every other row is exactly the transmission the plane is there
-        // to give up, and two rows of haze read as one flat slab.
-        component.colors.table_row_border = self.border.into();
-        component.highlight_theme = self.highlight_theme();
-
-        // 0.6.4 split every colour in two: `colors`, which is what a theme is
-        // written in, and `tokens`, a `Background`-valued copy of it that the
-        // library now actually paints from — `Root`'s base plane included. Only
-        // `Theme::change` rebuilds the copy, so mutating through `global_mut`
-        // leaves all 161 token reads on the library's light defaults, and the
-        // window comes back opaque white whatever `colors.background` says.
-        component.tokens = (&component.colors).into();
-
-        // 0.6.4 keeps a second theme global, the Base projection, and that is
-        // the one the input, the editor, the scrollbars and the text views read
-        // from. Mutating through `global_mut` alone leaves it on the library's
-        // light defaults: the editor pane comes back as an opaque fill, because
-        // `editor_background` falls through to `input_background`, which is
-        // `background` for any theme the Base does not believe is dark.
-        gpui_component::Theme::sync_base(cx);
+            // The one plane painted below dbdelve's own tree, by `Root`. It is the
+            // frost, so removing a `bg` from a chrome element uncovers glass rather
+            // than a hole.
+            component.colors.background = self.frost().into();
+            component.colors.foreground = self.text.into();
+            component.colors.input = self.border.into();
+            component.colors.border = self.border.into();
+            component.colors.caret = self.cursor.into();
+            component.colors.selection = self.selection.into();
+            component.colors.ring = self.accent.into();
+            // Only the completion popup reads this, for the matched prefix of a
+            // suggestion. Left at the library default it is a blue belonging to no
+            // palette dbdelve ships. The card's accent, since the card is the
+            // only place it is painted.
+            component.colors.blue = popup.accent.into();
+            component.colors.muted = self.surface.into();
+            component.colors.muted_foreground = self.text_muted.into();
+            // Translucent on glass only, and that is what tells gpui-component
+            // to frost its popups; opaque, they are drawn exactly as before.
+            component.colors.popover = self.overlay_glass().into();
+            component.colors.popover_foreground = self.text.into();
+            // Both button variants are the same neutral: a dbdelve button is a grey
+            // that steps visibly brighter under the pointer, never a colour.
+            // Colour is reserved for state (selection, danger), not for controls.
+            let control_hover = self.element_active.flatten(self.control);
+            let control_active = self.element_active.flatten(control_hover);
+            component.colors.primary = self.control.into();
+            component.colors.primary_foreground = self.text.into();
+            component.colors.primary_hover = control_hover.into();
+            component.colors.primary_active = control_active.into();
+            // What a `Button::primary()` actually paints from in 0.8. Left unset
+            // it stays on the library's own near-black, which is a black slab in
+            // the light theme.
+            component.colors.button_primary = self.control.into();
+            component.colors.button_primary_foreground = self.text.into();
+            component.colors.button_primary_hover = control_hover.into();
+            component.colors.button_primary_active = control_active.into();
+            component.colors.secondary = self.control.into();
+            component.colors.secondary_foreground = self.text.into();
+            component.colors.secondary_hover = control_hover.into();
+            component.colors.secondary_active = control_active.into();
+            // One highlight for everything that lights up under the pointer, so a
+            // ghost button, a menu item and dbdelve's own chips agree: the library
+            // washes all of them with `accent` (a ghost button at half strength on
+            // dark themes), and dbdelve's own hovers are `element_hover`, so this
+            // is the gray wash and never the blue of a selection. The completion
+            // popup's selected row and a right-click menu's highlighted item take
+            // it too; `selection` stays what a selected row in the tree and the
+            // grid wears.
+            component.colors.accent = self.element_active.into();
+            component.colors.accent_foreground = self.text.into();
+            component.colors.danger = self.danger.into();
+            component.colors.danger_foreground = self.on_accent.into();
+            component.colors.danger_hover = self.element_hover.flatten(self.danger).into();
+            component.colors.danger_active = self.element_active.flatten(self.danger).into();
+            // Same split as `button_primary`: left unset, a `Button::danger()` is
+            // the library's pale tint with `on_accent` ink, unreadable on either
+            // polarity.
+            component.colors.button_danger = component.colors.danger;
+            component.colors.button_danger_foreground = component.colors.danger_foreground;
+            component.colors.button_danger_hover = component.colors.danger_hover;
+            component.colors.button_danger_active = component.colors.danger_active;
+            component.colors.success = self.success.into();
+            component.colors.success_foreground = self.on_accent.into();
+            component.colors.success_hover = self.element_hover.flatten(self.success).into();
+            component.colors.success_active = self.element_active.flatten(self.success).into();
+            component.colors.list = self.surface.into();
+            component.colors.list_even = self.surface.into();
+            component.colors.list_head = self.surface.into();
+            component.colors.list_hover = self.element_hover.into();
+            component.colors.list_active = self.selection.into();
+            component.colors.list_active_border = self.accent.into();
+            component.colors.scrollbar = self.panel.into();
+            component.colors.scrollbar_thumb = self.border_strong.into();
+            component.colors.scrollbar_thumb_hover = self.element_active.into();
+            // The results pane already paints `data_glass` behind the grid, and a
+            // second tint over it would only stack toward opaque.
+            component.colors.table = TRANSPARENT.into();
+            component.colors.table_active = self.selection.into();
+            component.colors.table_active_border = self.accent.into();
+            component.colors.table_even = self.element_hover.into();
+            component.colors.table_head = self.panel_glass().into();
+            component.colors.table_head_foreground = self.text_muted.into();
+            component.colors.table_hover = self.element_hover.into();
+            // The hairline carries the rows. Stripes are off on glass: a 5% wash
+            // over every other row is exactly the transmission the plane is there
+            // to give up, and two rows of haze read as one flat slab.
+            component.colors.table_row_border = self.border.into();
+            component.highlight_theme = self.highlight_theme();
+        });
     }
 
     /// Built through serde because `ThemeStyle`'s fields are private and it has
@@ -870,10 +1236,11 @@ impl Theme {
                 editor_active_line: Some(self.element_hover.into()),
                 editor_line_number: Some(self.text_faint.into()),
                 editor_active_line_number: Some(self.text_muted.into()),
-                // 0.6.4 paints the gutter opaquely from `editor_background`
-                // when this is unset, which is the fill the note above exists
-                // to refuse. Named transparent so the refusal survives a bump
-                // that changes what the fallback is.
+                // 0.8 paints the gutter from `editor_background` when this is
+                // unset, which is transparent above, but 0.6.4 painted it
+                // opaquely, the fill the note above exists to refuse. Named
+                // transparent so the refusal survives a bump that changes
+                // what the fallback is.
                 editor_gutter_background: Some(TRANSPARENT.into()),
                 // Whitespace marks are scaffolding, not text: the same faint
                 // tone the line numbers get, one step behind `text_muted`,
@@ -885,7 +1252,7 @@ impl Theme {
         })
     }
 
-    /// The vibrant theme, and the default: the window background is the blurred
+    /// The vibrant theme: the window background is the blurred
     /// desktop and every plane is a tint over it rather than a fill.
     ///
     /// Near-black where [`Theme::dark`] is deliberately grey, which reverses
@@ -1043,6 +1410,8 @@ impl Theme {
             syntax_type: Oklch::new(0.80, 0.10, 205.0).to_srgb(),
             syntax_variable: neutral(0.90),
             syntax_operator: neutral(0.74),
+
+            popup_card: None,
         }
     }
 
@@ -1089,6 +1458,8 @@ impl Theme {
             syntax_type: Oklch::new(0.44, 0.12, 205.0).to_srgb(),
             syntax_variable: neutral(0.28),
             syntax_operator: neutral(0.40),
+
+            popup_card: None,
         }
     }
 
@@ -1603,11 +1974,21 @@ const RENAMED_THEMES: [(&str, &str); 4] = [
     ("GitHub Glass", "GitHub Dark Glass"),
 ];
 
+/// Where someone who has never picked a theme starts: the opaque DBDelve theme
+/// on the system's side. Only a start; once one is saved the system's
+/// appearance no longer matters, unless the theme is set to match it.
+pub(crate) fn starting_theme(system: Appearance) -> Theme {
+    match system {
+        Appearance::Dark => Theme::black(),
+        Appearance::Light => Theme::light(),
+    }
+}
+
 /// A theme read back from disk, by name. An absent or unknown name is the
-/// default: a palette dropped from `all` between launches must not strand the
-/// app on a name nothing answers to. Case-blind because the names were
-/// once spelled "dbdelve Dark" and profiles written then still say so.
-pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
+/// starting theme: a palette dropped from `all` between launches must not
+/// strand the app on a name nothing answers to. Case-blind because the names
+/// were once spelled "dbdelve Dark" and profiles written then still say so.
+pub(crate) fn restored_theme(name: Option<&str>, system: Appearance) -> Theme {
     name.and_then(|name| {
         let name = RENAMED_THEMES
             .iter()
@@ -1617,7 +1998,7 @@ pub(crate) fn restored_theme(name: Option<&str>) -> Theme {
             .into_iter()
             .find(|theme| theme.name.eq_ignore_ascii_case(name))
     })
-    .unwrap_or_default()
+    .unwrap_or_else(|| starting_theme(system))
 }
 
 /// Push a theme everywhere it is read from. Only a glass theme wants the
@@ -1658,7 +2039,6 @@ pub(crate) fn restored_fonts(stored: Option<store::StoredFonts>, available: &[St
 
 #[cfg(test)]
 mod tests {
-    use super::color::contrast_ratio;
     use super::*;
 
     /// WCAG AA: 4.5 for body text, 3.0 for large text and UI components.
@@ -1708,6 +2088,63 @@ mod tests {
             assert!(
                 missing.is_empty(),
                 "highlighter categories fell back to the component theme: {missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_engine_logo_stands_off_the_background_in_every_theme() {
+        for t in Theme::all() {
+            for engine in Engine::ALL {
+                let logo = engine_brand(engine, t, &t.logo_planes());
+                for plane in t.logo_planes() {
+                    check(t, engine.label(), logo, plane, AA_LARGE);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_titlebar_logo_stands_off_every_band_and_chip() {
+        for t in Theme::all() {
+            for color in ConnectionColor::ALL {
+                for (name, plane) in [
+                    ("band", color.band(t).flatten(t.surface)),
+                    ("chip", color.chip(t)),
+                ] {
+                    for engine in Engine::ALL {
+                        let logo = engine_brand(engine, t, &[plane]);
+                        let what = format!("{} on a {} {name}", engine.label(), color.label());
+                        check(t, &what, logo, plane, AA_LARGE);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_awkward_theme_still_gets_the_best_logo_available() {
+        let grey = |v: f32| Srgb { r: v, g: v, b: v };
+        let t = Theme {
+            bg: grey(0.45),
+            panel: grey(0.55),
+            ..Theme::dark()
+        };
+        for engine in Engine::ALL {
+            let logo = engine_brand(engine, t, &[t.bg, t.panel]);
+            let hue = Oklch::from_srgb(Srgb::from_hex(engine.brand()));
+            let worst = |color: Srgb| {
+                color::contrast_ratio(color, t.bg).min(color::contrast_ratio(color, t.panel))
+            };
+            let best = (10..=47)
+                .map(|n| Oklch::new(n as f32 * 0.02, hue.c, hue.h).to_srgb())
+                .map(worst)
+                .fold(0.0, f32::max);
+            assert!(
+                worst(logo) >= best.min(3.0) - 0.01,
+                "{}: {:.2} when {best:.2} was on offer",
+                engine.label(),
+                worst(logo)
             );
         }
     }
@@ -1787,9 +2224,7 @@ mod tests {
 
     #[test]
     fn a_titlebar_pill_stands_off_every_band() {
-        // What sits on a band: the mode pill in its own hue, and the switcher
-        // as a plain chip, since the band is already wearing its colour. The
-        // floor is set from the weakest pair that still reads as a separate
+        // What sits on a band: the mode pill, in its own hue. The floor is set from the weakest pair that still reads as a separate
         // shape at a glance: a Green mode pill on a Gray band, light theme.
         let distance = |a: Srgb, b: Srgb| {
             let d = |x: f32, y: f32| ((x - y) * 255.0).powi(2);
@@ -1799,7 +2234,6 @@ mod tests {
             for band_color in ConnectionColor::ALL {
                 let band = band_color.band(t).flatten(t.surface);
                 let pills = [
-                    ("the switcher", t.surface),
                     ("a Green mode", ConnectionColor::Green.chip(t)),
                     ("a Yellow mode", ConnectionColor::Yellow.chip(t)),
                     ("a Red mode", ConnectionColor::Red.chip(t)),
@@ -1841,7 +2275,10 @@ mod tests {
     fn themes_are_comparable_not_mirrored() {
         // Every theme should land in the same contrast neighbourhood, so
         // switching does not make one of them feel washed out next to another.
-        let ratios = Theme::all().map(|theme| contrast_ratio(theme.text, theme.bg));
+        let ratios: Vec<_> = Theme::all()
+            .iter()
+            .map(|theme| contrast_ratio(theme.text, theme.bg))
+            .collect();
         let spread = ratios.iter().cloned().fold(f32::MIN, f32::max)
             - ratios.iter().cloned().fold(f32::MAX, f32::min);
         assert!(spread < 6.0, "themes drifted apart: {ratios:?}");
@@ -1981,9 +2418,9 @@ mod tests {
     fn glass_is_toned_onto_the_glass_planes() {
         let planes = |t: Theme| [t.bg, t.panel, t.surface, t.overlay, t.control];
         let all = Theme::all();
-        for glass in all.into_iter().filter(|t| t.is_glass) {
-            let base = all
-                .into_iter()
+        for &glass in all.iter().filter(|t| t.is_glass) {
+            let base = *all
+                .iter()
                 .find(|t| Some(t.name) == glass.name.strip_suffix(" Glass"))
                 .unwrap_or_else(|| panic!("{}: no base theme", glass.name));
             let tones = match glass.appearance {
@@ -2009,6 +2446,214 @@ mod tests {
                         glass.name,
                         got.h,
                         own.h
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every opacity the setting can land on, floor to ceiling.
+    fn opacities() -> impl Iterator<Item = f32> {
+        let steps = ((OPACITY_MAX - OPACITY_MIN) / OPACITY_STEP).round() as usize;
+        (0..=steps).map(|step| OPACITY_MIN + OPACITY_STEP * step as f32)
+    }
+
+    #[test]
+    fn a_floating_card_keeps_its_text_over_the_worst_backdrop() {
+        // A glass card is a tint over a blur of the window beneath it, and the
+        // blur softens what is under it without darkening it, so the raw-tint
+        // checks say nothing here. At every opacity the setting allows, since
+        // the card is searched for at the one in force. Asked for on the
+        // installed theme, as gpui-component does, and on `for_popup`'s, as
+        // the app's own cards do.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            for (asker, t, asked) in opacities()
+                .map(|opacity| t.with_opacity(opacity))
+                .flat_map(|t| [("installed", t, t), ("popup", t, t.for_popup())])
+            {
+                let card = asked.overlay_glass();
+                let under = card.flatten(t.popup_backdrop());
+                let at =
+                    |what: &str| format!("{what} at {:.2}, asked on the {asker} theme", t.opacity);
+                check(t, &at("text on a floating card"), t.text, under, AA_TEXT);
+                check(
+                    t,
+                    &at("muted on a floating card"),
+                    t.text_muted,
+                    under,
+                    AA_LARGE,
+                );
+                check(
+                    t,
+                    &at("a floating card's own muted"),
+                    t.for_popup().text_muted,
+                    under,
+                    AA_LARGE,
+                );
+                // A card that has to go solid to be read has stopped being
+                // glass, which is a palette to fix rather than a fill to accept.
+                assert!(
+                    (OVERLAY_ALPHA_FLOOR..1.0).contains(&card.a),
+                    "{}: a floating card at {:.3} of its own tone at {:.2}",
+                    t.name,
+                    card.a,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_cards_inks_hold_over_the_worst_backdrop() {
+        // The card is searched for its body and muted text only; faint, danger
+        // and accent are moved to hold on whatever card that leaves.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                let under = popup.overlay_glass().flatten(t.popup_backdrop());
+                let at = |what: &str| format!("{what} on a floating card at {:.2}", t.opacity);
+                check(t, &at("faint"), popup.text_faint, under, AA_LARGE);
+                check(t, &at("accent"), popup.accent, under, AA_LARGE);
+                check(t, &at("danger"), popup.danger, under, AA_TEXT);
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_is_the_same_card_whichever_theme_asks_for_it() {
+        // The palette and the reference popup ask on the theme `for_popup`
+        // returns, gpui-component's popups on the installed one, and they sit
+        // side by side.
+        for t in Theme::all() {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                assert_eq!(
+                    popup.overlay_glass(),
+                    t.overlay_glass(),
+                    "{} at {:.2}",
+                    t.name,
+                    t.opacity
+                );
+                let again = popup.for_popup();
+                assert_eq!(
+                    (again.text_muted, again.text_faint),
+                    (popup.text_muted, popup.text_faint),
+                    "{} at {:.2}",
+                    t.name,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_is_backed_by_the_worst_fill_it_can_cover() {
+        // Built here from the tokens the way the window stacks them, rather
+        // than taken from `popup_backdrop`'s own list, so a fill that list
+        // misses fails here. Each plane under each wash a block of rows can
+        // wear, a table's header, and a button at rest. Not a hovered or
+        // pressed one: the pointer doing that is on the card instead.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let backdrop = t.popup_backdrop().relative_luminance();
+                let (desktop, worse): (Srgb, fn(f32, f32) -> bool) = match t.appearance {
+                    Appearance::Dark => (WHITE, |a, b| a > b),
+                    Appearance::Light => (BLACK, |a, b| a < b),
+                };
+                let chrome = t.frost().flatten(desktop);
+                let editor = t.panel_glass().flatten(chrome);
+                let results = t.data_glass().flatten(chrome);
+                let mut fills = vec![
+                    ("chrome".to_string(), chrome),
+                    ("the editor".to_string(), editor),
+                    ("the results".to_string(), results),
+                    (
+                        "a table's header".to_string(),
+                        t.panel_glass().flatten(results),
+                    ),
+                    ("a button".to_string(), t.control),
+                ];
+                for (plane, under) in [
+                    ("chrome", chrome),
+                    ("the editor", editor),
+                    ("the results", results),
+                ] {
+                    for (wash, over) in [
+                        ("selected", t.selection),
+                        ("edited", t.edited),
+                        ("hovered", t.element_hover),
+                        ("highlighted", t.element_active),
+                    ] {
+                        fills.push((format!("{wash} rows on {plane}"), over.flatten(under)));
+                    }
+                }
+                for (name, fill) in fills {
+                    assert!(
+                        !worse(fill.relative_luminance(), backdrop),
+                        "{} at {:.2}: {name} is worse than the card's backdrop",
+                        t.name,
+                        t.opacity
+                    );
+                }
+                assert!(
+                    worse(desktop.relative_luminance(), backdrop),
+                    "{} at {:.2}: a card searched against the bare desktop",
+                    t.name,
+                    t.opacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_card_lets_the_desktop_through_at_the_default() {
+        // The complaint this exists to catch: a card searched against a white
+        // backdrop came out near-opaque and read as a solid slab beside the
+        // frosted window around it. At the default every family's card is
+        // still mostly the window behind it.
+        for t in Theme::all().into_iter().filter(|t| t.is_glass) {
+            let card = t.with_opacity(t.default_opacity()).overlay_glass();
+            assert!(
+                card.a <= 0.30,
+                "{}: a floating card at {:.3} of its own tone at the default",
+                t.name,
+                card.a
+            );
+        }
+    }
+
+    #[test]
+    fn an_opaque_theme_floats_its_cards_exactly_as_before() {
+        for t in Theme::all().into_iter().filter(|t| !t.is_glass) {
+            assert_eq!(t.overlay_glass(), t.overlay.opaque(), "{}", t.name);
+            let popup = t.for_popup();
+            assert_eq!(
+                (popup.text_muted, popup.text_faint),
+                (t.text_muted, t.text_faint),
+                "{}",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_floating_cards_muted_text_never_reads_worse_than_the_themes_own() {
+        // On the card as it is drawn over the worst backdrop, not on its
+        // opaque tone, which is what `popup_ink` already chose by.
+        for t in Theme::all() {
+            for t in opacities().map(|opacity| t.with_opacity(opacity)) {
+                let popup = t.for_popup();
+                let card = t.overlay_glass().flatten(t.popup_backdrop());
+                for (name, own, on_card) in [
+                    ("muted", t.text_muted, popup.text_muted),
+                    ("faint", t.text_faint, popup.text_faint),
+                ] {
+                    let (own, on_card) = (contrast_ratio(own, card), contrast_ratio(on_card, card));
+                    assert!(
+                        on_card >= own,
+                        "{} at {:.2}: {name} on a floating card at {on_card:.2}, the theme's own at {own:.2}",
+                        t.name,
+                        t.opacity
                     );
                 }
             }
@@ -2095,7 +2740,8 @@ mod tests {
 
     #[test]
     fn every_dark_theme_is_listed_before_every_light_one() {
-        assert_eq!(Theme::default().name, "DBDelve Dark Glass");
+        assert_eq!(Theme::default().name, "DBDelve Black");
+        assert!(!Theme::default().is_glass);
         let first_light = Theme::all()
             .iter()
             .position(|t| t.appearance == Appearance::Light)
@@ -2110,22 +2756,56 @@ mod tests {
     #[test]
     fn a_theme_stored_under_its_pre_light_glass_name_is_still_restored() {
         // Asserted to exist by name too: an unknown name restores the default,
-        // which is what "DBDelve Glass" maps to, so restoring it alone proves
-        // nothing.
+        // so restoring it alone proves nothing.
         for (old, new) in RENAMED_THEMES {
             assert!(Theme::all().iter().any(|t| t.name == new), "{new}");
-            assert_eq!(restored_theme(Some(old)).name, new);
+            assert_eq!(restored_theme(Some(old), Appearance::Dark).name, new);
         }
         assert_eq!(
-            restored_theme(Some("gruvbox glass")).name,
+            restored_theme(Some("gruvbox glass"), Appearance::Dark).name,
             "Gruvbox Dark Glass"
         );
-        assert_eq!(restored_theme(Some("Dracula Glass")).name, "Dracula Glass");
+        assert_eq!(
+            restored_theme(Some("Dracula Glass"), Appearance::Dark).name,
+            "Dracula Glass"
+        );
+    }
+
+    #[test]
+    fn a_first_run_starts_on_the_systems_side_and_a_saved_theme_wins() {
+        assert_eq!(
+            restored_theme(None, Appearance::Light).name,
+            "DBDelve Light"
+        );
+        assert_eq!(restored_theme(None, Appearance::Dark).name, "DBDelve Black");
+        for system in [Appearance::Light, Appearance::Dark] {
+            assert!(!restored_theme(None, system).is_glass);
+            assert_eq!(
+                restored_theme(Some("Dracula"), system).name,
+                "Dracula",
+                "{system:?}"
+            );
+            assert_eq!(
+                restored_theme(Some("DBDelve Black"), system).name,
+                "DBDelve Black"
+            );
+        }
+        assert_eq!(
+            Appearance::of_system(gpui::WindowAppearance::VibrantLight),
+            Appearance::Light
+        );
+        assert_eq!(
+            Appearance::of_system(gpui::WindowAppearance::VibrantDark),
+            Appearance::Dark
+        );
     }
 
     #[test]
     fn a_theme_stored_under_its_old_lowercase_name_is_still_restored() {
-        assert_eq!(restored_theme(Some("dbdelve Dark")).name, "DBDelve Dark");
+        assert_eq!(
+            restored_theme(Some("dbdelve Dark"), Appearance::Dark).name,
+            "DBDelve Dark"
+        );
     }
 
     #[test]

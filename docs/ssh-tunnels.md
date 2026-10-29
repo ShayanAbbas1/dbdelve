@@ -38,6 +38,24 @@ The tunnel opens when the profile connects and stays open for as long as the
 connection does; closing the connection, quitting DBDelve, or a crash all end
 the `ssh` process with it, so nothing is left listening behind you.
 
+### Known-hosts files
+
+Packagers can set `DBDELVE_SSH_KNOWN_HOSTS` to an OpenSSH `UserKnownHostsFile`
+value: a space-separated list, with double quotes around paths containing
+spaces. Unset or blank uses the known-hosts files from SSH's configuration.
+For example:
+
+```sh
+export DBDELVE_SSH_KNOWN_HOSTS='"/path/to/app-data/known_hosts" "~/.ssh/known_hosts" "~/.ssh/known_hosts2"'
+```
+
+To record a new host, the first file must be writable if it exists;
+otherwise its parent directory must already exist and be writable. DBDelve
+refuses the connection if a newly accepted host key cannot be saved. Keep
+existing trust files in the list, even if they are read-only. This overrides
+`UserKnownHostsFile` for the destination host. A `ProxyJump` host uses its own
+SSH configuration.
+
 ## What's supported
 
 - Any auth `ssh` can do without prompting: a key already in ssh-agent
@@ -48,9 +66,9 @@ the `ssh` process with it, so nothing is left listening behind you.
 - TLS still verifies the database's real hostname, not the tunnel's local
   address, on Postgres and SQL Server — `sslmode=verify-full` works through a
   tunnel the same as it does direct.
-- A host your `ssh` config says nothing about is trusted on first connection
-  (`accept-new`). If your config sets `StrictHostKeyChecking` for that host
-  yourself, DBDelve leaves it exactly as you set it.
+- DBDelve uses `accept-new` whenever SSH reports `StrictHostKeyChecking=ask`,
+  including an explicitly configured `ask`. Other host-key checking settings
+  are left unchanged.
 
 On Windows, DBDelve uses the `ssh` on your `PATH`, or Windows' built-in
 OpenSSH client if none is there. That build's `ssh-agent` service is off by
@@ -81,12 +99,9 @@ These are `ssh`'s own messages, shown as they are:
 - **`Permission denied (publickey)`** — the SSH host didn't accept any key
   offered. Check the identity file path, and that the right key is loaded
   (`ssh-add -l`); there's no password fallback to try instead.
-- **`Host key verification failed`** — the host's key isn't in your
-  `known_hosts`, and something in your `~/.ssh/config` set
-  `StrictHostKeyChecking` for it explicitly (DBDelve only trusts a new host
-  automatically where nothing already decided that). Connect with plain
-  `ssh` once to add the key, or leave `StrictHostKeyChecking` unset for that
-  host.
+- **`Host key verification failed`** — for example, a new host with
+  `StrictHostKeyChecking=yes`, or a changed host key. Verify the server's
+  fingerprint before adding or updating its entry in `known_hosts`.
 - **`Could not resolve hostname …`** — the SSH host or alias itself doesn't
   resolve. Check the SSH host field and your `~/.ssh/config`.
 - **`open failed: connect failed: Connection refused`** — the SSH host was

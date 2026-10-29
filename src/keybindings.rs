@@ -25,13 +25,16 @@ use gpui::{KeyBinding, Keystroke};
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
-        CommandPalette, CopyCell, CopyResults, CopyRow, DeleteRow, DiscardEdits, EditCell,
-        ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, ImportConnections, NewConnection,
-        NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextTab, OpenSettings,
-        PaletteNext, PalettePrevious, PreviousEdit, PreviousPage, PreviousProfile, PreviousTab,
-        Quit, RefreshConnection, RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery,
-        SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetNull, ShowEditor, ToggleComment,
-        ToggleNextJoin, ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
+        CommandPalette, ConfirmDialog, CopyCell, CopyResults, CopyRow, CycleMode, DeleteRow,
+        DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
+        ImportConnections, ImportRows, NewConnection, NewProject, NewQuery, NewRow,
+        NextDialogButton, NextEdit, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext,
+        PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
+        PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit, PreviousPage,
+        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
+        RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
+        SetNull, ShowEditor, SubmitConnection, SwitchConnection, ToggleComment, ToggleNextJoin,
+        ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -43,8 +46,8 @@ pub(crate) struct KeybindingSpec {
     /// override, so treat it as append-only.
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
-    /// `None` means global. Two bindings in different, specific contexts
-    /// never conflict -- see [`contexts_overlap`].
+    /// `None` means global. Scoped bindings can still share a focus path --
+    /// see [`contexts_overlap`].
     pub(crate) context: Option<&'static str>,
     /// More than one only for `zoom_editor_in`, which ships both the shifted
     /// and unshifted key so `+` reads the same on every layout. An override
@@ -125,16 +128,29 @@ registry! {
     ("previous_tab", "Previous Tab", None, ["ctrl-shift-tab"], PreviousTab),
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),
     ("previous_profile", "Previous Connection", None, ["ctrl-shift-`"], PreviousProfile),
-    ("show_editor", "Back / Dismiss", None, ["escape"], ShowEditor),
+    ("show_editor", "Dismiss", None, ["escape"], ShowEditor),
     // Still keyed by the id of the cycle this replaced, so an override saved
     // against it keeps working.
     ("cycle_theme", "Select Theme", None, ["secondary-k t"], SelectTheme),
     ("select_database", "Select Database", None, ["secondary-k d"], SelectDatabase),
     ("open_settings", "Open Settings", None, ["secondary-,"], OpenSettings),
-    ("fuzzy_open", "Fuzzy Schema Search", None, ["secondary-p"], FuzzyOpen),
+    // Keyed by the id it had as a search across everything, so an override
+    // saved against it keeps working.
+    ("fuzzy_open", "Go to Object", None, ["secondary-p"], FuzzyOpen),
+    ("go_to_column", "Go to Column", None, ["secondary-shift-o"], GoToColumn),
     ("command_palette", "Command Palette", None, ["secondary-shift-p"], CommandPalette),
+    ("switch_connection", "Switch Connection", None, [], SwitchConnection),
+    ("search_everything", "Search Everything", None, [], SearchEverything),
+    ("cycle_mode", "Cycle Access Level", None, [], CycleMode),
     ("palette_previous", "Palette: Previous Row", Some("Palette > Input"), ["up"], PalettePrevious),
     ("palette_next", "Palette: Next Row", Some("Palette > Input"), ["down"], PaletteNext),
+    ("palette_next_scope", "Palette: Next Scope", Some("Palette > Input"), ["tab"], PaletteNextScope),
+    ("palette_previous_scope", "Palette: Previous Scope", Some("Palette > Input"), ["shift-tab"], PalettePreviousScope),
+    // The caret's keys too: they move it while it can move, and only at the
+    // field's edge do they reach the scopes (`Palette::arrow`).
+    ("palette_scope_left", "Palette: Arrow to Previous Scope", Some("Palette > Input"), ["left"], PaletteScopeLeft),
+    ("palette_scope_right", "Palette: Arrow to Next Scope", Some("Palette > Input"), ["right"], PaletteScopeRight),
+    ("palette_row_actions", "Palette: Row Actions", Some("Palette > Input"), ["shift-enter"], PaletteRowActions),
     ("zoom_editor_in", "Zoom In", None, ["secondary-+", "secondary-="], ZoomEditorIn),
     ("zoom_editor_out", "Zoom Out", None, ["secondary--"], ZoomEditorOut),
     ("reset_editor_zoom", "Reset Zoom", None, ["secondary-0"], ResetEditorZoom),
@@ -145,10 +161,18 @@ registry! {
     // this unreachable there. Clearing a cell with the delete key is the
     // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
-    ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
+    ("accept_completion", "Accept Completion", Some("Input && mode == editor"), ["tab"], AcceptCompletion),
     ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
+    // Run Query's chord, which reaches the form first and finds nothing to
+    // run there: see `INERT_IN`.
+    ("submit_connection", "Connect or Save Connection", Some("ConnectionForm"), ["secondary-enter"], SubmitConnection),
+    ("confirm_dialog", "Dialog: Press Selected Button", Some("Dialog"), ["enter"], ConfirmDialog),
+    ("previous_dialog_button", "Dialog: Previous Button", Some("Dialog"), ["left", "shift-tab"], PreviousDialogButton),
+    ("next_dialog_button", "Dialog: Next Button", Some("Dialog"), ["right", "tab"], NextDialogButton),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
+    ("toggle_row_edit", "Toggle Row Panel Edit Mode", None, ["secondary-shift-e"], ToggleRowEdit),
+    ("toggle_structure", "Toggle Data / Structure", None, ["secondary-shift-d"], ToggleStructure),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),
     // Click or command-palette only today; listed so they can be given a
     // chord for the first time.
@@ -158,7 +182,8 @@ registry! {
     ("clear_filter", "Clear Filter", None, [], ClearFilter),
     ("add_filter", "Add Filter", None, [], AddFilter),
     ("toggle_next_join", "Toggle Join Type", None, [], ToggleNextJoin),
-    ("new_row", "New Row", None, [], NewRow),
+    ("new_row", "Insert", None, [], NewRow),
+    ("import_rows", "Import Rows", None, [], ImportRows),
     // Scoped like `set_null` rather than left global: they act on the grid's
     // active cell, so a chord put on one later must not fire from the editor.
     ("set_empty", "Set Cell to Empty", Some("DataTable"), [], SetEmpty),
@@ -174,14 +199,27 @@ registry! {
     ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
 }
 
-/// Whether a binding scoped to `a` and one scoped to `b` could both be live
-/// at once. Two different, specific contexts never overlap; anything global
-/// (`None`) does, because a global binding fires regardless of focus.
+/// Whether both bindings can apply at the same focus path. The query editor
+/// supplies both the surface's wrapper and the widget's editor-mode context.
 fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
     match (a, b) {
         (None, _) | (_, None) => true,
+        (Some("Editor > Input"), Some("Input && mode == editor"))
+        | (Some("Input && mode == editor"), Some("Editor > Input")) => true,
         (Some(a), Some(b)) => a == b,
     }
+}
+
+/// Global actions with no handler inside a context, so a binding scoped there
+/// may take their chord. GPUI tries the unscoped binding first (AGENTS.md,
+/// "GPUI hazards"), nothing on the connection form handles Run Query, and the
+/// keystroke goes on to the form's own binding.
+const INERT_IN: &[(&str, &str)] = &[("run_query", "ConnectionForm")];
+
+fn inert(id: &str, context: Option<&str>) -> bool {
+    INERT_IN
+        .iter()
+        .any(|&(action, within)| action == id && Some(within) == context)
 }
 
 /// The chords currently in force for `spec`: its override if it has one,
@@ -211,6 +249,8 @@ pub(crate) fn conflict(
         .find(|spec| {
             spec.id != exclude_id
                 && contexts_overlap(spec.context, context)
+                && !inert(spec.id, context)
+                && !inert(exclude_id, spec.context)
                 && chords_for(spec, overrides).contains(&chord)
         })
         .map(|spec| spec.label)
@@ -236,11 +276,33 @@ mod tests {
         assert_eq!(
             conflict(
                 "enter",
-                Some("Editor > Input"),
+                Some("Input && mode == editor"),
                 "accept_completion",
                 &overrides
             ),
             None
+        );
+    }
+
+    #[test]
+    fn completion_and_comment_overrides_conflict_in_the_query_editor() {
+        let completion = REGISTRY
+            .iter()
+            .find(|spec| spec.id == "accept_completion")
+            .unwrap();
+        let comment = REGISTRY
+            .iter()
+            .find(|spec| spec.id == "toggle_comment")
+            .unwrap();
+        let overrides = HashMap::from([(comment.id.to_string(), "tab".to_string())]);
+        assert_eq!(
+            conflict("tab", completion.context, completion.id, &overrides),
+            Some(comment.label)
+        );
+        let overrides = HashMap::from([(completion.id.to_string(), "secondary-/".to_string())]);
+        assert_eq!(
+            conflict("secondary-/", comment.context, comment.id, &overrides),
+            Some(completion.label)
         );
     }
 
@@ -269,6 +331,46 @@ mod tests {
         // `KeyBinding::new` panics on a stroke it cannot parse, so a
         // `profiles.toml` holding one used to take the launch with it.
         assert!(!build_bindings(&overrides).is_empty());
+    }
+
+    #[test]
+    fn no_shipped_default_collides_with_another() {
+        let overrides = HashMap::new();
+        for spec in REGISTRY {
+            for chord in spec.defaults {
+                assert_eq!(
+                    conflict(chord, spec.context, spec.id, &overrides),
+                    None,
+                    "{chord} on {}",
+                    spec.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_form_shares_run_querys_chord_and_nothing_else_does() {
+        let mut overrides = HashMap::new();
+        assert_eq!(
+            conflict(
+                "secondary-enter",
+                Some("ConnectionForm"),
+                "submit_connection",
+                &overrides
+            ),
+            None
+        );
+        assert_eq!(
+            conflict("secondary-enter", None, "run_query", &overrides),
+            None
+        );
+        // Any other global action there would take the keystroke from the
+        // form, Run Query moved off it or not.
+        overrides.insert("run_query".to_string(), "secondary-k r".to_string());
+        assert_eq!(
+            conflict("secondary-enter", None, "quit", &overrides),
+            Some("Connect or Save Connection")
+        );
     }
 
     #[test]
