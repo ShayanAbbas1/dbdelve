@@ -1,17 +1,3 @@
-[advisories]
-# Each one is against rustls 0.21 / rustls-webpki 0.101, which only tiberius
-# 0.12 (SQL Server) pulls in, and goes with the tiberius 0.13 upgrade. Pinned
-# like every driver, so these are tolerated until then rather than bumped past.
-ignore = [
-    # rustls 0.21 parses CRLs only to verify client certificates on a server,
-    # and tiberius is a TLS client.
-    { id = "RUSTSEC-2026-0104", reason = "CRLs are parsed only server-side; tiberius is a client" },
-    { id = "RUSTSEC-2026-0346", reason = "nothing Debug-formats a tiberius TLS session" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.21 has no post-quantum key exchange to downgrade from" },
-    { id = "RUSTSEC-2026-0098", reason = "name constraints: low severity, tolerated until tiberius 0.13" },
-    { id = "RUSTSEC-2026-0099", reason = "name constraints: low severity, tolerated until tiberius 0.13" },
-]
-
 [licenses]
 # The permissive licenses the graph holds today. A crate bringing in another
 # fails here until someone decides about it.

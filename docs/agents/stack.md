@@ -97,7 +97,6 @@ future anywhere DBDelve spawns one still panics.
 
 
 **`deny.toml` is checked by `.github/workflows/deny.yml`** on any change to the
-manifests and weekly. Its license list is the permissive licenses the graph
-holds; copyleft is admitted per crate in `exceptions`, never added to `allow`.
-An advisory is ignored only with a reason that says why it cannot reach
-DBDelve, never to make the weekly run pass.
+manifests: bans, licenses and sources. Its license list is the permissive
+licenses the graph holds; copyleft is admitted per crate in `exceptions`, never
+added to `allow`.
