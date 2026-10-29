@@ -336,6 +336,8 @@ pub(crate) struct Workspace {
     /// Which dialog was in front last frame, so a change of it moves the
     /// keyboard to the one now there.
     pub(crate) dialog_in_front: std::cell::Cell<Option<&'static str>>,
+    /// The button `enter` presses in it, counted from the right.
+    pub(crate) dialog_choice: std::cell::Cell<usize>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -468,6 +470,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
+            dialog_choice: std::cell::Cell::default(),
             newer_release: None,
         };
 

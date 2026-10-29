@@ -5,14 +5,15 @@
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, PathPromptOptions, StyledText, ease_out_quint};
+use gpui::{Animation, AnimationExt, Div, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::ActiveTheme;
+use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 
 use super::welcome::{self, Part, Pose};
 use super::*;
-use crate::actions::ConfirmDialog;
+use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton};
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{
     QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
@@ -754,6 +755,12 @@ impl Workspace {
             }
             return None;
         }
+        if raised {
+            // Every dialog opens on its primary button, as a native one does.
+            // The ring is drawn by the dialogs above, before this ran.
+            self.dialog_choice.set(0);
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
         // The palette is stacked over the dialogs and holds the keyboard
         // itself. A field inside the dialog in front keeps it, but not one in
         // a dialog another has just gone up over, or come down off with the
@@ -768,55 +775,116 @@ impl Workspace {
                 .track_focus(&self.dialog_focus)
                 .key_context("Dialog")
                 .on_action(cx.listener(Self::confirm_dialog))
+                .on_action(cx.listener(|workspace, _: &PreviousDialogButton, _, cx| {
+                    workspace.step_dialog_button(true, cx);
+                }))
+                .on_action(cx.listener(|workspace, _: &NextDialogButton, _, cx| {
+                    workspace.step_dialog_button(false, cx);
+                }))
                 .children(dialogs)
                 .into_any_element(),
         )
     }
 
-    /// `enter` presses the primary button of the dialog in front, taken in
-    /// the order `show_editor` backs out of them. Never one that destroys
-    /// something, and never the import's, a form with more than one answer:
-    /// those take a click.
+    /// A dialog's button in the ring that marks the one `enter` presses,
+    /// counted from the right so the primary is 0. Every button wears the
+    /// frame, pulled out by its own width, so moving the ring moves nothing.
+    pub(crate) fn choice(
+        &self,
+        dialog: &'static str,
+        from_right: usize,
+        button: Button,
+        t: Theme,
+    ) -> Div {
+        let chosen =
+            self.dialog_in_front.get() == Some(dialog) && self.dialog_choice.get() == from_right;
+        div()
+            .m(px(-2.))
+            .p(px(1.))
+            .border_1()
+            .rounded(px(layout::RADIUS_CONTROL + 2.))
+            .border_color(match chosen {
+                true => t.accent.into(),
+                false => gpui::transparent_black(),
+            })
+            .child(button)
+    }
+
+    /// How many buttons the dialog in front has to move the ring across.
+    /// None for the import, a form whose buttons change with its phase.
+    fn dialog_buttons(&self) -> usize {
+        match self.dialog_in_front.get() {
+            Some("stale-edit") => {
+                let editing = self
+                    .profile()
+                    .and_then(|profile| profile.session.stale_edit.as_ref())
+                    .is_some_and(|stale| stale.resume.is_some());
+                if editing { 3 } else { 2 }
+            }
+            Some("import-rows") | None => 0,
+            Some(_) => 2,
+        }
+    }
+
+    fn step_dialog_button(&mut self, leftward: bool, cx: &mut Context<Self>) {
+        let buttons = self.dialog_buttons();
+        if buttons == 0 {
+            return;
+        }
+        let choice = self.dialog_choice.get();
+        self.dialog_choice.set(match leftward {
+            true => (choice + 1) % buttons,
+            false => (choice + buttons - 1) % buttons,
+        });
+        cx.notify();
+    }
+
+    /// `enter` presses the button the ring is on, in the dialog drawn in
+    /// front. The import's form has none.
     pub(crate) fn confirm_dialog(
         &mut self,
         _: &ConfirmDialog,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_import.is_some() {
-            self.confirm_import(window, cx);
-            return;
-        }
-        let Some(profile) = self.profile() else {
+        let choice = self.dialog_choice.get();
+        let Some(dialog) = self.dialog_in_front.get() else {
             return;
         };
-        let session = &profile.session;
-        let stale = session
-            .stale_edit
-            .as_ref()
-            .map(|stale| stale.resume.is_some());
-        let stop = session
-            .pending_run
-            .as_ref()
-            .and_then(|pending| sql::gate(&pending.verdict, profile.mode, &profile.confirmed));
-        let held = session.pending_discard.is_some()
-            || session.pending_delete.is_some()
-            || session.import_rows.is_some();
-        let review = session.apply_review_covers(session.active)
-            && !matches!(session.active_query(), Some(QueryState::Running { .. }));
-        if let Some(editing) = stale {
-            match editing {
-                true => self.edit_stale_anyway(window, cx),
-                false => self.refresh_stale(window, cx),
+        let session = self.profile().map(|profile| &profile.session);
+        let editing = session
+            .and_then(|session| session.stale_edit.as_ref())
+            .is_some_and(|stale| stale.resume.is_some());
+        let deleting = session.and_then(|session| session.pending_delete.clone());
+        let running = session.is_some_and(|session| {
+            matches!(session.active_query(), Some(QueryState::Running { .. }))
+        });
+        match (dialog, choice) {
+            ("import-choice", 0) => self.confirm_import(window, cx),
+            ("import-choice", _) => {
+                self.pending_import = None;
+                cx.notify();
             }
-        } else if self.render_queue_failure(cx).is_some() {
-            self.continue_queue(cx);
-        } else if let Some(stop) = stop {
-            if matches!(stop, Stop::Upgrade(_)) {
-                self.approve_pending_run(cx);
+            ("stale-edit", 0) if editing => self.edit_stale_anyway(window, cx),
+            ("stale-edit", 0) => self.refresh_stale(window, cx),
+            ("stale-edit", 1) if editing => self.refresh_stale(window, cx),
+            ("stale-edit", _) => _ = self.cancel_stale_edit(cx),
+            ("queue-failure", 0) => self.continue_queue(cx),
+            ("queue-failure", _) => self.stop_queue(cx),
+            ("pending-run", 0) => self.approve_pending_run(cx),
+            ("pending-run", _) => self.cancel_pending_run(cx),
+            ("discard", 0) => self.confirm_discard_close(window, cx),
+            ("discard", _) => _ = self.cancel_discard_close(cx),
+            ("delete", 0) => {
+                if let Some(name) = deleting {
+                    self.delete_saved_query(name, window, cx);
+                }
             }
-        } else if review && !held {
-            self.run_apply_review(cx);
+            ("delete", _) => _ = self.cancel_delete_query(cx),
+            // The button is disabled while the batch runs.
+            ("apply-review", 0) if !running => self.run_apply_review(cx),
+            ("apply-review", 1) => _ = self.close_apply_review(cx),
+            _ => {}
         }
     }
 
@@ -899,33 +967,43 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-import",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "import-choice",
+                                        1,
+                                        button(
+                                            "cancel-import",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            cx.listener(|workspace, _, _, cx| {
+                                                workspace.pending_import = None;
+                                                cx.notify();
+                                            }),
+                                        ),
                                         t,
-                                    )
-                                    .on_click(cx.listener(
-                                        |workspace, _, _, cx| {
-                                            workspace.pending_import = None;
-                                            cx.notify();
-                                        },
-                                    )),
+                                    ),
                                 )
                                 .child(
-                                    button(
-                                        "confirm-import",
-                                        "Import",
-                                        Tone::Primary,
-                                        Control::Standard,
+                                    self.choice(
+                                        "import-choice",
+                                        0,
+                                        button(
+                                            "confirm-import",
+                                            "Import",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            cx.listener(|workspace, _, window, cx| {
+                                                workspace.confirm_import(window, cx);
+                                            }),
+                                        ),
                                         t,
-                                    )
-                                    .on_click(cx.listener(
-                                        |workspace, _, window, cx| {
-                                            workspace.confirm_import(window, cx);
-                                        },
-                                    )),
+                                    ),
                                 ),
                         ),
                 )
@@ -1066,35 +1144,48 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-discard-close",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "discard",
+                                        1,
+                                        button(
+                                            "cancel-discard-close",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel_workspace.update(cx, |workspace, cx| {
+                                                    workspace.cancel_discard_close(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = cancel_workspace.update(cx, |workspace, cx| {
-                                                workspace.cancel_discard_close(cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .child(
-                                    button(
-                                        "confirm-discard-close",
-                                        "Discard",
-                                        Tone::Danger,
-                                        Control::Standard,
+                                    self.choice(
+                                        "discard",
+                                        0,
+                                        button(
+                                            "confirm-discard-close",
+                                            "Discard",
+                                            Tone::Danger,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = discard_workspace.update(
+                                                    cx,
+                                                    |workspace, cx| {
+                                                        workspace.confirm_discard_close(window, cx);
+                                                    },
+                                                );
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = discard_workspace.update(cx, |workspace, cx| {
-                                                workspace.confirm_discard_close(window, cx);
-                                            });
-                                        },
                                     ),
                                 ),
                         ),
@@ -1144,39 +1235,49 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-delete-query",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "delete",
+                                        1,
+                                        button(
+                                            "cancel-delete-query",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel_workspace.update(cx, |workspace, cx| {
+                                                    workspace.cancel_delete_query(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = cancel_workspace.update(cx, |workspace, cx| {
-                                                workspace.cancel_delete_query(cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .child(
-                                    button(
-                                        "confirm-delete-query",
-                                        "Delete",
-                                        Tone::Danger,
-                                        Control::Standard,
+                                    self.choice(
+                                        "delete",
+                                        0,
+                                        button(
+                                            "confirm-delete-query",
+                                            "Delete",
+                                            Tone::Danger,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = delete_workspace.update(cx, |workspace, cx| {
+                                                    workspace.delete_saved_query(
+                                                        deleted.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = delete_workspace.update(cx, |workspace, cx| {
-                                                workspace.delete_saved_query(
-                                                    deleted.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        },
                                     ),
                                 ),
                         ),
@@ -1320,35 +1421,45 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-pending-run",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "pending-run",
+                                        1,
+                                        button(
+                                            "cancel-pending-run",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel.update(cx, |workspace, cx| {
+                                                    workspace.cancel_pending_run(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = cancel.update(cx, |workspace, cx| {
-                                                workspace.cancel_pending_run(cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .child(
-                                    button(
-                                        "approve-pending-run",
-                                        confirm,
-                                        tone,
-                                        Control::Standard,
+                                    self.choice(
+                                        "pending-run",
+                                        0,
+                                        button(
+                                            "approve-pending-run",
+                                            confirm,
+                                            tone,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = approve.update(cx, |workspace, cx| {
+                                                    workspace.approve_pending_run(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = approve.update(cx, |workspace, cx| {
-                                                workspace.approve_pending_run(cx);
-                                            });
-                                        },
                                     ),
                                 ),
                         ),
@@ -1424,27 +1535,45 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button("stop-queue", "Stop", Tone::Quiet, Control::Standard, t)
-                                        .on_click(move |_, _, cx| {
-                                            _ = stop.update(cx, |workspace, cx| {
-                                                workspace.stop_queue(cx);
-                                            });
-                                        }),
+                                    self.choice(
+                                        "queue-failure",
+                                        1,
+                                        button(
+                                            "stop-queue",
+                                            "Stop",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = stop.update(cx, |workspace, cx| {
+                                                    workspace.stop_queue(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
                                 )
                                 .child(
-                                    button(
-                                        "continue-queue",
-                                        "Continue",
-                                        Tone::Primary,
-                                        Control::Standard,
+                                    self.choice(
+                                        "queue-failure",
+                                        0,
+                                        button(
+                                            "continue-queue",
+                                            "Continue",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = carry_on.update(cx, |workspace, cx| {
+                                                    workspace.continue_queue(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = carry_on.update(cx, |workspace, cx| {
-                                                workspace.continue_queue(cx);
-                                            });
-                                        },
                                     ),
                                 ),
                         ),
@@ -1562,54 +1691,69 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-stale-edit",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "stale-edit",
+                                        if editing { 2 } else { 1 },
+                                        button(
+                                            "cancel-stale-edit",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel.update(cx, |workspace, cx| {
+                                                    workspace.cancel_stale_edit(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = cancel.update(cx, |workspace, cx| {
-                                                workspace.cancel_stale_edit(cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .child(
-                                    button(
-                                        "refresh-stale-edit",
-                                        "Refresh",
-                                        match editing {
-                                            true => Tone::Quiet,
-                                            false => Tone::Primary,
-                                        },
-                                        Control::Standard,
+                                    self.choice(
+                                        "stale-edit",
+                                        usize::from(editing),
+                                        button(
+                                            "refresh-stale-edit",
+                                            "Refresh",
+                                            match editing {
+                                                true => Tone::Quiet,
+                                                false => Tone::Primary,
+                                            },
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = refresh.update(cx, |workspace, cx| {
+                                                    workspace.refresh_stale(window, cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = refresh.update(cx, |workspace, cx| {
-                                                workspace.refresh_stale(window, cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .children(editing.then(|| {
-                                    button(
-                                        "approve-stale-edit",
-                                        "Edit anyway",
-                                        Tone::Primary,
-                                        Control::Standard,
+                                    self.choice(
+                                        "stale-edit",
+                                        0,
+                                        button(
+                                            "approve-stale-edit",
+                                            "Edit anyway",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = approve.update(cx, |workspace, cx| {
+                                                    workspace.edit_stale_anyway(window, cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = approve.update(cx, |workspace, cx| {
-                                                workspace.edit_stale_anyway(window, cx);
-                                            });
-                                        },
                                     )
                                 })),
                         ),
@@ -1702,19 +1846,24 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    button(
-                                        "cancel-apply",
-                                        "Cancel",
-                                        Tone::Quiet,
-                                        Control::Standard,
+                                    self.choice(
+                                        "apply-review",
+                                        1,
+                                        button(
+                                            "cancel-apply",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel_workspace.update(cx, |workspace, cx| {
+                                                    workspace.close_apply_review(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = cancel_workspace.update(cx, |workspace, cx| {
-                                                workspace.close_apply_review(cx);
-                                            });
-                                        },
                                     ),
                                 )
                                 .child(
@@ -1722,20 +1871,25 @@ impl Workspace {
                                     // disabled fill is the only thing that
                                     // dims and our pinned label would stay
                                     // bright over it.
-                                    button(
-                                        "run-apply",
-                                        "Run",
-                                        if running { Tone::Quiet } else { Tone::Primary },
-                                        Control::Standard,
+                                    self.choice(
+                                        "apply-review",
+                                        0,
+                                        button(
+                                            "run-apply",
+                                            "Run",
+                                            if running { Tone::Quiet } else { Tone::Primary },
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .disabled(running)
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = run_workspace.update(cx, |workspace, cx| {
+                                                    workspace.run_apply_review(cx);
+                                                });
+                                            },
+                                        ),
                                         t,
-                                    )
-                                    .disabled(running)
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = run_workspace.update(cx, |workspace, cx| {
-                                                workspace.run_apply_review(cx);
-                                            });
-                                        },
                                     ),
                                 ),
                         ),

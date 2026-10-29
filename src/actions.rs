@@ -152,6 +152,8 @@ actions!(
         ToggleComment,
         ShowEditor,
         ConfirmDialog,
+        PreviousDialogButton,
+        NextDialogButton,
         SelectTheme,
         SelectDatabase,
         SaveQuery,
