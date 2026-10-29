@@ -736,7 +736,8 @@ impl Workspace {
             .filter_map(|(name, dialog)| Some((name, dialog?)))
             .unzip();
         let front = names.last().copied();
-        let raised = self.dialog_in_front.replace(front) != front;
+        let behind = self.dialog_in_front.replace(front);
+        let raised = behind != front;
         if dialogs.is_empty() {
             // The last one closing unmounts the keyboard with it. Handed back
             // only after the frame, and only if nothing took it during it:
@@ -744,16 +745,27 @@ impl Workspace {
             if self.dialog_focus.contains_focused(window, cx) {
                 let stranded = window.focused(cx);
                 cx.on_next_frame(window, move |workspace, window, cx| {
-                    if window.focused(cx) == stranded {
-                        match workspace.form.as_mut() {
-                            Some(form) => form.needs_focus = Some(form.lead_field()),
-                            None => workspace.refocus_front(),
-                        }
-                        cx.notify();
+                    let before = workspace.focus_before_dialog.take();
+                    if window.focused(cx) != stranded {
+                        return;
                     }
+                    // Back where it was taken from while that is still drawn:
+                    // a cell input the mode prompt went up over waits there
+                    // for the `enter` that commits it.
+                    match (before, workspace.form.as_mut()) {
+                        (Some(before), _) if workspace.focus.contains(&before, window) => {
+                            before.focus(window, cx)
+                        }
+                        (_, Some(form)) => form.needs_focus = Some(form.lead_field()),
+                        (_, None) => workspace.refocus_front(),
+                    }
+                    cx.notify();
                 });
             }
             return None;
+        }
+        if behind.is_none() && !self.dialog_focus.contains_focused(window, cx) {
+            self.focus_before_dialog.replace(window.focused(cx));
         }
         if raised {
             // Every dialog opens on its primary button, as a native one does.

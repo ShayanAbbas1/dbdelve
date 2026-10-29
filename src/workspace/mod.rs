@@ -338,6 +338,8 @@ pub(crate) struct Workspace {
     pub(crate) dialog_in_front: std::cell::Cell<Option<&'static str>>,
     /// The button `enter` presses in it, counted from the right.
     pub(crate) dialog_choice: std::cell::Cell<usize>,
+    /// What held the keyboard when the first dialog went up.
+    pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -471,6 +473,7 @@ impl Workspace {
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
+            focus_before_dialog: std::cell::RefCell::default(),
             newer_release: None,
         };
 
