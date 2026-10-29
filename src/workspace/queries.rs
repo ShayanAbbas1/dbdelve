@@ -1859,6 +1859,7 @@ impl Workspace {
                     }),
                     verdict,
                     dont_ask: false,
+                    commit_cell: false,
                 });
             }
             cx.notify();

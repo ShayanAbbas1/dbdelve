@@ -528,6 +528,9 @@ pub(crate) struct PendingRun {
     pub(crate) verdict: Verdict,
     /// The "don't ask again" tick, which only the Confirm shape shows.
     pub(crate) dont_ask: bool,
+    /// The mode refused a grid cell's commit, whose input waits open behind
+    /// the prompt: raising the mode carries the commit through.
+    pub(crate) commit_cell: bool,
 }
 
 /// The `confirmed` slug that silences [`StaleEdit`]'s prompt.

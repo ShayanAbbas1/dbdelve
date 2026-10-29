@@ -1135,14 +1135,20 @@ impl Workspace {
 
     /// The grid's own commit was refused by the mode. It has nowhere to say so
     /// and no way to offer the one thing that answers it, so the input stays
-    /// open behind this prompt and `enter` again commits what was typed.
+    /// open behind this prompt, and raising the mode commits what was typed.
     pub(crate) fn request_write_mode(
         &mut self,
         _: &RequestWriteMode,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.require(Mode::ReadWrite, cx);
+        if !self.require(Mode::ReadWrite, cx)
+            && let Some(pending) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.pending_run.as_mut())
+        {
+            pending.commit_cell = true;
+        }
     }
 
     /// Generate the one-row `DELETE` and show it. **Nothing runs here** — Run in
