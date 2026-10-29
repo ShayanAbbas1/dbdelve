@@ -2119,8 +2119,11 @@ impl ResultGrid {
         // caret after the text, and an edit starts from the end of the value.
         input.update(cx, |input, cx| input.set_value(seed, window, cx));
         // The keystrokes that follow belong to the value rather than to the
-        // grid's selection, so the input takes focus as it appears.
-        input.focus_handle(cx).focus(window, cx);
+        // grid's selection, so the input takes focus as it appears. Through
+        // `InputState::focus`, not its handle: the state's own focus listener,
+        // which starts the caret blinking, is only activated once this frame's
+        // effects flush, after the focus event it would have caught has fired.
+        input.update(cx, |input, cx| input.focus(window, cx));
         self.editing.as_mut()?.input = Some(input.clone());
         Some(input)
     }
