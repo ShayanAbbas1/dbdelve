@@ -34,9 +34,11 @@ on:
 # branch saving its own 0.5-2 GB copy evicted main's within the hour, so most
 # runs started cold. PRs still restore main's.
 #
-# The vendored crates under vendor/ rebuild on every run whatever the cache
-# holds: cargo judges a path crate fresh by file mtimes, and a checkout gives
-# every file a new one. Only a non-path source (a git dependency) avoids that.
+# The vendored crates under vendor/ rebuild on every run: rust-cache drops
+# every crate inside the checkout from what it saves, and cargo judges a path
+# crate fresh by file mtimes, which a checkout renews anyway. rust-cache would
+# keep them only as workspace members, which pulls their dev-dependencies into
+# Cargo.lock; a non-path source (a git dependency) avoids both.
 # Nothing here pushes or comments; build scripts and proc macros from a PR run
 # with whatever token the job holds.
 permissions:
