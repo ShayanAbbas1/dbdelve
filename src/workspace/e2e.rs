@@ -13,7 +13,7 @@ use crate::{
     keybindings,
     session::QueryState,
     store,
-    theme::{Fonts, Theme},
+    theme::{self, Fonts},
 };
 
 /// What `main` sets up before the window opens, minus the menu bar and the
@@ -30,10 +30,15 @@ fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext
             .expect("bundled fonts must be loadable");
         gpui_component::init(cx);
         cx.set_global(Fonts::default());
-        let theme = Theme::default();
+        theme::user::load();
+        let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
         theme.apply_to_components(cx);
         cx.set_global(theme);
-        cx.bind_keys(keybindings::build_bindings(&Default::default()));
+        let overrides = store::peek_profiles()
+            .and_then(|list| list.settings)
+            .and_then(|settings| settings.custom_keybindings)
+            .unwrap_or_default();
+        cx.bind_keys(keybindings::build_bindings(&overrides));
     });
     let mut workspace = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
