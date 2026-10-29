@@ -80,6 +80,7 @@ impl Workspace {
                 destructive: Vec::new(),
             },
             dont_ask: false,
+            commit_cell: false,
         });
         cx.notify();
         false
@@ -159,6 +160,7 @@ impl Workspace {
             resume,
             verdict,
             dont_ask,
+            commit_cell,
         }) = profile.session.pending_run.take()
         else {
             return;
@@ -170,6 +172,21 @@ impl Workspace {
         match stop {
             Stop::Upgrade(mode) => {
                 self.set_mode(mode, cx);
+                if commit_cell
+                    && let Some(results) = self
+                        .profile()
+                        .and_then(|profile| profile.session.active_results())
+                        .cloned()
+                {
+                    let grid = results.update(cx, |table, cx| {
+                        table.delegate_mut().commit_edit(cx);
+                        cx.notify();
+                        table.focus_handle(cx)
+                    });
+                    // The input the prompt went up over closes with the
+                    // commit, so the dialog hands the keyboard to the grid.
+                    self.focus_before_dialog.replace(Some(grid));
+                }
                 // Re-checked rather than run outright: raising Read-only to
                 // Full for a DROP answers "may this connection do this at
                 // all" and leaves "did you mean this table", which is a

@@ -291,11 +291,6 @@ pub(crate) struct Session {
     pub(crate) naming: bool,
     /// The saved query the delete dialog is asking about.
     pub(crate) pending_delete: Option<String>,
-    /// A dialog just went up over the workspace: the window takes the
-    /// keyboard on the next frame, from a buffer behind it that would take
-    /// keys nobody can see, or from the button that raised it, which may be
-    /// gone with the dialog it sat in.
-    pub(crate) dialog_needs_focus: bool,
     /// The sidebar row a saved query is being renamed in.
     pub(crate) query_rename: Option<QueryRename>,
     /// The same hazard as `save_name_needs_focus`, for the row's field.
@@ -533,6 +528,9 @@ pub(crate) struct PendingRun {
     pub(crate) verdict: Verdict,
     /// The "don't ask again" tick, which only the Confirm shape shows.
     pub(crate) dont_ask: bool,
+    /// The mode refused a grid cell's commit, whose input waits open behind
+    /// the prompt: raising the mode carries the commit through.
+    pub(crate) commit_cell: bool,
 }
 
 /// The `confirmed` slug that silences [`StaleEdit`]'s prompt.
@@ -669,7 +667,6 @@ impl Session {
             page_shown: 0,
             naming: false,
             pending_delete: None,
-            dialog_needs_focus: false,
             query_rename: None,
             query_rename_needs_focus: false,
             pending_discard: None,
@@ -1030,7 +1027,6 @@ impl Session {
         self.query_rename = None;
         self.query_rename_needs_focus = false;
         self.pending_discard = None;
-        self.dialog_needs_focus = false;
         self.naming = false;
         self.save_name_needs_focus = false;
         // A stopped statement must not survive a tab or profile switch and get

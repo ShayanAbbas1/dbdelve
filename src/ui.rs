@@ -117,6 +117,41 @@ pub(crate) fn code_highlights(
         .collect()
 }
 
+/// A statement as the editor colours it, one run per line: a single run
+/// carrying newlines is one line to the layout.
+pub(crate) fn code_lines(text: &str, syntax: Syntax, theme: &HighlightTheme) -> Vec<StyledText> {
+    split_highlights(text, &code_highlights(text, syntax, Code::Statement, theme))
+        .into_iter()
+        .map(|(line, runs)| StyledText::new(line.to_string()).with_highlights(runs))
+        .collect()
+}
+
+type Highlights = Vec<(Range<usize>, HighlightStyle)>;
+
+/// `highlights` over `text` cut at its line breaks, each run re-based onto
+/// its own line, so a comment or string spanning lines keeps its colour on
+/// every one.
+fn split_highlights<'a>(
+    text: &'a str,
+    highlights: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(&'a str, Highlights)> {
+    text.lines()
+        .map(|line| {
+            let start = line.as_ptr() as usize - text.as_ptr() as usize;
+            let end = start + line.len();
+            let runs = highlights
+                .iter()
+                .filter_map(|(range, style)| {
+                    let clipped = range.start.max(start)..range.end.min(end);
+                    (!clipped.is_empty())
+                        .then(|| (clipped.start - start..clipped.end - start, *style))
+                })
+                .collect();
+            (line, runs)
+        })
+        .collect()
+}
+
 /// One column of icons down the sidebar, so every label starts at the same x
 /// whether its row is a folder or an object.
 pub(crate) fn row_icon(t: Theme, path: &'static str) -> impl IntoElement {
@@ -1194,6 +1229,33 @@ mod tests {
                 "true"
             ),
             color("boolean")
+        );
+    }
+
+    #[test]
+    fn a_run_across_a_line_break_colours_both_lines() {
+        let style = HighlightStyle::default();
+        let text = "SELECT 'a\nb' FROM t\r\n\nx";
+        let split =
+            super::split_highlights(text, &[(0..6, style), (7..12, style), (22..23, style)]);
+        let lines: Vec<_> = split
+            .iter()
+            .map(|(line, runs)| {
+                let ranges: Vec<_> = runs
+                    .iter()
+                    .map(|(range, _)| (range.start, range.end))
+                    .collect();
+                (*line, ranges)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("SELECT 'a", vec![(0, 6), (7, 9)]),
+                ("b' FROM t", vec![(0, 2)]),
+                ("", vec![]),
+                ("x", vec![(0, 1)]),
+            ]
         );
     }
 

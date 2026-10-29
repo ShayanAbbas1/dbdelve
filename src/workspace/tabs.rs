@@ -794,7 +794,6 @@ impl Workspace {
                 tab,
                 deleting: None,
             });
-            profile.session.dialog_needs_focus = true;
         }
         cx.notify();
     }

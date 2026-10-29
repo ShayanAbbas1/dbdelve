@@ -2119,16 +2119,19 @@ impl ResultGrid {
         // caret after the text, and an edit starts from the end of the value.
         input.update(cx, |input, cx| input.set_value(seed, window, cx));
         // The keystrokes that follow belong to the value rather than to the
-        // grid's selection, so the input takes focus as it appears.
-        input.focus_handle(cx).focus(window, cx);
+        // grid's selection, so the input takes focus as it appears. Through
+        // `InputState::focus`, not its handle: the state's own focus listener,
+        // which starts the caret blinking, is only activated once this frame's
+        // effects flush, after the focus event it would have caught has fired.
+        input.update(cx, |input, cx| input.focus(window, cx));
         self.editing.as_mut()?.input = Some(input.clone());
         Some(input)
     }
 
     /// Take the open input's value into the pending set. `false` when the mode
-    /// refused the write, and the input is left open then: the prompt its caller
-    /// raises is answered by raising the mode and pressing `enter` again.
-    fn commit_edit(&mut self, cx: &App) -> bool {
+    /// refused the write, and the input is left open then, for raising the mode
+    /// in the prompt its caller raises to commit it.
+    pub(crate) fn commit_edit(&mut self, cx: &App) -> bool {
         let Some(editing) = self.editing.as_ref() else {
             return true;
         };
@@ -2178,7 +2181,7 @@ fn commit_from_input(
     if !table.delegate_mut().commit_edit(cx) {
         // A mode refusal has an action attached -- raise the mode -- and the
         // grid has nowhere to put one. The input stays open behind the prompt,
-        // so answering it and pressing the key again commits what was typed.
+        // and raising the mode there commits what was typed.
         window.dispatch_action(Box::new(crate::RequestWriteMode), cx);
         return false;
     }

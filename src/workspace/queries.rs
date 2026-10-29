@@ -1745,7 +1745,6 @@ impl Workspace {
             return;
         };
         profile.session.pending_delete = Some(name);
-        profile.session.dialog_needs_focus = true;
         cx.notify();
     }
 
@@ -1769,7 +1768,6 @@ impl Workspace {
                     tab,
                     deleting: Some(name),
                 });
-                profile.session.dialog_needs_focus = true;
             }
             cx.notify();
             return;
@@ -1861,6 +1859,7 @@ impl Workspace {
                     }),
                     verdict,
                     dont_ask: false,
+                    commit_cell: false,
                 });
             }
             cx.notify();
