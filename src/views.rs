@@ -207,11 +207,12 @@ fn completion_target(editor: &Entity<EditorState>) -> Div {
                 cx,
             )
         });
-        // The menu propagates its synthetic Enter; do not let that also run
-        // the library's fallback Tab binding after accepting a completion.
-        cx.stop_propagation();
-        if !accepted {
-            window.dispatch_action(Box::new(input::IndentInline), cx);
+        if accepted {
+            // The menu propagates its synthetic Enter, but the original
+            // keystroke must not also reach the editor after acceptance.
+            cx.stop_propagation();
+        } else {
+            cx.propagate();
         }
     })
 }
@@ -1049,6 +1050,9 @@ impl RenderOnce for FilterValue {
                     cx.stop_propagation();
                 }
             })
+            // Submit-on-enter emits the filter event and propagates the
+            // action; consume it here instead of inserting a fallback newline.
+            .on_action(|_: &input::Enter, _, cx| cx.stop_propagation())
             .when(focused, |this| this.focus_ring_style(window, cx))
             .child(
                 Editor::new(&self.editor)
@@ -3636,14 +3640,16 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn tab_completes_the_focused_raw_filter_without_applying_it(cx: &mut TestAppContext) {
+    fn completion_editors(
+        cx: &mut TestAppContext,
+        overrides: HashMap<String, String>,
+    ) -> (Entity<CompletionEditors>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(crate::theme::Fonts::default());
-            cx.bind_keys(crate::keybindings::build_bindings(&HashMap::new()));
+            cx.bind_keys(crate::keybindings::build_bindings(&overrides));
         });
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        cx.add_window_view(|window, cx| {
             let query = cx.new(|cx| EditorState::new(window, cx).default_value("cust"));
             let filters = ["untouched", "cust"].map(|value| {
                 cx.new(|cx| {
@@ -3657,7 +3663,12 @@ mod tests {
                 })
             });
             CompletionEditors { query, filters }
-        });
+        })
+    }
+
+    #[gpui::test]
+    fn tab_completes_the_focused_raw_filter_without_applying_it(cx: &mut TestAppContext) {
+        let (view, cx) = completion_editors(cx, HashMap::new());
         let (query, filters) =
             view.read_with(cx, |view, _| (view.query.clone(), view.filters.clone()));
         let applied = Rc::new(Cell::new(false));
@@ -3705,6 +3716,49 @@ mod tests {
         cx.read(|cx| {
             assert_eq!(filters[1].read(cx).value(), "customer_email\t");
             assert!(!applied.get(), "Indenting must not submit the filter");
+        });
+    }
+
+    #[gpui::test]
+    fn enter_completion_override_still_submits_a_filter_without_a_popup(cx: &mut TestAppContext) {
+        let (view, cx) = completion_editors(
+            cx,
+            HashMap::from([("accept_completion".into(), "enter".into())]),
+        );
+        let editor = view.read_with(cx, |view, _| view.filters[1].clone());
+        let submissions = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(4..4, cx);
+                editor.focus(window, cx);
+                editor.present_completion_items(
+                    0,
+                    "cust",
+                    vec![CompletionItem {
+                        label: "customer_name".into(),
+                        ..Default::default()
+                    }],
+                    cx,
+                );
+            });
+            let submissions = submissions.clone();
+            let subscription = cx.subscribe(&editor, move |_, event: &input::InputEvent, _| {
+                if matches!(event, input::InputEvent::PressEnter { .. }) {
+                    submissions.set(submissions.get() + 1);
+                }
+            });
+            window.draw(cx).clear(cx);
+            subscription
+        });
+        cx.simulate_keystrokes("enter");
+        cx.read(|cx| {
+            assert_eq!(editor.read(cx).value(), "customer_name");
+            assert_eq!(submissions.get(), 0);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.read(|cx| {
+            assert_eq!(editor.read(cx).value(), "customer_name");
+            assert_eq!(submissions.get(), 1);
         });
     }
 }
