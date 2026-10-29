@@ -726,11 +726,16 @@ impl Workspace {
     /// it, `enter` went on editing what the dialog covers.
     pub(crate) fn dialog_layer(
         &self,
-        dialogs: impl IntoIterator<Item = Option<AnyElement>>,
+        dialogs: impl IntoIterator<Item = (&'static str, Option<AnyElement>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let dialogs: Vec<AnyElement> = dialogs.into_iter().flatten().collect();
+        let (names, dialogs): (Vec<_>, Vec<_>) = dialogs
+            .into_iter()
+            .filter_map(|(name, dialog)| Some((name, dialog?)))
+            .unzip();
+        let front = names.last().copied();
+        let raised = self.dialog_in_front.replace(front) != front;
         if dialogs.is_empty() {
             // The last one closing unmounts the keyboard with it. Handed back
             // only after the frame, and only if nothing took it during it:
@@ -750,8 +755,10 @@ impl Workspace {
             return None;
         }
         // The palette is stacked over the dialogs and holds the keyboard
-        // itself. A field inside a dialog keeps it.
-        if self.palette.is_none() && !self.dialog_focus.contains_focused(window, cx) {
+        // itself. A field inside the dialog in front keeps it, but not one in
+        // a dialog another has just gone up over, or come down off with the
+        // focused button in it.
+        if self.palette.is_none() && (raised || !self.dialog_focus.contains_focused(window, cx)) {
             self.dialog_focus.focus(window, cx);
         }
         Some(

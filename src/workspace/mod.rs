@@ -333,6 +333,9 @@ pub(crate) struct Workspace {
     /// The dialogs' own, so `enter` answers the one in front instead of
     /// editing the buffer or the grid it covers.
     pub(crate) dialog_focus: FocusHandle,
+    /// Which dialog was in front last frame, so a change of it moves the
+    /// keyboard to the one now there.
+    pub(crate) dialog_in_front: std::cell::Cell<Option<&'static str>>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -464,6 +467,7 @@ impl Workspace {
             opacity_input,
             focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
+            dialog_in_front: std::cell::Cell::default(),
             newer_release: None,
         };
 
@@ -1308,7 +1312,11 @@ impl Render for Workspace {
                         .min_h_0()
                         .child(self.render_connection_form(window, cx)),
                 )
-                .children(self.dialog_layer([self.render_import_choice(cx)], window, cx))
+                .children(self.dialog_layer(
+                    [("import-choice", self.render_import_choice(cx))],
+                    window,
+                    cx,
+                ))
                 .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
@@ -1335,7 +1343,11 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::reset_editor_zoom))
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
-                .children(self.dialog_layer([self.render_import_choice(cx)], window, cx))
+                .children(self.dialog_layer(
+                    [("import-choice", self.render_import_choice(cx))],
+                    window,
+                    cx,
+                ))
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
@@ -2117,14 +2129,14 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
-                    self.render_apply_review(cx),
-                    self.render_import_rows(window, cx),
-                    self.render_delete_confirmation(cx),
-                    self.render_discard_confirmation(cx),
-                    self.render_pending_run(cx),
-                    self.render_queue_failure(cx),
-                    self.render_stale_edit(cx),
-                    self.render_import_choice(cx),
+                    ("apply-review", self.render_apply_review(cx)),
+                    ("import-rows", self.render_import_rows(window, cx)),
+                    ("delete", self.render_delete_confirmation(cx)),
+                    ("discard", self.render_discard_confirmation(cx)),
+                    ("pending-run", self.render_pending_run(cx)),
+                    ("queue-failure", self.render_queue_failure(cx)),
+                    ("stale-edit", self.render_stale_edit(cx)),
+                    ("import-choice", self.render_import_choice(cx)),
                 ],
                 window,
                 cx,
