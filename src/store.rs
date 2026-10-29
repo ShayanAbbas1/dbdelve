@@ -1365,7 +1365,7 @@ fn variant_name() -> Result<String, String> {
 /// macOS keeps Application Support, where every install before this already
 /// has its data. Linux follows the XDG base directory spec. Windows uses the
 /// roaming profile, which follows the user the way Application Support does.
-fn dbdelve_directory() -> Result<PathBuf, String> {
+pub(crate) fn dbdelve_directory() -> Result<PathBuf, String> {
     Ok(data_root()?.join(variant_name()?))
 }
 

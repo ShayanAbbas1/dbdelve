@@ -217,6 +217,10 @@ environment. The `tests` job in `.github/workflows/ci.yml` is the recipe for
 running them: the values for the dev databases, and the exact `cargo test`
 runs, which split off the timing tests and the vendored renderer's tests.
 
+`src/workspace/e2e.rs` launches the app headless and drives it through the
+real keymap and focus path, so a change to keyboard or focus behaviour adds a
+test there.
+
 ## Platforms
 
 Paths per platform and the rest of storage are in `docs/agents/session.md`.
