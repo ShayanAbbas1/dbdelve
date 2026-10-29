@@ -47,19 +47,16 @@ use gpui::{
 };
 use gpui_component::{
     Disableable, Root,
-    input::{
-        CompletionProvider, EditorMode, EditorState, Enter, IndentInline, Input, InputEvent,
-        InputModeKind, InputState, Position,
-    },
+    input::{CompletionProvider, EditorState, Input, InputEvent, InputState, Position},
     list::ListItem,
     resizable::{ResizableState, h_resizable, resizable_panel},
     tree::tree as render_tree,
 };
 
 use actions::{
-    AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette,
-    CopyCell, CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits,
-    EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell,
+    CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, EditCell,
+    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
     ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
     NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PreviousEdit,
     PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,

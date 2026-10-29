@@ -46,8 +46,8 @@ pub(crate) struct KeybindingSpec {
     /// override, so treat it as append-only.
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
-    /// `None` means global. Two bindings in different, specific contexts
-    /// never conflict -- see [`contexts_overlap`].
+    /// `None` means global. Scoped bindings can still share a focus path --
+    /// see [`contexts_overlap`].
     pub(crate) context: Option<&'static str>,
     /// More than one only for `zoom_editor_in`, which ships both the shifted
     /// and unshifted key so `+` reads the same on every layout. An override
@@ -161,7 +161,7 @@ registry! {
     // this unreachable there. Clearing a cell with the delete key is the
     // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("DataTable"), ["secondary-backspace"], SetNull),
-    ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
+    ("accept_completion", "Accept Completion", Some("Input && mode == editor"), ["tab"], AcceptCompletion),
     ("toggle_comment", "Toggle Line Comment", Some("Editor > Input"), ["secondary-/"], ToggleComment),
     // Run Query's chord, which reaches the form first and finds nothing to
     // run there: see `INERT_IN`.
@@ -199,12 +199,13 @@ registry! {
     ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
 }
 
-/// Whether a binding scoped to `a` and one scoped to `b` could both be live
-/// at once. Two different, specific contexts never overlap; anything global
-/// (`None`) does, because a global binding fires regardless of focus.
+/// Whether both bindings can apply at the same focus path. The query editor
+/// supplies both the surface's wrapper and the widget's editor-mode context.
 fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
     match (a, b) {
         (None, _) | (_, None) => true,
+        (Some("Editor > Input"), Some("Input && mode == editor"))
+        | (Some("Input && mode == editor"), Some("Editor > Input")) => true,
         (Some(a), Some(b)) => a == b,
     }
 }
@@ -275,11 +276,33 @@ mod tests {
         assert_eq!(
             conflict(
                 "enter",
-                Some("Editor > Input"),
+                Some("Input && mode == editor"),
                 "accept_completion",
                 &overrides
             ),
             None
+        );
+    }
+
+    #[test]
+    fn completion_and_comment_overrides_conflict_in_the_query_editor() {
+        let completion = REGISTRY
+            .iter()
+            .find(|spec| spec.id == "accept_completion")
+            .unwrap();
+        let comment = REGISTRY
+            .iter()
+            .find(|spec| spec.id == "toggle_comment")
+            .unwrap();
+        let overrides = HashMap::from([(comment.id.to_string(), "tab".to_string())]);
+        assert_eq!(
+            conflict("tab", completion.context, completion.id, &overrides),
+            Some(comment.label)
+        );
+        let overrides = HashMap::from([(completion.id.to_string(), "secondary-/".to_string())]);
+        assert_eq!(
+            conflict("secondary-/", comment.context, comment.id, &overrides),
+            Some(completion.label)
         );
     }
 

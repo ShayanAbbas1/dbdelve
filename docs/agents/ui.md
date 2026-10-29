@@ -21,6 +21,19 @@ draws the menu itself, so a provider is the whole integration, and `up`, `down`,
 `enter` and `escape` are already routed to the menu when it is open. Do not
 hand-roll a popup beside it.
 
+DBDelve adds Tab acceptance through `views::completion_target`, attached to the
+query buffer and each filter value so the action always names the editor with
+focus, not the tab's runnable buffer. The binding uses `Input && mode == editor`:
+`Editor > Input` depends on the query surface's wrapper and misses raw filters.
+Both contexts apply in a query buffer, so shortcut conflict detection must
+recognize their overlap when completion or Toggle Line Comment is rebound.
+After accepting through the menu's synthetic Enter, stop propagation, because
+the menu propagates and would otherwise run the original keystroke as well.
+With no suggestion, propagate the original stroke to its native binding: Tab
+indents, while a completion shortcut rebound to Enter still submits a filter.
+The filter consumes a propagated native Enter after its submission event so
+the unhandled-keystroke fallback cannot insert a hidden newline.
+
 The library binds `escape` scoped to the input; DBDelve's `show_editor` binding
 is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards" in `AGENTS.md`).
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has
