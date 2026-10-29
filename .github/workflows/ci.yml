@@ -51,45 +51,25 @@ permissions:
 # built the old way.
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # insta lets either variable rewrite or force-pass a snapshot, and CI must
+  # fail on any difference instead.
+  INSTA_UPDATE: "no"
+  INSTA_FORCE_PASS: "0"
 
 # Not on main: a run there cancelled by the next merge never reaches
-# rust-cache's save, and the tests job, the slowest, is the one that loses it.
+# rust-cache's save, and the slowest job is the one that loses it.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# One job per platform, so each saves one cache. No `cargo build` step:
+# `cargo test` compiles and links the crate, clippy checks what only the app
+# builds, and the release workflow builds the binary that ships.
 jobs:
-  linux-lint:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      - run: |
-          # The runner image ships Microsoft's apt repository, which we install
-          # nothing from; when it errors (403s, lapsed signatures) it fails
-          # the whole update.
-          { grep -rl packages.microsoft.com /etc/apt/sources.list.d || true; } | xargs -r sudo rm -f
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y build-essential pkg-config cmake \
-            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libdbus-1-dev
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-
-  tests:
+  linux:
     # Not 22.04: its sqlite3 (3.37) predates unhex(), which the dev seed uses.
     runs-on: ubuntu-24.04
     env:
-      # insta lets either variable rewrite or force-pass a snapshot, and CI must
-      # fail on any difference instead.
-      INSTA_UPDATE: "no"
-      INSTA_FORCE_PASS: "0"
       PGHOST: 127.0.0.1
       PGPORT: "55432"
       PGDATABASE: dbdelve_dev
@@ -103,20 +83,21 @@ jobs:
       dbdelve_REDIS_URL: redis://dbdelve:dbdelve@127.0.0.1:56379/0
       dbdelve_CLICKHOUSE_URL: clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
       dbdelve_SQLITE_PATH: ${{ github.workspace }}/dev/dbdelve_dev.db
-      # For the live_ssh_ tests a later checkpoint adds; setup.sh writes this.
+      # For the live_ssh_ tests; dev/ssh/setup.sh writes it.
       dbdelve_SSH_CONFIG: ${{ github.workspace }}/dev/ssh/.generated/ssh_config
     steps:
-      - uses: actions/checkout@v4
+      - &checkout
+        name: checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      # Started before the apt step so the databases boot while it runs.
-      - run: docker compose up -d
-      - run: |
+      # First, so the databases boot while everything else runs.
+      - name: start databases
+        run: docker compose up -d
+      - name: fmt
+        run: cargo fmt --check
+      - name: system packages
+        run: |
           # The runner image ships Microsoft's apt repository, which we install
           # nothing from; when it errors (403s, lapsed signatures) it fails
           # the whole update.
@@ -126,93 +107,77 @@ jobs:
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev sqlite3 \
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
-      - run: sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
-      - run: dev/ssh/setup.sh
-      - run: docker compose up -d --wait
+      - &rust-cache
+        name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - &dependencies-unoptimized
+        name: dependencies unoptimized
+        run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
+        shell: bash
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: seed databases
+        run: |
+          sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
+          dev/ssh/setup.sh
+          docker compose up -d --wait
       # CI has no Snowflake account, and the live Snowflake tests panic
-      # without one; the mock tests cover the same ground offline. The one
-      # live test that needs no account stays: it is what proves the TLS
-      # provider is linked at run time.
-      - run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --skip reads_run_at_once --skip conformance
+      # without one; the mock tests cover the same ground offline.
+      - name: test
+        run: cargo test -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --skip reads_run_at_once --skip conformance
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
       # like SQLite misses the margin by chance, so they run alone.
-      - run: cargo test reads_run_at_once -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --test-threads=1
-      # Own step: each DuckDB subject seeds a 1M-row table, which would add contention to the timing assertions above.
-      - run: cargo test live_conformance -- --include-ignored --skip turso::tests::live_ --test-threads=4
-      - run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
+      - name: timing tests
+        run: cargo test reads_run_at_once -- --include-ignored --skip snowflake::tests::live_ --skip turso::tests::live_ --test-threads=1
+      # Own step: each DuckDB subject seeds a 1M-row table, which would add
+      # contention to the timing assertions above.
+      - name: conformance
+        run: cargo test live_conformance -- --include-ignored --skip turso::tests::live_ --test-threads=4
+      # The one live Snowflake test that needs no account: it is what proves
+      # the TLS provider is linked at run time.
+      - name: snowflake tls
+        run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
       # The backdrop blur's pixel tests live in the vendored wgpu renderer,
-      # which isn't a workspace member, so `cargo test` alone never runs them.
-      # Mesa's lavapipe (Vulkan) and llvmpipe (GL) give the runner a software
-      # adapter. One thread: each test builds its own device.
-      - run: cargo test -p gpui-pre-wgpu --features test-support -- --test-threads=1
+      # which isn't a default workspace member, so `cargo test` alone never
+      # runs them. Mesa's lavapipe (Vulkan) and llvmpipe (GL) give the runner a
+      # software adapter. One thread: each test builds its own device.
+      - name: pixel tests
+        run: cargo test -p gpui-pre-wgpu --features test-support -- --test-threads=1
 
-  macos-lint:
+  # macOS runners have no Docker, so the live tests run on Linux alone.
+  macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      - run: cargo clippy --all-targets -- -D warnings
+      - *checkout
+      - *rust-cache
+      - *dependencies-unoptimized
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
 
-  macos-build:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      - run: cargo build
-
-  windows-lint:
+  windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      - run: cargo clippy --all-targets -- -D warnings
-
-  # Tests too, not only the build: the storage tests are what exercise the
-  # APPDATA paths, and no other job runs them on Windows.
-  windows-build:
-    runs-on: windows-latest
-    env:
-      # insta lets either variable rewrite or force-pass a snapshot, and CI must
-      # fail on any difference instead.
-      INSTA_UPDATE: "no"
-      INSTA_FORCE_PASS: "0"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
-        shell: bash
-      - run: cargo build
-      - run: cargo test
+      - *checkout
+      - *rust-cache
+      - *dependencies-unoptimized
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      # The storage tests are what exercise the APPDATA paths.
+      - name: test
+        run: cargo test
       # The backdrop blur's Direct3D WARP pixel tests live in the vendored
       # DirectX renderer, which isn't a workspace member, so `cargo test` alone
       # never runs them. Release, because only release builds use the shaders
       # fxc compiles in build.rs, which is what ships. Thin LTO and one codegen
       # unit are the shipped profile's settings; here they only slow a separate
       # build of every dependency and bloat the cache.
-      - run: cargo test --release -p gpui-pre-windows --lib directx_renderer::backdrop_tests -- --test-threads=1
+      - name: pixel tests
+        run: cargo test --release -p gpui-pre-windows --lib directx_renderer::backdrop_tests -- --test-threads=1
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
