@@ -140,11 +140,30 @@ jobs:
       # the TLS provider is linked at run time.
       - name: snowflake tls
         run: cargo test snowflake::tests::live_an_account_that_does_not_exist -- --ignored
+      # The pixel tests check the vendored renderers, so a PR runs them only
+      # when it changes vendor/; a push to main always does, which catches
+      # anything else that moves their output, a dependency bump among them. A
+      # PR's checkout is its merge commit, so the diff against the base is
+      # exactly what the PR changes.
+      - &vendor-changed
+        name: vendor changed
+        id: vendor
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=true
+          if [[ -n "$BASE" ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE"
+            git diff --quiet "$BASE" HEAD -- vendor/ && changed=false
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
       # The backdrop blur's pixel tests live in the vendored wgpu renderer,
       # which isn't a default workspace member, so `cargo test` alone never
       # runs them. Mesa's lavapipe (Vulkan) and llvmpipe (GL) give the runner a
       # software adapter. One thread: each test builds its own device.
       - name: pixel tests
+        if: steps.vendor.outputs.changed == 'true'
         run: cargo test -p gpui-pre-wgpu --features test-support -- --test-threads=1
 
   # macOS runners have no Docker, so the live tests run on Linux alone.
@@ -170,6 +189,7 @@ jobs:
       # The storage tests are what exercise the APPDATA paths.
       - name: test
         run: cargo test
+      - *vendor-changed
       # The backdrop blur's Direct3D WARP pixel tests live in the vendored
       # DirectX renderer, which isn't a workspace member, so `cargo test` alone
       # never runs them. Release, because only release builds use the shaders
@@ -177,6 +197,7 @@ jobs:
       # unit are the shipped profile's settings; here they only slow a separate
       # build of every dependency and bloat the cache.
       - name: pixel tests
+        if: steps.vendor.outputs.changed == 'true'
         run: cargo test --release -p gpui-pre-windows --lib directx_renderer::backdrop_tests -- --test-threads=1
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
