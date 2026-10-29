@@ -224,3 +224,34 @@ fn a_prompt_takes_the_keyboard_and_hands_it_back_once_answered(cx: &mut TestAppC
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_prompt_dismissed_from_the_keyboard_hands_it_back_to_the_editor(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("selec 1");
+
+        for (dismiss, typed) in [("tab enter", "x"), ("escape", "y")] {
+            raise_run_once_prompt(&workspace, cx);
+            let before = buffer(&workspace, cx);
+            cx.simulate_keystrokes(dismiss);
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(
+                    workspace.dialog_in_front.get(),
+                    None,
+                    "{dismiss} left it up"
+                );
+            });
+            query_tab(&workspace, cx, |tab, _, _| {
+                assert!(matches!(tab.query, QueryState::Idle), "{dismiss} ran it");
+            });
+            assert!(editor_has_keyboard(&workspace, cx), "after {dismiss}");
+            cx.simulate_input(typed);
+            settle(cx);
+            assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
+        }
+
+        quit(workspace, cx);
+    });
+}

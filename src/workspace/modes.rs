@@ -137,10 +137,13 @@ impl Workspace {
         let refused = stopped
             .and_then(|pending| pending.resume)
             .map(|run| run.tab);
-        match refused {
-            Some(tab) => self.stop_queue_on(tab, cx),
-            None => cx.notify(),
+        if let Some(tab) = refused {
+            self.stop_queue_on(tab, cx);
         }
+        // Unconditional: stopping the queue redraws only when one was
+        // waiting, and without a redraw a prompt dismissed from the keyboard
+        // stays up holding the keyboard.
+        cx.notify();
     }
 
     pub(crate) fn toggle_dont_ask(&mut self, cx: &mut Context<Self>) {
