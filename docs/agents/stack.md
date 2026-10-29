@@ -95,3 +95,9 @@ is part of. The same holds for tiberius's tokio-rustls 0.24, inside the runtime
 `mssql.rs` owns. Nothing tokio-shaped reaches GPUI's executor. Adding a tokio
 future anywhere DBDelve spawns one still panics.
 
+
+**`deny.toml` is checked by `.github/workflows/deny.yml`** on any change to the
+manifests and weekly. Its license list is the permissive licenses the graph
+holds; copyleft is admitted per crate in `exceptions`, never added to `allow`.
+An advisory is ignored only with a reason that says why it cannot reach
+DBDelve, never to make the weekly run pass.

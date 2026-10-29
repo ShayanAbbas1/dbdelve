@@ -1,0 +1,43 @@
+name: deny
+
+# Weekly as well: a new advisory against a crate already locked lands on no
+# commit, so only a scheduled run finds it.
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    # An advisory published today would fail every PR, whatever it touches,
+    # until someone acts on it. The scheduled run is where it surfaces, and
+    # there it fails the run, since a run that passes notifies nobody.
+    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name != 'schedule' }}
+    name: ${{ matrix.checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
