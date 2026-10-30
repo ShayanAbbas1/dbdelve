@@ -2452,8 +2452,16 @@ impl Workspace {
                 };
                 let import_workspace = menu_workspace.clone();
                 let import_names = (schema.clone(), relation.clone());
-                let export_workspace = menu_workspace.clone();
-                let export_names = (schema.clone(), relation.clone());
+                let export = |label: &'static str, format: FileAs| {
+                    let workspace = menu_workspace.clone();
+                    let (schema, relation) = (schema.clone(), relation.clone());
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let (schema, relation) = (schema.clone(), relation.clone());
+                        _ = workspace.update(cx, |workspace, cx| {
+                            workspace.export_relation(format, schema, relation, cx);
+                        });
+                    })
+                };
                 let mut menu = menu
                     .item(open("Open Data", false))
                     .item(open("Open Structure", true));
@@ -2467,15 +2475,11 @@ impl Workspace {
                         },
                     ));
                 }
+                menu = menu
+                    .item(export("Export as CSV…", FileAs::Rows(Format::Csv)))
+                    .item(export("Export as JSON…", FileAs::Rows(Format::Json)));
                 if engine.syntax() == db::Syntax::Sql {
-                    menu = menu.item(PopupMenuItem::new("Export as SQL…").on_click(
-                        move |_, _, cx| {
-                            let (schema, relation) = export_names.clone();
-                            _ = export_workspace.update(cx, |workspace, cx| {
-                                workspace.export_relation(schema, relation, cx);
-                            });
-                        },
-                    ));
+                    menu = menu.item(export("Export as SQL…", FileAs::Inserts));
                 }
                 relation_copies(engine, &schema, &relation, kind)
                     .into_iter()

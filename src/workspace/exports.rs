@@ -77,11 +77,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Every row of a relation the sidebar names, as `INSERT`s, whether or not
-    /// it is open. There is no page to ask about, so no dialog: the menu item
+    /// Every row of a relation the sidebar names, whether or not it is open.
+    /// There is no page to ask about, so no dialog: the menu item
     /// said what it would do, and the save panel can still back out of it.
     pub(crate) fn export_relation(
         &mut self,
+        format: FileAs,
         schema: String,
         relation: String,
         cx: &mut Context<Self>,
@@ -103,7 +104,7 @@ impl Workspace {
             relation: Some((schema, relation.clone())),
             ..InsertTarget::default()
         };
-        self.export_every_row(FileAs::Inserts, refetch, relation, target, cx);
+        self.export_every_row(format, refetch, relation, target, cx);
     }
 
     /// What the rows in front of the user write back to: on a relation tab its
@@ -1390,6 +1391,14 @@ mod tests {
         knows_nothing(&InsertTarget::default(), FileAs::Inserts);
 
         _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn every_engine_has_a_statement_for_a_relation_with_no_filter_or_sort() {
+        for engine in Engine::ALL {
+            let refetch = relation_refetch(engine, "main", "notes", "", &[], &[]);
+            assert!(refetch.is_ok(), "{engine:?}");
+        }
     }
 
     #[test]
