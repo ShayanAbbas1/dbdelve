@@ -344,14 +344,10 @@ fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String
         Some(value) if engine.spec().sql.backslash_escapes => {
             engine.quote_value(value, data_type).replace('\0', r"\0")
         }
-        Some(value) => match engine.spec().sql.nul_joiner {
-            Some(joiner) if value.contains('\0') => value
-                .split('\0')
-                .map(|part| engine.quote_value(part, data_type))
-                .collect::<Vec<_>>()
-                .join(joiner),
-            _ => engine.quote_value(value, data_type),
-        },
+        Some(value) => engine
+            .spec()
+            .text_around_nul(value, data_type)
+            .unwrap_or_else(|| engine.quote_value(value, data_type)),
     }
 }
 
@@ -1114,6 +1110,25 @@ mod tests {
             "INSERT INTO \"s\".\"t\" (\"note\", \"id\") OVERRIDING SYSTEM VALUE \
              VALUES (NULL, '3');\n"
         );
+    }
+
+    #[test]
+    fn a_nul_in_text_is_pieced_together_where_a_literal_cannot_hold_one() {
+        let spelled = |engine: Engine| engine.spec().text_around_nul("a\0b", None);
+        assert_eq!(
+            spelled(Engine::SqlServer).as_deref(),
+            Some("CAST(N'a' AS nvarchar(max)) + NCHAR(0) + N'b'")
+        );
+        assert_eq!(
+            spelled(Engine::Sqlite).as_deref(),
+            Some("'a' || char(0) || 'b'")
+        );
+        assert_eq!(
+            spelled(Engine::DuckDb).as_deref(),
+            Some("'a' || chr(0) || 'b'")
+        );
+        assert_eq!(spelled(Engine::Postgres), None);
+        assert_eq!(Engine::Sqlite.spec().text_around_nul("plain", None), None);
     }
 
     #[test]

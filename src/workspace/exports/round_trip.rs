@@ -271,14 +271,10 @@ fn assert_awkward_texts_read_as_written(table: &Throwaway, column: usize) {
 /// A text around a NUL, in each place one can fall, read as written and run
 /// back from a file that holds no raw NUL to cut a statement short.
 fn assert_nul_in_text_runs_back(table: &Throwaway) {
-    let texts = ["a\0b", "\0leads", "trails\0", "\0", "two\0\0nuls"];
-    let joiner = table.engine.spec().sql.nul_joiner.expect("a joiner");
+    let long = format!("{}\0{}", "x".repeat(3_000), "y".repeat(3_000));
+    let texts = ["a\0b", "\0leads", "trails\0", "\0", "two\0\0nuls", &long];
     for (index, text) in texts.iter().enumerate() {
-        let literal = text
-            .split('\0')
-            .map(|part| table.engine.quote_literal(part))
-            .collect::<Vec<_>>()
-            .join(joiner);
+        let literal = table.engine.spec().text_around_nul(text, None).unwrap();
         table.run(&format!(
             "INSERT INTO {{table}} (id, body) VALUES ({index}, {literal})"
         ));
@@ -686,7 +682,7 @@ impl Drop for DuckDbFile {
 #[ignore = "needs the dev SQL Server"]
 fn live_a_nul_in_text_exported_as_sql_runs_back_on_sql_server() {
     let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo", "nul");
-    table.run("CREATE TABLE {table} (id INT PRIMARY KEY, body NVARCHAR(40))");
+    table.run("CREATE TABLE {table} (id INT PRIMARY KEY, body NVARCHAR(MAX))");
     assert_nul_in_text_runs_back(&table);
 }
 

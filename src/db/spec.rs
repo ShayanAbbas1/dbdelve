@@ -96,6 +96,33 @@ impl EngineSpec {
         format!("{national}'{}'", value.replace('\'', "''"))
     }
 
+    /// `value` pieced together around its NULs, or `None` with none to spell.
+    pub fn text_around_nul(&self, value: &str, data_type: Option<&str>) -> Option<String> {
+        let joiner = match self.sql.nul_text {
+            NulText::Unspelled => return None,
+            NulText::PipedChar => " || char(0) || ",
+            NulText::PipedChr => " || chr(0) || ",
+            NulText::AddedNchar => " + NCHAR(0) + ",
+        };
+        value.contains('\0').then(|| {
+            let text = value
+                .split('\0')
+                .map(|part| self.quote_value(part, data_type))
+                .collect::<Vec<_>>();
+            match self.sql.nul_text {
+                // Without a `max` operand, `+` stops at 4,000 characters.
+                NulText::AddedNchar => {
+                    format!(
+                        "CAST({} AS nvarchar(max)){joiner}{}",
+                        text[0],
+                        text[1..].join(joiner)
+                    )
+                }
+                _ => text.join(joiner),
+            }
+        })
+    }
+
     pub fn quote_value(&self, value: &str, data_type: Option<&str>) -> String {
         data_type
             .zip(self.hooks.quote_value)
@@ -205,6 +232,20 @@ impl Hints {
     };
 }
 
+/// How a text is pieced together around a NUL, on an engine whose text can
+/// hold one and whose literal cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NulText {
+    /// Nothing to spell: the text cannot hold one, or a literal already can.
+    Unspelled,
+    /// `'a' || char(0) || 'b'`
+    PipedChar,
+    /// `'a' || chr(0) || 'b'`
+    PipedChr,
+    /// `CAST(N'a' AS nvarchar(max)) + NCHAR(0) + N'b'`
+    AddedNchar,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SqlSpec {
     pub identifier_quote: IdentifierQuote,
@@ -216,9 +257,8 @@ pub struct SqlSpec {
     /// Whether a backslash inside a quoted identifier escapes the character
     /// after it, so a literal one has to survive as two.
     pub identifier_backslash_escapes: bool,
-    /// What joins the quoted pieces of a text around a NUL, on an engine whose
-    /// text can hold one and whose literal has no escape for it.
-    pub nul_joiner: Option<&'static str>,
+    /// How a NUL in text is written, where a literal has no escape for it.
+    pub nul_text: NulText,
     /// String literals are written `N'…'`, because a bare one is converted to
     /// the database's code page first, and a character it lacks arrives as `?`.
     pub national_strings: bool,
@@ -281,7 +321,7 @@ impl SqlSpec {
         identifier_quote: IdentifierQuote::Double,
         backslash_escapes: false,
         identifier_backslash_escapes: false,
-        nul_joiner: None,
+        nul_text: NulText::Unspelled,
         national_strings: false,
         literal_offsets: true,
         boolean_literal: BooleanLiteral::TrueFalse,
@@ -824,7 +864,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
-        nul_joiner: Some(" || char(0) || "),
+        nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -873,7 +913,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
-        nul_joiner: Some(" || char(0) || "),
+        nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -915,7 +955,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
-        nul_joiner: Some(" || chr(0) || "),
+        nul_text: NulText::PipedChr,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
         },
@@ -1032,7 +1072,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
-        nul_joiner: Some(" + NCHAR(0) + "),
+        nul_text: NulText::AddedNchar,
         national_strings: true,
         boolean_literal: BooleanLiteral::OneZero,
         params: Params::AtP,
