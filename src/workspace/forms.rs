@@ -785,8 +785,7 @@ impl Workspace {
                 .key_context("Dialog")
                 .on_action(cx.listener(Self::confirm_dialog))
                 .on_action(cx.listener(|workspace, _: &TickDialogBox, window, cx| {
-                    let ringed = workspace.dialog_focus.is_focused(window)
-                        && workspace.dialog_checkbox()
+                    let ringed = workspace.dialog_checkbox()
                         && workspace.dialog_choice.get() + 1 == workspace.dialog_buttons();
                     match ringed {
                         true => workspace.confirm_dialog(&ConfirmDialog, window, cx),
@@ -819,6 +818,7 @@ impl Workspace {
         let chosen =
             self.dialog_in_front.get() == Some(dialog) && self.dialog_choice.get() == from_right;
         div()
+            .debug_selector(|| format!("{dialog}-{from_right}"))
             .m(px(-2.))
             .p(px(1.))
             .border_1()
@@ -878,6 +878,11 @@ impl Workspace {
             self.step_dialog_focus(leftward, window, cx);
             return;
         }
+        // The ring is where the keyboard is, so the layer takes it back from
+        // anything inside that took it, or `enter` would go there instead.
+        if !self.dialog_focus.is_focused(window) {
+            self.dialog_focus.focus(window, cx);
+        }
         let choice = self.dialog_choice.get();
         self.dialog_choice.set(match leftward {
             true => (choice + 1) % buttons,
@@ -922,16 +927,16 @@ impl Workspace {
     }
 
     /// `enter` presses the button the ring is on, in the dialog drawn in
-    /// front, and ticks or unticks its box. The ring is the dialog's own
-    /// keyboard: a control inside that holds focus itself, as the import's
-    /// do, takes the key as it would anywhere.
+    /// front, and ticks or unticks its box -- wherever focus is inside it.
+    /// The import has no ring: a control there that holds focus itself takes
+    /// the key as it would anywhere.
     pub(crate) fn confirm_dialog(
         &mut self,
         _: &ConfirmDialog,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.dialog_focus.is_focused(window) {
+        if self.dialog_buttons() == 0 && !self.dialog_focus.is_focused(window) {
             cx.propagate();
             return;
         }

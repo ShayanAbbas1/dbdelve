@@ -1093,3 +1093,46 @@ fn tab_onto_a_welcome_project_shows_its_rename_and_delete(cx: &mut TestAppContex
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_clicked_box_leaves_the_ring_in_charge_of_the_keyboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        cx.simulate_input("delete from birds");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+
+        let box_at = cx
+            .debug_bounds("pending-run-2")
+            .expect("the box is drawn in the ring")
+            .center();
+        cx.simulate_click(box_at, gpui::Modifiers::default());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            assert!(session.pending_run.as_ref().unwrap().dont_ask);
+        });
+
+        // Round to Run, which `enter` presses rather than the box it would tick.
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        assert_eq!(ringed_button(&workspace, cx), 0);
+        assert!(dialog_has_keyboard(&workspace, cx));
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), None, "enter pressed nothing");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert!(
+                profile
+                    .confirmed
+                    .contains(&crate::sql::Destructive::UnfilteredDelete)
+            );
+        });
+
+        quit(workspace, cx);
+    });
+}
