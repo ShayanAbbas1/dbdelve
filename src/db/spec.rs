@@ -7,8 +7,8 @@
 //! existing strategies is one more value here and its driver.
 
 use super::{
-    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, mongo, mssql, mysql, postgres,
-    redis,
+    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, duckdb, mongo, mssql, mysql,
+    postgres, redis,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +96,33 @@ impl EngineSpec {
         format!("{national}'{}'", value.replace('\'', "''"))
     }
 
+    /// `value` pieced together around its NULs, or `None` with none to spell.
+    pub fn text_around_nul(&self, value: &str, data_type: Option<&str>) -> Option<String> {
+        let joiner = match self.sql.nul_text {
+            NulText::Unspelled => return None,
+            NulText::PipedChar => " || char(0) || ",
+            NulText::PipedChr => " || chr(0) || ",
+            NulText::AddedNchar => " + NCHAR(0) + ",
+        };
+        value.contains('\0').then(|| {
+            let text = value
+                .split('\0')
+                .map(|part| self.quote_value(part, data_type))
+                .collect::<Vec<_>>();
+            match self.sql.nul_text {
+                // Without a `max` operand, `+` stops at 4,000 characters.
+                NulText::AddedNchar => {
+                    format!(
+                        "CAST({} AS nvarchar(max)){joiner}{}",
+                        text[0],
+                        text[1..].join(joiner)
+                    )
+                }
+                _ => text.join(joiner),
+            }
+        })
+    }
+
     pub fn quote_value(&self, value: &str, data_type: Option<&str>) -> String {
         data_type
             .zip(self.hooks.quote_value)
@@ -149,17 +176,31 @@ impl EngineSpec {
 
     /// [`Engine::generates`](super::Engine::generates).
     pub fn generates(&self, column: &ColumnDefinition) -> bool {
-        let Some(default) = column.default.as_deref() else {
-            return false;
-        };
-        self.sql
-            .generated_defaults
-            .iter()
-            .any(|marker| match *marker {
-                DefaultMarker::Exact(exact) => default == exact,
-                DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
-            })
+        marked(column, self.sql.generated_defaults)
     }
+
+    /// Whether the server numbers `column` itself, where a row written back
+    /// keeps the number it had.
+    pub fn numbers(&self, column: &ColumnDefinition) -> bool {
+        marked(column, self.sql.identity_defaults)
+    }
+
+    /// Whether the server works `column` out from the rest of its row, so
+    /// that a value for it has nowhere to go.
+    pub fn computes(&self, column: &ColumnDefinition) -> bool {
+        let data_type = column.data_type.to_ascii_lowercase();
+        self.sql.computed_types.contains(&data_type.as_str())
+            || (self.generates(column) && !self.numbers(column))
+    }
+}
+
+fn marked(column: &ColumnDefinition, markers: &[DefaultMarker]) -> bool {
+    column.default.as_deref().is_some_and(|default| {
+        markers.iter().any(|marker| match *marker {
+            DefaultMarker::Exact(exact) => default == exact,
+            DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
+        })
+    })
 }
 
 fn unwrap_type_wrapper<'a>(name: &'a str, wrapper: &str) -> Option<&'a str> {
@@ -191,6 +232,20 @@ impl Hints {
     };
 }
 
+/// How a text is pieced together around a NUL, on an engine whose text can
+/// hold one and whose literal cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NulText {
+    /// Nothing to spell: the text cannot hold one, or a literal already can.
+    Unspelled,
+    /// `'a' || char(0) || 'b'`
+    PipedChar,
+    /// `'a' || chr(0) || 'b'`
+    PipedChr,
+    /// `CAST(N'a' AS nvarchar(max)) + NCHAR(0) + N'b'`
+    AddedNchar,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SqlSpec {
     pub identifier_quote: IdentifierQuote,
@@ -202,6 +257,8 @@ pub struct SqlSpec {
     /// Whether a backslash inside a quoted identifier escapes the character
     /// after it, so a literal one has to survive as two.
     pub identifier_backslash_escapes: bool,
+    /// How a NUL in text is written, where a literal has no escape for it.
+    pub nul_text: NulText,
     /// String literals are written `N'…'`, because a bare one is converted to
     /// the database's code page first, and a character it lacks arrives as `?`.
     pub national_strings: bool,
@@ -227,6 +284,13 @@ pub struct SqlSpec {
     /// The markers the structure queries write into a column's default for
     /// one the server fills itself.
     pub generated_defaults: &'static [DefaultMarker],
+    /// Which of `generated_defaults` are an identity's rather than a computed
+    /// column's.
+    pub identity_defaults: &'static [DefaultMarker],
+    /// What an `INSERT` has to say for a value to reach an identity column.
+    pub identity_insert: IdentityInsert,
+    /// Types the server writes itself, with no default to say so.
+    pub computed_types: &'static [&'static str],
     pub statement_split: StatementSplit,
     pub explain_plan: Option<ExplainPrefix>,
     pub explain_analyze: Option<ExplainPrefix>,
@@ -257,6 +321,7 @@ impl SqlSpec {
         identifier_quote: IdentifierQuote::Double,
         backslash_escapes: false,
         identifier_backslash_escapes: false,
+        nul_text: NulText::Unspelled,
         national_strings: false,
         literal_offsets: true,
         boolean_literal: BooleanLiteral::TrueFalse,
@@ -271,6 +336,9 @@ impl SqlSpec {
         implicit_transaction: false,
         skip_duplicates: SkipDuplicates::None,
         generated_defaults: &[],
+        identity_defaults: &[],
+        identity_insert: IdentityInsert::Plain,
+        computed_types: &[],
         statement_split: StatementSplit::Semicolon,
         explain_plan: None,
         explain_analyze: None,
@@ -442,6 +510,15 @@ pub enum DefaultMarker {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityInsert {
+    Plain,
+    /// `OVERRIDING SYSTEM VALUE`, in the statement.
+    Overriding,
+    /// `SET IDENTITY_INSERT`, on the session, around the statements.
+    SessionSwitch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatementSplit {
     Semicolon,
     /// T-SQL batches separated by `GO` lines.
@@ -580,6 +657,10 @@ pub struct Hooks {
     /// A literal for a value bound for a column of `data_type`, or `None` to
     /// fall back to the plain literal.
     pub quote_value: Option<fn(value: &str, data_type: &str) -> Option<String>>,
+    /// A literal for a value the driver itself rendered, written back by an
+    /// `INSERT`, or `None` for what [`Self::quote_value`] and the shared shapes
+    /// make of it.
+    pub fetched_literal: Option<fn(value: &str, data_type: &str) -> Option<String>>,
     /// The whole predicate term naming a row's value in `column` (`None` for a
     /// NULL), for an engine whose rows are named by every value. `None` from the
     /// hook means the value cannot be matched, so the row is not written.
@@ -593,6 +674,7 @@ pub type MatchValue = fn(column: &str, value: Option<&str>, data_type: &str) -> 
 impl Hooks {
     pub const NONE: Self = Self {
         quote_value: None,
+        fetched_literal: None,
         match_value: None,
     };
 }
@@ -626,6 +708,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
             needs_unique_key: false,
         },
         generated_defaults: &[DefaultMarker::Prefix("GENERATED ALWAYS AS ")],
+        identity_defaults: &[DefaultMarker::Exact("GENERATED ALWAYS AS IDENTITY")],
+        identity_insert: IdentityInsert::Overriding,
         explain_plan: Some(ExplainPrefix::Explain),
         explain_analyze: Some(ExplainPrefix::ExplainAnalyze),
         typed_explain: TypedExplain::Postgres,
@@ -677,6 +761,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
             DefaultMarker::Exact("AUTO_INCREMENT"),
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
+        identity_defaults: &[DefaultMarker::Exact("AUTO_INCREMENT")],
         explain_plan: Some(ExplainPrefix::Explain),
         // Since 8.0.18. Server versions are not detected: an older server
         // refuses the statement and says so, which is the error the user needs
@@ -699,7 +784,10 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         // No `picks_schema`: the database is the schema.
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(mysql::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const MARIADB: EngineSpec = EngineSpec {
@@ -732,6 +820,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
             DefaultMarker::Exact("AUTO_INCREMENT"),
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
+        identity_defaults: &[DefaultMarker::Exact("AUTO_INCREMENT")],
         explain_plan: Some(ExplainPrefix::Explain),
         // MariaDB has no `EXPLAIN ANALYZE` and spells the same thing `ANALYZE`
         // with no `EXPLAIN`.
@@ -751,7 +840,10 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         switches_database: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(mysql::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const SQLITE: EngineSpec = EngineSpec {
@@ -772,6 +864,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -820,6 +913,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -861,9 +955,11 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        nul_text: NulText::PipedChr,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
         },
+        generated_defaults: &[DefaultMarker::Prefix("GENERATED ALWAYS AS (")],
         parser_dialect: ParserDialect::DuckDb,
         regex: RegexMatch::RegexpMatches,
         substring: SubstringMatch::InstrCast,
@@ -888,7 +984,10 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         picks_schema: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(duckdb::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
@@ -973,6 +1072,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_text: NulText::AddedNchar,
         national_strings: true,
         boolean_literal: BooleanLiteral::OneZero,
         params: Params::AtP,
@@ -988,6 +1088,9 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
             DefaultMarker::Prefix("IDENTITY("),
             DefaultMarker::Prefix("AS "),
         ],
+        identity_defaults: &[DefaultMarker::Prefix("IDENTITY(")],
+        identity_insert: IdentityInsert::SessionSwitch,
+        computed_types: &["rowversion", "timestamp"],
         statement_split: StatementSplit::Batches,
         parser_dialect: ParserDialect::MsSql,
         format_dialect: FormatDialect::SqlServer,
@@ -1014,6 +1117,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     },
     hooks: Hooks {
         quote_value: Some(mssql::typed_literal),
+        fetched_literal: None,
         match_value: None,
     },
 };

@@ -47,7 +47,7 @@ pub use spec::{
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
     Truncate, TypedExplain,
 };
-pub use spec::{ReadOnlySession, UnreadableFloor};
+pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -695,6 +695,11 @@ impl Engine {
             Syntax::Sql => self.spec().quote_value(value, data_type),
             Syntax::Mongo | Syntax::Redis => self.quote_literal(value),
         }
+    }
+
+    /// [`Hooks::fetched_literal`].
+    pub fn fetched_literal(self, value: &str, data_type: &str) -> Option<String> {
+        (self.spec().hooks.fetched_literal?)(value, data_type)
     }
 
     /// Whether a [`Column::data_type`] names a type whose values are bytes.

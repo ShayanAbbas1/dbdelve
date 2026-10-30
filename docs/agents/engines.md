@@ -47,9 +47,10 @@ Decided, and not to be re-litigated:
   plus overrides, so a field it leaves alone is the shared behaviour and the
   writers in `sql.rs`, `filter.rs` and `explorer.rs` read the spec, not the
   engine. Its `Abilities` start from `Abilities::NONE`, the read-only tier, and
-  switch on only what the engine does. The one hook, `Hooks::quote_value`,
-  covers a literal that depends on the column's type (SQL Server) and returns
-  `None` to fall back to `quote_literal`. A spec field is a bool, a strategy
+  switch on only what the engine does. `Hooks::quote_value` covers a literal
+  that depends on the column's type (SQL Server) and returns `None` to fall back
+  to `quote_literal`; `Hooks::fetched_literal` does the same for a value the
+  driver rendered, written back by an exported `INSERT`. A spec field is a bool, a strategy
   enum or a list of names DBDelve's own code reads, never SQL text. Per-engine
   snapshots in `src/sql_snapshots` hold the generated text, and
   `fake_spec.rs` shows a spec nobody wrote an arm for generating SQL.

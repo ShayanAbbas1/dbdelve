@@ -43,10 +43,10 @@ use crate::{
         PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
         PaletteScopeLeft, PaletteScopeRight,
     },
-    db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind},
+    db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
-    export::{Format, RowsAs},
+    export::{FileAs, Format, RowsAs},
     fuzzy::{Fuzzy, Query},
     icons::icon,
     import::Source,
@@ -347,8 +347,8 @@ pub enum Command {
     PreviousEdit,
     /// The format here only picks the extension the save dialog suggests. What
     /// the file is written as is read back off the path the user confirmed, so
-    /// these two rows are one code path — see `export::Format::for_path`.
-    ExportResults(Format),
+    /// these rows are one code path — see `export::FileAs::for_path`.
+    ExportResults(FileAs),
     /// Stop the export of every row this connection is running.
     CancelExport,
     CopyRow,
@@ -3360,15 +3360,23 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.push(command(
             "Export results as CSV…",
             icon::SAVE,
-            Command::ExportResults(Format::Csv),
+            Command::ExportResults(FileAs::Rows(Format::Csv)),
             RESULTS,
         ));
         items.push(command(
             "Export results as JSON…",
             icon::SAVE,
-            Command::ExportResults(Format::Json),
+            Command::ExportResults(FileAs::Rows(Format::Json)),
             RESULTS,
         ));
+        if profile.config.engine().syntax() == Syntax::Sql {
+            items.push(command(
+                "Export results as SQL…",
+                icon::SAVE,
+                Command::ExportResults(FileAs::Inserts),
+                RESULTS,
+            ));
+        }
         items.push(bound(
             command(
                 "Copy results as TSV",

@@ -2436,7 +2436,7 @@ impl Workspace {
                     })
                 },
             )
-            .context_menu(move |_, entry, menu, _, cx| {
+            .context_menu(move |_, entry, menu, window, cx| {
                 if let Some(name) = saved_query(entry.item().id.as_str()) {
                     return saved_query_menu(menu, name, &menu_workspace);
                 }
@@ -2485,6 +2485,30 @@ impl Workspace {
                 };
                 let import_workspace = menu_workspace.clone();
                 let import_names = (schema.clone(), relation.clone());
+                let export_workspace = menu_workspace.clone();
+                let export_names = (schema.clone(), relation.clone());
+                // Built here rather than through `PopupMenu::submenu`, for the
+                // reason the grid's "Copy Rows As" gives: that wants the menu's
+                // own context, and a tree hands over its own.
+                let exports = PopupMenu::build(window, cx, move |submenu, _, _| {
+                    let export = |label: &'static str, format: FileAs| {
+                        let workspace = export_workspace.clone();
+                        let (schema, relation) = export_names.clone();
+                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            let (schema, relation) = (schema.clone(), relation.clone());
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.export_relation(format, schema, relation, cx);
+                            });
+                        })
+                    };
+                    let submenu = submenu
+                        .item(export("CSV", FileAs::Rows(Format::Csv)))
+                        .item(export("JSON", FileAs::Rows(Format::Json)));
+                    match engine.syntax() {
+                        db::Syntax::Sql => submenu.item(export("SQL", FileAs::Inserts)),
+                        _ => submenu,
+                    }
+                });
                 let mut menu = menu
                     .item(open("Open Data", false))
                     .item(open("Open Structure", true));
@@ -2498,6 +2522,7 @@ impl Workspace {
                         },
                     ));
                 }
+                menu = menu.item(PopupMenuItem::submenu("Export", exports));
                 relation_copies(engine, &schema, &relation, kind)
                     .into_iter()
                     .fold(menu, |menu, group| {

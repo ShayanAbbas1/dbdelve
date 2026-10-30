@@ -75,7 +75,7 @@ use db::{
     Fields, RelationKind, ServerConfig, SnowflakeConfig, SslMode,
 };
 use explorer::{ExplorerTarget, ObjectKind, PREVIEW_ROW_LIMIT, tree as build_explorer_tree};
-use export::Format;
+use export::{FileAs, Format};
 use filter::{
     Conjunction, FilterBar, FilterRow, Operator, changed_filter, cycle, derived_filter,
     filter_bars, filter_row, foreign_key_filter, reference_filter, relation_sql, restored_filter,
