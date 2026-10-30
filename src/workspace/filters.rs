@@ -333,9 +333,11 @@ impl Workspace {
         {
             self.push_filter_row(id, window, cx);
         }
+        // A bar asking only whether a value is there draws no box, and a
+        // focused handle that is not on screen leaves no dispatch path.
         if let Some(input) = self
             .filter_rows_mut(id)
-            .and_then(|filters| filters.last())
+            .and_then(|filters| filters.iter().rev().find(|filter| filter.shows_value()))
             .map(|filter| filter.value.clone())
         {
             input.focus_handle(cx).focus(window, cx);

@@ -964,14 +964,10 @@ fn render_filter_bar(
                         }
                     })
                 }))
-                // An absence needs no value, and a box that cannot change what
-                // runs is a box to read past.
-                .children(
-                    (filter.raw || filter.operator.takes_value()).then(|| FilterValue {
-                        editor: filter.value.clone(),
-                        raw: filter.raw,
-                    }),
-                )
+                .children(filter.shows_value().then(|| FilterValue {
+                    editor: filter.value.clone(),
+                    raw: filter.raw,
+                }))
                 .child(
                     icon_button(
                         ("remove-filter", row),
