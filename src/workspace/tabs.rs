@@ -767,6 +767,10 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.reference_popup.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.pending_import.take().is_some() {
             cx.notify();
             return;

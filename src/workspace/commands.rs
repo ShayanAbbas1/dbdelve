@@ -737,6 +737,10 @@ impl Workspace {
                 self.focus_filter(window, cx);
             }
             Command::ToggleNextJoin => self.toggle_next_join(&ToggleNextJoin, window, cx),
+            Command::ShowReferences => self.show_references(&ShowReferences, window, cx),
+            Command::OpenReference(index) => {
+                self.open_reference(&OpenReference { index }, window, cx)
+            }
             Command::SetImportProject(project) => {
                 self.set_import_project(project);
                 cx.notify();

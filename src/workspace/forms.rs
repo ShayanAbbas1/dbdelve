@@ -1151,6 +1151,7 @@ impl Workspace {
     pub(crate) fn render_reference_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let popup = self.reference_popup.as_ref()?;
+        let at = popup.at?;
         let rows: Vec<AnyElement> = match &popup.choices {
             None => vec![note(t, "Checking…")],
             Some(choices) if choices.is_empty() => {
@@ -1201,8 +1202,8 @@ impl Workspace {
                 .child(
                     div()
                         .absolute()
-                        .left(popup.at.x)
-                        .top(popup.at.y)
+                        .left(at.x)
+                        .top(at.y)
                         .min_w(px(180.))
                         .max_w(px(420.))
                         .p(px(layout::SPACE_XS))

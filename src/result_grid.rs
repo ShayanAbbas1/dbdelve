@@ -1275,8 +1275,15 @@ impl ResultGrid {
         })
     }
 
-    pub fn reference_anchor(&self) -> Option<Point<Pixels>> {
-        self.reference_anchor
+    /// Where the arrow just pressed sits, once: `None` is the keyboard asking.
+    pub fn take_reference_anchor(&mut self) -> Option<Point<Pixels>> {
+        self.reference_anchor.take()
+    }
+
+    /// Whether the cell has relations pointing at its value: a key, and not a
+    /// NULL, which nothing references. Where the arrow is drawn.
+    pub fn is_referenced(&self, row: usize, col: usize) -> bool {
+        self.cell(row, col).is_some() && self.reference_menu(col).is_some()
     }
 
     /// The relations pointing at this column, as an index into the structure's

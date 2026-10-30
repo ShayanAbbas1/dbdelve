@@ -161,6 +161,9 @@ pub enum Mode {
     Engine,
     /// Where the connections an import is asking about go.
     ImportProject,
+    /// The relations holding rows that reference the key in the active cell,
+    /// as the arrow on it lists them.
+    References,
     /// What can be done to one connection, by index into the profiles, and to
     /// the project it is in.
     ConnectionActions(usize),
@@ -217,6 +220,7 @@ impl Mode {
             Mode::RowLimit => "Set the row limit…",
             Mode::Engine => "Pick an engine…",
             Mode::ImportProject => "Choose the project they join…",
+            Mode::References => "Open a referencing table…",
             Mode::ConnectionActions(_) | Mode::ProjectActions(_) => "Pick an action…",
             Mode::MoveToProject(_) => "Move to a project…",
             Mode::NameProject(None) => "Name the new project…",
@@ -247,6 +251,7 @@ impl Mode {
             Mode::RowLimit => "Row limit",
             Mode::Engine => "Engines",
             Mode::ImportProject => "Project",
+            Mode::References => "Referenced by",
             Mode::DeleteQuery => "Delete query",
             Mode::ConnectionActions(_) => "Connection",
             Mode::ProjectActions(_) => "Project",
@@ -267,7 +272,7 @@ impl Mode {
             | Mode::ConnectionActions(_)
             | Mode::ProjectActions(_) => "Run",
             Mode::Search(Scope::Connections) => "Switch",
-            Mode::Search(_) | Mode::Columns => "Open",
+            Mode::Search(_) | Mode::Columns | Mode::References => "Open",
             Mode::MoveToProject(_) => "Move",
             Mode::NameProject(None) => "Create",
             Mode::NameProject(Some(_)) => "Rename",
@@ -429,6 +434,11 @@ pub enum Command {
     /// Add a filter bar and put the cursor in it.
     AddFilter,
     ToggleNextJoin,
+    /// Put the palette back up over the relations that reference the key in
+    /// the active cell, once they have been asked whether they hold a row.
+    ShowReferences,
+    /// By index into the structure's `referenced_by`.
+    OpenReference(usize),
     /// `None` is No project.
     SetImportProject(Option<String>),
     /// Put the palette back up over the row limits.
@@ -1026,6 +1036,7 @@ impl Palette {
             (Mode::Search(_), None) => welcome_items(workspace),
             (Mode::Engine, _) => engine_items(workspace),
             (Mode::ImportProject, _) => import_project_items(workspace),
+            (Mode::References, _) => reference_items(workspace),
             (_, None) => Vec::new(),
         };
         let import_pending = workspace.pending_import.is_some();
@@ -2394,6 +2405,33 @@ pub(crate) fn picked_import_row(workspace: &Workspace) -> Option<usize> {
         .position(|item| item.hint.as_ref() == "current")
 }
 
+/// The relations the last reference check found rows in. One whose check
+/// failed is listed too, saying so, as the arrow's list shows it; opening it
+/// runs the same filtered read.
+fn reference_items(workspace: &Workspace) -> Vec<Item> {
+    let Some(choices) = workspace
+        .reference_popup
+        .as_ref()
+        .and_then(|popup| popup.choices.as_ref())
+    else {
+        return Vec::new();
+    };
+    choices
+        .iter()
+        .map(|(index, label, answer)| {
+            let item = Item::new(
+                label.to_string(),
+                icon::TABLE,
+                Command::OpenReference(*index),
+            );
+            match answer {
+                Ok(()) => item,
+                Err(message) => item.hint(format!("Could not check: {message}")).muted(),
+            }
+        })
+        .collect()
+}
+
 /// Where [`move_items`] lists the connection's own project, for the palette
 /// to open on.
 pub(crate) fn current_project_row(
@@ -3416,6 +3454,17 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     CELL,
                 ),
                 "follow_foreign_key",
+            ));
+        }
+        if grid.is_referenced(row, col) {
+            items.push(bound(
+                command(
+                    "Show references…",
+                    icon::REFERENCED_BY,
+                    Command::ShowReferences,
+                    CELL,
+                ),
+                "show_references",
             ));
         }
         items.push(bound(

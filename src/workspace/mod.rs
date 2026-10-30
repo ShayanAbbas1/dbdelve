@@ -2177,7 +2177,8 @@ pub(crate) type ReferenceAnswer = (usize, gpui::SharedString, Result<(), String>
 /// out to hold rows for the key, or whose check failed with the error it gave.
 /// `None` while the lookup is still out.
 pub(crate) struct ReferencePopup {
-    pub(crate) at: gpui::Point<gpui::Pixels>,
+    /// `None` when the keyboard asked, which puts the answer in the palette.
+    pub(crate) at: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) choices: Option<Vec<ReferenceAnswer>>,
     check: u64,
 }
