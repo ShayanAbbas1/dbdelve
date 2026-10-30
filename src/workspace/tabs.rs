@@ -61,15 +61,7 @@ impl Workspace {
         let session = &profile.session;
         let front = match session.active_object() {
             Some(tab) => self.catalog().and_then(|catalog| {
-                let schema = catalog
-                    .schemas
-                    .iter()
-                    .position(|schema| schema.name == tab.schema)?;
-                let relation = catalog.schemas[schema]
-                    .relations
-                    .iter()
-                    .position(|relation| relation.name == tab.name)?;
-                Some(crate::explorer::relation_row(schema, relation))
+                crate::explorer::object_row(catalog, &tab.schema, &tab.name, tab.kind)
             }),
             None => session
                 .active_query_tab()
