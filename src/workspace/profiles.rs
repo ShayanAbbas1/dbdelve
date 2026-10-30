@@ -937,8 +937,12 @@ impl Workspace {
                     let complete = matches!(routines, Routines::Loaded);
                     // Worn until `load_sizes` answers, which a lock can hold up
                     // for as long as the transaction holding it stays open.
+                    // What the catalog itself carries stays on top: on some
+                    // engines these are its numbers and `load_sizes` has none.
                     if let CatalogState::Loaded(old, _) = &profile.catalog {
+                        let fresh = catalog.sizes();
                         catalog.set_sizes(&old.sizes());
+                        catalog.set_sizes(&fresh);
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
                     profile.session.structure_requests.clear();
@@ -1714,8 +1718,10 @@ impl Workspace {
         // The relations are new, so what was known about any one's columns
         // describes a schema that may no longer exist. Here and not in
         // `install_completions`, which the routines and every new buffer also
-        // reach without the relations having changed.
-        profile.session.completion_columns.borrow_mut().clear();
+        // reach without the relations having changed. A new cache and not a
+        // cleared one, so a fetch still out writes into the one left behind:
+        // a refresh keeps the generation that would otherwise turn it away.
+        profile.session.completion_columns = completion::ColumnCache::default();
         self.install_completions(id, cx);
         self.rebuild_explorer(id, keep, cx);
         self.catalog_landed(id, cx);
