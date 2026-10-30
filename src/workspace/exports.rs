@@ -23,6 +23,11 @@ use crate::session::{ExportProgress, Exporting, PendingExport, Refetch};
 use crate::sql::Destructive;
 use crate::ui::code_lines;
 
+/// The rows a feed holds for the writer before the statement waits for it: a
+/// few passes' worth, so a fast server is slowed to the disk's pace rather than
+/// held in memory, without the statement stalling on every pass.
+const HELD_ROWS: usize = 4_096;
+
 /// How an export that wrote nothing ended.
 #[derive(Debug, PartialEq)]
 enum Ended {
@@ -741,7 +746,7 @@ fn stream(
     mut sink: Sink,
     progress: &ExportProgress,
 ) -> Result<usize, Ended> {
-    let feed = Feed::default();
+    let feed = Feed::bounded(HELD_ROWS);
     // A user's statement goes out on a connection `query_alongside` opens and
     // stops under the run's token; a generated one on a session of its own,
     // stopped as that session, once it is open.
@@ -780,6 +785,9 @@ fn stream(
 
         let mut failure = None;
         let mut stopped_at: Option<Instant> = None;
+        let mut stopper: Option<std::thread::ScopedJoinHandle<()>> = None;
+        // Taken from until the statement is over, whatever happens, as the
+        // bounded feed needs: a push it holds waits for this loop alone.
         while !query.is_finished() {
             let fed = feed.take();
             let arrived = !fed.rows.is_empty();
@@ -790,12 +798,17 @@ fn stream(
                 failure = Some(ended);
             }
             // Sent again each second it runs on: a cancel can land before
-            // the statement has started, and stop nothing.
+            // the statement has started, and stop nothing. On a thread of its
+            // own, since a cancel can wait for the statement to end -- a
+            // ClickHouse `KILL … SYNC` does -- and the statement can be
+            // waiting on this loop to take.
             if (failure.is_some() || progress.cancelled.load(Ordering::Relaxed))
                 && stopped_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+                && stopper.as_ref().is_none_or(|stopper| stopper.is_finished())
             {
                 if let Some(target) = stops.get() {
-                    _ = target.cancel(&cancel);
+                    let cancel = &cancel;
+                    stopper = Some(scope.spawn(move || _ = target.cancel(cancel)));
                 }
                 stopped_at = Some(Instant::now());
             }

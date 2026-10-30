@@ -13,7 +13,7 @@
 //! engine's catalog SQL aliases its columns to names chosen here rather than to
 //! its own.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -2520,7 +2520,15 @@ impl Fetch<'_> {
 /// large result is on screen long before the last arrives. The driver pushes
 /// and the grid takes; a row sits here only between the two.
 #[derive(Clone, Default)]
-pub struct Feed(Arc<Mutex<Fed>>);
+pub struct Feed(Arc<Shared>);
+
+#[derive(Default)]
+struct Shared {
+    fed: Mutex<Fed>,
+    /// Signalled whenever rows leave, for a push waiting under `bound`.
+    room: Condvar,
+    bound: Option<usize>,
+}
 
 /// What a [`Feed`] holds since it was last taken from.
 #[derive(Default)]
@@ -2544,8 +2552,23 @@ pub struct Fed {
 }
 
 impl Feed {
+    /// A feed that holds at most `rows` rows: a push past them waits for the
+    /// next take, so a driver faster than its taker is slowed to the taker's
+    /// pace rather than piling the result up here.
+    ///
+    /// Only for a taker that takes until the statement is over, whatever
+    /// happens: a push nobody takes from waits forever, on the thread running
+    /// the statement.
+    pub fn bounded(rows: usize) -> Self {
+        Self(Arc::new(Shared {
+            bound: Some(rows),
+            ..Shared::default()
+        }))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Fed> {
         self.0
+            .fed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -2556,10 +2579,21 @@ impl Feed {
         fed.columns = columns;
         fed.rows.clear();
         fed.filled = None;
+        self.0.room.notify_all();
     }
 
     pub(crate) fn push(&self, row: Row) {
-        self.lock().rows.push(row);
+        let mut fed = self.lock();
+        if let Some(bound) = self.0.bound {
+            // The wait lets go of the lock, so a describe or a take is never
+            // shut out by the push waiting on it.
+            fed = self
+                .0
+                .room
+                .wait_while(fed, |fed| fed.rows.len() >= bound)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        fed.rows.push(row);
     }
 
     /// The rows since the last take, under the set's columns, typed once the
@@ -2581,14 +2615,16 @@ impl Feed {
                 column.data_type = Some(data_type.clone());
             }
         }
-        Fed {
+        let taken = Fed {
             set: fed.set,
             columns,
             rows: std::mem::take(&mut fed.rows),
             types: Vec::new(),
             awaiting: None,
             filled: fed.filled,
-        }
+        };
+        self.0.room.notify_all();
+        taken
     }
 
     /// Types learned from a row rather than the description before it.
@@ -3283,6 +3319,35 @@ pub(super) mod at_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bounded_feed_holds_a_push_past_its_bound_until_rows_are_taken() {
+        let feed = Feed::bounded(2);
+        feed.begin(vec![Column {
+            name: "n".into(),
+            data_type: None,
+        }]);
+        let row = |n: &str| Row::new([Some(n)]).unwrap();
+        feed.push(row("1"));
+        feed.push(row("2"));
+        let (pushed, done) = std::sync::mpsc::channel();
+        let pusher = std::thread::spawn({
+            let feed = feed.clone();
+            move || {
+                feed.push(row("3"));
+                _ = pushed.send(());
+            }
+        });
+        assert!(
+            done.recv_timeout(Duration::from_millis(5)).is_err(),
+            "a push past the bound went through untaken"
+        );
+        assert_eq!(feed.take().rows.len(), 2);
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("a take makes room for the push");
+        pusher.join().unwrap();
+        assert_eq!(feed.take().rows.len(), 1);
+    }
 
     #[test]
     fn system_databases_are_listed_after_the_users_own_in_server_order() {
