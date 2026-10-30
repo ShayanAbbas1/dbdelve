@@ -125,7 +125,7 @@ impl Workspace {
 
     /// Read `path` and open `profile`'s dialog on it, in place of whatever
     /// file the dialog held, then read the table's columns for it.
-    fn open_import_file(
+    pub(super) fn open_import_file(
         &mut self,
         profile: String,
         schema: String,

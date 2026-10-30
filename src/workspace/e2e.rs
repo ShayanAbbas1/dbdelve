@@ -564,3 +564,218 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
         quit(workspace, cx);
     });
 }
+
+/// A key pressed and let go: a focused button clicks on the release, which
+/// `simulate_keystrokes` never sends.
+fn press(cx: &mut VisualTestContext, key: &str) {
+    let keystroke = gpui::Keystroke::parse(key).expect("a key the test names");
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke });
+    settle(cx);
+}
+
+fn in_dialog(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| workspace.read(cx).dialog_focus.contains_focused(window, cx))
+}
+
+fn front_dialog(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<&'static str> {
+    workspace.read_with(cx, |workspace, _| workspace.dialog_in_front.get())
+}
+
+fn palette_mode(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<PaletteMode> {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .palette
+            .as_ref()
+            .map(|palette| palette.read(cx).mode())
+    })
+}
+
+#[gpui::test]
+fn tab_walks_the_import_dialog_and_its_buttons_answer_the_keyboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let file = store::dbdelve_directory().unwrap().join("birds.csv");
+        std::fs::write(&file, "name\nwren\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().unwrap().id.clone();
+            workspace.open_import_file(profile, "main".into(), "birds".into(), file, window, cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        assert!(dialog_has_keyboard(&workspace, cx));
+        let format = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                dialog.map(|dialog| dialog.options.format)
+            })
+        };
+
+        // Change file…, then the format's CSV and TSV.
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        assert!(in_dialog(&workspace, cx));
+        assert!(!dialog_has_keyboard(&workspace, cx));
+        press(cx, "space");
+        assert_eq!(format(cx), Some(crate::import_rows::Format::Tsv));
+
+        // JSON, the header box, then the delimiter's list, which `escape` closes
+        // without taking the dialog down with it.
+        let in_menu = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains("PopupMenu"))
+            })
+        };
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        press(cx, "space");
+        assert!(in_menu(cx), "space opened no list");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(!in_menu(cx));
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+
+        // Round and round, never out of the dialog nor into its preview.
+        let preview = workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            dialog.unwrap().preview.clone()
+        });
+        for _ in 0..40 {
+            cx.simulate_keystrokes("tab");
+            settle(cx);
+            assert!(in_dialog(&workspace, cx));
+            cx.update(|window, cx| assert!(!preview.focus_handle(cx).is_focused(window)));
+        }
+
+        // The file is checked a moment after the last change to how it is read.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        let skip_lines = workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            assert_eq!(super::import_dialog::import_blocked(dialog.unwrap()), None);
+            dialog.unwrap().inputs.skip_lines.clone()
+        });
+        cx.update(|window, cx| skip_lines.focus_handle(cx).focus(window, cx));
+        press(cx, "enter");
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            let editing = matches!(dialog.unwrap().phase, crate::session::ImportPhase::Editing);
+            assert!(editing, "enter in a field started the import");
+        });
+
+        // From the dialog's own focus, back to Import and then Cancel.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.dialog_focus.focus(window, cx)
+        });
+        cx.simulate_keystrokes("shift-tab shift-tab");
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_import_question_picks_its_project_from_the_keyboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.pending_import = Some(super::PendingImport {
+                source: crate::import::Source::TablePlus,
+                report: crate::import::Report::default(),
+                fresh: 1,
+                project: Some("Imported from TablePlus".into()),
+            });
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-choice"));
+        assert_eq!(ringed_button(&workspace, cx), 0);
+
+        cx.simulate_keystrokes("left left");
+        settle(cx);
+        assert_eq!(
+            ringed_button(&workspace, cx),
+            2,
+            "the ring reaches the project"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx) == Some(PaletteMode::ImportProject));
+
+        cx.simulate_input("No project");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx).is_none());
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.pending_import.as_ref().unwrap().project, None);
+        });
+        assert_eq!(front_dialog(&workspace, cx), Some("import-choice"));
+        assert!(dialog_has_keyboard(&workspace, cx));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_ring_reaches_dont_ask_again_and_enter_or_space_ticks_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        cx.simulate_input("delete from birds");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+        assert_eq!(ringed_button(&workspace, cx), 0, "the ring starts on Run");
+        let dont_ask = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                session.pending_run.as_ref().map(|pending| pending.dont_ask)
+            })
+        };
+
+        for (keystroke, ringed, ticked) in [
+            // A space typed on as the prompt goes up presses nothing.
+            ("space", 0, false),
+            ("left left", 2, false),
+            ("enter", 2, true),
+            ("space", 2, false),
+            ("enter", 2, true),
+            ("tab", 1, true),
+            ("tab", 0, true),
+            ("tab", 2, true),
+        ] {
+            cx.simulate_keystrokes(keystroke);
+            settle(cx);
+            assert_eq!(ringed_button(&workspace, cx), ringed, "after {keystroke}");
+            assert_eq!(dont_ask(cx), Some(ticked), "after {keystroke}");
+            assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+        }
+
+        cx.simulate_keystrokes("right right enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert!(
+                profile
+                    .confirmed
+                    .contains(&crate::sql::Destructive::UnfilteredDelete),
+                "Run ran with the box ticked"
+            );
+        });
+
+        quit(workspace, cx);
+    });
+}

@@ -159,6 +159,8 @@ pub enum Mode {
     RowLimit,
     /// Every engine, to pick the connection form's.
     Engine,
+    /// Where the connections an import is asking about go.
+    ImportProject,
     /// What can be done to one connection, by index into the profiles, and to
     /// the project it is in.
     ConnectionActions(usize),
@@ -214,6 +216,7 @@ impl Mode {
             Mode::Columns => "Go to a column…",
             Mode::RowLimit => "Set the row limit…",
             Mode::Engine => "Pick an engine…",
+            Mode::ImportProject => "Choose the project they join…",
             Mode::ConnectionActions(_) | Mode::ProjectActions(_) => "Pick an action…",
             Mode::MoveToProject(_) => "Move to a project…",
             Mode::NameProject(None) => "Name the new project…",
@@ -243,6 +246,7 @@ impl Mode {
             Mode::Columns => "Columns",
             Mode::RowLimit => "Row limit",
             Mode::Engine => "Engines",
+            Mode::ImportProject => "Project",
             Mode::DeleteQuery => "Delete query",
             Mode::ConnectionActions(_) => "Connection",
             Mode::ProjectActions(_) => "Project",
@@ -425,6 +429,8 @@ pub enum Command {
     /// Add a filter bar and put the cursor in it.
     AddFilter,
     ToggleNextJoin,
+    /// `None` is No project.
+    SetImportProject(Option<String>),
     /// Put the palette back up over the row limits.
     PickRowLimit,
     SetRowLimit(Option<usize>),
@@ -1019,6 +1025,7 @@ impl Palette {
             (Mode::RowLimit, Some(profile)) => row_limit_items(&profile.session),
             (Mode::Search(_), None) => welcome_items(workspace),
             (Mode::Engine, _) => engine_items(workspace),
+            (Mode::ImportProject, _) => import_project_items(workspace),
             (_, None) => Vec::new(),
         };
         let import_pending = workspace.pending_import.is_some();
@@ -2042,7 +2049,11 @@ fn row_verb(mode: Mode, item: Option<&Item>, collapsed: &HashSet<String>) -> &'s
 /// lists them, and the one row that removes one.
 pub fn without_a_connection(mode: Mode, unavailable: bool) -> Option<Mode> {
     match mode {
-        Mode::Theme(_) | Mode::ImportTheme(..) | Mode::Engine | Mode::Font(_) => Some(mode),
+        Mode::Theme(_)
+        | Mode::ImportTheme(..)
+        | Mode::Engine
+        | Mode::Font(_)
+        | Mode::ImportProject => Some(mode),
         Mode::Search(_) if unavailable => Some(Mode::Search(Scope::Connections)),
         Mode::Search(Scope::Commands | Scope::All) => Some(mode),
         Mode::Confirm(Target::Unavailable(_)) if unavailable => Some(mode),
@@ -2344,6 +2355,43 @@ fn move_items(index: usize, id: &str, projects: &[StoredProject]) -> Vec<Item> {
         .hint(hint(current == Some(at)))
     }))
     .collect()
+}
+
+/// Where an import's connections can go, as its dialog's list offers them.
+fn import_project_items(workspace: &Workspace) -> Vec<Item> {
+    let picked = workspace
+        .pending_import
+        .as_ref()
+        .map(|pending| pending.project.clone());
+    workspace
+        .import_destinations()
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .map(|project| {
+            let hint = if picked.as_ref() == Some(&project) {
+                "current"
+            } else {
+                ""
+            };
+            let (label, icon) = match &project {
+                None => (NO_PROJECT.to_string(), icon::LEAVE_PROJECT),
+                Some(name) if workspace.import_makes(&project) => {
+                    (format!("{name} (new project)"), icon::PLUS)
+                }
+                Some(name) => (name.clone(), icon::PROJECT),
+            };
+            Item::new(label, icon, Command::SetImportProject(project)).hint(hint)
+        })
+        .collect()
+}
+
+/// Where [`import_project_items`] lists the project picked so far, for the
+/// palette to open on.
+pub(crate) fn picked_import_row(workspace: &Workspace) -> Option<usize> {
+    import_project_items(workspace)
+        .iter()
+        .position(|item| item.hint.as_ref() == "current")
 }
 
 /// Where [`move_items`] lists the connection's own project, for the palette

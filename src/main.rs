@@ -95,7 +95,7 @@ use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme,
 use ui::{
     Control, Tone, button, button_label, dialog, engine_logo, frosted_card, group_thousands,
     highlighted, human_bytes, icon_button, object_icon, one_line, relative_age, row_icon,
-    row_readout, section_label, segment, titlebar,
+    row_readout, section_label, segmented_choice, titlebar,
 };
 use workspace::Workspace;
 

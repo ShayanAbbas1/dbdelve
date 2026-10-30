@@ -37,9 +37,9 @@ use crate::{
         PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation,
         ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase,
         SelectTheme, SetDefault, SetEmpty, SetMode, SetNull, ShowAllColumns, ShowEditor,
-        ShowMessages, SortActiveColumn, SubmitConnection, SwitchConnection, ToggleComment,
-        ToggleNextJoin, TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        ShowMessages, SortActiveColumn, SubmitConnection, SwitchConnection, TickDialogBox,
+        ToggleComment, ToggleNextJoin, TogglePinColumn, ToggleResultsFocus, ToggleRowEdit,
+        ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -174,6 +174,9 @@ registry! {
     // run there: see `INERT_IN`.
     ("submit_connection", "Connect or Save Connection", Some("ConnectionForm"), ["secondary-enter"], SubmitConnection),
     ("confirm_dialog", "Dialog: Press Selected Button", Some("Dialog"), ["enter"], ConfirmDialog),
+    // Not the buttons': a space typed into a prompt that has just taken the
+    // keyboard must never press Run.
+    ("tick_dialog_box", "Dialog: Tick Selected Box", Some("Dialog"), ["space"], TickDialogBox),
     ("previous_dialog_button", "Dialog: Previous Button", Some("Dialog"), ["left", "shift-tab"], PreviousDialogButton),
     ("next_dialog_button", "Dialog: Next Button", Some("Dialog"), ["right", "tab"], NextDialogButton),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),

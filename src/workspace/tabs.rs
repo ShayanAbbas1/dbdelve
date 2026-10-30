@@ -753,6 +753,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A menu open from a dropdown or a cell closes on its own `escape`,
+        // which this unscoped binding would otherwise beat to it and take
+        // the dialog or form under the menu down instead.
+        if window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains("PopupMenu"))
+        {
+            cx.propagate();
+            return;
+        }
         if self.close_palette(window, cx) {
             return;
         }

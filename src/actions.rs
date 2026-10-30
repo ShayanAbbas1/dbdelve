@@ -152,6 +152,7 @@ actions!(
         ToggleComment,
         ShowEditor,
         ConfirmDialog,
+        TickDialogBox,
         PreviousDialogButton,
         NextDialogButton,
         SelectTheme,

@@ -249,6 +249,7 @@ impl Workspace {
             PaletteMode::RowLimit => self
                 .profile()
                 .and_then(crate::palette::active_row_limit_row),
+            PaletteMode::ImportProject => crate::palette::picked_import_row(self),
             _ => None,
         };
         // A list put up in place of one opened from the panel, or by a row
@@ -736,6 +737,10 @@ impl Workspace {
                 self.focus_filter(window, cx);
             }
             Command::ToggleNextJoin => self.toggle_next_join(&ToggleNextJoin, window, cx),
+            Command::SetImportProject(project) => {
+                self.set_import_project(project);
+                cx.notify();
+            }
             Command::PickRowLimit => self.open_palette(PaletteMode::RowLimit, window, cx),
             Command::SetRowLimit(rows) => {
                 match self
