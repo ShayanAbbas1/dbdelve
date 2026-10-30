@@ -1078,6 +1078,7 @@ pub(crate) enum Focus {
     /// gpui-component 0.8 splits the code editor off from the plain input.
     Field(Entity<InputState>),
     Grid(Entity<TableState<ResultGrid>>),
+    Structure(Entity<TableState<StructureGrid>>),
     /// The window itself, for a surface with nothing in it to type into. Not a
     /// no-op: a keystroke only reaches the workspace along the focused
     /// element's dispatch path, so focusing nothing at all is what makes every

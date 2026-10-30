@@ -2578,20 +2578,34 @@ fn render_structure(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
+    // The grid's own focus handle, held by the line standing in for it: the
+    // tab gives the grid focus as it opens, and a handle no element tracks
+    // leaves the window with no dispatch path at all.
+    let standing_in = |line: AnyElement| {
+        div()
+            .size_full()
+            .track_focus(&grid.focus_handle(cx))
+            .child(line)
+            .into_any_element()
+    };
     let structure = match state {
         StructureState::Loading => {
-            return div()
-                .p(px(layout::SPACE_LG))
-                .text_color(t.text_muted)
-                .child("Loading structure…")
-                .into_any_element();
+            return standing_in(
+                div()
+                    .p(px(layout::SPACE_LG))
+                    .text_color(t.text_muted)
+                    .child("Loading structure…")
+                    .into_any_element(),
+            );
         }
         StructureState::Failed(message) => {
-            return div()
-                .p(px(layout::SPACE_LG))
-                .text_color(t.danger)
-                .child(message.clone())
-                .into_any_element();
+            return standing_in(
+                div()
+                    .p(px(layout::SPACE_LG))
+                    .text_color(t.danger)
+                    .child(message.clone())
+                    .into_any_element(),
+            );
         }
         StructureState::Loaded(structure) => structure,
     };

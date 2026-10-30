@@ -1210,13 +1210,12 @@ impl Render for Workspace {
                     .map(|tab| &tab.body)
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
+                    Some(ObjectBody::Structure { grid, .. }) => Focus::Structure(grid.clone()),
                     // A routine's tab is read: nothing in it takes a
-                    // keystroke; a structure tab's grid takes focus on a click. The window still has to hold focus, or the
+                    // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_) | ObjectBody::Structure { .. }) | None => {
-                        Focus::Window
-                    }
+                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -1252,6 +1251,7 @@ impl Render for Workspace {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
             Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
+            Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
