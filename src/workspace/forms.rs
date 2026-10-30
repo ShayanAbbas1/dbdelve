@@ -1999,7 +1999,8 @@ impl Workspace {
     }
 
     /// The database the connection is on and, where the engine has one, the
-    /// active schema, each a step after the connection that opens its picker.
+    /// active schema, each a step after the connection that opens its picker,
+    /// and the way to read what they hold again.
     pub(crate) fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = *theme(cx);
         let Some(profile) = self.profile() else {
@@ -2045,6 +2046,7 @@ impl Workspace {
                 .into_any_element(),
             );
         }
+        steps.push(self.render_refresh_schema(profile, t).into_any_element());
         steps
     }
 
@@ -2116,8 +2118,8 @@ impl Workspace {
     /// Dispatches what the shortcut does, so the two cannot come apart.
     fn render_refresh_schema(&self, profile: &Profile, t: Theme) -> Button {
         if profile.refreshing_schema() {
-            return ui::control("refresh-schema", Tone::Quiet, Control::Inline)
-                .w(px(Control::Inline.height()))
+            return ui::control("refresh-schema", Tone::Quiet, Control::Compact)
+                .w(px(Control::Compact.height()))
                 .p_0()
                 .loading(true)
                 .child(
@@ -2135,7 +2137,7 @@ impl Workspace {
             "refresh-schema",
             icon::REFRESH,
             Tone::Quiet,
-            Control::Inline,
+            Control::Compact,
             t,
         )
         .tooltip(tooltip)
@@ -2444,8 +2446,7 @@ impl Workspace {
                                 .min_w_0()
                                 .appearance(false),
                         ),
-                    )
-                    .child(self.render_refresh_schema(profile, t)),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(content))
     }

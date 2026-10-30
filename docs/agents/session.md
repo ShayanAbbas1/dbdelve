@@ -111,7 +111,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   profile's state the same way in the status bar and on each connection row in
   the palette.
 - **Refresh keeps the session; only a dead one is replaced.**
-  `RefreshConnection`, from `Cmd+Shift+R`, the palette and the sidebar's button
+  `RefreshConnection`, from `Cmd+Shift+R`, the palette and the titlebar's button
   alike, runs `Workspace::refresh_schema`: the relations and routines are read
   and land together, sizes follow, and the object tabs go stale as they do on a
   reconnect. An open transaction, a `SET` and a temporary table survive it: the
