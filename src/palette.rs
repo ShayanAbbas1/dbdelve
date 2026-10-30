@@ -3308,10 +3308,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
 
-    // The cell menu's own entries, offered where it offers them.
-    if let Some(grid) = session
+    // The cell menu's own entries, offered where it offers them: on a grid
+    // on screen, which a plan or the messages stand in front of.
+    let grid_shown = session
+        .active_query_tab()
+        .is_none_or(|tab| tab.plan_shown().is_none() && !tab.messages_shown());
+    let shown_grid = session
         .active_results()
-        .map(|results| results.read(cx).delegate())
+        .filter(|_| grid_shown)
+        .map(|results| results.read(cx).delegate());
+    if let Some(grid) = shown_grid
         && let Some((row, col)) = grid.active()
         && let Some(name) = grid.columns().get(col).map(|column| column.name.clone())
     {
@@ -3392,9 +3398,8 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
     // Not the active cell's: the columns come back whichever cell is ringed.
-    if let Some(hidden) = session
-        .active_results()
-        .map(|results| results.read(cx).delegate().hidden_columns())
+    if let Some(hidden) = shown_grid
+        .map(|grid| grid.hidden_columns())
         .filter(|hidden| *hidden > 0)
     {
         items.push(bound(
