@@ -2452,6 +2452,8 @@ impl Workspace {
                 };
                 let import_workspace = menu_workspace.clone();
                 let import_names = (schema.clone(), relation.clone());
+                let export_workspace = menu_workspace.clone();
+                let export_names = (schema.clone(), relation.clone());
                 let mut menu = menu
                     .item(open("Open Data", false))
                     .item(open("Open Structure", true));
@@ -2461,6 +2463,16 @@ impl Workspace {
                             let (schema, relation) = import_names.clone();
                             _ = import_workspace.update(cx, |workspace, cx| {
                                 workspace.import_rows_into(schema, relation, window, cx);
+                            });
+                        },
+                    ));
+                }
+                if engine.syntax() == db::Syntax::Sql {
+                    menu = menu.item(PopupMenuItem::new("Export as SQL…").on_click(
+                        move |_, _, cx| {
+                            let (schema, relation) = export_names.clone();
+                            _ = export_workspace.update(cx, |workspace, cx| {
+                                workspace.export_relation(schema, relation, cx);
                             });
                         },
                     ));

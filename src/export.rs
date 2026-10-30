@@ -1,7 +1,7 @@
 //! Rendering a `QueryResult` to a file format for "Export Results".
 //!
 //! The format is decided once, from the file extension the user picked in the
-//! save dialog (`Format::for_path`), and every caller routes through it rather
+//! save dialog (`FileAs::for_path`), and every caller routes through it rather
 //! than guessing again — a `.json` and a `.csv` button are two menu items, not
 //! two code paths.
 
@@ -39,6 +39,126 @@ impl Format {
             Format::Tsv => "tsv",
             Format::Json => "json",
         }
+    }
+}
+
+/// What an export's file holds. Apart from `Format` because `INSERT`s need
+/// an engine and a table to name, which the clipboard's formats never do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileAs {
+    Rows(Format),
+    Inserts,
+}
+
+impl FileAs {
+    /// `.sql` on an engine that does not read SQL falls back as any other
+    /// unknown extension does, and the notice says what was written.
+    pub fn for_path(path: &Path, engine: Engine) -> Self {
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("sql") && engine.syntax() == Syntax::Sql => {
+                FileAs::Inserts
+            }
+            _ => FileAs::Rows(Format::for_path(path)),
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            FileAs::Rows(format) => format.extension(),
+            FileAs::Inserts => "sql",
+        }
+    }
+
+    pub fn writer<W: Write>(
+        self,
+        out: W,
+        engine: Engine,
+        target: &InsertTarget,
+        columns: &[Column],
+    ) -> io::Result<Writer<W>> {
+        match self {
+            FileAs::Rows(format) => Writer::new(out, format, columns),
+            FileAs::Inserts => {
+                let inserts = Inserts::new(engine, target, columns);
+                Writer::with_shape(out, Shape::Inserts(inserts), columns)
+            }
+        }
+    }
+}
+
+/// Where a result's `INSERT`s write. With no relation they say `table_name`
+/// and leave the naming to whoever runs them; with no columns they write each
+/// result column under its own (possibly aliased) name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InsertTarget {
+    /// Schema and table.
+    pub relation: Option<(String, String)>,
+    /// The result column's real source, positionally -- `None` for a computed
+    /// one (`now() AS t`), which has nowhere to write back to.
+    pub columns: Option<Vec<Option<String>>>,
+}
+
+impl From<&EditTarget> for InsertTarget {
+    fn from(edit: &EditTarget) -> Self {
+        Self {
+            relation: Some((edit.schema.clone(), edit.table.clone())),
+            columns: Some(edit.columns.clone()),
+        }
+    }
+}
+
+/// The statement shape of one result, spelled once and filled per row.
+struct Inserts {
+    engine: Engine,
+    opening: String,
+    /// The result columns that are written, by position.
+    written: Vec<(usize, Column)>,
+}
+
+impl Inserts {
+    fn new(engine: Engine, target: &InsertTarget, columns: &[Column]) -> Self {
+        let into = target.relation.as_ref().map_or_else(
+            || "table_name".to_string(),
+            |(schema, table)| engine.qualified(schema, table),
+        );
+        // A statement fetched again may have come back a different shape from
+        // the result its target was read from, and a source named for the
+        // wrong column would write values under it.
+        let sources = target
+            .columns
+            .as_ref()
+            .filter(|sources| sources.len() == columns.len());
+        let written: Vec<(usize, &str, &Column)> = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| match sources {
+                Some(sources) => sources[index].as_deref().map(|name| (index, name, column)),
+                None => Some((index, column.name.as_str(), column)),
+            })
+            .collect();
+        let names = written
+            .iter()
+            .map(|(_, name, _)| engine.quote_identifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self {
+            engine,
+            opening: format!("INSERT INTO {into} ({names}) VALUES ("),
+            written: written
+                .into_iter()
+                .map(|(index, _, column)| (index, column.clone()))
+                .collect(),
+        }
+    }
+
+    fn statement(&self, row: &Row) -> String {
+        let values = self
+            .written
+            .iter()
+            .map(|(index, column)| insert_literal(self.engine, row.get(*index), column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}{values});", self.opening)
     }
 }
 
@@ -82,10 +202,8 @@ impl RowsAs {
 }
 
 /// The rows of `result` as clipboard text. `edit` is where the rows came
-/// from, for `INSERT` to name; without one it says `table_name` and leaves
-/// the naming to whoever pastes it, writing every result column under its own
-/// (possibly aliased) name for lack of a mapping back to real ones. Nothing
-/// here runs: it is text, and the statement is the user's to run or not.
+/// from, for `INSERT` to name. Nothing here runs: it is text, and the
+/// statement is the user's to run or not.
 pub fn render_rows_as(
     kind: RowsAs,
     engine: Engine,
@@ -111,43 +229,12 @@ pub fn render_rows_as(
         }
         RowsAs::Json => render(Format::Json, result),
         RowsAs::InsertSql => {
-            let target = edit.map_or_else(
-                || "table_name".to_string(),
-                |edit| engine.qualified(&edit.schema, &edit.table),
-            );
-            // `edit.columns` is the result column's real source, positionally
-            // -- `None` for a computed one (`now() AS t`), which has nowhere
-            // to write back to and is dropped rather than named by its alias.
-            let sources: Vec<Option<&str>> = match edit {
-                Some(edit) => edit.columns.iter().map(|c| c.as_deref()).collect(),
-                None => result
-                    .columns
-                    .iter()
-                    .map(|c| Some(c.name.as_str()))
-                    .collect(),
-            };
-            let columns = result
-                .columns
-                .iter()
-                .zip(&sources)
-                .filter_map(|(_, source)| source.map(|name| engine.quote_identifier(name)))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let target = edit.map(InsertTarget::from).unwrap_or_default();
+            let inserts = Inserts::new(engine, &target, &result.columns);
             result
                 .rows
                 .iter()
-                .map(|row| {
-                    let values = row
-                        .iter()
-                        .zip(&result.columns)
-                        .zip(&sources)
-                        .filter_map(|((cell, column), source)| {
-                            source.map(|_| insert_literal(engine, cell, column))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("INSERT INTO {target} ({columns}) VALUES ({values});")
-                })
+                .map(|row| inserts.statement(row))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -261,6 +348,7 @@ enum Shape {
     Delimited(char),
     /// Each column's key, already spelled as a JSON string.
     Json(Vec<String>),
+    Inserts(Inserts),
 }
 
 impl Shape {
@@ -358,6 +446,12 @@ impl<W: Write> Writer<W> {
                         _ => b"\n  }",
                     })?;
                     self.written += 1;
+                }
+            }
+            Shape::Inserts(inserts) => {
+                for row in rows {
+                    out.write_all(inserts.statement(row).as_bytes())?;
+                    out.write_all(b"\n")?;
                 }
             }
         }
@@ -637,6 +731,65 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(parsed, expected, "{text}");
         }
+    }
+
+    fn inserts_file(target: &InsertTarget, result: &QueryResult) -> String {
+        let mut writer = FileAs::Inserts
+            .writer(Vec::new(), Engine::Postgres, target, &result.columns)
+            .unwrap();
+        writer.rows(&result.rows, &[]).unwrap();
+        String::from_utf8(writer.finish().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_file_of_inserts_holds_one_terminated_statement_a_row() {
+        let result = QueryResult {
+            columns: vec![column("id"), column("note")],
+            rows: rows(vec![
+                vec![Some("7".into()), Some("it's".into())],
+                vec![Some("8".into()), None],
+            ]),
+            ..QueryResult::default()
+        };
+        let target = InsertTarget {
+            relation: Some(("public".into(), "notes".into())),
+            columns: None,
+        };
+        assert_eq!(
+            inserts_file(&target, &result),
+            "INSERT INTO \"public\".\"notes\" (\"id\", \"note\") VALUES ('7', 'it''s');\n\
+             INSERT INTO \"public\".\"notes\" (\"id\", \"note\") VALUES ('8', NULL);\n"
+        );
+    }
+
+    #[test]
+    fn sources_that_no_longer_line_up_fall_back_to_the_columns_own_names() {
+        let result = QueryResult {
+            columns: vec![column("a"), column("b")],
+            rows: rows(vec![vec![Some("1".into()), Some("2".into())]]),
+            ..QueryResult::default()
+        };
+        let target = InsertTarget {
+            relation: None,
+            columns: Some(vec![Some("only".into())]),
+        };
+        assert_eq!(
+            inserts_file(&target, &result),
+            "INSERT INTO table_name (\"a\", \"b\") VALUES ('1', '2');\n"
+        );
+    }
+
+    #[test]
+    fn dot_sql_writes_inserts_only_where_the_server_reads_sql() {
+        let path = Path::new("rows.SQL");
+        assert_eq!(FileAs::for_path(path, Engine::Postgres), FileAs::Inserts);
+        for engine in [Engine::MongoDb, Engine::Redis] {
+            assert_eq!(FileAs::for_path(path, engine), FileAs::Rows(Format::Csv));
+        }
+        assert_eq!(
+            FileAs::for_path(Path::new("rows.json"), Engine::Postgres),
+            FileAs::Rows(Format::Json)
+        );
     }
 
     #[test]

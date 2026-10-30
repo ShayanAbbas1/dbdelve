@@ -541,7 +541,7 @@ pub(crate) struct PendingRun {
 /// Export over a grid holding less than its result, waiting on the dialog
 /// that asks whether to write the rows shown or fetch every row again.
 pub(crate) struct PendingExport {
-    pub(crate) format: crate::export::Format,
+    pub(crate) format: crate::export::FileAs,
     /// The tab it was asked over.
     pub(crate) tab: Tab,
     pub(crate) showing: usize,

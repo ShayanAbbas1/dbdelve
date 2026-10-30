@@ -1200,7 +1200,8 @@ fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
 
         for (dismiss, typed) in [("escape", " "), ("tab tab enter", "x")] {
             workspace.update(cx, |workspace, cx| {
-                workspace.export_results(crate::export::Format::Csv, cx);
+                workspace
+                    .export_results(crate::export::FileAs::Rows(crate::export::Format::Csv), cx);
             });
             settle(cx);
             workspace.read_with(cx, |workspace, _| {

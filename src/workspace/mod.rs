@@ -1669,6 +1669,7 @@ impl Render for Workspace {
         let copy_workspace = apply_workspace.clone();
         let csv_workspace = apply_workspace.clone();
         let json_workspace = apply_workspace.clone();
+        let sql_workspace = apply_workspace.clone();
         let refresh_workspace = apply_workspace.clone();
         let ddl_workspace = apply_workspace.clone();
         let insert_workspace = apply_workspace.clone();
@@ -1792,7 +1793,7 @@ impl Render for Workspace {
                             })
                         }))
                         // Named, not one button over a menu: the choice is
-                        // between two things, and a control that opens
+                        // between a few things, and a control that opens
                         // another control to ask which is a click spent on
                         // nothing. It also puts the format on screen, which
                         // a lone "Export" left to the file extension.
@@ -1800,7 +1801,7 @@ impl Render for Workspace {
                             button("export-csv", "Export CSV", Tone::Quiet, Control::Compact, t)
                                 .on_click(move |_, _, cx| {
                                     _ = csv_workspace.update(cx, |workspace, cx| {
-                                        workspace.export_results(Format::Csv, cx);
+                                        workspace.export_results(FileAs::Rows(Format::Csv), cx);
                                     });
                                 })
                         }))
@@ -1814,10 +1815,30 @@ impl Render for Workspace {
                             )
                             .on_click(move |_, _, cx| {
                                 _ = json_workspace.update(cx, |workspace, cx| {
-                                    workspace.export_results(Format::Json, cx);
+                                    workspace.export_results(FileAs::Rows(Format::Json), cx);
                                 });
                             })
                         }))
+                        .children(
+                            (show_result_actions && engine.syntax() == db::Syntax::Sql).then(
+                                || {
+                                    button(
+                                        "export-sql",
+                                        "Export SQL",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = sql_workspace.update(cx, |workspace, cx| {
+                                                workspace.export_results(FileAs::Inserts, cx);
+                                            });
+                                        },
+                                    )
+                                },
+                            ),
+                        )
                         .children(structure_copies.map(|(ddl, insert)| {
                             div()
                                 .flex()

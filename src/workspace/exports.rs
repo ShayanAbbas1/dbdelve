@@ -18,7 +18,7 @@ use gpui_component::ActiveTheme;
 use super::editing::Short;
 use super::*;
 use crate::db::{Column, Feed, Fetch, QueryResult, Row};
-use crate::export::Writer;
+use crate::export::{FileAs, InsertTarget, Writer};
 use crate::session::{ExportProgress, Exporting, PendingExport, Refetch};
 use crate::sql::Destructive;
 use crate::ui::code_lines;
@@ -50,7 +50,7 @@ impl Workspace {
     /// number on the row-limit chip a lie, and run SQL nobody asked for.
     /// Pending edits are not written either way: this is the result set the
     /// server returned, and applying them is a separate, visible act.
-    pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
+    pub(crate) fn export_results(&mut self, format: FileAs, cx: &mut Context<Self>) {
         if !self.has_results(cx) {
             return;
         }
@@ -74,6 +74,60 @@ impl Workspace {
             every_row,
         });
         cx.notify();
+    }
+
+    /// Every row of a relation the sidebar names, as `INSERT`s, whether or not
+    /// it is open. There is no page to ask about, so no dialog: the menu item
+    /// said what it would do, and the save panel can still back out of it.
+    pub(crate) fn export_relation(
+        &mut self,
+        schema: String,
+        relation: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let engine = profile.config.engine();
+        let refetch = relation_refetch(engine, &schema, &relation, "", &[], &[])
+            .and_then(|refetch| self.cleared(refetch));
+        let refetch = match refetch {
+            Ok(refetch) => refetch,
+            Err(reason) => {
+                self.note(format!("All rows were not exported: {reason}"), cx);
+                return;
+            }
+        };
+        let target = InsertTarget {
+            relation: Some((schema, relation.clone())),
+            columns: None,
+        };
+        self.export_every_row(FileAs::Inserts, refetch, relation, target, cx);
+    }
+
+    /// What the rows in front of the user write back to: the table of a
+    /// relation tab even where it could not be edited, a view or a keyless
+    /// table, since its `SELECT *` names real columns regardless.
+    fn insert_target(&self, cx: &App) -> InsertTarget {
+        let Some(profile) = self.profile() else {
+            return InsertTarget::default();
+        };
+        let mut target = profile
+            .session
+            .active_results()
+            .and_then(|results| {
+                let result = results.read(cx).delegate().result();
+                result.edit.as_ref().map(InsertTarget::from)
+            })
+            .unwrap_or_default();
+        if let Some(tab) = profile.session.active_object()
+            && matches!(tab.body, ObjectBody::Relation { .. })
+        {
+            target
+                .relation
+                .get_or_insert_with(|| (tab.schema.clone(), tab.name.clone()));
+        }
+        target
     }
 
     /// A relation tab's page, when it may not be the whole relation: a later
@@ -101,9 +155,6 @@ impl Workspace {
     /// why there is none to run.
     fn refetch(&self) -> Result<Refetch, &'static str> {
         let profile = self.profile().ok_or("the connection is gone.")?;
-        if profile.session.exporting.is_some() {
-            return Err("an export of every row is already running on this connection.");
-        }
         let engine = profile.config.engine();
         let refetch = match profile.session.active {
             Tab::Query(id) => {
@@ -146,20 +197,20 @@ impl Workspace {
                     StructureState::Loaded(structure) => structure.row_key(),
                     _ => Vec::new(),
                 };
-                // Through the gates `requery_relation` puts the page through.
-                let sql = relation_sql(engine, &tab.schema, &tab.name, filter, sort, None, 0);
-                let sql = sql::is_generated_select(engine, &sql)
-                    .then(|| sql::paged(engine, &sql, &key))
-                    .flatten()
-                    .ok_or("dbdelve cannot read this tab's filter as one query.")?;
-                Refetch {
-                    sql,
-                    generated: true,
-                }
+                relation_refetch(engine, &tab.schema, &tab.name, filter, sort, &key)?
             }
         };
+        self.cleared(refetch)
+    }
+
+    /// `refetch`, or why this connection may not run it now.
+    fn cleared(&self, refetch: Refetch) -> Result<Refetch, &'static str> {
+        let profile = self.profile().ok_or("the connection is gone.")?;
+        if profile.session.exporting.is_some() {
+            return Err("an export of every row is already running on this connection.");
+        }
         match refetch_refusal(
-            engine,
+            profile.config.engine(),
             &refetch,
             profile.mode,
             &profile.confirmed,
@@ -171,8 +222,9 @@ impl Workspace {
     }
 
     /// The rows the grid in front holds, written to a file the user picks.
-    fn export_shown(&mut self, format: Format, cx: &mut Context<Self>) {
+    fn export_shown(&mut self, format: FileAs, cx: &mut Context<Self>) {
         let stem = self.export_stem();
+        let target = self.insert_target(cx);
         let Some(profile) = self.profile() else {
             return;
         };
@@ -192,6 +244,7 @@ impl Workspace {
         }
         let id = profile.id.clone();
         let generation = profile.generation;
+        let engine = profile.config.engine();
         let rows = result.rows.len();
         let chosen = choose_path(&stem, format, cx);
 
@@ -209,11 +262,12 @@ impl Workspace {
                     // asked for JSON. Which is why the notice says which one it
                     // wrote -- that rename is the one thing they could have got
                     // wrong, and the file name alone does not read it back.
-                    let format = Format::for_path(&path);
+                    let format = FileAs::for_path(&path, engine);
                     let written = write_replacing(&path, |out| {
                         let failed = could_not_write(&path);
-                        let mut writer =
-                            Writer::new(out, format, &result.columns).map_err(&failed)?;
+                        let mut writer = format
+                            .writer(out, engine, &target, &result.columns)
+                            .map_err(&failed)?;
                         writer
                             .rows(&result.rows, &result.cell_types)
                             .map_err(&failed)?;
@@ -276,7 +330,10 @@ impl Workspace {
             return;
         }
         match (every_row, pending.every_row) {
-            (true, Ok(refetch)) => self.export_every_row(pending.format, refetch, cx),
+            (true, Ok(refetch)) => {
+                let (stem, target) = (self.export_stem(), self.insert_target(cx));
+                self.export_every_row(pending.format, refetch, stem, target, cx);
+            }
             _ => self.export_shown(pending.format, cx),
         }
     }
@@ -291,8 +348,14 @@ impl Workspace {
         cancelled
     }
 
-    fn export_every_row(&mut self, format: Format, refetch: Refetch, cx: &mut Context<Self>) {
-        let stem = self.export_stem();
+    fn export_every_row(
+        &mut self,
+        format: FileAs,
+        refetch: Refetch,
+        stem: String,
+        target: InsertTarget,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profile() else {
             return;
         };
@@ -303,7 +366,7 @@ impl Workspace {
                 return;
             };
             _ = workspace.update(cx, |workspace, cx| {
-                workspace.start_export(&id, generation, refetch, path, cx);
+                workspace.start_export(&id, generation, refetch, target, path, cx);
             });
         })
         .detach();
@@ -317,6 +380,7 @@ impl Workspace {
         id: &str,
         generation: u64,
         refetch: Refetch,
+        target: InsertTarget,
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
@@ -386,7 +450,17 @@ impl Workspace {
 
         let task = cx.background_executor().spawn(on_own_thread({
             let (path, progress) = (path.clone(), progress.clone());
-            move || export_every_row(&connection, &refetch, read_only, engine, &path, &progress)
+            move || {
+                export_every_row(
+                    &connection,
+                    &refetch,
+                    &target,
+                    read_only,
+                    engine,
+                    &path,
+                    &progress,
+                )
+            }
         }));
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -415,7 +489,7 @@ impl Workspace {
                 };
                 match ended {
                     Ok(rows) => {
-                        let message = exported(rows, Format::for_path(&path), &path);
+                        let message = exported(rows, FileAs::for_path(&path, engine), &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -590,13 +664,34 @@ impl Workspace {
 /// The save panel, opened on the home directory with `stem` named in it.
 fn choose_path(
     stem: &str,
-    format: Format,
+    format: FileAs,
     cx: &mut Context<Workspace>,
 ) -> impl Future<Output = Option<PathBuf>> + use<> {
     let suggested = format!("{stem}.{}", format.extension());
     let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
     let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
     async move { chosen.await.ok()?.ok()? }
+}
+
+/// The statement that fetches every row of a relation, through the gates
+/// `requery_relation` puts a page through.
+fn relation_refetch(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    filter: &str,
+    sort: &[SortKey],
+    key: &[String],
+) -> Result<Refetch, &'static str> {
+    let sql = relation_sql(engine, schema, relation, filter, sort, None, 0);
+    let sql = sql::is_generated_select(engine, &sql)
+        .then(|| sql::paged(engine, &sql, key))
+        .flatten()
+        .ok_or("dbdelve cannot read this tab's filter as one query.")?;
+    Ok(Refetch {
+        sql,
+        generated: true,
+    })
 }
 
 /// Why fetching every row of `refetch` again for an export is refused, or
@@ -646,7 +741,7 @@ pub(crate) fn refetch_refusal(
     None
 }
 
-fn exported(rows: usize, format: Format, path: &Path) -> String {
+fn exported(rows: usize, format: FileAs, path: &Path) -> String {
     format!(
         "Exported {} {} as {} to {}.",
         group_thousands(rows as u64),
@@ -726,6 +821,7 @@ fn staging(path: &Path) -> io::Result<(PathBuf, File)> {
 fn export_every_row(
     connection: &Connection,
     refetch: &Refetch,
+    target: &InsertTarget,
     read_only: bool,
     engine: Engine,
     path: &Path,
@@ -733,8 +829,9 @@ fn export_every_row(
 ) -> Result<usize, Ended> {
     write_replacing(path, |out| {
         let sink = Sink {
-            format: Format::for_path(path),
+            format: FileAs::for_path(path, engine),
             engine,
+            target,
             path,
             out: Some(out),
             writer: None,
@@ -870,8 +967,9 @@ fn several_sets() -> Ended {
 /// Where an export's rows go: the file, behind a writer made once the first
 /// rows say what the columns are.
 struct Sink<'a> {
-    format: Format,
+    format: FileAs,
     engine: Engine,
+    target: &'a InsertTarget,
     path: &'a Path,
     out: Option<&'a mut BufWriter<File>>,
     writer: Option<Writer<&'a mut BufWriter<File>>>,
@@ -901,7 +999,8 @@ impl Sink<'_> {
                 .out
                 .take()
                 .expect("a sink without a writer has its file");
-            self.writer = Some(Writer::new(out, self.format, columns).map_err(&failed)?);
+            let writer = self.format.writer(out, self.engine, self.target, columns);
+            self.writer = Some(writer.map_err(&failed)?);
         }
         let writer = self.writer.as_mut().expect("made above");
         writer.rows(&rows, cell_types).map_err(failed)?;
@@ -1096,8 +1195,9 @@ mod tests {
             };
             write_replacing(&path, |out| {
                 let sink = Sink {
-                    format: Format::Csv,
+                    format: FileAs::Rows(Format::Csv),
                     engine: Engine::MongoDb,
+                    target: &InsertTarget::default(),
                     path: &path,
                     out: Some(out),
                     writer: None,
@@ -1141,6 +1241,7 @@ mod tests {
         let written = export_every_row(
             &connection,
             &refetch,
+            &InsertTarget::default(),
             true,
             Engine::Sqlite,
             &path,
@@ -1158,6 +1259,7 @@ mod tests {
         let written = export_every_row(
             &connection,
             &refetch,
+            &InsertTarget::default(),
             true,
             Engine::Sqlite,
             &path,
@@ -1166,6 +1268,47 @@ mod tests {
         assert_eq!(written, Err(Ended::Cancelled));
         assert!(!path.exists());
         assert_eq!(staged(&directory), Vec::<PathBuf>::new());
+        _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_relation_exported_as_sql_runs_back_into_a_copy_of_it() {
+        let directory = scratch("inserts");
+        let database = directory.join("rows.db");
+        std::fs::write(&database, b"").unwrap();
+        let connection = Connection::open(ConnectionConfig::Sqlite {
+            path: database.display().to_string(),
+            statement_timeout: 0,
+        })
+        .unwrap();
+        let cancel = CancelToken::default();
+        let run = |sql: &str| connection.query(sql, &cancel, Fetch::default()).unwrap();
+        run("CREATE TABLE notes (id INTEGER, note TEXT, ratio REAL, data BLOB)");
+        run("INSERT INTO notes VALUES (1, 'it''s', 1.5, x'ABCD'), (2, NULL, NULL, NULL)");
+
+        let path = directory.join("notes.sql");
+        let refetch = relation_refetch(Engine::Sqlite, "main", "notes", "", &[], &[]).unwrap();
+        let target = InsertTarget {
+            relation: Some(("main".into(), "notes".into())),
+            columns: None,
+        };
+        let written = export_every_row(
+            &connection,
+            &refetch,
+            &target,
+            true,
+            Engine::Sqlite,
+            &path,
+            &ExportProgress::default(),
+        );
+        assert_eq!(written, Ok(2));
+
+        let before = run("SELECT * FROM notes ORDER BY id").rows;
+        run("DELETE FROM notes");
+        for statement in std::fs::read_to_string(&path).unwrap().lines() {
+            run(statement);
+        }
+        assert_eq!(run("SELECT * FROM notes ORDER BY id").rows, before);
         _ = std::fs::remove_dir_all(&directory);
     }
 }
