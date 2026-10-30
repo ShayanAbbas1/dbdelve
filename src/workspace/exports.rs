@@ -399,15 +399,20 @@ impl Workspace {
                 if !workspace.export_running(&id, started) {
                     return;
                 }
-                let Some(profile) = workspace
+                if let Some(profile) = workspace
                     .profiles
                     .iter_mut()
                     .find(|profile| profile.id == id)
-                else {
+                {
+                    profile.session.exporting = None;
+                }
+                cx.notify();
+                // What it ended in, though, is news only to the session that
+                // asked for it, not to one a reconnect or a database switch
+                // has put in its place.
+                let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
-                profile.session.exporting = None;
-                let generation = profile.generation;
                 match ended {
                     Ok(rows) => {
                         let message = exported(rows, Format::for_path(&path), &path);
@@ -416,7 +421,6 @@ impl Workspace {
                     }
                     Err(ended) => profile.session.notice = Some(ended.notice(&path)),
                 }
-                cx.notify();
             });
         })
         .detach();
