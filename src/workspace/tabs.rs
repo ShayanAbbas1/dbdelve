@@ -412,6 +412,43 @@ impl Workspace {
         self.cycle_tab(-1, window, cx);
     }
 
+    pub(crate) fn move_tab_left(
+        &mut self,
+        _: &MoveTabLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_tab(-1, cx);
+    }
+
+    pub(crate) fn move_tab_right(
+        &mut self,
+        _: &MoveTabRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_tab(1, cx);
+    }
+
+    /// The keyboard's drag: the chip in front trades places with its
+    /// neighbour, and the strip keeps the order as a drop does.
+    pub(crate) fn move_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+        let Some(session) = self.profile_mut().map(|profile| &mut profile.session) else {
+            return;
+        };
+        if !session.move_active_tab(step) {
+            return;
+        }
+        if let Some(index) = session
+            .strip_order()
+            .iter()
+            .position(|key| session.tab_of(key) == Some(session.active))
+        {
+            crate::scroller::scroll_to("tab-strip", "", index, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn select_theme(
         &mut self,
         _: &SelectTheme,

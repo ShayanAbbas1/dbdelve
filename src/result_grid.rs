@@ -1332,6 +1332,11 @@ impl ResultGrid {
         self.foreign_keys.contains(&col)
     }
 
+    /// What a row opens, by the name its opened column holds.
+    pub fn opens(&self, row: usize) -> Option<&str> {
+        self.opened.and_then(|opened| self.cell(row, opened))
+    }
+
     /// The whole value behind a cell, not the clipped one the grid paints: a
     /// column is a couple of hundred pixels wide and a JSONB document is not,
     /// and copying what happens to fit would be the same bug as reading a value
@@ -2792,16 +2797,13 @@ impl TableDelegate for ResultGrid {
         let name = &self.result.columns[col].name;
         // The row's own name for it, which is the one thing a generic label
         // could not say.
-        let opens = self
-            .opened
-            .and_then(|opened| self.cell(row, opened))
-            .map(|name| {
-                let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
-                match short.len() < name.len() {
-                    true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
-                    false => format!("Open \u{201c}{name}\u{201d}"),
-                }
-            });
+        let opens = self.opens(row).map(|name| {
+            let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
+            match short.len() < name.len() {
+                true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
+                false => format!("Open \u{201c}{name}\u{201d}"),
+            }
+        });
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
             .when_some(opens, |menu, label| {

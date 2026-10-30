@@ -34,6 +34,11 @@ indents, while a completion shortcut rebound to Enter still submits a filter.
 The filter consumes a propagated native Enter after its submission event so
 the unhandled-keystroke fallback cannot insert a hidden newline.
 
+`ctrl-space` (`show_completions`) dispatches the library's own
+`ShowCompletions`, which it handles but leaves unbound, under the same
+`Input && mode == editor` context. On macOS the system takes that chord first
+while more than one input source is enabled; it can be rebound.
+
 The library binds `escape` scoped to the input; DBDelve's `show_editor` binding
 is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards" in `AGENTS.md`).
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has
