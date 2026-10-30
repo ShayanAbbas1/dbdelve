@@ -881,15 +881,14 @@ impl Workspace {
 
         let refresh_task = cx.background_executor().spawn(async move {
             // A failed read inside the user's transaction fails the transaction
-            // on Postgres, so it is kept off that session. A database nothing
-            // else can open, in memory, has only this one.
+            // on Postgres, so it never goes on that session: with no other to
+            // be had, an in-memory database's among them, the refresh says so.
+            let lost = |error| (error, connection.is_lost());
             let reader = match in_transaction {
-                true => connection.apart().unwrap_or_else(|_| connection.clone()),
+                true => connection.apart().map_err(lost)?,
                 false => connection.clone(),
             };
-            let catalog = reader
-                .catalog()
-                .map_err(|error| (error, connection.is_lost()))?;
+            let catalog = reader.catalog().map_err(lost)?;
             Ok::<_, (DbError, bool)>((catalog, reader.routines()))
         });
 

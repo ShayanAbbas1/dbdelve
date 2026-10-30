@@ -1315,6 +1315,11 @@ fn the_refresh_shortcut_finds_a_table_made_elsewhere_over_the_same_session(
             let profile = workspace.profile().expect("the profile is still open");
             assert_eq!(Some(profile.generation), generation, "it reconnected");
             assert!(!profile.refreshing_schema());
+            assert_eq!(
+                profile.session.notice.as_deref(),
+                Some("Schema refreshed."),
+                "the read beside the session failed"
+            );
         });
 
         run("COMMIT");
