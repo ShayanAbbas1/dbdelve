@@ -964,14 +964,10 @@ fn render_filter_bar(
                         }
                     })
                 }))
-                // An absence needs no value, and a box that cannot change what
-                // runs is a box to read past.
-                .children(
-                    (filter.raw || filter.operator.takes_value()).then(|| FilterValue {
-                        editor: filter.value.clone(),
-                        raw: filter.raw,
-                    }),
-                )
+                .children(filter.shows_value().then(|| FilterValue {
+                    editor: filter.value.clone(),
+                    raw: filter.raw,
+                }))
                 .child(
                     icon_button(
                         ("remove-filter", row),
@@ -1617,7 +1613,18 @@ fn render_results(
         .into_any_element();
 
     let content = match message {
-        Some(message) => message,
+        // Holding the grid's handle in its place: a table opened empty was
+        // given the keyboard as it opened, and a handle no element tracks
+        // leaves the window with no dispatch path at all.
+        Some(message) => div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .min_w_0()
+            .track_focus(&results.focus_handle(cx))
+            .child(message)
+            .into_any_element(),
         None => match loading {
             // A child rather than replacing the grid: it must stay mounted
             // for the focus a fresh tab put on it, `secondary-w` included --
@@ -2578,20 +2585,34 @@ fn render_structure(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
+    // The grid's own focus handle, held by the line standing in for it: the
+    // tab gives the grid focus as it opens, and a handle no element tracks
+    // leaves the window with no dispatch path at all.
+    let standing_in = |line: AnyElement| {
+        div()
+            .size_full()
+            .track_focus(&grid.focus_handle(cx))
+            .child(line)
+            .into_any_element()
+    };
     let structure = match state {
         StructureState::Loading => {
-            return div()
-                .p(px(layout::SPACE_LG))
-                .text_color(t.text_muted)
-                .child("Loading structure…")
-                .into_any_element();
+            return standing_in(
+                div()
+                    .p(px(layout::SPACE_LG))
+                    .text_color(t.text_muted)
+                    .child("Loading structure…")
+                    .into_any_element(),
+            );
         }
         StructureState::Failed(message) => {
-            return div()
-                .p(px(layout::SPACE_LG))
-                .text_color(t.danger)
-                .child(message.clone())
-                .into_any_element();
+            return standing_in(
+                div()
+                    .p(px(layout::SPACE_LG))
+                    .text_color(t.danger)
+                    .child(message.clone())
+                    .into_any_element(),
+            );
         }
         StructureState::Loaded(structure) => structure,
     };
@@ -2905,27 +2926,32 @@ pub(crate) fn render_hidden_columns(
     })
 }
 
-/// Who orders the view in front, on any grid with columns to click. `None`
-/// where there is nothing to sort.
-pub(crate) fn render_view_sorting(
-    profile: &Profile,
-    cx: &mut Context<Workspace>,
-) -> Option<AnyElement> {
-    let t = *theme(cx);
+/// Whether the view in front is sorted in memory, on any grid with columns to
+/// click. `None` where there is nothing to sort, or no choice in how: the
+/// status bar's Server and Client, and the palette's rows for them.
+pub(crate) fn view_sorts_on_client(profile: &Profile, cx: &App) -> Option<bool> {
     let session = &profile.session;
     // Memory is the only choice there, so there is no choice to show.
     if !profile.config.engine().sorts_on_server() {
         return None;
     }
-    let client = match session.active {
+    match session.active {
         Tab::Object(_) => relation_preview(session).and(session.sorting(session.active)),
         Tab::Query(_) => session
             .active_results()
             .filter(|results| !results.read(cx).delegate().columns().is_empty())
             .and(session.sorting(session.active)),
     }
-    .map(|sorting| sorting.client_keys().is_some());
-    client.map(|client| {
+    .map(|sorting| sorting.client_keys().is_some())
+}
+
+/// Who orders the view in front.
+pub(crate) fn render_view_sorting(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    view_sorts_on_client(profile, cx).map(|client| {
         div()
             .flex_shrink_0()
             .flex()

@@ -14,11 +14,9 @@ use gpui_component::{ActiveTheme, Sizable};
 
 use super::welcome::{self, Part, Pose};
 use super::*;
-use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton};
+use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::ConnectionTest;
-use crate::explorer::{
-    QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
-};
+use crate::explorer::{QUERIES_GROUP, is_schema_row, relation_copies, saved_query};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
 use crate::ui::{Status, code_lines, raised_card};
@@ -788,11 +786,21 @@ impl Workspace {
                 .track_focus(&self.dialog_focus)
                 .key_context("Dialog")
                 .on_action(cx.listener(Self::confirm_dialog))
-                .on_action(cx.listener(|workspace, _: &PreviousDialogButton, _, cx| {
-                    workspace.step_dialog_button(true, cx);
+                .on_action(cx.listener(|workspace, _: &TickDialogBox, window, cx| {
+                    let ringed = workspace.dialog_checkbox()
+                        && workspace.dialog_choice.get() + 1 == workspace.dialog_buttons();
+                    match ringed {
+                        true => workspace.confirm_dialog(&ConfirmDialog, window, cx),
+                        false => cx.propagate(),
+                    }
                 }))
-                .on_action(cx.listener(|workspace, _: &NextDialogButton, _, cx| {
-                    workspace.step_dialog_button(false, cx);
+                .on_action(
+                    cx.listener(|workspace, _: &PreviousDialogButton, window, cx| {
+                        workspace.step_dialog_button(true, window, cx);
+                    }),
+                )
+                .on_action(cx.listener(|workspace, _: &NextDialogButton, window, cx| {
+                    workspace.step_dialog_button(false, window, cx);
                 }))
                 .children(dialogs)
                 .into_any_element(),
@@ -806,12 +814,13 @@ impl Workspace {
         &self,
         dialog: &'static str,
         from_right: usize,
-        button: Button,
+        button: impl IntoElement,
         t: Theme,
     ) -> Div {
         let chosen =
             self.dialog_in_front.get() == Some(dialog) && self.dialog_choice.get() == from_right;
         div()
+            .debug_selector(|| format!("{dialog}-{from_right}"))
             .m(px(-2.))
             .p(px(1.))
             .border_1()
@@ -823,17 +832,21 @@ impl Workspace {
             .child(button)
     }
 
-    /// How many buttons the dialog in front has to move the ring across.
-    /// None for the import, a form whose buttons change with its phase.
+    /// How many controls the dialog in front has to move the ring across:
+    /// its buttons, then its "Don't ask again" box or its project, which sit
+    /// left of and above them. None for the import, a form with fields and
+    /// lists of its own, which Tab moves the keyboard itself through.
     fn dialog_buttons(&self) -> usize {
+        let checkbox = usize::from(self.dialog_checkbox());
         match self.dialog_in_front.get() {
             Some("stale-edit") => {
                 let editing = self
                     .profile()
                     .and_then(|profile| profile.session.stale_edit.as_ref())
                     .is_some_and(|stale| stale.resume.is_some());
-                if editing { 3 } else { 2 }
+                if editing { 3 + checkbox } else { 2 }
             }
+            Some("import-choice") => 3,
             Some("pending-export") => {
                 let all = self
                     .profile()
@@ -842,14 +855,42 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("import-rows") | None => 0,
-            Some(_) => 2,
+            Some(_) => 2 + checkbox,
         }
     }
 
-    fn step_dialog_button(&mut self, leftward: bool, cx: &mut Context<Self>) {
+    /// Whether the dialog in front offers to stop asking: the run prompt over
+    /// a kind that can be silenced, and the stale-edit prompt over an edit.
+    pub(crate) fn dialog_checkbox(&self) -> bool {
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        match self.dialog_in_front.get() {
+            Some("pending-run") => profile
+                .session
+                .pending_run
+                .as_ref()
+                .and_then(|pending| sql::gate(&pending.verdict, profile.mode, &profile.confirmed))
+                .is_some_and(|stop| matches!(stop, Stop::Confirm(kind) if kind.suppressible())),
+            Some("stale-edit") => profile
+                .session
+                .stale_edit
+                .as_ref()
+                .is_some_and(|stale| stale.resume.is_some()),
+            _ => false,
+        }
+    }
+
+    fn step_dialog_button(&mut self, leftward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let buttons = self.dialog_buttons();
         if buttons == 0 {
+            self.step_dialog_focus(leftward, window, cx);
             return;
+        }
+        // The ring is where the keyboard is, so the layer takes it back from
+        // anything inside that took it, or `enter` would go there instead.
+        if !self.dialog_focus.is_focused(window) {
+            self.dialog_focus.focus(window, cx);
         }
         let choice = self.dialog_choice.get();
         self.dialog_choice.set(match leftward {
@@ -859,14 +900,55 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Tab order through the import's controls, kept inside the dialog. Its
+    /// preview grid and its SQL are passed over: each binds `tab` itself, and
+    /// once in either the keyboard could never Tab back out.
+    fn step_dialog_focus(&mut self, backward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let passed_over = self
+            .profile()
+            .and_then(|profile| profile.session.import_rows.as_ref())
+            .map(|dialog| vec![dialog.preview.focus_handle(cx), dialog.sql.focus_handle(cx)])
+            .unwrap_or_default();
+        let mut first = None;
+        loop {
+            match backward {
+                true => window.focus_prev(cx),
+                false => window.focus_next(cx),
+            }
+            let focused = window.focused(cx);
+            let landed = self.dialog_focus.contains_focused(window, cx)
+                && !passed_over
+                    .iter()
+                    .any(|handle| handle.contains_focused(window, cx));
+            if landed || focused.is_none() {
+                break;
+            }
+            match &first {
+                None => first = focused,
+                Some(first) if Some(first) == focused.as_ref() => {
+                    self.dialog_focus.focus(window, cx);
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        cx.notify();
+    }
+
     /// `enter` presses the button the ring is on, in the dialog drawn in
-    /// front. The import's form has none.
+    /// front, and ticks or unticks its box -- wherever focus is inside it.
+    /// The import has no ring: a control there that holds focus itself takes
+    /// the key as it would anywhere.
     pub(crate) fn confirm_dialog(
         &mut self,
         _: &ConfirmDialog,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dialog_buttons() == 0 && !self.dialog_focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
         let choice = self.dialog_choice.get();
         let Some(dialog) = self.dialog_in_front.get() else {
             return;
@@ -884,16 +966,19 @@ impl Workspace {
             .is_some_and(|pending| pending.every_row.is_ok());
         match (dialog, choice) {
             ("import-choice", 0) => self.confirm_import(window, cx),
+            ("import-choice", 2) => self.open_palette(PaletteMode::ImportProject, window, cx),
             ("import-choice", _) => {
                 self.pending_import = None;
                 cx.notify();
             }
+            ("stale-edit", 3) if editing => self.toggle_stale_dont_ask(cx),
             ("stale-edit", 0) if editing => self.edit_stale_anyway(window, cx),
             ("stale-edit", 0) => self.refresh_stale(window, cx),
             ("stale-edit", 1) if editing => self.refresh_stale(window, cx),
             ("stale-edit", _) => _ = self.cancel_stale_edit(cx),
             ("queue-failure", 0) => self.continue_queue(cx),
             ("queue-failure", _) => self.stop_queue(cx),
+            ("pending-run", 2) => self.toggle_dont_ask(cx),
             ("pending-export", 0) => self.answer_pending_export(every_row, cx),
             ("pending-export", 1) if every_row => self.answer_pending_export(false, cx),
             ("pending-export", _) => _ = self.cancel_pending_export(cx),
@@ -914,30 +999,52 @@ impl Workspace {
         }
     }
 
+    /// Where an import's connections can go, a group per separator: a new
+    /// project named for the client unless one already is, the projects
+    /// there are, and none.
+    pub(crate) fn import_destinations(&self) -> Option<Vec<Vec<Option<String>>>> {
+        let pending = self.pending_import.as_ref()?;
+        let known = self.projects.iter().map(|project| project.name.clone());
+        let suggested = format!("Imported from {}", pending.source.label());
+        let mut groups = Vec::new();
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.name == suggested)
+        {
+            groups.push(vec![Some(suggested)]);
+        }
+        if !self.projects.is_empty() {
+            groups.push(known.map(Some).collect());
+        }
+        groups.push(vec![None]);
+        Some(groups)
+    }
+
+    pub(crate) fn set_import_project(&mut self, project: Option<String>) {
+        if let Some(pending) = &mut self.pending_import {
+            pending.project = project;
+        }
+    }
+
+    /// Whether picking `project` for the import makes it.
+    pub(crate) fn import_makes(&self, project: &Option<String>) -> bool {
+        project
+            .as_ref()
+            .is_some_and(|name| !self.projects.iter().any(|known| &known.name == name))
+    }
+
     pub(crate) fn render_import_choice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let pending = self.pending_import.as_ref()?;
         let source = pending.source.label();
-        let known = self
-            .projects
+        let groups = self.import_destinations()?;
+        let new: Vec<Option<String>> = groups
             .iter()
-            .map(|project| project.name.clone())
-            .collect::<Vec<_>>();
-        let suggested = format!("Imported from {source}");
-        let mut groups = Vec::new();
-        if !known.contains(&suggested) {
-            groups.push(vec![Some(suggested)]);
-        }
-        if !known.is_empty() {
-            groups.push(known.iter().cloned().map(Some).collect());
-        }
-        groups.push(vec![None]);
-        let new = {
-            let known = known.clone();
-            move |project: &Option<String>| {
-                project.as_ref().is_some_and(|name| !known.contains(name))
-            }
-        };
+            .flatten()
+            .filter(|project| self.import_makes(project))
+            .cloned()
+            .collect();
         let marked = new.clone();
         let picker = Self::dropdown(
             "import-project",
@@ -945,22 +1052,18 @@ impl Workspace {
             groups,
             move |project| match project {
                 None => "No project".into(),
-                Some(name) if new(project) => format!("{name} (new project)").into(),
+                Some(name) if new.contains(project) => format!("{name} (new project)").into(),
                 Some(name) => name.clone().into(),
             },
             move |project| {
                 let path = match project {
                     None => return None,
-                    Some(_) if marked(project) => icon::PLUS,
+                    Some(_) if marked.contains(project) => icon::PLUS,
                     Some(_) => icon::PROJECT,
                 };
                 Some(row_icon(t, path).into_any_element())
             },
-            |workspace, project, _, _| {
-                if let Some(pending) = &mut workspace.pending_import {
-                    pending.project = project;
-                }
-            },
+            |workspace, project, _, _| workspace.set_import_project(project),
             cx,
         );
         let count = pending.fresh;
@@ -986,7 +1089,12 @@ impl Workspace {
                                 .text_color(t.text_muted)
                                 .child("Choose the project they join."),
                         )
-                        .child(self.labelled_field("Project", picker, cx))
+                        .child(self.choice(
+                            "import-choice",
+                            2,
+                            self.labelled_field("Project", picker, cx),
+                            t,
+                        ))
                         .child(
                             div()
                                 .flex()
@@ -1061,6 +1169,7 @@ impl Workspace {
     pub(crate) fn render_reference_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let popup = self.reference_popup.as_ref()?;
+        let at = popup.at?;
         let rows: Vec<AnyElement> = match &popup.choices {
             None => vec![note(t, "Checking…")],
             Some(choices) if choices.is_empty() => {
@@ -1094,8 +1203,9 @@ impl Workspace {
                         .hover(|row| row.bg(t.element_hover))
                         .child(label.clone())
                         .on_click(cx.listener(move |workspace, _, window, cx| {
-                            workspace.reference_popup = None;
-                            workspace.open_reference(&OpenReference { index }, window, cx);
+                            if let Some(popup) = workspace.reference_popup.take() {
+                                workspace.open_listed_reference(&popup.source, index, window, cx);
+                            }
                         }))
                         .into_any_element()
                 })
@@ -1111,8 +1221,8 @@ impl Workspace {
                 .child(
                     div()
                         .absolute()
-                        .left(popup.at.x)
-                        .top(popup.at.y)
+                        .left(at.x)
+                        .top(at.y)
                         .min_w(px(180.))
                         .max_w(px(420.))
                         .p(px(layout::SPACE_XS))
@@ -1425,19 +1535,24 @@ impl Workspace {
                         // one decision about one of them.
                         .children(match stop {
                             Stop::Confirm(kind) if kind.suppressible() => Some(
-                                Checkbox::new("dont-ask-again")
-                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                    .font_weight(FontWeight::BOLD)
-                                    .label(format!(
-                                        "Don't ask again for {} on {name}",
-                                        kind.label()
-                                    ))
-                                    .checked(dont_ask)
-                                    .on_click(move |_, _, cx| {
-                                        _ = tick.update(cx, |workspace, cx| {
-                                            workspace.toggle_dont_ask(cx);
-                                        });
-                                    }),
+                                self.choice(
+                                    "pending-run",
+                                    2,
+                                    Checkbox::new("dont-ask-again")
+                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                        .font_weight(FontWeight::BOLD)
+                                        .label(format!(
+                                            "Don't ask again for {} on {name}",
+                                            kind.label()
+                                        ))
+                                        .checked(dont_ask)
+                                        .on_click(move |_, _, cx| {
+                                            _ = tick.update(cx, |workspace, cx| {
+                                                workspace.toggle_dont_ask(cx);
+                                            });
+                                        }),
+                                    t,
+                                ),
                             ),
                             _ => None,
                         })
@@ -1700,16 +1815,21 @@ impl Workspace {
                                 )
                         }))
                         .children(editing.then(|| {
-                            Checkbox::new("dont-ask-stale")
-                                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                .font_weight(FontWeight::BOLD)
-                                .label("Don't ask again for this connection")
-                                .checked(dont_ask)
-                                .on_click(move |_, _, cx| {
-                                    _ = tick.update(cx, |workspace, cx| {
-                                        workspace.toggle_stale_dont_ask(cx);
-                                    });
-                                })
+                            self.choice(
+                                "stale-edit",
+                                3,
+                                Checkbox::new("dont-ask-stale")
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                    .font_weight(FontWeight::BOLD)
+                                    .label("Don't ask again for this connection")
+                                    .checked(dont_ask)
+                                    .on_click(move |_, _, cx| {
+                                        _ = tick.update(cx, |workspace, cx| {
+                                            workspace.toggle_stale_dont_ask(cx);
+                                        });
+                                    }),
+                                t,
+                            )
                         }))
                         .child(
                             div()
@@ -2051,11 +2171,13 @@ impl Workspace {
     }
 
     /// Rename and delete, revealed by hovering a row grouped as
-    /// `project-row-{index}`, or held in view while the delete is armed.
+    /// `project-row-{index}`, and held in view while the keyboard is on one
+    /// of them or the delete is armed.
     pub(super) fn project_actions(
         &self,
         index: usize,
         name: &str,
+        window: &Window,
         t: Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -2064,11 +2186,14 @@ impl Workspace {
         let rename_name = name.to_string();
         let delete_name = name.to_string();
         let pending = self.pending_project_deletion.as_deref() == Some(name);
+        let held = self.welcome_project_focus(index, cx);
+        let focused = held.contains_focused(window, cx);
         div()
+            .track_focus(&held)
             .flex()
             .items_center()
             .gap(px(layout::SPACE_XS))
-            .when(!pending, |actions| {
+            .when(!pending && !focused, |actions| {
                 actions
                     .opacity(0.)
                     .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
@@ -2179,9 +2304,7 @@ impl Workspace {
             }
             CatalogState::Loaded(..) => None,
         };
-        // Drawn while the catalog is away too, so a connection that is down or
-        // still loading has its saved queries within reach.
-        let tree = (message.is_none() || !profile.session.saved_queries.is_empty()).then(|| {
+        let tree = explorer_drawn(profile).then(|| {
             render_tree(
                 &profile.session.explorer_tree,
                 move |index, entry, _, _, cx| {
@@ -2375,31 +2498,27 @@ impl Workspace {
                         },
                     ));
                 }
-                let menu = menu
-                    .separator()
-                    .when(engine.copies_ddl(), |menu| {
-                        menu.item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
-                            let (schema, relation) = ddl_names.clone();
-                            _ = ddl_workspace.update(cx, |workspace, cx| {
-                                workspace.copy_ddl(schema, relation, kind, cx);
-                            });
-                        }))
+                relation_copies(engine, &schema, &relation, kind)
+                    .into_iter()
+                    .fold(menu, |menu, group| {
+                        group
+                            .into_iter()
+                            .fold(menu.separator(), |menu, (label, text)| match text {
+                                Some(text) => menu.item(copy(label, text)),
+                                None => {
+                                    let (workspace, names) =
+                                        (ddl_workspace.clone(), ddl_names.clone());
+                                    menu.item(PopupMenuItem::new(label).on_click(
+                                        move |_, _, cx| {
+                                            let (schema, relation) = names.clone();
+                                            _ = workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                            });
+                                        },
+                                    ))
+                                }
+                            })
                     })
-                    .when_some(select_top_sql(engine, &schema, &relation), |menu, sql| {
-                        menu.item(copy("Copy SELECT (Top 100)", sql))
-                    })
-                    .separator()
-                    .when_some(drop_sql(engine, &schema, &relation, kind), |menu, sql| {
-                        menu.item(copy("Copy DROP", sql))
-                    });
-                if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
-                    menu.item(copy(
-                        "Copy TRUNCATE",
-                        truncate_sql(engine, &schema, &relation),
-                    ))
-                } else {
-                    menu
-                }
             })
         });
         let content = div()
@@ -2412,7 +2531,15 @@ impl Workspace {
                     .text_color(color)
                     .child(message)
             }))
-            .children(tree.map(|tree| div().flex_1().min_h_0().child(tree)));
+            .children(tree.map(|tree| {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .key_context("Explorer")
+                    .track_focus(&self.explorer_focus)
+                    .on_action(cx.listener(Self::open_sidebar_item))
+                    .child(tree)
+            }));
 
         div()
             .size_full()
@@ -2748,4 +2875,12 @@ fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
             |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
         )
         .into_any_element()
+}
+
+/// Whether the sidebar draws its tree: with a catalog that lists something,
+/// and while the catalog is away too, so a connection that is down or still
+/// loading has its saved queries within reach.
+pub(super) fn explorer_drawn(profile: &Profile) -> bool {
+    matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
+        || !profile.session.saved_queries.is_empty()
 }

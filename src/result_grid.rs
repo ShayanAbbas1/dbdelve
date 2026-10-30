@@ -1275,8 +1275,15 @@ impl ResultGrid {
         })
     }
 
-    pub fn reference_anchor(&self) -> Option<Point<Pixels>> {
-        self.reference_anchor
+    /// Where the arrow just pressed sits, once: `None` is the keyboard asking.
+    pub fn take_reference_anchor(&mut self) -> Option<Point<Pixels>> {
+        self.reference_anchor.take()
+    }
+
+    /// Whether the cell has relations pointing at its value: a key, and not a
+    /// NULL, which nothing references. Where the arrow is drawn.
+    pub fn is_referenced(&self, row: usize, col: usize) -> bool {
+        self.cell(row, col).is_some() && self.reference_menu(col).is_some()
     }
 
     /// The relations pointing at this column, as an index into the structure's
@@ -1330,6 +1337,11 @@ impl ResultGrid {
     /// Whether this column's cells can be followed to the row they reference.
     pub fn follows_a_key(&self, col: usize) -> bool {
         self.foreign_keys.contains(&col)
+    }
+
+    /// What a row opens, by the name its opened column holds.
+    pub fn opens(&self, row: usize) -> Option<&str> {
+        self.opened.and_then(|opened| self.cell(row, opened))
     }
 
     /// The whole value behind a cell, not the clipped one the grid paints: a
@@ -2388,6 +2400,29 @@ pub(crate) fn reveal_column(
     true
 }
 
+/// Give the grid the keyboard from outside it, the ring where it was or on the
+/// first cell. The library's arrows step from its own selected row, which a
+/// grid reached by a click elsewhere may no longer have, so it is told the
+/// ring's -- without collapsing the rows the user picked out around it.
+pub(crate) fn take_keyboard(
+    table: &mut TableState<ResultGrid>,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    table.focus_handle(cx).focus(window, cx);
+    if table.delegate().result.rows.is_empty() || table.selected_row().is_some() {
+        return;
+    }
+    let row = match table.delegate().active {
+        Some((row, _)) => {
+            table.delegate_mut().pointer_row = Some(row);
+            row
+        }
+        None => 0,
+    };
+    table.set_selected_row(row, cx);
+}
+
 /// Scroll the active cell back into view when the grid's width changes under
 /// it. The row panel is what usually changes it: the click that selects a row
 /// opens the panel beside the grid, and any scroll into view that click caused
@@ -2792,16 +2827,13 @@ impl TableDelegate for ResultGrid {
         let name = &self.result.columns[col].name;
         // The row's own name for it, which is the one thing a generic label
         // could not say.
-        let opens = self
-            .opened
-            .and_then(|opened| self.cell(row, opened))
-            .map(|name| {
-                let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
-                match short.len() < name.len() {
-                    true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
-                    false => format!("Open \u{201c}{name}\u{201d}"),
-                }
-            });
+        let opens = self.opens(row).map(|name| {
+            let short: String = name.chars().take(OPEN_LABEL_CHARS).collect();
+            match short.len() < name.len() {
+                true => format!("Open \u{201c}{short}\u{2026}\u{201d}"),
+                false => format!("Open \u{201c}{name}\u{201d}"),
+            }
+        });
         let menu = menu
             .when_some(self.focus.clone(), PopupMenu::action_context)
             .when_some(opens, |menu, label| {

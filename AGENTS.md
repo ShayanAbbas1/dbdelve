@@ -220,7 +220,7 @@ split off the timing tests and the vendored renderer's tests.
 
 `src/workspace/e2e.rs` launches the app headless and drives it through the
 real keymap and focus path, so a change to keyboard or focus behaviour adds a
-test there.
+test there. Its gotchas are in `docs/agents/session.md`.
 
 ## Platforms
 

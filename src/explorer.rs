@@ -86,6 +86,44 @@ pub fn saved_query(id: &str) -> Option<&str> {
     id.strip_prefix(QUERY_ROW)
 }
 
+/// The row id of a saved query, the inverse of [`saved_query`].
+pub fn query_row(name: &str) -> String {
+    format!("{QUERY_ROW}{name}")
+}
+
+/// The row id of a relation. By name and not by place, so that a row is the
+/// same row after a schema refresh has moved the catalog around it.
+pub fn relation_row(schema: &str, relation: &str) -> String {
+    format!("relation-{schema}\0{relation}")
+}
+
+fn routine_row(schema: &str, routine: &Routine) -> String {
+    let (kind, name) = (routine.kind, crate::session::routine_name(routine));
+    format!("routine-{kind:?}-{schema}\0{name}")
+}
+
+/// The row id of the object a tab shows. A routine is found by its name and
+/// arguments, as its tab is named: the name alone does not tell overloads
+/// apart, and a relation of the same name is another object entirely.
+pub fn object_row(catalog: &Catalog, schema: &str, name: &str, kind: ObjectKind) -> Option<String> {
+    let schema = catalog
+        .schemas
+        .iter()
+        .find(|candidate| candidate.name == schema)?;
+    match kind {
+        ObjectKind::Relation(_) => schema
+            .relations
+            .iter()
+            .find(|relation| relation.name == name)
+            .map(|relation| relation_row(&schema.name, &relation.name)),
+        ObjectKind::Routine(kind) => schema
+            .routines
+            .iter()
+            .find(|routine| routine.kind == kind && crate::session::routine_name(routine) == name)
+            .map(|routine| routine_row(&schema.name, routine)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -232,10 +270,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .enumerate()
                     .filter(|(_, routine)| routine.kind == kind)
                     .filter_map(|(routine_index, routine)| {
-                        let id = format!(
-                            "routine-{label}-{}\0{}({})",
-                            schema.name, routine.name, routine.identity_arguments
-                        );
+                        let id = routine_row(&schema.name, routine);
                         let name_matches = builder.name_matches(&id, &routine.name);
                         if !(schema_matches || name_matches || builder.signature_matches(routine)) {
                             return None;
@@ -290,7 +325,7 @@ pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
     let children: Vec<TreeItem> = names
         .iter()
         .filter_map(|name| {
-            let id = format!("{QUERY_ROW}{name}");
+            let id = query_row(name);
             builder
                 .name_matches(&id, name)
                 .then(|| TreeItem::new(id, name.clone()))
@@ -353,7 +388,7 @@ fn relation_item(
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let id = format!("relation-{}\0{}", schema.name, relation.name);
+    let id = relation_row(&schema.name, &relation.name);
     let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
@@ -499,6 +534,35 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
         Syntax::Mongo => format!("{}.deleteMany({{}})", mql::browse::handle(relation)),
         Syntax::Redis => "FLUSHDB".into(),
     }
+}
+
+/// What a relation's menu copies, in its two groups: the label, and the text,
+/// or `None` for the DDL, which only the server can give. The palette offers
+/// the same rows for the tab in front, so the two cannot disagree on which.
+pub fn relation_copies(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    kind: RelationKind,
+) -> [Vec<(&'static str, Option<String>)>; 2] {
+    let mut reads = Vec::new();
+    if engine.copies_ddl() {
+        reads.push(("Copy DDL", None));
+    }
+    if let Some(sql) = select_top_sql(engine, schema, relation) {
+        reads.push(("Copy SELECT (Top 100)", Some(sql)));
+    }
+    let mut writes = Vec::new();
+    if let Some(sql) = drop_sql(engine, schema, relation, kind) {
+        writes.push(("Copy DROP", Some(sql)));
+    }
+    if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
+        writes.push((
+            "Copy TRUNCATE",
+            Some(truncate_sql(engine, schema, relation)),
+        ));
+    }
+    [reads, writes]
 }
 
 /// The command a preview's row opens with, as a result of its own
@@ -662,6 +726,32 @@ mod tests {
         ids(&tree(&before, "").items, &mut old);
         ids(&tree(&after, "").items, &mut new);
         assert!(old.is_subset(&new), "moved: {:?}", old.difference(&new));
+    }
+
+    #[test]
+    fn a_tab_finds_its_row_by_kind_and_a_routine_by_its_arguments() {
+        let catalog = catalog();
+        let row = |name: &str, kind| object_row(&catalog, "public", name, kind);
+        assert_eq!(
+            row("accounts", ObjectKind::Relation(RelationKind::Table)).as_deref(),
+            Some("relation-public\0accounts")
+        );
+        assert_eq!(
+            row(
+                "account_name(account_id bigint)",
+                ObjectKind::Routine(RoutineKind::Function)
+            )
+            .as_deref(),
+            Some("routine-Function-public\0account_name(account_id bigint)")
+        );
+        assert_eq!(
+            row("account_name", ObjectKind::Routine(RoutineKind::Function)),
+            None
+        );
+        assert_eq!(
+            row("reindex()", ObjectKind::Relation(RelationKind::Table)),
+            None
+        );
     }
 
     fn catalog() -> Catalog {
@@ -1023,14 +1113,14 @@ mod tests {
         assert_eq!(
             marked(
                 &explorer,
-                "routine-Functions-public\0account_name(account_id bigint)",
+                "routine-Function-public\0account_name(account_id bigint)",
                 label
             )
             .as_deref(),
             Some("acct")
         );
         assert!(
-            explorer.highlights["routine-Functions-public\0account_name(account_id bigint)"]
+            explorer.highlights["routine-Function-public\0account_name(account_id bigint)"]
                 .iter()
                 .all(|range| range.end <= "account_name".len())
         );
@@ -1081,7 +1171,7 @@ mod tests {
         assert_eq!(
             explorer
                 .leaves
-                .get("routine-Functions-public\0account_name(account_id bigint)"),
+                .get("routine-Function-public\0account_name(account_id bigint)"),
             Some(&ExplorerLeaf {
                 target: ExplorerTarget::Routine {
                     schema_index: 1,

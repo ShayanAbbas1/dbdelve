@@ -633,35 +633,6 @@ pub(crate) fn control(id: impl Into<gpui::ElementId>, tone: Tone, size: Control)
         .h(px(size.height()))
 }
 
-/// One choice of a segmented toggle, dressed as the preview's Data and
-/// Structure tabs so every either-or reads the same. The caller adds the click.
-pub(crate) fn segment(
-    id: impl Into<gpui::ElementId>,
-    label: &'static str,
-    selected: bool,
-    t: Theme,
-) -> gpui::Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(layout::chrome(24.)))
-        .px(px(layout::SPACE_SM))
-        .rounded(px(layout::RADIUS_CONTROL))
-        .text_size(px(layout::chrome(layout::TEXT_SM)))
-        .whitespace_nowrap()
-        .map(|segment| {
-            if selected {
-                segment.bg(t.element_active).text_color(t.text)
-            } else {
-                segment
-                    .text_color(t.text_muted)
-                    .hover(|style| style.bg(t.element_hover))
-            }
-        })
-        .child(label)
-}
-
 /// Rows set into the surface they sit on rather than raised off it, a
 /// hairline between each two: a settings group, a section of the connection
 /// form.
@@ -1285,7 +1256,7 @@ mod tests {
         assert!(!shipped.is_empty());
         assert_ne!(shipped, rebound);
         // An action nothing has bound draws no cap at all.
-        assert_eq!(chord_hint("cancel_query", &overrides), "");
+        assert_eq!(chord_hint("next_page", &overrides), "");
     }
 
     #[test]

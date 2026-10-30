@@ -93,7 +93,7 @@ jobs:
     steps:
       - &checkout
         name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       # First, so the databases boot while everything else runs.

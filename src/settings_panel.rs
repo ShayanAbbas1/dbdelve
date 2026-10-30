@@ -29,7 +29,8 @@ use crate::{
     },
     ui::{
         Control, Tone, button, button_label, chord_hint, highlighted, icon_button, keycap_text,
-        keycaps, option_row, picker, raised_card, segment, stacked_option_row, switch, well,
+        keycaps, option_row, picker, raised_card, segmented, segmented_choice, stacked_option_row,
+        switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -736,12 +737,10 @@ fn render_control(
         ),
         SettingId::DefaultSorting => {
             let client_sort = settings.client_sort;
-            div()
-                .flex()
-                .gap(px(layout::SPACE_XS))
+            segmented(t)
                 .children(
                     [(false, "Server"), (true, "Client")].map(|(client, label)| {
-                        segment(
+                        segmented_choice(
                             ("default-sorting", client as usize),
                             label,
                             client == client_sort,
@@ -1073,7 +1072,14 @@ mod tests {
 
     #[test]
     fn a_word_matches_within_one_field_not_across_them() {
-        assert_eq!(found("sort"), [SettingId::DefaultSorting]);
+        assert_eq!(
+            found("sort"),
+            [
+                SettingId::DefaultSorting,
+                SettingId::Keybinding("reset_confirmations"),
+                SettingId::Keybinding("sort_active_column"),
+            ]
+        );
         assert_eq!(found("!keyboard").len(), 12);
     }
 

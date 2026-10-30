@@ -54,16 +54,17 @@ use gpui_component::{
 };
 
 use actions::{
-    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
     CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, EditCell,
     ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, ImportRows, LimitTarget, NewConnection, NewProject, NewQuery, NewRow,
-    NextEdit, NextPage, NextProfile, NextTab, OpenReference, OpenSettings, PreviousEdit,
-    PreviousPage, PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
-    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
-    ShowAllColumns, ShowEditor, ShowReferences, SortColumn, SubmitConnection, SwitchConnection,
+    ImportConnections, ImportRows, LimitTarget, MoveTabLeft, MoveTabRight, NewConnection,
+    NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab,
+    OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
+    PreviousTab, Quit, RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode,
+    ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase,
+    SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator,
+    SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor,
+    ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
     ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
     ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
@@ -94,7 +95,7 @@ use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme,
 use ui::{
     Control, Tone, button, button_label, dialog, engine_logo, frosted_card, group_thousands,
     highlighted, human_bytes, icon_button, object_icon, one_line, relative_age, row_icon,
-    row_readout, section_label, segment, titlebar,
+    row_readout, section_label, segmented_choice, titlebar,
 };
 use workspace::Workspace;
 
