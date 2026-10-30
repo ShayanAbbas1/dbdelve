@@ -86,6 +86,43 @@ pub fn saved_query(id: &str) -> Option<&str> {
     id.strip_prefix(QUERY_ROW)
 }
 
+/// The row id of a saved query, the inverse of [`saved_query`].
+pub fn query_row(name: &str) -> String {
+    format!("{QUERY_ROW}{name}")
+}
+
+/// The row id of a relation, by its place in the catalog.
+pub fn relation_row(schema_index: usize, relation_index: usize) -> String {
+    format!("relation-{schema_index}-{relation_index}")
+}
+
+fn routine_row(schema_index: usize, routine_index: usize) -> String {
+    format!("routine-{schema_index}-{routine_index}")
+}
+
+/// The row id of the object a tab shows. A routine is found by its name and
+/// arguments, as its tab is named: the name alone does not tell overloads
+/// apart, and a relation of the same name is another object entirely.
+pub fn object_row(catalog: &Catalog, schema: &str, name: &str, kind: ObjectKind) -> Option<String> {
+    let (schema_index, schema) = catalog
+        .schemas
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.name == schema)?;
+    match kind {
+        ObjectKind::Relation(_) => schema
+            .relations
+            .iter()
+            .position(|relation| relation.name == name)
+            .map(|index| relation_row(schema_index, index)),
+        ObjectKind::Routine(_) => schema
+            .routines
+            .iter()
+            .position(|routine| crate::session::routine_name(routine) == name)
+            .map(|index| routine_row(schema_index, index)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -232,7 +269,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .enumerate()
                     .filter(|(_, routine)| routine.kind == kind)
                     .filter_map(|(routine_index, routine)| {
-                        let id = format!("routine-{schema_index}-{routine_index}");
+                        let id = routine_row(schema_index, routine_index);
                         let name_matches = builder.name_matches(&id, &routine.name);
                         if !(schema_matches || name_matches || builder.signature_matches(routine)) {
                             return None;
@@ -287,7 +324,7 @@ pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
     let children: Vec<TreeItem> = names
         .iter()
         .filter_map(|name| {
-            let id = format!("{QUERY_ROW}{name}");
+            let id = query_row(name);
             builder
                 .name_matches(&id, name)
                 .then(|| TreeItem::new(id, name.clone()))
@@ -350,7 +387,7 @@ fn relation_item(
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let id = format!("relation-{schema_index}-{relation_index}");
+    let id = relation_row(schema_index, relation_index);
     let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
@@ -623,6 +660,32 @@ mod tests {
             )
             .unwrap()
             .ends_with(" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY")
+        );
+    }
+
+    #[test]
+    fn a_tab_finds_its_row_by_kind_and_a_routine_by_its_arguments() {
+        let catalog = catalog();
+        let row = |name: &str, kind| object_row(&catalog, "public", name, kind);
+        assert_eq!(
+            row("accounts", ObjectKind::Relation(RelationKind::Table)).as_deref(),
+            Some("relation-1-1")
+        );
+        assert_eq!(
+            row(
+                "account_name(account_id bigint)",
+                ObjectKind::Routine(RoutineKind::Function)
+            )
+            .as_deref(),
+            Some("routine-1-1")
+        );
+        assert_eq!(
+            row("account_name", ObjectKind::Routine(RoutineKind::Function)),
+            None
+        );
+        assert_eq!(
+            row("reindex()", ObjectKind::Relation(RelationKind::Table)),
+            None
         );
     }
 

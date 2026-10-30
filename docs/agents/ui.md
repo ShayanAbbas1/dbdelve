@@ -42,7 +42,13 @@ while more than one input source is enabled; it can be rebound.
 The library binds `escape` scoped to the input; DBDelve's `show_editor` binding
 is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards" in `AGENTS.md`).
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has
-nothing stacked to close, or the completion popup cannot be dismissed.
+nothing stacked to close, or the completion popup cannot be dismissed. Its two
+last stops are focus moves, not dismissals: from the sidebar's tree it hands
+the keyboard to the surface in front, and from a query tab's grid (the table
+itself, never a cell's open input, which is its descendant) to the buffer
+above it, keeping the selection. Both run before the propagate, so on a query
+tab the table's own `escape`, which clears its selection, never sees it; on an
+object tab's grid, with no buffer to go to, it still does.
 
 It does **not** provide a fuzzy matcher, and its `command` palette filters by
 substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
